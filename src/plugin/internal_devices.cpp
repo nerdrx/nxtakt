@@ -165,8 +165,25 @@ public:
     void setBypassed(bool b) override       { bypassed_ = b; }
     bool bypassed() const override          { return bypassed_; }
 
+    // REALTIME (host.h): the engine pushes this once per block before
+    // process(). Plain stores only. Devices that sync to tempo read trBpm_ and
+    // prefer it over their Tempo parameter whenever it is non-zero — zero
+    // means "no transport has ever been pushed" (offline tools, standalone
+    // tests), in which case the parameter keeps working exactly as before.
+    // The parameters stay in the lists deliberately: internal ids are indices,
+    // so removing one would shift every id after it and silently mis-restore
+    // any set saved before the removal.
+    void setTransport(f64 bpm, f64 beat, bool playing) override {
+        trBpm_ = bpm; trBeat_ = beat; trPlaying_ = playing;
+    }
+
 protected:
     static constexpr int kMaxParams = 16;
+
+    // Transport as last pushed by the host; 0 BPM = never pushed.
+    f64  trBpm_ = 0.0;
+    f64  trBeat_ = 0.0;
+    bool trPlaying_ = false;
 
     // Construction time only. Returns the parameter index so devices can keep
     // named constants honest.
@@ -853,26 +870,19 @@ private:
 // anyway.
 //
 // So sync is implemented in full -- the division table, the beats-to-samples
-// conversion, the switch -- against a TEMPO PARAMETER on the device, defaulting
-// to 120 BPM. Everything except the source of the number is done. The wart is
-// exactly one field wide: the user (or an automation lane) has to tell the
-// device what the session tempo is, and nothing tells them when it drifts out
-// of agreement with the transport.
+// conversion, the switch. The source of the number is layered: host.h now
+// carries setTransport(bpm, beat, playing), the engine pushes it before every
+// chain's process(), and this device PREFERS the pushed tempo whenever it has
+// seen one. The Tempo parameter remains as the fallback for hosts that never
+// push (offline tools, standalone tests) -- and it must remain in the list
+// regardless, because internal ids are indices and removing it would shift
+// every id after it, silently mis-restoring any set saved before the removal.
 //
-// What host.h would need, stated so it can be done in one pass when a contract
-// change is on the table:
-//
-//     // REALTIME. Called before this block's process() with the transport
-//     // state the block will be rendered at. Default no-op.
-//     virtual void setTransport(f64 bpm, f64 beat, bool playing) {}
-//
-// plus the three fx->process() call sites in engine.cpp calling it first, and
-// LV2/CLAP forwarding it (LV2: a time:Position atom on the event input; CLAP:
-// clap_event_transport_t in the process struct -- both formats already have a
-// place for it, which is the strongest argument that the shape above is the
-// right one). This device would then drop its Tempo parameter and read the
-// transport instead. The division maths, which is the part that can be wrong,
-// is already written and already tested.
+// Still open: LV2/CLAP forwarding (LV2: a time:Position atom on the event
+// input; CLAP: clap_event_transport_t in the process struct -- both formats
+// already have a place for it). Third-party plugins do not see the transport
+// yet; internal devices and racks do. The division maths, which is the part
+// that can be wrong, is written and tested independently of the source.
 //
 // Feedback path: the delayed signal is lowpassed BEFORE it re-enters the line
 // and not on the way out, so each repeat is one filter pass darker than the
@@ -932,7 +942,10 @@ public:
         f32 sec;
         if (sync) {
             const int div = (int)clampv(p(pDiv_) + 0.5f, 0.f, (f32)(kDivCount - 1));
-            const f32 bpm = clampv(p(pTempo_), 20.f, 999.f);
+            // Live transport first; the Tempo parameter is the fallback for
+            // hosts that never push one (offline tools, standalone tests).
+            const f32 bpm = trBpm_ > 0.0 ? clampv((f32)trBpm_, 20.f, 999.f)
+                                         : clampv(p(pTempo_), 20.f, 999.f);
             sec = kDivBeats[div] * 60.f / bpm;
         } else {
             sec = clampv(p(pTime_), 1.f, 2000.f) * 1e-3f;
@@ -1369,7 +1382,10 @@ public:
 
         if (p(pSync_) >= 0.5f) {
             const int div = (int)clampv(p(pDiv_) + 0.5f, 0.f, (f32)(kDivCount - 1));
-            const f32 bpm = clampv(p(pTempo_), 20.f, 999.f);
+            // Live transport first; the Tempo parameter is the fallback for
+            // hosts that never push one (offline tools, standalone tests).
+            const f32 bpm = trBpm_ > 0.0 ? clampv((f32)trBpm_, 20.f, 999.f)
+                                         : clampv(p(pTempo_), 20.f, 999.f);
             // One cycle per division: a 1/4 at 120 BPM is 0.5 s, i.e. 2 Hz.
             lfo_.setRate(sr_, bpm / (60.f * kDivBeats[div]));
         } else {
@@ -2059,6 +2075,14 @@ public:
 
         const f32* cur[kCh] = { nullptr, nullptr };
         for (int c = 0; c < nc; ++c) cur[c] = in ? in[c] : nullptr;
+
+        // Forward the transport the engine pushed to us. Done here rather than
+        // in our setTransport override because the chain the audio thread may
+        // touch is the published one, and this is the one place that already
+        // holds it. Plain virtual calls, no allocation — same budget as the
+        // process calls below.
+        for (int i = 0; i < L->n; ++i)
+            L->dev[i]->setTransport(trBpm_, trBeat_, trPlaying_);
 
         int which = 0;
         for (int i = 0; i < L->n; ++i) {

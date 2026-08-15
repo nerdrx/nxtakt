@@ -3888,8 +3888,10 @@ void Engine::process(const f32* inL, const f32* inR, f32* outL, f32* outR, int n
             // chain runs through the one scratch pair with no copies.
             f32* bufs[2] = {t.fxL, t.fxR};
             for (int fi = 0; fi < cnt; ++fi)
-                if (PluginInstance* fx = t.chain->fx[fi])
+                if (PluginInstance* fx = t.chain->fx[fi]) {
+                    fx->setTransport(tempo_, beat_, playing_);
                     fx->process(bufs, bufs, 2, n);
+                }
         }
 
         // Stage 1 of the derivation: line this track's chain up with the
@@ -4006,8 +4008,10 @@ void Engine::process(const f32* inL, const f32* inR, f32* outL, f32* outR, int n
             // is armed onto it. In-place, like a track's chain.
             f32* bufs[2] = {rt.fxL, rt.fxR};
             for (int fi = 0; fi < cnt; ++fi)
-                if (PluginInstance* fx = rt.chain->fx[fi])
+                if (PluginInstance* fx = rt.chain->fx[fi]) {
+                    fx->setTransport(tempo_, beat_, playing_);
                     fx->process(bufs, bufs, 2, n);
+                }
         }
         if (comp) pdcDelay(*pdc, kMaxTracks + r, rt.fxL, rt.fxR, n,
                            pdc->maxRetLat - pdc->retLat[r]);
@@ -4048,8 +4052,10 @@ void Engine::process(const f32* inL, const f32* inR, f32* outL, f32* outR, int n
         const int cnt = masterChain_->count < kMaxChainFx ? masterChain_->count : kMaxChainFx;
         f32* bufs[2] = {outL, outR};
         for (int fi = 0; fi < cnt; ++fi)
-            if (PluginInstance* fx = masterChain_->fx[fi])
+            if (PluginInstance* fx = masterChain_->fx[fi]) {
+                fx->setTransport(tempo_, beat_, playing_);
                 fx->process(bufs, bufs, 2, n);
+            }
     }
 
     // Master bus.

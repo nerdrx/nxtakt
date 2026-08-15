@@ -109,12 +109,21 @@ void App::drawControlBar(const Rect& r) {
     rend_.rect(r, pal::panel);
     rend_.rect({r.x, r.bottom() - 1 * s, r.w, 1 * s}, pal::divider);
 
-    // The playhead as a musician reads it, out of the SAME sigPosAt() the
-    // metronome and the engine's own posBar/posBeat/posSixteenth come from
-    // (engine.h). Everything the bar prints about position -- the readout and
-    // the signature chip -- reads this one struct, so the two cannot say the
-    // playhead is in different bars.
-    const BarPos pos = sigMapOf(ses_).posAt(es_.beat);
+    // The playhead as a musician reads it — from the ENGINE's own counters,
+    // which cross in the snapshot now (posBar/posBeat/posSixteenth and the
+    // signature at the playhead). The session's map produces identical numbers
+    // right up until a publication is ever refused: sigMapValid rejects a map
+    // whose bar lines do not follow from its own bar lengths and leaves the
+    // engine at 4/4 — and in exactly that state a session-derived readout
+    // would confidently display 7/8 over an engine playing 4/4, with nothing
+    // anywhere to show the disagreement. Reading the engine's numbers makes
+    // that state impossible to render.
+    BarPos pos = sigMapOf(ses_).posAt(es_.beat);   // fallback: fills barStart etc.
+    pos.bar = es_.posBar - 1;                      // engine's are one-based
+    pos.beat = es_.posBeat - 1;
+    pos.sixteenth = es_.posSixteenth - 1;
+    pos.num = es_.posSigNum;
+    pos.den = es_.posSigDen;
     const Input& in = win_.input();
 
     const f32 pad = 8 * s, h = 20 * s;
@@ -362,22 +371,43 @@ void App::drawControlBar(const Rect& r) {
         // floor(beat/4), floor(beat mod 4) and floor(frac(beat)*4) there, which
         // is the pre-change expression term for term.
         //
-        // OWED, and the reason this reads the session's map rather than the
-        // engine's: Engine already publishes posBar/posBeat/posSixteenth and
-        // posSigNum/posSigDen as atomics, but EngineState -- which is what a
-        // draw is allowed to read (engine_state.h: "nothing else reads an engine
-        // atomic") -- does not carry them yet, and that header belongs to
-        // another agent this wave. The numbers are identical while the publish
-        // above is succeeding, because both sides walk the same map through the
-        // same sigPosAt; the engine's are the better source the moment they are
-        // reachable, since they cannot disagree with what is being played even
-        // if a publication was refused.
+        // The numbers come from the engine's snapshot fields (overwritten into
+        // `pos` at the top of the bar) -- the debt the paragraph above used to
+        // describe is paid, and the session's map is only the fallback that
+        // fills the fields the engine does not publish (barStart, unit).
         char buf[48];
         snprintf(buf, sizeof buf, "%d.%d.%d", pos.bar + 1, pos.beat + 1, pos.sixteenth + 1);
         Rect posR{x, cy, 92 * s, h};
         rend_.roundRect(posR, 2 * s, pal::appBg);
         rend_.textIn(fBig_, posR, buf, playing ? pal::playGreen : pal::text, Align::Center);
         x += posR.w + 8 * s;
+    }
+
+    // --- the engine link, when it is news (§6) -------------------------------
+    // Silence about a dead engine is the one thing this bar may never do. The
+    // banner text is policy from engine_state.h -- the view adds no wording of
+    // its own -- and the Restart button appears exactly when the table says
+    // acting is legitimate. Amber, not red: attention, not danger (the set is
+    // intact, and the copy says so).
+    if (const char* bn = engineLinkBanner(es_.link)) {
+        const f32 bw = fBody_.measure(bn) + 16 * s;
+        Rect bnR{x + 8 * s, cy, bw, h};
+        rend_.textIn(fBody_, bnR, bn, pal::meterAmber, Align::Left);
+        f32 bx = bnR.right() + 6 * s;
+        if (engineLinkOffersRestart(es_.link)) {
+            Rect rb{bx, cy, 64 * s, h};
+            if (ui_.button(uiId(1, 40), rb, "RESTART", false, pal::accent)) {
+                status_ = eng_.restartEngine() ? "Engine restarted"
+                                               : "Engine restart failed - see the log";
+                // The engine came back empty; everything the model knows goes
+                // across again, exactly as after a load. restartEngine() only
+                // returns true with a live attach, so success IS the gate.
+                if (eng_.link() == EngineLink::Live) {
+                    pushAll();
+                    publishArrangementAll();
+                }
+            }
+        }
     }
 
     // --- right side: CPU + view switch ---
@@ -1407,13 +1437,22 @@ void App::drawStatusBar(const Rect& r) {
     const int pdc = es_.latencyFrames;
     if (pdc > 0) snprintf(pdcTag, sizeof pdcTag, " · PDC %d", pdc);
 
+    // Devices the daemon has been asked for and has not confirmed. Zero in
+    // local mode by construction, so the tag only ever appears when it means
+    // something: the strip may be drawing a device the engine is not running
+    // yet, and this is the one honest word about it.
+    char syncTag[28] = "";
+    if (es_.devicesPending > 0)
+        snprintf(syncTag, sizeof syncTag, " · syncing %u", es_.devicesPending);
+
     char buf[224];
-    snprintf(buf, sizeof buf, "%s · %s %.0f Hz / %d fr%s%s · %.0f fps · %d draws",
+    snprintf(buf, sizeof buf, "%s · %s %.0f Hz / %d fr%s%s%s · %.0f fps · %d draws",
              win_.backendName(),
              eng_.driverName() ? eng_.driverName() : "silent",
              eng_.driverSampleRate(),
              eng_.driverBufferSize(),
              pdcTag,
+             syncTag,
              midiTag,
              fps_, rend_.drawCalls());
     rend_.textIn(fSmall_, r, buf, pal::textFaint, Align::Right, 8 * s);

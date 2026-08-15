@@ -81,6 +81,22 @@ public:
     // instruments) override. Same rules as process(): no allocation, no locks.
     virtual void midi(const u8* data, int len, int frameOffset) { (void)data; (void)len; (void)frameOffset; }
 
+    // The transport, pushed by the engine once per block before process().
+    // Realtime rules apply: implementations may store the values and no more.
+    //
+    // This retires the documented wart where a tempo-synced device (Delay's
+    // sync divisions, Auto Filter's LFO) could only learn the BPM through a
+    // user-set "Tempo" parameter. Those parameters DELIBERATELY remain in the
+    // devices' parameter lists: internal ids are indices, so removing one
+    // would shift every id after it and silently mis-restore any set saved
+    // before the removal. They are fallbacks now — a device prefers the pushed
+    // transport when it has seen one (bpm > 0) and the parameter otherwise,
+    // which also keeps offline tools that never push transport working
+    // unchanged. A rack forwards this to its sub-devices for free.
+    virtual void setTransport(f64 bpm, f64 beat, bool playing) {
+        (void)bpm; (void)beat; (void)playing;
+    }
+
     virtual int              paramCount() const = 0;
     virtual const ParamInfo& paramInfo(int i) const = 0;
     virtual f32              getParam(int i) const = 0;

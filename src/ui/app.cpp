@@ -51,7 +51,7 @@ bool App::init(int argc, char** argv) {
     // because loadSample resamples to the engine's rate and a detached handle
     // does not know it yet. Locally that has always been true by construction;
     // keep it true.
-    if (!eng_.openLocal(env("AUDIO"))) return false;
+    if (!eng_.open(env("AUDIO"))) return false;
     // A first snapshot, so anything that runs before frame() ever does — the
     // headless hooks, a project on the command line — reads real state and not
     // a default-constructed one.

@@ -445,6 +445,13 @@ RackControl* App::openRack() {
 }
 
 void App::ensurePluginScan() {
+    // Daemon mode first: the list that matters is what the ENGINE's process can
+    // instantiate, and the daemon scans on its own machine-time. requestScan()
+    // is idempotent; the browser draws a spinner off scanRunning() and swaps to
+    // the catalog when it lands. The local registry still scans below as the
+    // fallback -- and because addDevice() still instantiates locally, so a
+    // local instance must exist for anything the user actually adds.
+    if (!eng_.local() && !eng_.catalogReady()) eng_.requestScan();
     if (registryScanned_) return;
     // lilv walks every bundle on the system and a CLAP scan dlopens each
     // binary, which costs the better part of a second. Deferring it to the
@@ -496,7 +503,13 @@ void App::drawPluginBrowser(const Rect& r) {
     // --- filtered index, rebuilt each frame: a few hundred string compares ---
     static std::vector<int> shown;                  // reused to avoid churn
     shown.clear();
-    const std::vector<PluginDesc>& all = registry_.plugins();
+    // In daemon mode the browsable list is the DAEMON's catalog -- what the
+    // engine's process proved it can instantiate -- not what this process's
+    // registry found. The two are the same machine today, but the catalog is
+    // the honest source: a plugin only one side can see is exactly the
+    // divergence the catalog exists to make visible.
+    const std::vector<PluginDesc>& all =
+        (!eng_.local() && eng_.catalogReady()) ? eng_.catalog() : registry_.plugins();
     for (int i = 0; i < (int)all.size(); ++i)
         if (icontains(all[i].name, query)) shown.push_back(i);
 

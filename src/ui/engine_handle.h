@@ -102,11 +102,6 @@ public:
     // — including unset — gives the in-process one. `NXTAKT_SESSION` names the
     // session; it defaults to "default".
     //
-    // ABOUT THE NAME. This is `open()` wearing step 1's spelling. App::init()
-    // has exactly one call to it and that file belongs to another agent this
-    // wave, so the dispatch went inside the existing entry point rather than
-    // into a rename nobody could apply. The one-line change — `eng_.open(...)`
-    // at src/ui/app.cpp:54 — is owed and is the whole of it.
     //
     // `driver` is "jack", "alsa" or null for auto, i.e. NXTAKT_AUDIO. In daemon
     // mode it is forwarded to a daemon we spawn and ignored for one we merely
@@ -117,9 +112,13 @@ public:
     // is silent), missing MIDI hardware is not an error, and neither is a daemon
     // that will not start: §8's degraded mode says a GUI with no engine should
     // still open, load, edit and save rather than refuse to run.
-    bool openLocal(const char* driver);
+    bool open(const char* driver);
 
-    // The two halves openLocal() dispatches between, exposed for callers that
+    // The pre-rename spelling, kept because tests call it and a deprecation
+    // cycle for an internal header is ceremony. New code says open().
+    bool openLocal(const char* driver) { return open(driver); }
+
+    // The two halves open() dispatches between, exposed for callers that
     // genuinely mean one of them (and for tests).
     bool openLocalEngine(const char* driver);
     bool openDaemon(const char* session, const char* driver);

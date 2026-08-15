@@ -1194,7 +1194,7 @@ struct RemoteEngine {
 EngineHandle::EngineHandle()  = default;
 EngineHandle::~EngineHandle() = default;
 
-bool EngineHandle::openLocal(const char* driver) {
+bool EngineHandle::open(const char* driver) {
     const char* which = env("ENGINE");
     if (which && (!std::strcmp(which, "daemon") || !std::strcmp(which, "remote"))) {
         const char* sess = env("SESSION");

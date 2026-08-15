@@ -964,6 +964,40 @@ static void testDelay(PluginRegistry& reg) {
         CHECK(at == 24000, "the same division at 60 BPM lands at %d (expected 24000)", at);
     }
 
+    // 2b. The transport outranks the Tempo parameter. The engine pushes
+    // setTransport() before every process(); a device that has seen one must
+    // follow it and ignore the parameter — the parameter exists for hosts that
+    // never push (this suite, everywhere else in it). The Tempo param is set
+    // to a WRONG value on purpose: if the device is still reading it, the echo
+    // lands at 12000 and this fails, which is the regression this test is for.
+    {
+        auto dl = reg.instantiate(*d, kSR, kBlock);
+        if (!dl) return;
+        dl->setParam(paramIndex(*dl, "Sync"), 1.f);
+        dl->setParam(paramIndex(*dl, "Division"), 3.f);        // 1/8
+        dl->setParam(paramIndex(*dl, "Tempo"), 120.f);         // the decoy
+        dl->setParam(paramIndex(*dl, "Feedback"), 0.f);
+        dl->setParam(paramIndex(*dl, "Dry/Wet"), 1.f);
+
+        std::vector<f32> l(48000, 0.f), r(48000, 0.f);
+        std::vector<f32> inL(48000, 0.f), inR(48000, 0.f);
+        inL[0] = inR[0] = 1.f;
+        for (int i = 0; i < 48000; i += kBlock) {
+            // 48000 is not a multiple of kBlock; the last block is short.
+            const int n = 48000 - i < kBlock ? 48000 - i : kBlock;
+            const f32* in[2]  = { inL.data() + i, inR.data() + i };
+            f32* out[2] = { l.data() + i, r.data() + i };
+            dl->setTransport(60.0, 0.0, true);                 // what the engine does
+            dl->process(in, out, 2, n);
+        }
+        int at = 0; f32 best = 0.f;
+        for (int i = 100; i < 48000; ++i)
+            if (std::fabs(l[(size_t)i]) > best) { best = std::fabs(l[(size_t)i]); at = i; }
+        CHECK(at == 24000,
+              "pushed transport (60 BPM) outranks the Tempo param (120): echo at %d (expected 24000)",
+              at);
+    }
+
     // 3. Ping-pong alternates sides rather than spreading.
     {
         auto dl = reg.instantiate(*d, kSR, kBlock);
