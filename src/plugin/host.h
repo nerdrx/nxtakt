@@ -259,14 +259,21 @@ public:
     // parameter does not exist. `min`/`max` are clamped into the target
     // parameter's own range on the way in (which preserves inversion), so what
     // mapping() reports back is what the macro will actually do.
+    //
+    // The new mapping is APPLIED: the target snaps to where the macro already
+    // sits, so the knob and the macro that now owns it agree from this moment.
+    // That is an edit-time property. setState() restores mappings WITHOUT it —
+    // see its own note.
     virtual int  addMapping(const RackMapping& m) = 0;
     virtual bool removeMapping(int i) = 0;
     virtual void clearMacro(int macro) = 0;
 
     virtual RackState state() const = 0;
     // Replaces the entire contents. Restored parameter values are written
-    // verbatim and macros are NOT re-applied over them, because a state that
-    // was saved from a consistent rack already reflects its macro positions.
+    // verbatim and NOTHING in the load path re-derives one: macros are not
+    // re-applied, and the mappings are re-added structurally rather than
+    // through addMapping(), which would snap. A mapped target parked off its
+    // macro's curve therefore comes back parked, exactly as saved.
     virtual bool      setState(const RackState& s) = 0;
 
     // Frees the instances that removeDevice()/setState() unlinked.

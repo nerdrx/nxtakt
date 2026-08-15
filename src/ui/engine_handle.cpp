@@ -87,9 +87,14 @@ const char* cmdName(Cmd t) {
     return "?";
 }
 
-// FNV-1a over the scalars plus up to kProbes strided 8-byte words of the
-// payload. See RemoteEngine::poolRefFor for why a fingerprint exists at all.
-u64 fingerprint(const void* p, size_t bytes, i64 a, i64 b, f64 c) {
+// FNV-1a over the scalars plus the payload. See RemoteEngine::poolRefFor for
+// why a fingerprint exists at all.
+//
+// `probes` caps how much of the payload is mixed: 0 means EVERY byte, and any
+// positive number means that many 8-byte words, evenly strided. The two callers
+// want different answers and the difference is not a tuning knob — it is what
+// each buffer is allowed to do underneath us. See sampleRefFor / notesRefFor.
+u64 fingerprint(const void* p, size_t bytes, i64 a, i64 b, f64 c, size_t probes) {
     u64 h = 1469598103934665603ull;
     auto mix = [&](u64 v) {
         for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xffull; h *= 1099511628211ull; }
@@ -100,16 +105,20 @@ u64 fingerprint(const void* p, size_t bytes, i64 a, i64 b, f64 c) {
     std::memcpy(&cbits, &c, sizeof cbits);
     mix(cbits);
     mix((u64)bytes);
-    if (!p || bytes < sizeof(u64)) return h;
-    constexpr size_t kProbes = 256;
-    const size_t words = bytes / sizeof(u64);
-    const size_t step  = words > kProbes ? words / kProbes : 1;
+    if (!p || !bytes) return h;
     const u8* base = (const u8*)p;
+    const size_t words = bytes / sizeof(u64);
+    const size_t step  = (probes && words > probes) ? words / probes : 1;
     for (size_t i = 0; i < words; i += step) {
         u64 w = 0;
         std::memcpy(&w, base + i * sizeof(u64), sizeof w);
         mix(w);
     }
+    // The bytes past the last whole word. Only reachable on the full path — a
+    // strided sample has already given up on completeness — but a hash that
+    // ignored a payload's tail would be a trap for the next caller.
+    if (step == 1)
+        for (size_t i = words * sizeof(u64); i < bytes; ++i) mix((u64)base[i]);
     return h;
 }
 
@@ -184,9 +193,10 @@ struct RemoteEngine {
     // Keyed by the SOURCE ADDRESS, with a content fingerprint beside it. The
     // address alone is not enough: a SampleBuffer can be freed and a different
     // one allocated at the same address (undo does exactly this), and serving
-    // the cached offset then would publish the wrong audio. The fingerprint is
-    // 256 strided words plus the shape, which no accident produces a collision
-    // in and which costs a microsecond on a buffer of any size.
+    // the cached offset then would publish the wrong audio. Note arrays go
+    // further and are edited in place at the same address, which is why the two
+    // fingerprints cover different amounts of their payload — sampleRefFor and
+    // notesRefFor each say how much, and why.
     struct Cached { u64 ref = 0; u64 finger = 0; };
     std::unordered_map<const void*, Cached> samples;
     std::unordered_map<const void*, Cached> notes;
@@ -393,21 +403,52 @@ struct RemoteEngine {
         return ref;
     }
 
+    // AUDIO: strided, 256 probes, and that is enough for what this fingerprint
+    // has to answer for. A SampleBuffer's samples are immutable for the life of
+    // the allocation — a re-decode, a resample or an undo produces a NEW buffer,
+    // never an edit in place — so the question here is never "did these bytes
+    // change" but "is the buffer at this address still the buffer I cached".
+    // Frames, channels, rate and byte count plus 256 spread words settle that,
+    // and they settle it in a microsecond on a buffer of any length. Hashing
+    // every sample of a ten-minute stereo file (a quarter of a gigabyte) on
+    // every publication would buy nothing and cost that.
     u64 sampleRefFor(const RtClip& rc) {
         if (!rc.data || rc.frames <= 0 || rc.channels < 1) return 0;
         const size_t bytes = (size_t)rc.frames * (size_t)rc.channels * sizeof(f32);
         return poolRefFor(samples, rc.data, bytes,
-                          fingerprint(rc.data, bytes, rc.frames, rc.channels, rate),
+                          fingerprint(rc.data, bytes, rc.frames, rc.channels, rate, 256),
                           false, rc.frames, rc.channels);
     }
 
+    // NOTES: every byte, and the strided sample was a real bug here.
+    //
+    // A note array IS edited in place, at the same address, all the time: that
+    // is what the piano roll does. So this fingerprint has to answer the hard
+    // question — did the content change — and a strided sample of a long clip
+    // cannot. Any stride above 1 skips whole notes, and the arithmetic is worse
+    // than that: RtNote is 24 B, three words a note, so an 800-note clip is
+    // 2 400 words and 2 400 / 256 is a stride of 9. Every sampled index is then
+    // a multiple of 3 — always a note's FIRST word, `beat` — so no note's pitch,
+    // velocity, chance or velTo byte was hashed at all. Changing one produced
+    // the same fingerprint, poolRefFor served the cached block, and the daemon
+    // went on playing the pre-edit notes with nothing to notice it but the ear.
+    //
+    // Hashing all of it costs what the payload costs, and the payload is tiny:
+    // 24 B a note, so a 10 000-note clip is 240 kB — tens of microseconds, once
+    // per publication of that clip (this is the SetClip path, not a per-frame
+    // one). The alternative designs — a separate cheap checksum beside the
+    // fingerprint, or keying notes by content instead of address — buy nothing
+    // over it and add a second thing to keep true.
+    //
+    // WireNote is asserted to mirror RtNote field for field (pool.h), which is
+    // what makes poolRefFor's write below a cast and not a conversion loop —
+    // and what makes hashing these RtNote bytes the same as hashing exactly
+    // what the daemon will reinterpret and play.
     u64 notesRefFor(const RtClip& rc) {
         if (!rc.notes || rc.noteCount <= 0) return 0;
         const size_t bytes = (size_t)rc.noteCount * sizeof(RtNote);
-        // WireNote is asserted to mirror RtNote field for field (pool.h), which
-        // is what makes this a cast and not a conversion loop.
         return poolRefFor(notes, rc.notes, bytes,
-                          fingerprint(rc.notes, bytes, rc.noteCount, 0, 0.0),
+                          fingerprint(rc.notes, bytes, rc.noteCount, 0, 0.0, 0),
                           true, rc.noteCount, 0);
     }
 
@@ -1486,6 +1527,27 @@ u64  EngineHandle::midiReceived() const { return remote_ ? 0u : midi_.received()
 
 u64 EngineHandle::remoteRefusals() const { return remote_ ? remote_->refusals : 0u; }
 u64 EngineHandle::snapshotTears() const  { return remote_ ? remote_->tears : 0u; }
+
+// The pool copy, read back through the same two indirections the daemon uses:
+// the clip cell says which block, the pool says where it is. Nothing here reads
+// the GUI's own RtNote[] — that would defeat the point.
+i64 EngineHandle::publishedNotes(int track, int slot, RtNote* out, i64 max) const {
+    if (!remote_) return -1;
+    const ipc::WireClip& c = remote_->cli.clipShadow(track, slot);
+    if (!c.notesRef || c.noteCount <= 0) return 0;
+    const ipc::WireNote* blk = remote_->cli.pool().data<ipc::WireNote>(c.notesRef);
+    if (!blk) return 0;                         // the block went away under us
+    if (out && max > 0) {
+        // Reinterpreted, not converted — WireNote mirrors RtNote field for
+        // field (pool.h asserts every offset), and this is the same cast
+        // nxtaktd::buildClip makes on the far side. Reading it any other way
+        // would be reading something other than what the daemon plays.
+        const RtNote* src = (const RtNote*)blk;
+        const i64 n = c.noteCount < max ? c.noteCount : max;
+        for (i64 i = 0; i < n; ++i) out[i] = src[i];
+    }
+    return c.noteCount;
+}
 
 // ---------------------------------------------------------------------------
 // Devices, the catalog, the link

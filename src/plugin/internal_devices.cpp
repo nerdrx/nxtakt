@@ -2252,33 +2252,11 @@ public:
         return (i >= 0 && i < (int)maps_.size()) ? maps_[(size_t)i] : kNone;
     }
 
-    int addMapping(const RackMapping& in) override {
-        if ((int)maps_.size() >= kRackMaxMappings) return -1;
-        if (in.macro < 0 || in.macro >= kRackMacros) return -1;
-        if (in.device < 0 || in.device >= (int)chain_.size()) return -1;
-
-        PluginInstance* d = chain_[(size_t)in.device];
-        const int pi = paramIndexOf(*d, in.param);
-        if (pi < 0) return -1;
-
-        // Clamp the endpoints into the target's own range, which PRESERVES
-        // inversion (min and max are clamped independently, so min > max stays
-        // min > max) and makes mapping() report what the macro will really do
-        // rather than what was asked for. A non-finite endpoint is a caller bug
-        // that would poison the target on the audio thread, so it is refused.
-        const ParamInfo& info = d->paramInfo(pi);
-        const f32 lo = info.min < info.max ? info.min : info.max;
-        const f32 hi = info.min < info.max ? info.max : info.min;
-        RackMapping m = in;
-        if (!std::isfinite(m.min) || !std::isfinite(m.max)) return -1;
-        m.min = clampv(m.min, lo, hi);
-        m.max = clampv(m.max, lo, hi);
-
-        maps_.push_back(m);
-        republish();
-        applyMacro(m.macro, false);       // the target snaps to where the macro already is
-        return (int)maps_.size() - 1;
-    }
+    // A mapping made NOW snaps its target to where the macro already sits, so
+    // the knob and the macro agree from this moment on. That is an EDIT-TIME
+    // property and it is not what restoring a saved rack wants -- see
+    // addMappingImpl.
+    int addMapping(const RackMapping& in) override { return addMappingImpl(in, true); }
 
     bool removeMapping(int i) override {
         if (i < 0 || i >= (int)maps_.size()) return false;
@@ -2422,6 +2400,76 @@ private:
         for (int i = 0; i < kRackMacros; ++i) applyMacro(i, false);
     }
 
+    // addMapping(), with the one thing that differs between an EDIT and a
+    // RESTORE spelled out as an argument.
+    //
+    // `snap` drives the macro's targets once the mapping is live. A user
+    // dragging a parameter onto a macro wants exactly that: the target jumps to
+    // where the macro already is, so the knob on screen and the macro that owns
+    // it agree from that moment, and the next macro move is continuous rather
+    // than a jump.
+    //
+    // A RESTORE wants the opposite, and this is the bug that lived here. A
+    // mapped target can be parked OFF the macro's curve -- map Drive to macro 4,
+    // then turn Drive by hand -- and the state string carries that parked value
+    // faithfully. Re-adding the mappings with `snap` on threw it away and
+    // re-derived the target from the macro on every single load, so a set drifted
+    // to the curve the first time it was opened. Worse, it snapped to the macro
+    // position the rack happened to hold BEFORE the state was applied, since
+    // setStateDepth writes the macros last.
+    //
+    // So restore re-adds the mappings STRUCTURALLY (`snap` false) and nothing in
+    // the load path ever writes a sub-device parameter the state did not name.
+    // That is what host.h's setState() contract already promised -- "restored
+    // parameter values are written verbatim and macros are NOT re-applied over
+    // them" -- and what the closing macro writes have always honoured.
+    int addMappingImpl(const RackMapping& in, bool snap) {
+        if ((int)maps_.size() >= kRackMaxMappings) return -1;
+        if (in.macro < 0 || in.macro >= kRackMacros) return -1;
+        if (in.device < 0 || in.device >= (int)chain_.size()) return -1;
+
+        PluginInstance* d = chain_[(size_t)in.device];
+        const int pi = paramIndexOf(*d, in.param);
+        if (pi < 0) return -1;
+
+        // Clamp the endpoints into the target's own range, which PRESERVES
+        // inversion (min and max are clamped independently, so min > max stays
+        // min > max) and makes mapping() report what the macro will really do
+        // rather than what was asked for. A non-finite endpoint is a caller bug
+        // that would poison the target on the audio thread, so it is refused.
+        const ParamInfo& info = d->paramInfo(pi);
+        const f32 lo = info.min < info.max ? info.min : info.max;
+        const f32 hi = info.min < info.max ? info.max : info.min;
+        RackMapping m = in;
+        if (!std::isfinite(m.min) || !std::isfinite(m.max)) return -1;
+        m.min = clampv(m.min, lo, hi);
+        m.max = clampv(m.max, lo, hi);
+
+        maps_.push_back(m);
+        republish();
+        if (snap) applyMacro(m.macro, false);   // the target snaps to where the macro already is
+        return (int)maps_.size() - 1;
+    }
+
+    // THE LOAD ORDER, and why it is this one. Nothing here may write a
+    // sub-device parameter that `s` did not name -- the state is the authority
+    // on every value in the rack, macro positions included.
+    //
+    //   1. devices, each with its parameters, bypass and (if it is a rack) its
+    //      own nested state. Mappings are cleared first, so the applyAllMacros()
+    //      inside insertDevice() has nothing to drive and cannot reach a value
+    //      restored a line later.
+    //   2. mappings, STRUCTURALLY -- addMappingImpl(m, false), never
+    //      addMapping(). They must come after the devices (a mapping names a
+    //      chain index and a parameter id, and both have to exist to resolve),
+    //      and they must not snap, or a target parked off its macro's curve is
+    //      re-derived from the macro and the saved value is lost.
+    //   3. macros, written through InternalInstance::setParam so they do not
+    //      drive their targets either.
+    //
+    // Steps 2 and 3 are order-independent now that neither writes a target; the
+    // ordering that MATTERS is 1 before 2. It is written this way round because
+    // the mapping list is validated against the chain it names.
     bool setStateDepth(const RackState& s, int depth) {
         chain_.clear();
         maps_.clear();
@@ -2467,12 +2515,16 @@ private:
             }
         }
 
+        // Step 2: structural only. `false` is the whole of the fix described on
+        // addMappingImpl -- addMapping() here would re-snap every mapped target
+        // onto its macro's curve on every load.
         for (const RackMapping& m : s.mappings)
-            if (addMapping(m) < 0) ok = false;
+            if (addMappingImpl(m, false) < 0) ok = false;
 
-        // Macros are written WITHOUT re-driving their targets: the parameter
-        // values restored above already are what these macro positions produced
-        // when the state was saved, and re-applying would only round them.
+        // Step 3. Macros are written WITHOUT re-driving their targets: the
+        // parameter values restored above are what the user saved -- whether
+        // they sit on the macro's curve or were parked off it by hand -- and
+        // re-applying would overwrite them with a re-derivation.
         for (int i = 0; i < kRackMacros; ++i)
             InternalInstance::setParam(i, s.macros[i]);
 

@@ -298,6 +298,20 @@ public:
     // stopped mid-publish.
     u64 snapshotTears() const;
 
+    // WHAT THE DAEMON CAN ACTUALLY SEE for a session cell's notes: the pool
+    // block the last published WireClip for (track, slot) points at, read back
+    // out of the shared region and copied into `out` (up to `max` notes).
+    // Returns the note count published there, 0 if the cell has no notes, and
+    // -1 if this is not the daemon path.
+    //
+    // It exists because the GUI's own RtNote[] is NOT what sounds — a COPY of
+    // it in the pool is, made when the clip was published and reused whenever
+    // the handle believes the array has not changed. Those two can disagree,
+    // and when they do the symptom is an edit that is on screen and not in the
+    // audio. handle_test asserts against this rather than against the GUI's own
+    // array, because only this side of the copy can fail.
+    i64 publishedNotes(int track, int slot, RtNote* out, i64 max) const;
+
 private:
     // Heap, not by value. Engine is ~2.3 MB of scratch buffers — it was already
     // a member of App and therefore already wherever App lives, but a pointer

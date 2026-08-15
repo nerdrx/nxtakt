@@ -251,6 +251,92 @@ int main() {
           "without this App::retiringNotes_ grows for the life of the session",
           retired, (void*)n1.data());
 
+    // --- a notes-only edit on a BIG clip has to reach the pool --------------
+    //
+    // The clip cache is keyed by the source address, so an array edited IN
+    // PLACE — which is every piano-roll edit — is recognised as changed only by
+    // its fingerprint. That fingerprint used to be 256 strided 8-byte words of
+    // the payload. RtNote is 24 B, three words a note, so 800 notes are 2 400
+    // words and the stride was 2 400 / 256 = 9: every word it looked at was a
+    // multiple of 3, which is always a note's FIRST word (`beat`). The word
+    // holding pitch, velocity, CHANCE and velTo was not "unlikely to be
+    // sampled", it was never sampled at all. Turning one note's chance produced
+    // the same fingerprint, poolRefFor served the cached block, and the daemon
+    // kept playing the old notes.
+    //
+    // So the assertion is deliberately NOT about the GUI's own array (which is
+    // right by construction — the test just wrote it) but about the pool block
+    // the published clip cell points at, which is the memory the daemon
+    // reinterprets as RtNote[] and plays.
+    banner("the pool fingerprint sees a notes-only edit on a long clip");
+    {
+        const i64 kN    = 800;      // > 683: past the point the stride opened up
+        const i64 kEdit = 700;      // and far enough in that the old hash never looked
+        std::vector<RtNote> big((size_t)kN);
+        for (i64 i = 0; i < kN; ++i) {
+            big[(size_t)i].beat   = 0.25 * (double)i;
+            big[(size_t)i].len    = 0.25;
+            big[(size_t)i].pitch  = (u8)(36 + (i % 48));
+            big[(size_t)i].vel    = 100;
+            big[(size_t)i].chance = 100;
+        }
+
+        Command bc;
+        bc.type = Cmd::SetClip; bc.a = 2; bc.b = 0;
+        bc.clip.isMidi = true;
+        bc.clip.notes = big.data(); bc.clip.noteCount = (int)kN;
+        bc.clip.lengthBeats = 200.0; bc.clip.gain = 1.0f; bc.clip.valid = true;
+        bc.clip.quantumIdx = 0;
+
+        bool put = false;
+        for (int i = 0; i < 40 && !put; ++i) {
+            put = eng.pushCommand(bc);
+            if (!put) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(20); }
+        }
+        CHECK(put, "an %lld-note clip is published", (long long)kN);
+        for (int i = 0; i < 20; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+
+        std::vector<RtNote> seen((size_t)kN);
+        i64 got = eng.publishedNotes(2, 0, seen.data(), kN);
+        CHECK(got == kN, "the pool block behind cell (2,0) holds all %lld of them (%lld)",
+              (long long)kN, (long long)got);
+        CHECK(got == kN && seen[(size_t)kEdit].chance == 100 &&
+              seen[(size_t)kEdit].pitch == big[(size_t)kEdit].pitch,
+              "and note %lld arrived intact (chance %d, pitch %d)", (long long)kEdit,
+              got == kN ? (int)seen[(size_t)kEdit].chance : -1,
+              got == kN ? (int)seen[(size_t)kEdit].pitch : -1);
+
+        // THE EDIT. One byte, in place, at the same address — chance, which is
+        // the smallest thing the piano roll can change and the one with no
+        // other field to give it away.
+        big[(size_t)kEdit].chance = 37;
+
+        put = false;
+        for (int i = 0; i < 60 && !put; ++i) {
+            put = eng.pushCommand(bc);
+            if (!put) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(20); }
+        }
+        CHECK(put, "the same clip is republished after the edit (same pointer, same count)");
+        for (int i = 0; i < 30; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+
+        got = eng.publishedNotes(2, 0, seen.data(), kN);
+        CHECK(got == kN && seen[(size_t)kEdit].chance == 37,
+              "THE DAEMON'S COPY CHANGED: note %lld reads chance %d (want 37). A "
+              "fingerprint that did not cover this byte leaves the engine playing "
+              "the pre-edit notes with nothing on screen to say so",
+              (long long)kEdit, got == kN ? (int)seen[(size_t)kEdit].chance : -1);
+
+        bool restIntact = got == kN;
+        for (i64 i = 0; restIntact && i < kN; ++i) {
+            const RtNote& a = seen[(size_t)i];
+            const RtNote& b = big[(size_t)i];
+            if (a.beat != b.beat || a.len != b.len || a.pitch != b.pitch ||
+                a.vel != b.vel || a.chance != b.chance) restIntact = false;
+        }
+        CHECK(restIntact, "and every other note came across unchanged — the republish "
+                          "is a fresh copy of the whole array, not a patch");
+    }
+
     // =====================================================================
     // STEP 4: a device published as a chain reaches the engine and SOUNDS
     // =====================================================================

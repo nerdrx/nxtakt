@@ -2897,6 +2897,166 @@ static void testRack(PluginRegistry& reg) {
             }
         }
     }
+
+    // 10. A PARKED TARGET. The one case a round trip of "typical" values cannot
+    //     catch, and the one a user hits within a minute of making a macro.
+    //
+    //     Map Drive to a macro, move the macro, then turn Drive BY HAND. The
+    //     target now sits off the macro's curve — which is legal, is what the
+    //     knob is for, and is what state() records. Restore has to give it back
+    //     verbatim.
+    //
+    //     It did not. setState re-added every mapping through addMapping(),
+    //     whose whole job at edit time is to SNAP the target onto the macro's
+    //     curve, and it did so against the macro position the fresh rack held
+    //     BEFORE the state was applied (the macros are written last). So the
+    //     parked value was replaced by a re-derivation from a macro that was not
+    //     even at its saved position yet, on every load.
+    //
+    //     Every value below is exactly representable and the compact form
+    //     round-trips shortest-form floats, so these are `==` and not a
+    //     tolerance: "comes back exactly as saved" is the claim.
+    banner("Rack: a target parked off its macro's curve survives a save/load");
+    {
+        auto rack = makeRack(reg, { "nxtakt:saturator", "nxtakt:delay" });
+        CHECK(rack != nullptr, "built a Saturator + Delay rack to park a knob in");
+        if (rack) {
+            RackControl* r = asRack(rack.get());
+            PluginInstance* sat = r->device(0);
+            PluginInstance* dly = r->device(1);
+            const int pDrive = paramIndex(*sat, "Drive");
+            const int pFb    = paramIndex(*dly, "Feedback");
+
+            // TWO MACROS ON ONE TARGET, which is also the load-order case: the
+            // restore must not apply either of them, and it must not let the
+            // mapping added last decide what Drive reads.
+            RackMapping a;
+            a.macro = 2; a.device = 0; a.param = sat->paramInfo(pDrive).id;
+            a.min = 0.f; a.max = 36.f;
+            CHECK(r->addMapping(a) == 0, "macro 2 mapped onto Drive");
+            RackMapping b;
+            b.macro = 5; b.device = 0; b.param = sat->paramInfo(pDrive).id;
+            b.min = 0.f; b.max = 12.f;
+            CHECK(r->addMapping(b) == 1, "and macro 5 onto the SAME target");
+            RackMapping c;
+            c.macro = 2; c.device = 1; c.param = dly->paramInfo(pFb).id;
+            c.min = 0.f; c.max = 0.5f;
+            CHECK(r->addMapping(c) == 2, "with a third onto the Delay's Feedback");
+
+            rack->setParam(2, 0.5f);
+            rack->setParam(5, 0.25f);
+            CHECK(sat->getParam(pDrive) == 3.f && dly->getParam(pFb) == 0.25f,
+                  "the macros drive their targets while they are being edited "
+                  "(Drive %.3f, Feedback %.4f)",
+                  (double)sat->getParam(pDrive), (double)dly->getParam(pFb));
+
+            // THE PARK. Nothing here is unusual: it is one drag on the device's
+            // own knob, after the mapping was made.
+            sat->setParam(pDrive, 28.5f);
+            dly->setParam(pFb, 0.75f);
+            CHECK(sat->getParam(pDrive) == 28.5f && dly->getParam(pFb) == 0.75f,
+                  "then the user turns both by hand, off every macro's curve");
+
+            const std::string text = rackStateToString(r->state());
+            RackState saved;
+            CHECK(rackStateFromString(text, saved), "the state serialises and parses back");
+            bool carried = false;
+            if (!saved.devices.empty())
+                for (const auto& pv : saved.devices[0].params)
+                    if (pv.first == sat->paramInfo(pDrive).id && pv.second == 28.5f) carried = true;
+            CHECK(carried, "and the STRING carries the parked value — the loss is the "
+                           "rack's, not the format's");
+
+            auto fresh = reg.instantiate(*rd, kSR, kBlock);
+            RackControl* fr = asRack(fresh.get());
+            CHECK(fr && fr->setState(saved), "setState rebuilds the rack");
+            if (fr && fr->deviceCount() == 2) {
+                PluginInstance* fsat = fr->device(0);
+                PluginInstance* fdly = fr->device(1);
+                const int fDrive = paramIndex(*fsat, "Drive");
+                const int fFb    = paramIndex(*fdly, "Feedback");
+
+                CHECK(fsat->getParam(fDrive) == 28.5f,
+                      "THE BUG: Drive comes back parked at %.4f, not re-derived from "
+                      "a macro (want 28.5; 18 would be macro 2's curve, 3 macro 5's, "
+                      "0 either macro at its pre-restore zero)",
+                      (double)fsat->getParam(fDrive));
+                CHECK(fdly->getParam(fFb) == 0.75f,
+                      "and Feedback at %.4f, on a second device the same macro drives "
+                      "(want 0.75)", (double)fdly->getParam(fFb));
+                CHECK(fresh->getParam(2) == 0.5f && fresh->getParam(5) == 0.25f,
+                      "with both macro positions restored (%.3f, %.3f)",
+                      (double)fresh->getParam(2), (double)fresh->getParam(5));
+
+                // Structural, and in the saved order — "last write wins" is a
+                // statement about mapping order, so a restore that reordered
+                // them would change which macro owns Drive.
+                CHECK(fr->mappingCount() == 3, "all three mappings came back (%d)",
+                      fr->mappingCount());
+                CHECK(fr->mappingCount() == 3 &&
+                      fr->mapping(0).macro == 2 && fr->mapping(0).max == 36.f &&
+                      fr->mapping(1).macro == 5 && fr->mapping(1).max == 12.f &&
+                      fr->mapping(2).macro == 2 && fr->mapping(2).device == 1,
+                      "in the order they were saved in");
+
+                // Not restored INERT: the mappings are live the moment the user
+                // touches a macro again. A fix that simply stopped adding them
+                // would pass everything above and break the feature.
+                fresh->setParam(5, 1.f);
+                CHECK(fsat->getParam(fDrive) == 12.f,
+                      "and moving macro 5 drives Drive again: %.3f (want 12)",
+                      (double)fsat->getParam(fDrive));
+                fresh->setParam(2, 1.f);
+                CHECK(fsat->getParam(fDrive) == 36.f && fdly->getParam(fFb) == 0.5f,
+                      "macro 2 owns it after that — last write wins, across the "
+                      "restore (Drive %.3f, Feedback %.4f)",
+                      (double)fsat->getParam(fDrive), (double)fdly->getParam(fFb));
+            }
+        }
+    }
+
+    // 11. The same claim one level down, because setState recurses into a
+    //     nested rack through the same path and a fix that only held at depth 0
+    //     would be a fix for the test rather than for the bug.
+    banner("Rack: a parked target inside a NESTED rack survives too");
+    {
+        auto outer = makeRack(reg, { "nxtakt:rack" });
+        CHECK(outer != nullptr, "built an outer rack holding a rack");
+        if (outer) {
+            RackControl* o = asRack(outer.get());
+            RackControl* i = asRack(o->device(0));
+            const PluginDesc* satd = reg.find("nxtakt:saturator");
+            if (i && satd && i->addDevice(*satd)) {
+                PluginInstance* sat = i->device(0);
+                const int pDrive = paramIndex(*sat, "Drive");
+                RackMapping m;
+                m.macro = 1; m.device = 0; m.param = sat->paramInfo(pDrive).id;
+                m.min = 0.f; m.max = 36.f;
+                CHECK(i->addMapping(m) == 0, "the inner rack maps macro 1 onto Drive");
+                o->device(0)->setParam(1, 0.75f);
+                sat->setParam(pDrive, 4.5f);          // parked, off the 27 the macro gives
+                CHECK(sat->getParam(pDrive) == 4.5f, "and its target is parked at 4.5");
+
+                RackState st;
+                CHECK(rackStateFromString(rackStateToString(o->state()), st),
+                      "the nested state round-trips");
+                auto rebuilt = reg.instantiate(*rd, kSR, kBlock);
+                RackControl* rb = asRack(rebuilt.get());
+                CHECK(rb && rb->setState(st), "and restores");
+                RackControl* inner = (rb && rb->deviceCount() == 1) ? asRack(rb->device(0)) : nullptr;
+                CHECK(inner && inner->deviceCount() == 1, "the inner rack came back filled");
+                if (inner && inner->deviceCount() == 1) {
+                    PluginInstance* fsat = inner->device(0);
+                    CHECK(fsat->getParam(paramIndex(*fsat, "Drive")) == 4.5f,
+                          "with its parked Drive at %.3f, not the 27 macro 1 would "
+                          "re-derive", (double)fsat->getParam(paramIndex(*fsat, "Drive")));
+                    CHECK(rb->device(0)->getParam(1) == 0.75f,
+                          "and the inner rack's own macro where it was (%.3f)",
+                          (double)rb->device(0)->getParam(1));
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

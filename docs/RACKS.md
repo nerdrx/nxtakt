@@ -176,6 +176,36 @@ as re-derived from macro positions. **The reverse order would silently round
 every mapped parameter on every single load** — a set that drifts a little each
 time you open it, which is the kind of bug that takes months to attribute.
 
+### Inside `setState`, the same rule, one level down
+
+The obligation on the caller above is only half of it. `setState` restores in
+this order, and the order is load-bearing for the same reason:
+
+1. **devices** — each instantiated, then its parameters, its bypass and (for a
+   nested rack) its own state. The mapping list is cleared *before* this, so the
+   `applyAllMacros()` that every `insertDevice` ends with has nothing to drive
+   and cannot reach a value restored a line later.
+2. **mappings**, structurally. They must come after the devices, because a
+   mapping names a chain index and a `ParamInfo::id` and both have to resolve.
+   They are re-added through the internal `addMappingImpl(m, false)` and **never
+   through `addMapping`**.
+3. **macros**, through `InternalInstance::setParam`, which does not drive
+   targets.
+
+Step 2's `false` is the difference between an edit and a restore, and it was a
+real bug for one release. `addMapping` *applies* the new mapping — the target
+snaps to where the macro already sits, which is exactly right when a user drags
+a parameter onto a macro, because the knob and the macro then agree from that
+moment. Reusing that path on load meant a target **parked off its macro's
+curve** — map Drive to macro 4, then turn Drive by hand — was re-derived from
+the macro every time the set was opened, and re-derived from the macro position
+the rack held *before* the state was applied, since the macros are written last.
+The state string carried the parked value faithfully; the rack threw it away.
+
+The rule that falls out: **nothing in the load path may write a sub-device
+parameter the state did not name.** With that held, steps 2 and 3 are
+order-independent and only "devices before mappings" is a constraint.
+
 ## UI
 
 Nothing is required to make racks usable — that was the point. To show the
