@@ -940,10 +940,18 @@ static void testStateSeqlock(ipc::EngineClient& c) {
         if (sawOdd > 200 && samples > 100000) break;      // proved; stop burning CPU
     }
 
-    CHECK(sawOdd > 0,
-          "the sequence is observed ODD while the mirror publishes, so "
-          "publishBegin() is in mirrorLoop() (%llu of %llu samples)",
-          (unsigned long long)sawOdd, (unsigned long long)samples);
+    // Telemetry, deliberately NOT a CHECK. Catching the sequence odd from
+    // another process is a bet on the scheduler interleaving the observer with
+    // a microseconds-wide publish, and on a starved single-CPU host the
+    // observer only ever runs while the writer is parked BETWEEN publishes --
+    // at even -- so this legitimately reads 0 of 100 million there. CI hit
+    // exactly that. The claim this used to assert ("publishBegin() is in
+    // mirrorLoop()") is proved deterministically by the stalled-daemon control
+    // below, which parks the mirror INSIDE the window where odd is guaranteed,
+    // and which goes red if either bump is removed.
+    note("sequence observed odd %llu times in %llu samples (0 is normal on a "
+         "starved host; the stall control below is the proof)",
+         (unsigned long long)sawOdd, (unsigned long long)samples);
     CHECK(gaveUp == 0,
           "and readCoherent() proved every one of %llu snapshots coherent, so "
           "publishEnd() closes the window (%llu gave up)",
