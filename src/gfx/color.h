@@ -27,22 +27,54 @@ constexpr Col rgba(u32 hex, f32 a) {
     return Col(((hex >> 16) & 0xFF) / 255.f, ((hex >> 8) & 0xFF) / 255.f, (hex & 0xFF) / 255.f, a);
 }
 
+// ---------------------------------------------------------------------------
+// The palette, retuned onto the NX design language (docs/DESIGN.md, theme.h).
+//
+// WHY THIS FILE MOVED AND theme.h DID NOT REPLACE IT
+//
+// theme.h holds the tokens; this holds the *legacy surface names* the existing
+// views spell. Roughly three hundred call sites across src/ui say `pal::panel`
+// and `pal::textDim`, and they will keep saying it until each view is
+// re-skinned onto the tokens directly. Retuning the values here is what lets
+// the whole program change palette in one commit instead of fifteen, and it is
+// why the very first screenshot of the unmodified app already reads as NX
+// rather than as grey boxes floating over a nebula nobody can see.
+//
+// TRANSLUCENCY IS THE POINT, not a side effect. The old values were opaque
+// greys, and an opaque surface over §3's living background hides it completely
+// -- the field, the nebula and the stars all render underneath and none of
+// them reach the eye. The background-most tokens are therefore translucent
+// now: the field shows through the empty half of the clip grid and around the
+// edges of every panel, which is the entire mechanism by which "faked glass"
+// works (§4). Anything that must stay readable stays near-opaque.
+//
+// Hue: every grey is gone. Surfaces sit on the violet axis, so violet
+// dominates by construction rather than by decoration (§1).
+//
+// A view being re-skinned should migrate to `nx::` and drop its `pal::` use;
+// until it does, it gets the new palette for free and looks intentional.
+// ---------------------------------------------------------------------------
 namespace pal {
-// Surfaces
-constexpr Col appBg        = rgb(0x1D1D1D);
-constexpr Col panel        = rgb(0x282828);
-constexpr Col panelAlt     = rgb(0x2F2F2F);
-constexpr Col gridBg       = rgb(0x333333);
-constexpr Col slotEmpty    = rgb(0x2A2A2A);
-constexpr Col slotHover    = rgb(0x3A3A3A);
-constexpr Col divider      = rgb(0x151515);
-constexpr Col ridge        = rgb(0x404040);
+// Surfaces. Alphas are over the §3 field, which is #0a0714 -> #12091f, so a
+// 0.55 fill still lands near #14 0e 22 -- dark enough to read text on.
+constexpr Col appBg        = rgba(0x0C0817, 0.55f);   // the "nothing here" fill
+constexpr Col panel        = rgba(0x171028, 0.88f);   // chrome panels
+constexpr Col panelAlt     = rgba(0x1D1433, 0.90f);   // controls on panels
+constexpr Col gridBg       = rgba(0x120C22, 0.50f);   // the clip grid's empty field
+constexpr Col slotEmpty    = rgba(0x1A1230, 0.62f);
+constexpr Col slotHover    = rgba(0x2A1E48, 0.90f);
+// Not a divider colour any more: `divider` is used both for separators and for
+// recessed troughs, and only the separators are wrong. It is now the --line
+// token, which is a violet-black rather than a grey. Real dividers should move
+// to Renderer::hairlineH/V -- a solid line is a §11 finding.
+constexpr Col divider      = rgba(0x2A1F45, 0.85f);
+constexpr Col ridge        = rgb(0x4B3A6E);           // raised edges, handles
 
 // Text
-constexpr Col text         = rgb(0xD6D6D6);
-constexpr Col textDim      = rgb(0x8A8A8A);
-constexpr Col textFaint    = rgb(0x5E5E5E);
-constexpr Col textOnClip   = rgb(0x1A1A1A);
+constexpr Col text         = rgb(0xEFEAFF);
+constexpr Col textDim      = rgb(0x9A8FC0);
+constexpr Col textFaint    = rgb(0x6B5F92);
+constexpr Col textOnClip   = rgb(0x160E28);
 
 // Accents. The brand accent is the user's chosen electric purple. It is a
 // dark hue, so two rules keep it readable: as small TEXT on dark surfaces use
@@ -50,13 +82,22 @@ constexpr Col textOnClip   = rgb(0x1A1A1A);
 // text — widgets.cpp picks per-luminance.
 constexpr Col accent       = rgb(0x7700FF);   // selection / focus / brand
 constexpr Col accentHi     = rgb(0xA875FF);   // accent as text on dark
-constexpr Col playGreen    = rgb(0x59D64B);
-constexpr Col recRed       = rgb(0xFF3B30);
-constexpr Col armRed       = rgb(0xC8462F);
-constexpr Col soloBlue     = rgb(0x4FA3E3);
-constexpr Col meterGreen   = rgb(0x62D84E);
-constexpr Col meterAmber   = rgb(0xE8C33C);
-constexpr Col meterRed     = rgb(0xE8483C);
+// Transport and status. Play moves to cyan: §1 reserves cyan for "light inside
+// materials" -- live values, playheads, running state -- which is exactly what
+// a play indicator is, and a lime green on a violet field was the one colour in
+// the program that belonged to no palette at all. Record stays red because red
+// means record everywhere and a DAW does not get to be clever about that.
+constexpr Col playGreen    = rgb(0x00E5FF);
+constexpr Col recRed       = rgb(0xFF5470);
+constexpr Col armRed       = rgb(0xB03048);
+constexpr Col soloBlue     = rgb(0x66C4FF);
+// Meters keep the green/amber/red ladder. It is a measurement instrument, read
+// at a glance and often in peripheral vision, and every engineer alive already
+// knows what its colours mean; restyling it would be branding at the cost of
+// the one thing on screen that has to be unambiguous.
+constexpr Col meterGreen   = rgb(0x3FD07A);
+constexpr Col meterAmber   = rgb(0xFFB300);
+constexpr Col meterRed     = rgb(0xFF5470);
 
 // The eight-colour clip strip Live cycles through for new tracks.
 constexpr Col clipColors[] = {

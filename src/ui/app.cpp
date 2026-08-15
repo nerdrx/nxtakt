@@ -249,8 +249,9 @@ void App::frame() {
     const f32 W = (f32)win_.width(), H = (f32)win_.height();
 
     rend_.begin(win_.width(), win_.height(), s);
-    glClearColor(pal::appBg.r, pal::appBg.g, pal::appBg.b, 1.f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    // begin() lays down the NX field (docs/DESIGN.md §3) as the first quads of
+    // the batch. pal::appBg is translucent now; clearing to it would be
+    // clearing to a colour no surface in the program actually is.
 
     ui_.beginFrame();
 
