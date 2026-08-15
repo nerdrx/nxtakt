@@ -80,8 +80,20 @@ jobs:
       # that must not be silent, and an LV2/CLAP plugin scan. The runner has no
       # LV2 plugins installed, so the scan legitimately reports 0 -- it is
       # exercising lilv discovery, not asserting a plugin count.
+      # On failure, every FAIL line and each suite's summary is re-emitted as a
+      # ::error annotation. Annotations are readable through the public
+      # check-runs API without a token; the raw step log is not. This exists
+      # because a red run could previously only be diagnosed by guessing at the
+      # runner's environment from outside -- the failing CHECK's own text is
+      # the one thing a diagnosis actually needs.
       - name: Headless test suite
-        run: make test
+        run: |
+          set -o pipefail
+          if ! make test 2>&1 | tee test-output.txt; then
+            grep -E "FAIL|passed, [1-9][0-9]* failed" test-output.txt | tail -40 \
+              | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
