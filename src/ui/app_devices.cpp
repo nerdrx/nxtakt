@@ -20,6 +20,61 @@
 namespace lat {
 
 // ---------------------------------------------------------------------------
+// THE JUDGMENT, for this file (docs/DESIGN.md §4).
+//
+// This whole tab is chrome, so it takes the tier table properly: the browser is
+// a WELL recessed into the detail panel, every device is a small CARD with the
+// faked glass fill and the 1px lit edge, and the rack panel is the one card
+// that carries the lit-violet edge because it is the inside of the box beside
+// it. Nothing here is a working surface, so nothing here has to stay flat --
+// but §4's cardinal rule still holds: cards fake their glass. A chain of eight
+// devices with a rack open is a dozen glass surfaces on screen, which is
+// exactly the count that makes real blur a slideshow.
+//
+// One structural note. textIn() already truncates with an ellipsis to fit the
+// rect it is given, so the pushClip/popClip pairs that used to fence every name
+// in here bought nothing and cost two draw calls each -- the scissor is GL
+// state and setting it flushes the batch. They are gone; where a name needs to
+// stop early it is textIn's rect that stops it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A micro-label cut to fit its box.
+//
+// Ui::microIn draws glyph by glyph -- that is how it gets §5's tracking -- so
+// unlike textIn it has no ellipsis logic, and a plugin name is arbitrary text
+// off disk. Trimming here is what keeps a long name inside its card without a
+// scissor around it, and a scissor is two draw calls every time it is set.
+void microFit(Ui& ui, const Font& f, const Rect& b, const char* s, const Col& c,
+              Align a = Align::Left, f32 pad = 0.f) {
+    if (!s || !*s) return;
+    const f32 avail = b.w - pad * 2.f;
+    if (avail <= 1.f) return;
+    char buf[72];
+    snprintf(buf, sizeof buf, "%s", s);
+    if (ui.microWidth(f, buf) > avail) {
+        const f32 dots = ui.microWidth(f, "..");
+        size_t n = strlen(buf);
+        while (n > 1 && ui.microWidth(f, buf) + dots > avail) buf[--n] = 0;
+        if (n + 2 < sizeof buf) { buf[n] = '.'; buf[n + 1] = '.'; buf[n + 2] = 0; }
+    }
+    ui.microIn(f, b, buf, c, a, pad);
+}
+
+// What a plugin's format chip says. `formatName` spells Internal in full, which
+// is right in a log line and four characters too long for a badge -- at 10px
+// over 0.12em of tracking it does not fit beside a name and a vendor, and a
+// badge that ellipsises its own word is worse than no badge. NxTakt's own
+// devices wear the brand instead, which is also more use than the word: it says
+// whose plugin this is, not which loader will open it.
+const char* formatBadge(PluginFormat f) {
+    return f == PluginFormat::Internal ? "NX" : formatName(f);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
 // device chains
 //
 // See the lifecycle comment in app.h: the GUI owns every RtChain and every
@@ -479,30 +534,19 @@ void App::drawDeviceDetail(const Rect& r) {
     const f32 listW = 236 * s;
     Rect list{r.x, r.y, listW, r.h};
     Rect strip{list.right() + 1 * s, r.y, r.right() - list.right() - 1 * s, r.h};
-    drawPluginBrowser(list);
-    rend_.rect({list.right(), r.y, 1 * s, r.h}, pal::divider);
+    drawPluginBrowser(list);      // draws the hairline down its own right edge
     drawDeviceStrip(strip);
 }
 
 void App::drawPluginBrowser(const Rect& r) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
-    rend_.rect(r, pal::panelAlt);
+    // A list inside the detail panel's surface, so it recesses. §4: a content
+    // region inside glass is a well, never a second frosted layer -- glass
+    // inside glass reads as fog and takes the hierarchy with it.
+    rend_.well(r, 0.f);
+    rend_.hairlineV(r.right(), r.y, r.bottom());
 
-    // --- filter ---
-    const u64 fid = uiId(10, 0);
-    Rect filter{r.x + 6 * s, r.y + 5 * s, r.w - 12 * s, 17 * s};
-    ui_.textField(fid, filter, &pluginFilter_, pal::appBg, pal::text, Align::Left, false);
-    // textField only writes back on commit, but a filter has to narrow as you
-    // type, so read the live edit buffer while this field owns the caret.
-    const std::string* live = ui_.liveText(fid);
-    const std::string& query = live ? *live : pluginFilter_;
-    if (query.empty())
-        rend_.textIn(fSmall_, filter, "filter plugins", pal::textFaint, Align::Left, 5 * s);
-
-    // --- filtered index, rebuilt each frame: a few hundred string compares ---
-    static std::vector<int> shown;                  // reused to avoid churn
-    shown.clear();
     // In daemon mode the browsable list is the DAEMON's catalog -- what the
     // engine's process proved it can instantiate -- not what this process's
     // registry found. The two are the same machine today, but the catalog is
@@ -510,13 +554,41 @@ void App::drawPluginBrowser(const Rect& r) {
     // divergence the catalog exists to make visible.
     const std::vector<PluginDesc>& all =
         (!eng_.local() && eng_.catalogReady()) ? eng_.catalog() : registry_.plugins();
+
+    // --- header: the §5 chip language, 10px uppercase over wide tracking ----
+    Rect head{r.x + nx::sp1 * s, r.y + 4 * s, r.w - nx::sp1 * 2.f * s, 12 * s};
+    ui_.microIn(fSmall_, head, "BROWSER", nx::muted, Align::Left, 0);
+    {
+        char cnt[24];
+        snprintf(cnt, sizeof cnt, "%zu", all.size());
+        ui_.microIn(fSmall_, head, cnt, nx::muted.alpha(0.6f), Align::Right, 0);
+    }
+
+    // --- filter ---
+    const u64 fid = uiId(10, 0);
+    Rect filter{r.x + 6 * s, head.bottom() + 4 * s, r.w - 12 * s, 17 * s};
+    // The field is recessed at rest and takes the violet border and the focus
+    // ring the moment the caret arrives (§5: never a bare outline). textField
+    // paints the focused state itself, so this is only the resting well.
+    ui_.fieldWell(filter, 0.f);
+    ui_.textField(fid, filter, &pluginFilter_, Col(0, 0, 0, 0), nx::text, Align::Left, false);
+    // textField only writes back on commit, but a filter has to narrow as you
+    // type, so read the live edit buffer while this field owns the caret.
+    const std::string* live = ui_.liveText(fid);
+    const std::string& query = live ? *live : pluginFilter_;
+    if (query.empty())
+        rend_.textIn(fSmall_, filter, "Filter plugins", nx::muted.alpha(0.6f), Align::Left, 6 * s);
+
+    // --- filtered index, rebuilt each frame: a few hundred string compares ---
+    static std::vector<int> shown;                  // reused to avoid churn
+    shown.clear();
     for (int i = 0; i < (int)all.size(); ++i)
         if (icontains(all[i].name, query)) shown.push_back(i);
 
     const f32 rowH = 17 * s;
-    Rect listR{r.x, filter.bottom() + 4 * s, r.w, r.bottom() - filter.bottom() - 4 * s};
+    Rect listR{r.x, filter.bottom() + 6 * s, r.w, r.bottom() - filter.bottom() - 6 * s};
+    rend_.hairlineH(r.x + nx::sp1 * s, r.right() - nx::sp1 * s, listR.y - 3 * s);
     rend_.pushClip(listR);
-    rend_.rect(listR, pal::appBg.scale(1.05f));
 
     if (ui_.setHot(uiId(10, 1), listR) && in.wheel != 0.f) {
         pluginScroll_ -= in.wheel * rowH * 3.f;
@@ -525,10 +597,20 @@ void App::drawPluginBrowser(const Rect& r) {
     pluginScroll_ = clampv(pluginScroll_, 0.f, maxScroll);
 
     if (shown.empty()) {
-        rend_.textIn(fSmall_, listR, all.empty() ? "no plugins found" : "no match",
-                     pal::textFaint, Align::Center);
+        // §5's empty state: one short line, one muted sentence, centred.
+        const f32 lh = fBody_.height();
+        rend_.textIn(fBold_, {listR.x, listR.y + nx::sp4 * s, listR.w, lh},
+                     all.empty() ? "No plugins found" : "No match", nx::text, Align::Center);
+        rend_.textIn(fSmall_, {listR.x, listR.y + nx::sp4 * s + lh + nx::sp1 * s, listR.w, lh},
+                     all.empty() ? "Install an LV2 or CLAP plugin and restart."
+                                 : "Clear the filter to see every plugin.",
+                     nx::muted, Align::Center);
     }
 
+    // Shapes for every row, then every row's text. The batcher binds the glyph
+    // atlas for text and unbinds it for shapes, and each switch is a draw call;
+    // a list that drew each row complete paid four of them per row.
+    const f32 rowRad = nx::radiusXs * s;
     f32 y = listR.y - pluginScroll_;
     for (size_t k = 0; k < shown.size(); ++k) {
         Rect row{listR.x, y, listR.w, rowH};
@@ -539,26 +621,20 @@ void App::drawPluginBrowser(const Rect& r) {
         const PluginDesc& d = all[pi];
         const u64 id = uiId(10, 100 + pi);
         const bool hot = ui_.setHot(id, row) && ui_.isHot(id);
-        if (pi == pluginSel_) rend_.rect(row, pal::gridBg);
-        else if (hot)         rend_.rect(row, pal::slotHover);
+        const Rect chipR{row.x + 4 * s, row.y + 1 * s, row.w - 8 * s, row.h - 2 * s};
+        if (pi == pluginSel_) {
+            rend_.gradRect(chipR, rowRad, nx::glassChip, 0.85f);
+            rend_.rect({nx::snapPx(chipR.x), chipR.y, std::max(1.f, nx::snapPx(2 * s)), chipR.h},
+                       nx::violet);
+        } else if (hot) {
+            rend_.gradRect(chipR, rowRad, nx::glassChip, 0.45f);
+        }
         if (hot) ui_.cursor = Cursor::Hand;
 
-        Rect tag{row.right() - 34 * s, row.cy() - 6 * s, 28 * s, 12 * s};
-        rend_.roundRect(tag, 2 * s, pal::panel);
-        rend_.textIn(fSmall_, tag, formatName(d.format), pal::textFaint, Align::Center, 0);
-
-        Rect vendor{tag.x - 74 * s, row.y, 70 * s, row.h};
-        if (!d.vendor.empty()) {
-            rend_.pushClip(vendor);
-            rend_.textIn(fSmall_, vendor, d.vendor.c_str(), pal::textDim, Align::Right, 0);
-            rend_.popClip();
-        }
-
-        Rect name{row.x + 8 * s, row.y, vendor.x - row.x - 12 * s, row.h};
-        rend_.pushClip(name);
-        rend_.textIn(fBody_, name, d.name.c_str(), hot || pi == pluginSel_ ? pal::text : pal::textDim,
-                     Align::Left, 0);
-        rend_.popClip();
+        Rect tag{row.right() - 46 * s, row.cy() - 6 * s, 40 * s, 12 * s};
+        // --radius-xs, not h*0.5: a hand-rolled capsule is exactly the
+        // roundness the owner called cheap, and the token is 2px now.
+        rend_.gradRect(tag, nx::radiusXs * s, nx::glassChip, 0.9f);
 
         if (hot && in.pressed[0]) pluginSel_ = pi;
         // Double-click loads, matching how the file browser drops a sample.
@@ -585,13 +661,43 @@ void App::drawPluginBrowser(const Rect& r) {
             }
         }
     }
+
+    // Pass two: every row's text, in one bind. textIn truncates to its rect, so
+    // a long name stops with an ellipsis where the vendor column begins and no
+    // scissor is needed to make it.
+    y = listR.y - pluginScroll_;
+    for (size_t k = 0; k < shown.size(); ++k) {
+        Rect row{listR.x, y, listR.w, rowH};
+        y += rowH;
+        if (row.bottom() < listR.y || row.y > listR.bottom()) continue;
+
+        const int pi = shown[k];
+        const PluginDesc& d = all[pi];
+        const bool hot = ui_.isHot(uiId(10, 100 + pi));
+        const bool sel = pi == pluginSel_;
+
+        Rect tag{row.right() - 46 * s, row.cy() - 6 * s, 40 * s, 12 * s};
+        microFit(ui_, fSmall_, tag, formatBadge(d.format), nx::muted.alpha(0.85f),
+                 Align::Center);
+
+        Rect vendor{tag.x - 70 * s, row.y, 66 * s, row.h};
+        if (!d.vendor.empty())
+            rend_.textIn(fSmall_, vendor, d.vendor.c_str(), nx::muted.alpha(0.7f),
+                         Align::Right, 0);
+
+        Rect name{row.x + 10 * s, row.y, vendor.x - row.x - 14 * s, row.h};
+        rend_.textIn(fBody_, name, d.name.c_str(),
+                     sel || hot ? nx::text : nx::muted, Align::Left, 0);
+    }
     rend_.popClip();
 }
 
 void App::drawDeviceStrip(const Rect& r) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
-    rend_.rect(r, pal::panel);
+    // No fill: this is the detail panel's own surface, and the device cards
+    // below are what floats on it. A second glass layer here would be the fog
+    // §4 warns about.
 
     // The chain being edited belongs to a track, a return or the master; past
     // this point the only difference is the colour of the identity chip.
@@ -616,17 +722,18 @@ void App::drawDeviceStrip(const Rect& r) {
     std::vector<DeviceModel>& devices = *co.devices;
     const Col tc = ownIsTrack(devOwner_)
                  ? pal::clipColors[ses_.tracks[devOwner_].colorIdx % pal::clipColorCount]
-                 : (ownIsReturn(devOwner_) ? pal::soloBlue : pal::accent);
+                 : (ownIsReturn(devOwner_) ? pal::soloBlue : nx::violet);
 
     Rect head{r.x, r.y, r.w, 16 * s};
-    rend_.rect(head, pal::panelAlt);
-    rend_.rect({head.x, head.y, 4 * s, head.h}, tc);       // owner identity chip
+    rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s},
+               tc);                                       // owner identity chip
+    rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
     rend_.textIn(fBold_, {head.x + 10 * s, head.y, 220 * s, head.h},
-                 ownerName(devOwner_).c_str(), pal::text, Align::Left, 0);
+                 ownerName(devOwner_).c_str(), nx::text, Align::Left, 0);
     rend_.textIn(fSmall_, head,
-                 rackOpenUid_ ? "a rack is open - double-click a plugin to add it INSIDE the rack"
-                              : "double-click a plugin to add it to this chain",
-                 rackOpenUid_ ? pal::accentHi : pal::textFaint, Align::Right, 8 * s);
+                 rackOpenUid_ ? "A rack is open - a double-click adds the plugin inside it"
+                              : "Double-click a plugin to add it to this chain",
+                 rackOpenUid_ ? nx::violetSoft : nx::muted.alpha(0.7f), Align::Right, 8 * s);
 
     Rect area{r.x, head.bottom(), r.w, r.bottom() - head.bottom()};
     rend_.pushClip(area);
@@ -637,9 +744,16 @@ void App::drawDeviceStrip(const Rect& r) {
     else selDevice_ = clampv(selDevice_ < 0 ? 0 : selDevice_, 0, (int)devices.size() - 1);
 
     if (devices.empty()) {
+        // §5's empty state: one short bold line, one muted sentence, centred,
+        // and an invitation rather than an apology (§9).
         char msg[80];
         snprintf(msg, sizeof msg, "No devices on %s", ownerName(devOwner_).c_str());
-        rend_.textIn(fBody_, area, msg, pal::textFaint, Align::Center);
+        const f32 lh = fBody_.height();
+        rend_.textIn(fBold_, {area.x, area.cy() - lh - nx::sp1 * 0.5f * s, area.w, lh},
+                     msg, nx::text, Align::Center);
+        rend_.textIn(fSmall_, {area.x, area.cy() + nx::sp1 * 0.5f * s, area.w, lh},
+                     "Double-click a plugin in the browser to add one.", nx::muted,
+                     Align::Center);
         rend_.popClip();
         return;
     }
@@ -683,16 +797,28 @@ void App::drawDeviceStrip(const Rect& r) {
         // can take it back — last setHot() of the frame wins.
         const u64 bid = uiId(11, (int)i, 2);
         const bool hotBox = ui_.setHot(bid, box) && ui_.isHot(bid);
-        rend_.roundRect(box, 3 * s, sel ? pal::gridBg : pal::panelAlt);
-        if (sel) rend_.roundRectOutline(box, 3 * s, 1 * s, pal::accent);
+        // A device is a card: --glass-1, a 1px lit edge, --radius-sm. Faked,
+        // like every card in the system. §5's disabled rule does the bypass:
+        // a bypassed device is not doing anything, and it says so at 40%.
+        const f32 dim = d.bypass ? 0.4f : 1.f;
+        const f32 rad = nx::radiusSm * s;
+        rend_.gradRect(box, rad, nx::glass1, (sel ? 1.f : 0.8f) * (d.bypass ? 0.55f : 1.f));
+        if (sel) {
+            rend_.gradStroke(box, rad, s, nx::edgeLit, 0.9f);
+            rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)),
+                                   nx::violet.alpha(0.75f));
+        } else {
+            rend_.gradStroke(box, rad, s, nx::edge, 0.85f * dim);
+        }
 
         Rect title{box.x, box.y, box.w, 16 * s};
-        rend_.rect({title.x + 2 * s, title.y + 3 * s, 3 * s, title.h - 6 * s}, tc);
+        rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
+                    title.h - 8 * s}, tc.alpha(dim));
 
         // Both controls are glyph-drawn rather than lettered: at this size the
         // font ellipsises anything longer than a character or two.
-        Rect xr{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
-        Rect br{xr.x - 20 * s, title.y + 2 * s, 18 * s, 12 * s};
+        Rect xr{title.right() - 16 * s, title.y + 2 * s, 14 * s, 12 * s};
+        Rect br{xr.x - 18 * s, title.y + 2 * s, 18 * s, 12 * s};
 
         // "This device has an inside." Only a rack answers rack() non-null, so
         // this is the whole test -- and it is a virtual call and not a
@@ -702,15 +828,25 @@ void App::drawDeviceStrip(const Rect& r) {
         // and Live opens a rack alongside its chain for the same reason.
         const bool isRack = d.inst && d.inst->rack();
         Rect kr{br.x, title.y, 0, title.h};
+        if (isRack) kr = Rect{br.x - 34 * s, title.y + 2 * s, 34 * s, 12 * s};
+
+        // The card's controls are ONE cluster, not two or three little capsules
+        // adrift in the title bar: chain (a rack only), bypass, remove. The
+        // plate and the lit edge belong to the group; the segments are seams.
+        const Rect ctrls{isRack ? kr.x : br.x, br.y,
+                         xr.right() - (isRack ? kr.x : br.x), br.h};
+        ui_.segCluster(ctrls);
+        rend_.hairlineV(br.x, ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
+        if (isRack) rend_.hairlineV(kr.right(), ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
+
         if (isRack) {
-            kr = Rect{br.x - 36 * s, title.y + 2 * s, 34 * s, 12 * s};
             const bool open = (int)i == openIdx;
             // Lettered rather than glyphed, unlike its two neighbours: bypass
             // and remove are universal, "there is a chain in here" is not, and
             // the word is the only thing that says so without being clicked.
-            // Drawn small by hand because Ui::button's body font ellipsises it.
-            const bool tog = ui_.button(uiId(11, (int)i, 3), kr, "", open, pal::accent);
-            rend_.textIn(fSmall_, kr, "chain", open ? pal::text : pal::textDim, Align::Center, 0);
+            const bool tog = ui_.segButton(uiId(11, (int)i, 3), kr, open, nx::violet);
+            ui_.microIn(fSmall_, ui_.lastRect, "chain",
+                        open ? nx::text : nx::muted, Align::Center);
             if (tog) {
                 if (open) { rackOpenUid_ = 0; rackPath_.clear(); }
                 else {
@@ -730,27 +866,31 @@ void App::drawDeviceStrip(const Rect& r) {
                 ui_.tip = open ? "Close the rack" : "Open this rack: its chain and its macro mappings";
         }
 
-        Rect nameR{title.x + 9 * s, title.y, (isRack ? kr.x : br.x) - title.x - 11 * s, title.h};
-        rend_.pushClip(nameR);
-        rend_.textIn(fBold_, nameR, d.desc.name.c_str(), sel ? pal::text : pal::textDim,
-                     Align::Left, 0);
-        rend_.popClip();
+        // The card's title is a micro-label (§5): 10px, uppercase, wide
+        // tracking. A device name is an identity, not a sentence.
+        Rect nameR{title.x + 10 * s, title.y, (isRack ? kr.x : br.x) - title.x - 12 * s, title.h};
+        microFit(ui_, fSmall_, nameR, d.desc.name.c_str(),
+                 (sel ? nx::text : nx::muted).alpha(dim), Align::Left, 0);
 
         // Bypass lives on the instance, so the chain does not have to be
         // republished; setBypassed() is GUI-safe per the host contract.
         const bool wasBypass = d.bypass;
-        if (ui_.squareToggle(uiId(11, (int)i, 0), br, "", &d.bypass, pal::meterAmber)) {
+        if (ui_.segButton(uiId(11, (int)i, 0), br, d.bypass, pal::meterAmber)) {
+            d.bypass = !d.bypass;
             undoPointWith("bypass", d.bypass, wasBypass);
             if (d.inst) d.inst->setBypassed(d.bypass);
         }
-        rend_.circle(br.cx(), br.cy(), 3.5f * s,
-                     d.bypass ? pal::textOnClip : pal::playGreen);   // lit = active
-        const bool xHot = ui_.button(uiId(11, (int)i, 1), xr, "");
+        // Lit cyan = this device is in the signal path; dark = bypassed. §1
+        // again: cyan is the light a running thing gives off.
+        rend_.circle(ui_.lastRect.cx(), ui_.lastRect.cy(), 3.5f * s,
+                     d.bypass ? nx::inkOn(pal::meterAmber) : nx::live);
+        const bool xHot = ui_.segButton(uiId(11, (int)i, 1), xr, false, nx::danger);
         {
+            const Rect g = ui_.lastRect;
             const f32 k = 3.f * s;
-            const Col xc = pal::textDim;
-            rend_.line(xr.cx() - k, xr.cy() - k, xr.cx() + k, xr.cy() + k, 1.2f * s, xc);
-            rend_.line(xr.cx() - k, xr.cy() + k, xr.cx() + k, xr.cy() - k, 1.2f * s, xc);
+            const Col xc = nx::muted;
+            rend_.line(g.cx() - k, g.cy() - k, g.cx() + k, g.cy() + k, 1.2f * s, xc);
+            rend_.line(g.cx() - k, g.cy() + k, g.cx() + k, g.cy() - k, 1.2f * s, xc);
         }
         if (xHot) {
             // The instance is retired with the outgoing chain, so undoing this
@@ -771,12 +911,10 @@ void App::drawDeviceStrip(const Rect& r) {
             // A device restored from a set whose plugin is not installed here.
             // It holds its place and its saved values (see DeviceModel), so the
             // chain comes back intact on a machine that has the plugin.
-            rend_.pushClip(body);
             rend_.textIn(fSmall_, {body.x, body.y + 2 * s, body.w, 12 * s},
-                         "plugin not installed", pal::armRed, Align::Left, 0);
+                         "Plugin not installed", nx::danger, Align::Left, 0);
             rend_.textIn(fSmall_, {body.x, body.y + 15 * s, body.w, 12 * s},
-                         d.desc.uri.c_str(), pal::textFaint, Align::Left, 0);
-            rend_.popClip();
+                         d.desc.uri.c_str(), nx::muted.alpha(0.7f), Align::Left, 0);
             panel();
             continue;
         }
@@ -786,13 +924,12 @@ void App::drawDeviceStrip(const Rect& r) {
             // a time, like Live collapsing the devices you are not touching.
             char buf[64];
             snprintf(buf, sizeof buf, "%d params", d.inst->paramCount());
-            rend_.pushClip(body);
             if (!d.desc.vendor.empty())
                 rend_.textIn(fSmall_, {body.x, body.y + 2 * s, body.w, 12 * s},
-                             d.desc.vendor.c_str(), pal::textFaint, Align::Left, 0);
+                             d.desc.vendor.c_str(), nx::muted.alpha(0.7f * dim),
+                             Align::Left, 0);
             rend_.textIn(fSmall_, {body.x, body.y + 15 * s, body.w, 12 * s}, buf,
-                         pal::textFaint, Align::Left, 0);
-            rend_.popClip();
+                         nx::muted.alpha(0.7f * dim), Align::Left, 0);
             panel();
             continue;
         }
@@ -813,7 +950,7 @@ void App::drawDeviceStrip(const Rect& r) {
 
         rend_.pushClip(body);
         if (n == 0)
-            rend_.textIn(fSmall_, body, "no parameters", pal::textFaint, Align::Center);
+            rend_.textIn(fSmall_, body, "No parameters", nx::muted, Align::Center);
         for (int p = 0; p < n; ++p) {
             Rect cell{body.x + (p % cols) * cw, body.y - paramScroll_ + (p / cols) * chh, cw, chh};
             if (cell.bottom() < body.y || cell.y > body.bottom()) continue;
@@ -842,7 +979,7 @@ void App::drawDeviceStrip(const Rect& r) {
             const Rect ctrlR = info.isBool ? tg : kr;
             if (info.isBool) {
                 bool on = d.inst->getParam(p) > 0.5f;
-                if (ui_.squareToggle(wid, tg, "", &on, pal::accent)) {
+                if (ui_.squareToggle(wid, tg, "", &on, nx::violet)) {
                     undoPoint(info.name.c_str());
                     const f32 nv = on ? info.max : info.min;
                     d.inst->setParam(p, nv);
@@ -887,11 +1024,14 @@ void App::drawDeviceStrip(const Rect& r) {
                 if (learning) {
                     // Accent purple, pulsing — the same light the MAP chip in
                     // the control bar wears while it is armed.
-                    const f32 pulse = 0.5f + 0.5f * (f32)std::sin(nowSeconds() * 6.2831853 * 1.6);
+                    // Lit, not pulsing, under reduced motion (§6): "listening"
+                    // is said by the ring being there at all.
+                    const f32 pulse = nx::reducedMotion()
+                        ? 1.f : 0.5f + 0.5f * (f32)std::sin(nowSeconds() * 6.2831853 * 1.6);
                     rend_.roundRectOutline(ctrlR.insetXY(-3 * s, -3 * s), 5 * s, 1.5f * s,
-                                           pal::accentHi.alpha(0.30f + 0.70f * pulse));
+                                           nx::violetSoft.alpha(0.30f + 0.70f * pulse));
                 } else if (bound) {
-                    rend_.circle(ctrlR.right() + 1 * s, ctrlR.y + 1 * s, 2.2f * s, pal::accentHi);
+                    rend_.circle(ctrlR.right() + 1 * s, ctrlR.y + 1 * s, 2.2f * s, nx::violetSoft);
                 }
                 if (overCell) {
                     ui_.tip = learning ? "MIDI learn: move a control on your surface "
@@ -905,9 +1045,10 @@ void App::drawDeviceStrip(const Rect& r) {
                           "space has no return or master scope";
             }
 
-            rend_.pushClip(lbl);
-            rend_.textIn(fSmall_, lbl, info.name.c_str(), pal::textDim, Align::Center, 0);
-            rend_.popClip();
+            // A rack's parameters ARE its macros, so they wear the brand: §1,
+            // violet is identity, and these eight knobs are the rack's face.
+            rend_.textIn(fSmall_, lbl, info.name.c_str(),
+                         (isRack ? nx::violetSoft : nx::muted).alpha(dim), Align::Center, 0);
         }
         rend_.popClip();
         panel();
@@ -939,19 +1080,26 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
 
-    rend_.roundRect(box, 3 * s, pal::panelAlt);
-    rend_.roundRectOutline(box, 3 * s, 1 * s, pal::accent);
+    // The rack panel IS the inside of the box beside it, so it is the one card
+    // in the strip that carries the lit-violet edge and an elevation: it is
+    // open, and open is a state worth seeing from across the screen.
+    const f32 rad = nx::radiusSm * s;
+    rend_.shadow(box, rad, nx::shadow);
+    rend_.gradRect(box, rad, nx::glass1);
+    rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
+    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.55f));
 
     // --- title: where we are, and the way back out -------------------------
     Rect title{box.x, box.y, box.w, 16 * s};
-    rend_.rect({title.x + 2 * s, title.y + 3 * s, 3 * s, title.h - 6 * s}, tc);
+    rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
+                title.h - 8 * s}, tc);
 
     Rect closeR{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
     if (ui_.button(uiId(13, 0, 0), closeR, "")) { rackOpenUid_ = 0; rackPath_.clear(); }
     {
         const f32 k = 3.f * s;
-        rend_.line(closeR.cx() - k, closeR.cy() - k, closeR.cx() + k, closeR.cy() + k, 1.2f * s, pal::textDim);
-        rend_.line(closeR.cx() - k, closeR.cy() + k, closeR.cx() + k, closeR.cy() - k, 1.2f * s, pal::textDim);
+        rend_.line(closeR.cx() - k, closeR.cy() - k, closeR.cx() + k, closeR.cy() + k, 1.2f * s, nx::muted);
+        rend_.line(closeR.cx() - k, closeR.cy() + k, closeR.cx() + k, closeR.cy() - k, 1.2f * s, nx::muted);
     }
     Rect backR{closeR.x - 20 * s, title.y + 2 * s, 18 * s, 12 * s};
     if (!rackPath_.empty()) {
@@ -964,19 +1112,18 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     for (size_t i = 0; i < rackPath_.size(); ++i) crumb += " / RACK";
     char head[96];
     snprintf(head, sizeof head, "%s   %d/%d", crumb.c_str(), rc.deviceCount(), kRackMaxDevices);
-    rend_.textIn(fBold_, {title.x + 9 * s, title.y, backR.x - title.x - 11 * s, title.h},
-                 head, pal::accentHi, Align::Left, 0);
+    microFit(ui_, fSmall_, {title.x + 10 * s, title.y, backR.x - title.x - 12 * s, title.h},
+             head, nx::violetSoft, Align::Left, 0);
 
     const f32 colW = 156 * s;
     Rect left{box.x + 4 * s, title.bottom() + 2 * s, colW, box.bottom() - title.bottom() - 6 * s};
     Rect right{left.right() + 6 * s, left.y, box.right() - left.right() - 10 * s, left.h};
-    rend_.rect({left.right() + 2 * s, left.y, 1 * s, left.h}, pal::divider);
+    rend_.hairlineV(left.right() + 2 * s, left.y, left.bottom());
 
     // -----------------------------------------------------------------------
     // left: the chain, in processing order
     // -----------------------------------------------------------------------
-    rend_.textIn(fSmall_, {left.x, left.y, left.w, 11 * s}, "CHAIN",
-                 pal::textFaint, Align::Left, 0);
+    ui_.microIn(fSmall_, {left.x, left.y, left.w, 11 * s}, "CHAIN", nx::muted, Align::Left, 0);
 
     const f32 rowH = 15 * s;
     f32 y = left.y + 13 * s;
@@ -991,25 +1138,41 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         const bool sel = i == rackSel_;
         const u64 rid = uiId(13, 1, i);
         const bool hot = ui_.setHot(rid, row) && ui_.isHot(rid);
-        if (sel)      rend_.roundRect(row, 2 * s, pal::gridBg);
-        else if (hot) rend_.roundRect(row, 2 * s, pal::slotHover);
+        // Well rows with the specimen's hover treatment: nothing at rest, the
+        // glass chip under the pointer, a violet marker on the selected one.
+        if (sel) {
+            rend_.gradRect(row, nx::radiusXs * s, nx::glassChip, 0.85f);
+            rend_.rect({nx::snapPx(row.x), row.y, std::max(1.f, nx::snapPx(2 * s)), row.h},
+                       nx::violet);
+        } else if (hot) {
+            rend_.gradRect(row, nx::radiusXs * s, nx::glassChip, 0.45f);
+        }
 
-        Rect xr{row.right() - 13 * s, row.y + 2 * s, 12 * s, rowH - 4 * s};
-        Rect dn{xr.x - 13 * s, row.y + 2 * s, 12 * s, rowH - 4 * s};
-        Rect up{dn.x - 13 * s, row.y + 2 * s, 12 * s, rowH - 4 * s};
+        // Reorder and remove are one cluster of three seams, not three little
+        // buttons in a row: they act on the same device and they are the only
+        // controls this row has.
+        Rect xr{row.right() - 14 * s, row.y + 2 * s, 12 * s, rowH - 4 * s};
+        Rect dn{xr.x - 12 * s, row.y + 2 * s, 12 * s, rowH - 4 * s};
+        Rect up{dn.x - 12 * s, row.y + 2 * s, 12 * s, rowH - 4 * s};
+        // The plate arrives with the pointer: eight rows each wearing a
+        // permanent chip would be eight competing surfaces in a 156px column.
+        const Rect rowCtrls{up.x, up.y, xr.right() - up.x, up.h};
+        if (hot || sel) {
+            ui_.segCluster(rowCtrls);
+            rend_.hairlineV(dn.x, rowCtrls.y + 1 * s, rowCtrls.bottom() - 1 * s);
+            rend_.hairlineV(xr.x, rowCtrls.y + 1 * s, rowCtrls.bottom() - 1 * s);
+        }
 
         char idx[16];
         snprintf(idx, sizeof idx, "%d", i + 1);
-        rend_.textIn(fSmall_, {row.x + 3 * s, row.y, 12 * s, row.h}, idx,
-                     pal::textFaint, Align::Left, 0);
+        rend_.textIn(fSmall_, {row.x + 5 * s, row.y, 12 * s, row.h}, idx,
+                     nx::muted.alpha(0.6f), Align::Left, 0);
         Rect nameR{row.x + 16 * s, row.y, up.x - row.x - 18 * s, row.h};
-        rend_.pushClip(nameR);
         // A rack inside a rack is marked, because it is the one row that has
         // somewhere to go when you double-click it.
         const bool nested = sub->rack() != nullptr;
         rend_.textIn(fSmall_, nameR, sub->desc().name.c_str(),
-                     nested ? pal::accentHi : (sel ? pal::text : pal::textDim), Align::Left, 0);
-        rend_.popClip();
+                     nested ? nx::violetSoft : (sel ? nx::text : nx::muted), Align::Left, 0);
 
         // Reorder. Two buttons rather than a drag: the chain is at most eight
         // long, the strip already scrolls under the pointer, and a drag would
@@ -1019,12 +1182,13 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         // ellipsises even a single character.
         const auto chevron = [&](const Rect& b, bool upward, bool live) {
             const f32 k = 2.6f * s, d = upward ? -1.f : 1.f;
-            const Col c = live ? pal::textDim : pal::textFaint.scale(0.6f);
+            // §5's disabled rule: an end-of-chain arrow is at 40%, not greyed.
+            const Col c = live ? nx::muted : nx::muted.alpha(0.4f);
             rend_.line(b.cx() - k, b.cy() - k * d * 0.6f, b.cx(), b.cy() + k * d * 0.6f, 1.1f * s, c);
             rend_.line(b.cx() + k, b.cy() - k * d * 0.6f, b.cx(), b.cy() + k * d * 0.6f, 1.1f * s, c);
         };
         const bool canUp = i > 0, canDn = i + 1 < n;
-        if (ui_.button(uiId(13, 2, i), up, "") && canUp) {
+        if (ui_.segButton(uiId(13, 2, i), up, false, nx::violet) && canUp) {
             undoPoint("move device in rack");
             rc.moveDevice(i, i - 1);
             rackChainEdited();
@@ -1032,7 +1196,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             return;                          // the list changed under us
         }
         chevron(up, true, canUp);
-        if (ui_.button(uiId(13, 3, i), dn, "") && canDn) {
+        if (ui_.segButton(uiId(13, 3, i), dn, false, nx::violet) && canDn) {
             undoPoint("move device in rack");
             rc.moveDevice(i, i + 1);
             rackChainEdited();
@@ -1040,7 +1204,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             return;
         }
         chevron(dn, false, canDn);
-        if (ui_.button(uiId(13, 4, i), xr, "")) {
+        if (ui_.segButton(uiId(13, 4, i), xr, false, nx::danger)) {
             undoPoint("remove device from rack");
             rc.removeDevice(i);
             rackChainEdited();
@@ -1053,8 +1217,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         }
         {
             const f32 k = 2.5f * s;
-            rend_.line(xr.cx() - k, xr.cy() - k, xr.cx() + k, xr.cy() + k, 1.1f * s, pal::textDim);
-            rend_.line(xr.cx() - k, xr.cy() + k, xr.cx() + k, xr.cy() - k, 1.1f * s, pal::textDim);
+            rend_.line(xr.cx() - k, xr.cy() - k, xr.cx() + k, xr.cy() + k, 1.1f * s, nx::muted);
+            rend_.line(xr.cx() - k, xr.cy() + k, xr.cx() + k, xr.cy() - k, 1.1f * s, nx::muted);
         }
 
         if (hot && in.pressed[0]) rackSel_ = i;
@@ -1072,10 +1236,10 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         const bool have = pluginSel_ >= 0 && pluginSel_ < (int)all.size();
         const bool full = n >= kRackMaxDevices;
         char label[80];
-        if (full)       snprintf(label, sizeof label, "rack is full");
+        if (full)       snprintf(label, sizeof label, "Rack is full");
         else if (have)  snprintf(label, sizeof label, "+ %s", all[pluginSel_].name.c_str());
         else            snprintf(label, sizeof label, "+ pick a plugin on the left");
-        if (ui_.button(uiId(13, 5, 0), addR, label, false, pal::accent) && have && !full) {
+        if (ui_.button(uiId(13, 5, 0), addR, label, false, nx::violet) && have && !full) {
             undoPoint("add device to rack");
             if (rc.addDevice(all[pluginSel_])) {
                 rackChainEdited();
@@ -1096,25 +1260,38 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // units and are read back CLAMPED, so what the list shows is what the macro
     // will really do rather than what was typed at it.
     // -----------------------------------------------------------------------
-    rend_.textIn(fSmall_, {right.x, right.y, right.w, 11 * s}, "MACRO",
-                 pal::textFaint, Align::Left, 0);
+    ui_.microIn(fSmall_, {right.x, right.y, right.w, 11 * s}, "MACRO", nx::muted, Align::Left, 0);
 
-    const f32 mw = (right.w - 3 * s * 3) / 4.f, mh = 13 * s;
-    for (int m = 0; m < kRackMacros; ++m) {
-        Rect b{right.x + (m % 4) * (mw + 3 * s), right.y + 12 * s + (m / 4) * (mh + 2 * s), mw, mh};
-        char lbl[8];
-        snprintf(lbl, sizeof lbl, "M%d", m + 1);
-        if (ui_.button(uiId(13, 6, m), b, lbl, m == rackMacro_, pal::accent)) {
-            rackMacro_ = m;
-            rackListScroll_ = 0.f;
+    // Eight macros, four to a row, each row ONE segmented cluster: this is a
+    // chooser -- exactly one macro is being edited -- and a chooser drawn as
+    // eight separate capsules is the "buttons that don't belong together" look.
+    const f32 mw = right.w / 4.f, mh = 13 * s;
+    for (int rowN = 0; rowN < 2; ++rowN) {
+        const f32 ry0 = right.y + 12 * s + (f32)rowN * (mh + 2 * s);
+        ui_.segCluster({right.x, ry0, right.w, mh});
+        for (int c = 0; c < 4; ++c) {
+            const int m = rowN * 4 + c;
+            Rect b{right.x + (f32)c * mw, ry0, mw, mh};
+            if (c) rend_.hairlineV(b.x, ry0 + 2 * s, ry0 + mh - 2 * s);
+            char lbl[8];
+            snprintf(lbl, sizeof lbl, "M%d", m + 1);
+            // The macros are the rack's identity, so the selected one is violet.
+            if (ui_.segButton(uiId(13, 6, m), b, m == rackMacro_, nx::violet)) {
+                rackMacro_ = m;
+                rackListScroll_ = 0.f;
+            }
+            ui_.microIn(fSmall_, ui_.lastRect, lbl,
+                        m == rackMacro_ ? nx::text : nx::muted, Align::Center);
         }
     }
 
     f32 ry = right.y + 12 * s + 2 * (mh + 2 * s) + 3 * s;
     if (n == 0) {
+        // §5's empty state, sized for the space it has: one line that says what
+        // to do next rather than what is missing.
         rend_.textIn(fSmall_, {right.x, ry, right.w, 12 * s},
-                     "put a device in the rack to map a macro to it",
-                     pal::textFaint, Align::Left, 0);
+                     "Put a device in the rack to map a macro to it.",
+                     nx::muted, Align::Left, 0);
         return;
     }
 
@@ -1146,8 +1323,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     tgt = rc.device(rackTgtDev_);
     const int pc2 = tgt ? tgt->paramCount() : 0;
     if (pc2 == 0) {
-        rend_.roundRect(parR, 2 * s, pal::panelAlt);
-        rend_.textIn(fSmall_, parR, "this device has no parameters", pal::textFaint, Align::Center, 0);
+        rend_.well(parR, nx::radiusXs * s);
+        rend_.textIn(fSmall_, parR, "This device has no parameters", nx::muted, Align::Center, 0);
         return;
     }
     rackTgtParam_ = clampv(rackTgtParam_, 0, pc2 - 1);
@@ -1181,7 +1358,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     if (ui_.hovered(maxR))
         ui_.tip = "Value at macro 1 - set it BELOW the other end to invert the macro";
 
-    if (ui_.button(uiId(13, 10, 0), mapR, "MAP", false, pal::accent)) {
+    if (ui_.button(uiId(13, 10, 0), mapR, "MAP", false, nx::violet)) {
         undoPoint("map macro");
         RackMapping m;
         m.macro  = rackMacro_;
@@ -1221,8 +1398,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     Rect clr{list.right() - 44 * s, list.y, 44 * s, 11 * s};
     char cap[48];
     snprintf(cap, sizeof cap, "MACRO %d DRIVES %d", rackMacro_ + 1, shown);
-    rend_.textIn(fSmall_, {list.x, list.y, list.w - 48 * s, 11 * s}, cap,
-                 pal::textFaint, Align::Left, 0);
+    microFit(ui_, fSmall_, {list.x, list.y, list.w - 48 * s, 11 * s}, cap,
+             nx::muted, Align::Left, 0);
     if (shown > 0 && ui_.button(uiId(13, 11, 0), clr, "clear")) {
         undoPoint("clear macro");
         rc.clearMacro(rackMacro_);
@@ -1256,10 +1433,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         // legible at a glance rather than by comparing two numbers.
         snprintf(line, sizeof line, "%d/%s   %.2f %s %.2f", m.device + 1, pn,
                  (f64)m.min, m.min > m.max ? "\\" : "/", (f64)m.max);
-        rend_.pushClip({row.x, row.y, row.w - 14 * s, row.h});
-        rend_.textIn(fSmall_, row, line, m.min > m.max ? pal::accentHi : pal::textDim,
-                     Align::Left, 0);
-        rend_.popClip();
+        rend_.textIn(fSmall_, {row.x, row.y, row.w - 14 * s, row.h}, line,
+                     m.min > m.max ? nx::violetSoft : nx::muted, Align::Left, 0);
         if (ui_.button(uiId(13, 12, i), xr, "")) {
             undoPoint("unmap macro");
             rc.removeMapping(i);
@@ -1267,8 +1442,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             return;
         }
         const f32 k = 2.2f * s;
-        rend_.line(xr.cx() - k, xr.cy() - k, xr.cx() + k, xr.cy() + k, 1.f * s, pal::textFaint);
-        rend_.line(xr.cx() - k, xr.cy() + k, xr.cx() + k, xr.cy() - k, 1.f * s, pal::textFaint);
+        rend_.line(xr.cx() - k, xr.cy() - k, xr.cx() + k, xr.cy() + k, 1.f * s, nx::muted.alpha(0.7f));
+        rend_.line(xr.cx() - k, xr.cy() + k, xr.cx() + k, xr.cy() - k, 1.f * s, nx::muted.alpha(0.7f));
     }
     rend_.popClip();
 }

@@ -111,21 +111,26 @@ void App::drawWaveform(const Rect& r, const SampleBuffer& sb, const Col& c, f64 
 // the tab selects. Ctrl+D still hides the panel as a whole.
 void App::drawDetailPanel(const Rect& r) {
     const f32 s = win_.dpiScale();
-    rend_.rect(r, pal::panel);
-    rend_.rect({r.x, r.y, r.w, 1 * s}, pal::divider);
+    // The panel is a docked band of chrome, so it takes the bar fill and a
+    // hairline where the solid rule used to be (§11). Its CONTENTS are what
+    // carry the tier language from here: the plugin browser recesses into it,
+    // the device boxes float on it as cards.
+    rend_.gradRect(r, 0.f, nx::glassBar);
+    rend_.hairlineH(r.x, r.right(), r.y);
 
     Rect head{r.x, r.y + 1 * s, r.w, 19 * s};
-    rend_.rect(head, pal::panelAlt);
-    rend_.rect({head.x, head.bottom() - 1 * s, head.w, 1 * s}, pal::divider);
+    rend_.hairlineH(head.x, head.right(), head.bottom());
 
-    const f32 tabW = 62 * s, tabH = 15 * s;
-    Rect clipTab{head.x + 6 * s, head.y + (head.h - tabH) * 0.5f, tabW, tabH};
-    Rect devTab{clipTab.right() + 3 * s, clipTab.y, tabW, tabH};
-    if (ui_.button(uiId(9, 0), clipTab, "CLIP", detailTab_ == DetailTab::Clip, pal::accent))
-        detailTab_ = DetailTab::Clip;
-    if (ui_.button(uiId(9, 1), devTab, "DEVICES", detailTab_ == DetailTab::Devices, pal::accent)) {
-        detailTab_ = DetailTab::Devices;
-        ensurePluginScan();
+    // §5's tab pill: ONE indicator sliding between two equal slots on
+    // --ease-spring, not two backgrounds toggling. The enum is the model; the
+    // pill speaks in indices, so the conversion happens here and nowhere else.
+    const f32 tabW = 62 * s, tabH = 17 * s;
+    Rect tabs{head.x + 6 * s, head.y + (head.h - tabH) * 0.5f, tabW * 2.f + 6 * s, tabH};
+    static const char* const kTabs[2] = {"CLIP", "DEVICES"};
+    int tab = detailTab_ == DetailTab::Clip ? 0 : 1;
+    if (ui_.tabPill(uiId(9, 0), tabs, kTabs, 2, &tab)) {
+        detailTab_ = tab == 0 ? DetailTab::Clip : DetailTab::Devices;
+        if (detailTab_ == DetailTab::Devices) ensurePluginScan();
     }
 
     // Context label on the right of the tab strip, so the panel says what it is
@@ -157,7 +162,7 @@ void App::drawDetailPanel(const Rect& r) {
             snprintf(buf, sizeof buf, "%s  -  %zu device%s", ownerName(devOwner_).c_str(),
                      n, n == 1 ? "" : "s");
         }
-        rend_.textIn(fSmall_, head, buf, pal::textFaint, Align::Right, 8 * s);
+        rend_.textIn(fSmall_, head, buf, nx::muted.alpha(0.8f), Align::Right, 8 * s);
     }
 
     Rect content{r.x, head.bottom(), r.w, r.bottom() - head.bottom()};
@@ -188,9 +193,14 @@ void App::drawArrangeClipDetail(const Rect& r) {
     const f32 s = win_.dpiScale();
     ArrangeClip* const it = selectedArrItem();
     if (!it || !it->src.valid()) {
-        rend_.textIn(fBody_, r,
-                     "No item selected  -  click a clip on the timeline, or drag one onto it",
-                     pal::textFaint, Align::Center);
+        // §5: one short bold line, one muted sentence, centred, and room around
+        // them. §9: it invites the next action instead of apologising.
+        const f32 lh = fBody_.height();
+        rend_.textIn(fBold_, {r.x, r.cy() - lh - nx::sp1 * s, r.w, lh},
+                     "No item selected", nx::text, Align::Center);
+        rend_.textIn(fBody_, {r.x, r.cy() + nx::sp1 * s, r.w, lh},
+                     "Click a clip on the timeline, or drag one onto it.",
+                     nx::muted, Align::Center);
         return;
     }
     ClipModel& m = it->src;
@@ -198,16 +208,18 @@ void App::drawArrangeClipDetail(const Rect& r) {
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
     Rect head{r.x, r.y + 1 * s, r.w, 20 * s};
-    rend_.rect({head.x, head.y, 4 * s, head.h}, ccol);
+    rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s}, ccol);
     rend_.textIn(fBold_, {head.x + 10 * s, head.y, 260 * s, head.h}, m.name.c_str(),
-                 pal::text, Align::Left, 0);
+                 nx::text, Align::Left, 0);
+    rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
     const f32 panelW = 250 * s;
     Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
     f32 y = ctrl.y;
     const f32 rowH = 20 * s, lblW = 62 * s;
+    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking.
     auto label = [&](const char* tx, const Rect& row) {
-        rend_.textIn(fSmall_, {row.x, row.y, lblW, row.h}, tx, pal::textFaint, Align::Left, 0);
+        ui_.microIn(fSmall_, {row.x, row.y, lblW, row.h}, tx, nx::muted, Align::Left, 0);
     };
     // Every one of these is a placement field, so every one of them goes through
     // the same commit: repair the lane, republish that track, one undo entry per
@@ -241,7 +253,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
             placed = true;
         }
         Rect lp{dn.right() + 6 * s, row.y, 52 * s, row.h};
-        if (ui_.button(uiId(27, 6), lp, "LOOP", m.loop, pal::accent)) {
+        if (ui_.button(uiId(27, 6), lp, "LOOP", m.loop, nx::violet)) {
             undoPoint("clip loop");
             m.loop = !m.loop;
             placed = true;
@@ -253,7 +265,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
         char buf[128];
         snprintf(buf, sizeof buf, "%s  -  %.2f .. %.2f bt", ownerName(track).c_str(),
                  it->start, it->end());
-        rend_.textIn(fSmall_, row, buf, pal::textFaint, Align::Left, 0);
+        rend_.textIn(fSmall_, row, buf, nx::muted.alpha(0.8f), Align::Left, 0);
     }
 
     Rect wave{ctrl.right() + 12 * s, head.bottom() + 6 * s,
@@ -416,8 +428,17 @@ void App::drawClipDetail(const Rect& r) {
 
     ClipModel& m = ses_.tracks[selTrack_].slots[selSlot_];
     if (!m.valid()) {
-        rend_.textIn(fBody_, r, "No clip selected  —  drag a file from the browser onto a slot",
-                     pal::textFaint, Align::Center);
+        // §5's empty state: one short bold line, one muted sentence, centred,
+        // with the whitespace it needs. ASCII only -- the em dash this line
+        // used to carry is not in the glyph atlas and rendered as a hole, which
+        // is exactly the trap the specimen sheet's own labels warn about.
+        const f32 lh = fBody_.height();
+        rend_.textIn(fBold_, {r.x, r.cy() - lh - nx::sp1 * s, r.w, lh},
+                     "No clip selected", nx::text, Align::Center);
+        rend_.textIn(fBody_, {r.x, r.cy() + nx::sp1 * s, r.w, lh},
+                     "Drag a file from the browser onto a slot, or double-click "
+                     "an empty slot on an instrument track.",
+                     nx::muted, Align::Center);
         return;
     }
     // A pattern has no sample behind it, so warp, clip tempo and the loop
@@ -427,8 +448,16 @@ void App::drawClipDetail(const Rect& r) {
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
     Rect head{r.x, r.y + 1 * s, r.w, 20 * s};
-    rend_.rect({head.x, head.y, 4 * s, head.h}, ccol);
-    rend_.textIn(fBold_, {head.x + 10 * s, head.y, 260 * s, head.h}, m.name.c_str(), pal::text, Align::Left, 0);
+    rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s}, ccol);
+    const f32 nameW = std::min(260 * s, fBold_.measure(m.name.c_str()) + 4 * s);
+    rend_.textIn(fBold_, {head.x + 10 * s, head.y, nameW, head.h}, m.name.c_str(),
+                 nx::text, Align::Left, 0);
+    // What kind of material this is, as a status chip (§5) rather than as one
+    // more line of prose. Cyan = a pattern, which is the one the editor to the
+    // right behaves differently for.
+    ui_.chip({head.x + 14 * s + nameW, head.cy() - 6 * s, 44 * s, 13 * s},
+             midi ? "midi" : "audio", midi ? nx::cyan : nx::muted);
+    rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
     // --- controls column ---
     const f32 panelW = 250 * s;
@@ -448,8 +477,9 @@ void App::drawClipDetail(const Rect& r) {
     Rect ctrl2{ctrl.right() + 10 * s, ctrl.y, panelW, ctrl.h};
     f32 y2 = ctrl2.y;
 
+    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking.
     auto label = [&](const char* t, const Rect& row) {
-        rend_.textIn(fSmall_, {row.x, row.y, lblW, row.h}, t, pal::textFaint, Align::Left, 0);
+        ui_.microIn(fSmall_, {row.x, row.y, lblW, row.h}, t, nx::muted, Align::Left, 0);
     };
 
     {   // Warp mode (audio only) + loop, which both kinds have
@@ -469,7 +499,7 @@ void App::drawClipDetail(const Rect& r) {
         } else {
             label("PLAY", row);
         }
-        if (ui_.button(uiId(8, 1), lp, "LOOP", m.loop, pal::accent)) {
+        if (ui_.button(uiId(8, 1), lp, "LOOP", m.loop, nx::violet)) {
             undoPoint("clip loop");
             m.loop = !m.loop;
             send(Cmd::ClipLoop, selTrack_, selSlot_, m.loop ? 1.0 : 0.0);
@@ -486,19 +516,24 @@ void App::drawClipDetail(const Rect& r) {
             m.clipBpm = bpm;
             pushClip(selTrack_, selSlot_);
         }
-        // Halve / double, exactly like Live's :2 and *2 buttons.
+        // Halve / double, exactly like Live's :2 and *2 buttons -- and one
+        // cluster, because they are one control with two directions.
         Rect h2{dn.right() + 6 * s, row.y, 26 * s, row.h};
-        Rect d2{h2.right() + 3 * s, row.y, 26 * s, row.h};
-        if (ui_.button(uiId(8, 3), h2, ":2")) {
+        Rect d2{h2.right(), row.y, 26 * s, row.h};
+        ui_.segCluster({h2.x, h2.y, d2.right() - h2.x, h2.h});
+        rend_.hairlineV(d2.x, h2.y + 3 * s, h2.bottom() - 3 * s);
+        if (ui_.segButton(uiId(8, 3), h2, false, nx::violet)) {
             undoPoint("clip tempo");
             m.clipBpm *= 0.5;
             pushClip(selTrack_, selSlot_);
         }
-        if (ui_.button(uiId(8, 4), d2, "*2")) {
+        ui_.microIn(fSmall_, ui_.lastRect, ":2", nx::muted, Align::Center);
+        if (ui_.segButton(uiId(8, 4), d2, false, nx::violet)) {
             undoPoint("clip tempo");
             m.clipBpm *= 2.0;
             pushClip(selTrack_, selSlot_);
         }
+        ui_.microIn(fSmall_, ui_.lastRect, "*2", nx::muted, Align::Center);
         y += rowH + 4 * s;
     }
     {   // Gain
@@ -598,7 +633,7 @@ void App::drawClipDetail(const Rect& r) {
             ses_.scale.mode = clScaleMode(mode);
         }
         Rect nr{sr.right() + 6 * s, row.y, 44 * s, row.h};
-        if (ui_.button(uiId(24, 2), nr, "SNAP", ses_.scale.snap, pal::accent)) {
+        if (ui_.button(uiId(24, 2), nr, "SNAP", ses_.scale.snap, nx::violet)) {
             undoPoint("scale snap");
             ses_.scale.snap = !ses_.scale.snap;
         }
@@ -662,8 +697,12 @@ void App::drawClipDetail(const Rect& r) {
             label("NOTES", row);
             Rect lg{row.x + lblW, row.y, 52 * s, row.h};
             Rect dp{lg.right() + 6 * s, row.y, 44 * s, row.h};
+            // Down and up are one control with two directions, so they are one
+            // cluster with a seam rather than two capsules in a gap.
             Rect dn{dp.right() + 6 * s, row.y, 22 * s, row.h};
-            Rect up{dn.right() + 3 * s, row.y, 22 * s, row.h};
+            Rect up{dn.right(), row.y, 22 * s, row.h};
+            ui_.segCluster({dn.x, dn.y, up.right() - dn.x, dn.h});
+            rend_.hairlineV(up.x, dn.y + 3 * s, dn.bottom() - 3 * s);
 
             if (ui_.button(uiId(25, 3), lg, "LEGATO")) {
                 const ClipModel was = m;
@@ -686,20 +725,22 @@ void App::drawClipDetail(const Rect& r) {
                           "the whole loop instead)";
             // Transpose by a semitone each way. An octave is Shift+Up/Down on the
             // keyboard already, so the buttons cover what the keyboard does not.
-            if (ui_.button(uiId(25, 5), dn, "-")) {
+            if (ui_.segButton(uiId(25, 5), dn, false, nx::violet)) {
                 const ClipModel was = m;
                 if (roll_->transposeSelected(m, -1)) {
                     undoPointWith("transpose", m, was);
                     pushClip(selTrack_, selSlot_);
                 }
             }
-            if (ui_.button(uiId(25, 6), up, "+")) {
+            ui_.microIn(fSmall_, ui_.lastRect, "-", nx::muted, Align::Center);
+            if (ui_.segButton(uiId(25, 6), up, false, nx::violet)) {
                 const ClipModel was = m;
                 if (roll_->transposeSelected(m, 1)) {
                     undoPointWith("transpose", m, was);
                     pushClip(selTrack_, selSlot_);
                 }
             }
+            ui_.microIn(fSmall_, ui_.lastRect, "+", nx::muted, Align::Center);
             if (ui_.hovered(dn) || ui_.hovered(up))
                 ui_.tip = ses_.scale.snap && ses_.scale.active()
                               ? "transpose by one step of " + ses_.scale.label()
@@ -718,7 +759,7 @@ void App::drawClipDetail(const Rect& r) {
             snprintf(buf, sizeof buf, "%.2f beats  ·  rate %.3fx  ·  %d ch",
                      m.lengthBeats, rate, m.sample->channels);
         }
-        rend_.textIn(fSmall_, row, buf, pal::textFaint, Align::Left, 0);
+        rend_.textIn(fSmall_, row, buf, nx::muted.alpha(0.8f), Align::Left, 0);
     }
 
     // --- the material: the note grid for a pattern, the waveform for a sample,
