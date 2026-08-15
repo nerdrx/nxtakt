@@ -230,6 +230,18 @@ struct Ui {
     // violet and blooms the focus ring; never a bare outline.
     void fieldWell(const Rect& b, f32 focus, bool deep = true) const;
 
+    // A segment inside a segmented cluster (the transport trio, mode pairs).
+    // Draws NO plate of its own at rest -- the CONTAINER is the control the eye
+    // groups; a segment shows a whisper of chip fill on hover and the full
+    // primary/danger fill only when on. This is what makes a row of related
+    // controls read as one instrument-panel cluster instead of unrelated
+    // capsules floating in gaps. Pair with segCluster() around the union.
+    bool segButton(u64 id, const Rect& b, bool on, Col onCol);
+
+    // The cluster's shared plate: one chip fill, one lit edge, drawn BEFORE the
+    // segments. Callers put hairlineV seams between segments themselves.
+    void segCluster(const Rect& b) const;
+
     // --- drawing helpers --------------------------------------------------
     void meterV(const Rect& b, f32 lvl, f32 peak);   // vertical peak meter
     void arc(f32 cx, f32 cy, f32 rad, f32 a0, f32 a1, f32 th, const Col& c);

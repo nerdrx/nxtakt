@@ -57,11 +57,16 @@ constexpr Col rgba(u32 hex, f32 a) {
 namespace pal {
 // Surfaces. Alphas are over the §3 field, which is #0a0714 -> #12091f, so a
 // 0.55 fill still lands near #14 0e 22 -- dark enough to read text on.
-constexpr Col appBg        = rgba(0x0C0817, 0.55f);   // the "nothing here" fill
-constexpr Col panel        = rgba(0x171028, 0.88f);   // chrome panels
-constexpr Col panelAlt     = rgba(0x1D1433, 0.90f);   // controls on panels
-constexpr Col gridBg       = rgba(0x120C22, 0.50f);   // the clip grid's empty field
-constexpr Col slotEmpty    = rgba(0x1A1230, 0.62f);
+// Darker and less violet than the first tuning: at 0x171028-class fills over
+// the nebula the whole app carried a purple wash and read as a toy. Expensive
+// is 90% darkness with small luminous accents, so the base surfaces move
+// toward the field (#0a0714) and keep only a BREATH of violet; saturated
+// color is for clips, accents and live elements, never for square metres.
+constexpr Col appBg        = rgba(0x0A0712, 0.62f);   // the "nothing here" fill
+constexpr Col panel        = rgba(0x100B1D, 0.92f);   // chrome panels
+constexpr Col panelAlt     = rgba(0x150E26, 0.93f);   // controls on panels
+constexpr Col gridBg       = rgba(0x0C0918, 0.58f);   // the clip grid's empty field
+constexpr Col slotEmpty    = rgba(0x120C20, 0.62f);
 constexpr Col slotHover    = rgba(0x2A1E48, 0.90f);
 // Not a divider colour any more: `divider` is used both for separators and for
 // recessed troughs, and only the separators are wrong. It is now the --line

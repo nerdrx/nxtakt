@@ -147,7 +147,9 @@ void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
                   const UiMotion& m) const {
     if (!r || b.w <= 0.f || b.h <= 0.f) return;
     const f32 dpi = std::max(1.f, r->dpiScale());
-    const f32 rad = radius < 0.f ? b.h * 0.5f : radius;
+    // radius<0 = "the control radius": the TOKEN, not a capsule. h*0.5 here
+    // is what made every button an unrelated pill -- see theme.h's geometry note.
+    const f32 rad = radius < 0.f ? std::min(nx::pill * dpi, b.h * 0.5f) : radius;
 
     switch (kind) {
     case Pill::Primary:
@@ -265,8 +267,9 @@ void Ui::microIn(const Font& f, const Rect& b, const char* s, const Col& c,
 void Ui::chip(const Rect& b, const char* label, const Col& ink) {
     if (!r) return;
     const f32 dpi = std::max(1.f, r->dpiScale());
-    r->gradRect(b, b.h * 0.5f, nx::glassChip);
-    r->gradStroke(b, b.h * 0.5f, dpi, nx::edge, 0.8f);
+    const f32 chipRad = std::min(nx::pill * dpi, b.h * 0.5f);
+    r->gradRect(b, chipRad, nx::glassChip);
+    r->gradStroke(b, chipRad, dpi, nx::edge, 0.8f);
     Font* f = fSmall ? fSmall : fBody;
     if (f) microIn(*f, b, label, ink, Align::Center);
 }
@@ -361,12 +364,13 @@ bool Ui::tabPill(u64 id, const Rect& b, const char* const* labels, int count, in
     // Shapes first and text after, deliberately: the batcher pays a draw call
     // for every shape->text->shape alternation, and a tab strip that drew each
     // slot complete would cost one per tab.
-    r->gradRect(b, b.h * 0.5f, nx::glassChip, 0.55f);
-    r->gradStroke(b, b.h * 0.5f, dpi, nx::edge, 0.7f);
+    const f32 tabRad = std::min(nx::pill * dpi, b.h * 0.5f);
+    r->gradRect(b, tabRad, nx::glassChip, 0.55f);
+    r->gradStroke(b, tabRad, dpi, nx::edge, 0.7f);
 
     const Rect ind{track.x + slotW * at, track.y, slotW, track.h};
     const UiMotion im = motion(id, hotSlot >= 0, active != 0 && hotSlot >= 0);
-    pillRect(ind, ind.h * 0.5f, Pill::Primary, nx::violet, im);
+    pillRect(ind, std::min(nx::pill * dpi, ind.h * 0.5f), Pill::Primary, nx::violet, im);
 
     Font* f = fSmall ? fSmall : fBody;
     if (f) {
@@ -492,7 +496,8 @@ bool Ui::button(u64 id, const Rect& b, const char* label, bool on, Col onCol, f3
     const UiMotion m = motion(id, hotNow, held);
     const Rect br = liftPress(b, m);
     lastRect = br;
-    const f32 rad = radius < 0.f ? br.h * 0.5f : radius;
+    const f32 rad = radius < 0.f
+        ? std::min(nx::pill * std::max(1.f, r->dpiScale()), br.h * 0.5f) : radius;
 
     // Danger is a role, not a colour a caller happened to pick: red arrives
     // here only from the transport's record plate and the delete verbs, both of
@@ -504,6 +509,45 @@ bool Ui::button(u64 id, const Rect& b, const char* label, bool on, Col onCol, f3
     const Col fg = on ? inkOn(onCol)
                       : nx::muted.mix(nx::text, 0.55f + 0.45f * m.hover);
     if (label && *label && fBody) drawTextIn(*fBody, br, label, fg, Align::Center, 3.f);
+    if (hotNow) cursor = Cursor::Hand;
+    return clicked;
+}
+
+void Ui::segCluster(const Rect& b) const {
+    if (!r) return;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = std::min(nx::pill * dpi, b.h * 0.5f);
+    r->gradRect(b, rad, nx::glassChip, 0.85f);
+    r->gradStroke(b, rad, dpi, nx::edge, 0.7f);
+}
+
+bool Ui::segButton(u64 id, const Rect& b, bool on, Col onCol) {
+    if (!r) return false;
+    const bool over = setHot(id, b);
+    const bool hotNow = isHot(id);
+    bool clicked = false;
+
+    if (in->pressed[0] && hotNow) active = id;
+    if (in->released[0] && active == id) {
+        if (over) clicked = true;
+        active = 0;
+    }
+
+    const bool held = (active == id) && over;
+    const UiMotion m = motion(id, hotNow, held);
+    // Press scale only, never lift: a segment that lifts out of its cluster
+    // reads as the panel coming apart. The cluster is the thing with edges.
+    const Rect br = liftPress(b, {0.f, m.press});
+    lastRect = br;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = std::min(nx::radiusXs * dpi, br.h * 0.5f);
+
+    const bool danger = onCol.r > 0.6f && onCol.g < 0.45f && onCol.b < 0.55f;
+    if (on) {
+        pillRect(br, rad, danger ? Pill::Danger : Pill::Primary, onCol, m);
+    } else if (m.hover > 0.01f) {
+        r->gradRect(br, rad, nx::glassChip, 0.55f * m.hover);
+    }
     if (hotNow) cursor = Cursor::Hand;
     return clicked;
 }

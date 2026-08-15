@@ -88,9 +88,14 @@ namespace tl {
 //
 // `inline const` and not constexpr only because Col::scale/alpha are not
 // constexpr; these are initialised once and read from hot loops.
-inline const Col gridBar  = nx::line.scale(1.60f).alpha(0.92f);
-inline const Col gridBeat = nx::line.alpha(0.88f);
-inline const Col gridSub  = nx::line.alpha(0.42f);
+// Quieted from 0.92/0.88/0.42: at those alphas the grid was the loudest thing
+// on the timeline -- a lattice you look AT instead of music you look at
+// THROUGH. A musician needs the bar findable, the beat aimable and the
+// sixteenth barely-there texture; the empty timeline should read as darkness,
+// not as graph paper.
+inline const Col gridBar  = nx::line.scale(1.35f).alpha(0.55f);
+inline const Col gridBeat = nx::line.alpha(0.30f);
+inline const Col gridSub  = nx::line.alpha(0.14f);
 
 // --- surfaces ---------------------------------------------------------------
 //

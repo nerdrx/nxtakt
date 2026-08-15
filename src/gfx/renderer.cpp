@@ -867,9 +867,14 @@ void Renderer::background(f64 timeSeconds) {
     // NXTAKT_GFX_STATS) until the whole pass fit comfortably inside a frame,
     // and the blobs still read as enormous because they are anchored off the
     // corners and only ever show one shoulder.
-    blob(nx::nebulaViolet,  0.16f, 0.10f, D * 0.50f,  96.f, 0.055f, 0.045f, 0.0f, +1.f);
-    blob(nx::nebulaCyan,    0.88f, 0.92f, D * 0.42f,  74.f, 0.050f, 0.040f, 1.1f, -1.f);
-    blob(nx::nebulaMagenta, 0.64f, 0.26f, D * 0.30f, 110.f, 0.045f, 0.035f, 2.3f, +1.f);
+    // Halved twice from the first cut (0.055/0.050/0.045): at those alphas the
+    // nebula read as a purple WASH over the whole app -- violet as paint. §1's
+    // rule is literal: visible from across the room means halve it. The blobs
+    // should be felt in empty regions and found when looked for, never seen
+    // while working.
+    blob(nx::nebulaViolet,  0.16f, 0.10f, D * 0.50f,  96.f, 0.026f, 0.020f, 0.0f, +1.f);
+    blob(nx::nebulaCyan,    0.88f, 0.92f, D * 0.42f,  74.f, 0.020f, 0.016f, 1.1f, -1.f);
+    blob(nx::nebulaMagenta, 0.64f, 0.26f, D * 0.30f, 110.f, 0.016f, 0.012f, 2.3f, +1.f);
 
     // Stars behind the vignette, in one pass. Cell size scales with DPI so the
     // density is per visual area rather than per pixel.

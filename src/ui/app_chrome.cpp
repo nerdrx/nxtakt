@@ -123,9 +123,10 @@ static bool ctlChip(Ui& ui, u64 id, const Rect& b, Font& f, const char* label,
     const bool held = hot && ui.in->down[0];
     const UiMotion m = ui.motion(id, hot, held);
     const Rect br = ui.liftPress(b, m);
-    ui.pillRect(br, br.h * 0.5f, on ? Pill::Primary : Pill::Secondary, nx::violet, m);
+    const f32 chipRad = std::min(nx::pill * std::max(1.f, ui.r->dpiScale()), br.h * 0.5f);
+    ui.pillRect(br, chipRad, on ? Pill::Primary : Pill::Secondary, nx::violet, m);
     if (!on && wash > 0.f)
-        ui.r->roundRect(br, br.h * 0.5f, nx::violet.alpha(clampv(wash, 0.f, 0.6f)));
+        ui.r->roundRect(br, chipRad, nx::violet.alpha(clampv(wash, 0.f, 0.6f)));
     ui.microIn(f, br, label,
                on ? nx::text : pal::textFaint.mix(nx::text, 0.25f + 0.75f * m.hover),
                Align::Center);
@@ -442,25 +443,35 @@ void App::drawControlBar(const Rect& r) {
     // by the glow under it, and by the position counter turning cyan. The
     // glyphs are drawn into ui_.lastRect so they ride the pill's lift and press
     // instead of standing still while it moves.
-    Rect playR{x, cy, 30 * s, h};
+    // One CLUSTER, not three buttons. The trio shares a single plate and a
+    // single lit edge; segments separate by hairline, show a whisper on hover,
+    // and only an active state fills. A physical transport is one machined
+    // block with three switches in it, and that is what the eye should group.
+    const f32 segW = 30 * s;
+    Rect trioR{x, cy, segW * 3, h};
+    ui_.segCluster(trioR);
+
+    Rect playR{x, cy, segW, h};
     chromeDebugMark("play", playR);
     const bool playing = es_.playing;
-    if (ui_.button(uiId(1, 4), playR, "", playing, pal::accent)) togglePlay();
+    if (ui_.segButton(uiId(1, 4), playR, playing, pal::accent)) togglePlay();
     ui_.playTriangle(ui_.lastRect.insetXY(11 * s, 6 * s),
                      playing ? nx::text : pal::textDim.mix(nx::text, 0.5f));
-    x += playR.w + gap;
+    x += segW;
+    rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
 
-    Rect stopR{x, cy, 30 * s, h};
-    if (ui_.button(uiId(1, 5), stopR, "")) send(Cmd::SetPlaying, 0);
-    ui_.stopSquare(ui_.lastRect, pal::textDim.mix(nx::text, 0.5f));
-    x += stopR.w + gap;
+    Rect stopR{x, cy, segW, h};
+    if (ui_.segButton(uiId(1, 5), stopR, false, pal::accent)) send(Cmd::SetPlaying, 0);
+    ui_.stopSquare(ui_.lastRect.insetXY(11 * s, 6 * s), pal::textDim.mix(nx::text, 0.5f));
+    x += segW;
+    rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
 
     // Session record. This is an *intent*, not a transport action: while it is
     // lit, clicking an empty slot on an armed track starts a take in that slot;
     // while it is unlit, the same click only moves the selection. The circle
     // additionally lights while any track is actually capturing, so the bar
     // says what the engine is doing and not just what was asked for.
-    Rect recR{x, cy, 30 * s, h};
+    Rect recR{x, cy, segW, h};
     chromeDebugMark("rec", recR);
     bool anyRec = false;
     for (size_t t = 0; t < ses_.tracks.size(); ++t)
@@ -475,11 +486,11 @@ void App::drawControlBar(const Rect& r) {
     // --danger pill under a white dot, armed is the dark plate under a bright
     // red dot, and inert is plain glass under a dimmed one.
     const Col recPlate = anyRec ? pal::recRed : pal::armRed;
-    if (ui_.button(uiId(1, 6), recR, "", recIntent_ || anyRec, recPlate)) recIntent_ = !recIntent_;
+    if (ui_.segButton(uiId(1, 6), recR, recIntent_ || anyRec, recPlate)) recIntent_ = !recIntent_;
     const Rect rr = ui_.lastRect;
     rend_.circle(rr.cx(), rr.cy(), 5 * s,
                  anyRec ? nx::text : (recIntent_ ? pal::recRed : pal::recRed.scale(0.55f)));
-    x += recR.w + gap;
+    x += segW + gap;
 
     // Automation Arm — its own control, immediately right of the record circle
     // (docs/AUTOMATION.md §5.1, decision #10). Not implied by record-arm:
@@ -488,13 +499,21 @@ void App::drawControlBar(const Rect& r) {
     // Drawn as the KBD chip is — accentHi on dark rather than a filled plate —
     // because it is a MODE the transport row reports, not a transport action,
     // and the row already reads "the red thing is record".
+    // AUTO and ARR are one cluster: two record-destination modes, one plate.
+    // They kept reading as strays while every other control found a group --
+    // which is exactly the "buttons that don't belong together" complaint.
+    ui_.segCluster({x, cy, 36 * s + 32 * s, h});
     {
         Rect autoR{x, cy, 36 * s, h};
         const u64 id = uiId(1, 10);
-        if (ctlChip(ui_, id, autoR, fSmall_, "AUTO", autoArm_)) toggleAutoArm();
+        if (ui_.segButton(id, autoR, autoArm_, nx::violet)) toggleAutoArm();
+        ui_.microIn(fSmall_, ui_.lastRect, "AUTO",
+                    autoArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
+                    Align::Center);
         if (ui_.isHot(id))
             ui_.tip = "Automation arm: record control moves into the playing clip";
-        x = autoR.right() + gap;
+        x = autoR.right();
+        rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
     }
 
     // Arrangement arm -- a THIRD independent chip, immediately right of AUTO and
@@ -511,7 +530,10 @@ void App::drawControlBar(const Rect& r) {
     {
         Rect arrR{x, cy, 32 * s, h};
         const u64 id = uiId(1, 12);
-        const bool pressed = ctlChip(ui_, id, arrR, fSmall_, "ARR", arrArm_);
+        const bool pressed = ui_.segButton(id, arrR, arrArm_, nx::violet);
+        ui_.microIn(fSmall_, ui_.lastRect, "ARR",
+                    arrArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
+                    Align::Center);
         if (ui_.isHot(id))
             ui_.tip = "Arrangement arm: record armed tracks onto the timeline";
         if (pressed) {
