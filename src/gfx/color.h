@@ -104,12 +104,18 @@ constexpr Col meterGreen   = rgb(0x3FD07A);
 constexpr Col meterAmber   = rgb(0xFFB300);
 constexpr Col meterRed     = rgb(0xFF5470);
 
-// The eight-colour clip strip Live cycles through for new tracks.
+// The sixteen-colour clip strip. These are DATA -- a musician tells tracks
+// apart by them in peripheral vision -- so all sixteen hue families survive
+// and their order is frozen (colorIdx persists in saved sets). What changed
+// is the register: the old values were Live's neon defaults, and a 0x1AFF2F
+// green or a pure white block in a deep-space room is a toy block in a
+// listening studio. Same hues, saturation tamed, luminance unified -- jewel
+// tones that hold their identity against near-black without shouting over it.
 constexpr Col clipColors[] = {
-    rgb(0xFF94A6), rgb(0xFFA529), rgb(0xCC9B54), rgb(0xF7F47C),
-    rgb(0xBFFB00), rgb(0x1AFF2F), rgb(0x25FFA8), rgb(0x5CFFE8),
-    rgb(0x8BC5FF), rgb(0x5480E4), rgb(0x92A7FF), rgb(0xD86CE4),
-    rgb(0xE553A0), rgb(0xFFFFFF), rgb(0xFF3636), rgb(0xF66C03),
+    rgb(0xD98A9C), rgb(0xE09B4A), rgb(0xC29A66), rgb(0xD9CF7E),
+    rgb(0xA8C95E), rgb(0x5BBF6F), rgb(0x4EC29A), rgb(0x55C4C9),
+    rgb(0x7FA9E0), rgb(0x5E7BD0), rgb(0x8E97E8), rgb(0xB678CC),
+    rgb(0xC25E92), rgb(0xD9D4E8), rgb(0xD05656), rgb(0xD0742E),
 };
 constexpr int clipColorCount = 16;
 } // namespace pal
