@@ -28,13 +28,22 @@
 // and note previews, and — step 3 — session clips, both audio and MIDI, through
 // the sample pool.
 //
+// Also carried: device chains (§5 step 4, reconciled from the declaration the
+// GUI publishes), the plugin catalog, and — protocol v7 — a rack's CONTENTS,
+// which used to be the loudest gap on the list because a rack loaded empty and
+// passed audio through.
+//
+// Also carried: the arrangement and its automation (one pool blob per lane, over
+// the same pointer -> pool-ref cache the clip table uses) and — protocol v8 —
+// the time-signature map, which is why daemon mode no longer plays every set in
+// 4/4.
+//
+// And hardware MIDI: MidiInput takes a SINK now rather than an Engine&, so the
+// ALSA reader thread's messages go over the wire in daemon mode (§1.3 option 3,
+// with the lock the second producer needs).
+//
 // Not carried yet, and refused *with a reason* rather than dropped (see
-// remoteRefusals()): device chains (§5 step 4), recording (§7), the arrangement
-// and its automation (which the daemon can take, but only as a pool blob this
-// wave does not build), time signatures (Cmd::SetSignatures is outside
-// ipc::commandIsKnown's bound, so the daemon answers RejectUnknownCommand and
-// plays the set in 4/4), and hardware MIDI input (MidiInput pushes straight into
-// an Engine, and in daemon mode there is not one — §1.3 moves it into nxtaktd).
+// remoteRefusals()): recording (§7). That is the whole of the remaining list.
 //
 // Threading: GUI thread only, like everything in src/ui. The Engine it owns in
 // local mode is the one the audio thread runs; the ring pushes here are the
@@ -48,6 +57,7 @@
 #include "../audio/midi_in.h"
 #include "../plugin/host.h"      // PluginDesc, and PluginInstance as an identity
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -246,6 +256,64 @@ public:
     u64 devicesAdded() const;
     u64 devicesFailed() const;
 
+    // --- rack contents (protocol v7, docs/RACKS.md) -------------------------
+    //
+    // A rack is a PluginInstance that owns PluginInstances and its descriptor
+    // says nothing about its contents, so until v7 the daemon instantiated
+    // `nxtakt:rack`, got an EMPTY one, and the device sounded as a passthrough
+    // while the GUI drew the sub-chain. It now crosses as a PoolKindRackState
+    // blob — `rackStateToString()`'s output, which is already one line of
+    // printable ASCII and already version-tagged — applied on the far side with
+    // `rackStateFromString` + `setState`.
+    //
+    // Nothing calls anything here: the handle polls the GUI's own RackControl
+    // once a frame, exactly as it polls the parameters, because a device dropped
+    // into a rack or a mapping dragged onto a macro has no command to hook. What
+    // is polled is a FINGERPRINT of RackState; the string is only built when
+    // that has moved.
+    //
+    // Both counters are diagnostics with an audible meaning: `racksRefused()`
+    // non-zero is a rack that is drawn full and sounds as whatever the engine
+    // already had, and the log says which one and why.
+    u64 racksPublished() const;
+    u64 racksRefused() const;
+
+    // --- the arrangement (docs/ARRANGEMENT.md §9) ---------------------------
+    //
+    // The daemon has been able to take an arrangement since wave 8g; what was
+    // missing was the encoder on this side. A lane crosses as ONE pool blob
+    // ([WireArrHeader][WireArrItem[]][WireClip[]]) over the same pointer ->
+    // pool-ref cache the clip table uses, so a clip that is both in a scene and
+    // on the timeline names one block and is written once. The transport's loop
+    // brace is the lane addressed as track -1.
+    //
+    // `arrangementsRefused()` non-zero is a timeline that is drawn and does not
+    // play; the log line says which lane and why.
+    u64 arrangementsPublished() const;
+    u64 arrangementsRefused() const;
+
+    // --- the signature map (protocol v8) ------------------------------------
+    //
+    // A flat RtSig[] crossing as a PoolKindSignatures blob. It is published
+    // through pushCommand(Cmd::SetSignatures) like everything else, which is
+    // why session.h's publishSignatures() takes an EngineHandle& now: it used
+    // to take an Engine& and could therefore not be called at all in daemon
+    // mode, and the set played in 4/4.
+    //
+    // `signaturesRefused()` non-zero means exactly that state has come back —
+    // the map is unwalkable, the engine kept 4/4 — and it must be sayable,
+    // because the transport readout reads the ENGINE's counters (§11.6) and
+    // will show 4/4 without explaining why.
+    u64 signaturesPublished() const;
+    u64 signaturesRefused() const;
+
+    // Pool blocks currently allocated. A diagnostic with one specific job: a
+    // publication path that writes a fresh block every frame instead of reusing
+    // the one it already wrote looks EXACTLY like one that works — the audio is
+    // right, the events arrive, and the pool fills up over a long session. This
+    // is the only number that can tell them apart from outside. 0 in local mode.
+    u64 poolBlocksLive() const;
+
     // --- the plugin catalog (§5 step 5) -------------------------------------
     //
     // What the DAEMON can instantiate, which is not in general what this
@@ -320,8 +388,18 @@ private:
     std::unique_ptr<Engine> engine_;
     std::unique_ptr<AudioBackend> audio_;
     // Started after the backend and stopped before it: the reader thread pushes
-    // into the engine's ring from its own thread.
+    // into the engine's ring (local) or over the wire (daemon) from its own
+    // thread. Which of the two is decided by the sink openLocalEngine() /
+    // openDaemon() hands it.
     MidiInput midi_;
+    // Guards the DAEMON path's single MIDI ring against its two producers: this
+    // thread (the computer keyboard, note previews) and the ALSA reader thread.
+    // lat::Ring is documented single-producer and neither of these is realtime,
+    // so a mutex is the whole fix — docs/GUI-ON-DAEMON.md §1.3, option 3. It
+    // also covers restartEngine(), which unmaps the ring the reader is pushing
+    // into. Unused on the local path, where the engine keeps a ring per
+    // producer.
+    mutable std::mutex midiMx_;
 
     // Null unless openDaemon() succeeded. Exactly one of engine_ and remote_ is
     // ever set; both null is §8's degraded mode and is a supported state.

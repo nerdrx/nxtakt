@@ -18,19 +18,23 @@
 //     are unlinked" has no other test.
 //
 // Built by `make build/handle_test` and run by `make test`. It spawns its own
-// daemon and cleans up after itself. To build it by hand:
-//
-//   g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -I.
-//       tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp
-//       src/audio/backend.cpp src/audio/midi_in.cpp src/core/common.cpp
-//       -o build/handle_test $(pkg-config --libs jack alsa) -lrt -lpthread -lm
-//   (one line; the continuations are left off so this comment does not trip
-//    -Wcomment, which the tree builds with)
-//   ./build/handle_test          # needs build/nxtaktd
+// daemon and cleans up after itself. The recipe is in the Makefile; it grew
+// src/plugin when rack contents landed, because a rack is the one device whose
+// state cannot be faked — see the note above step 4b.
 #include "src/ui/engine_handle.h"
+// For the protocol's own bounds, and for those only. The handle deliberately
+// keeps src/ipc out of its header so the view translation units never see it;
+// a TEST asserting what happens at kMaxArrItems has to name the real number
+// rather than a copy of it that can drift.
+#include "src/ipc/control.h"
+// For the hardware-MIDI check below, which sends a real sequencer event into
+// the GUI's own ALSA client. There is no other way to prove that path: the
+// reader thread is the producer and a fake would test the fake.
+#include <alsa/asoundlib.h>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <vector>
 #include <dirent.h>
 #include <unistd.h>
@@ -149,7 +153,14 @@ int main() {
           "sampleRate() is live off the wire before anything decodes (%.0f)", eng.sampleRate());
     CHECK(eng.driverName() && std::strstr(eng.driverName(), "null"),
           "driverName() comes off ControlHeader ('%s')", eng.driverName() ? eng.driverName() : "");
-    CHECK(!eng.midiRunning(), "midiRunning() is false: hardware MIDI is not on this path");
+    // HARDWARE MIDI IS ON THIS PATH NOW (§1.3). It used to be asserted absent
+    // here, which was honest while MidiInput took an Engine& and there was no
+    // Engine to give it. What can be asserted on every machine is that the three
+    // accessors AGREE — a running reader has a client id, a stopped one does not
+    // — because whether snd-seq exists at all is a property of the box.
+    CHECK(eng.midiRunning() == (eng.midiClientId() >= 0),
+          "the MIDI accessors agree (running %d, client %d)",
+          (int)eng.midiRunning(), eng.midiClientId());
 
     EngineState es;
     eng.poll(es);
@@ -176,6 +187,74 @@ int main() {
     // --- MIDI (step 2) -----------------------------------------------------
     MidiMsg m{}; m.status = 0x90; m.d1 = 60; m.d2 = 100;
     CHECK(eng.pushMidi(m), "pushMidi crosses on the MIDI ring");
+
+    // --- HARDWARE MIDI, end to end (§1.3) ----------------------------------
+    //
+    // Not a stand-in: a real ALSA sequencer client, connected to the GUI's own
+    // input port, sending a real note-on. What it proves is the whole of the new
+    // path — snd_seq_event_input on the reader thread, toWire, the SINK the
+    // handle installed, and cli.pushMidi accepting it onto the shared-memory
+    // ring. `received()` counts only messages a sink ACCEPTED, so it cannot move
+    // for a reader that was started with nowhere to put them.
+    //
+    // THE SKIP IS GATED ON THE TEST'S OWN SEQUENCER, NOT ON THE HANDLE'S.
+    // Skipping when `midiRunning()` is false would have been the obvious
+    // shape and is exactly wrong: it cannot tell "this box has no snd-seq" from
+    // "the handle never installed a sink", so removing the sink would have made
+    // this section quietly stop testing anything instead of going red. So the
+    // test opens a sequencer FIRST — if IT can, so could the handle, and
+    // midiRunning() being false is then a failure and not an environment.
+    {
+        snd_seq_t* seq = nullptr;
+        const bool opened = snd_seq_open(&seq, "default", SND_SEQ_OPEN_OUTPUT, 0) >= 0 && seq;
+        if (!opened) {
+            std::printf("  SKIP  no ALSA sequencer on this machine; "
+                        "hardware MIDI is untested here\n");
+        } else {
+            CHECK(eng.midiRunning(),
+                  "the handle opened an ALSA client too (%d): this machine has a "
+                  "sequencer, so a reader that is not running is a missing sink and "
+                  "not a missing kernel module", eng.midiClientId());
+            snd_seq_set_client_name(seq, "handle_test");
+            const int outPort = snd_seq_create_simple_port(
+                seq, "out",
+                SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
+                SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
+            CHECK(outPort >= 0, "with an output port (%d)", outPort);
+            const int conn = snd_seq_connect_to(seq, outPort, eng.midiClientId(), 0);
+            CHECK(conn >= 0, "connected to NxTakt's input at %d:0", eng.midiClientId());
+
+            const u64 got0 = eng.midiReceived();
+            snd_seq_event_t ev;
+            snd_seq_ev_clear(&ev);
+            snd_seq_ev_set_source(&ev, outPort);
+            snd_seq_ev_set_subs(&ev);
+            snd_seq_ev_set_direct(&ev);
+            snd_seq_ev_set_noteon(&ev, 0, 60, 100);
+            snd_seq_event_output_direct(seq, &ev);
+            snd_seq_drain_output(seq);
+
+            bool arrived = false;
+            for (int i = 0; i < 200 && !arrived; ++i) {
+                sleepMs(10);
+                arrived = eng.midiReceived() > got0;
+            }
+            CHECK(arrived,
+                  "A NOTE PLAYED ON A HARDWARE PORT REACHED THE DAEMON: "
+                  "received() %llu -> %llu. The reader thread has no Engine to "
+                  "push into on this path; it pushes over the wire",
+                  (unsigned long long)got0, (unsigned long long)eng.midiReceived());
+
+            snd_seq_ev_clear(&ev);
+            snd_seq_ev_set_source(&ev, outPort);
+            snd_seq_ev_set_subs(&ev);
+            snd_seq_ev_set_direct(&ev);
+            snd_seq_ev_set_noteoff(&ev, 0, 60, 0);
+            snd_seq_event_output_direct(seq, &ev);
+            snd_seq_drain_output(seq);
+            snd_seq_close(seq);
+        }
+    }
 
     // --- a clip through the pool (step 3) ----------------------------------
     // A DC buffer on this process's heap, exactly as a decoded SampleBuffer is:
@@ -508,6 +587,138 @@ int main() {
           "polls)", (unsigned long long)eng.devicesFailed());
 
     // =====================================================================
+    // STEP 4b: a RACK's CONTENTS (protocol v7, docs/RACKS.md)
+    // =====================================================================
+    //
+    // Everything above this point uses FakeDevice, because what the handle needs
+    // off a chain is four virtual calls and a fake supplies them. A rack is the
+    // one device where that stops being true: `rackStateToString` is real code
+    // in internal_devices.cpp, `setState` is real code in the daemon, and a fake
+    // RackControl on this side would only prove that the handle can serialise a
+    // fake. So this section links the plugin layer and uses a REAL
+    // `nxtakt:rack` holding a REAL `nxtakt:saturator`.
+    //
+    // The GUI's rack renders nothing — there is no in-process engine — so every
+    // level measured below was computed by plugins the daemon instantiated from
+    // a string this process wrote.
+    banner("step 4b: a rack's contents, and they sound");
+
+    PluginRegistry reg;
+    reg.scan();
+    const PluginDesc* rackDesc = reg.find("nxtakt:rack");
+    const PluginDesc* satDesc  = reg.find("nxtakt:saturator");
+    CHECK(rackDesc != nullptr && satDesc != nullptr,
+          "the local registry has nxtakt:rack and nxtakt:saturator");
+
+    std::unique_ptr<PluginInstance> rackInst;
+    if (rackDesc) rackInst = reg.instantiate(*rackDesc, eng.sampleRate(), 1024);
+    RackControl* rc = rackInst ? rackInst->rack() : nullptr;
+    CHECK(rc != nullptr, "and a real rack instance answers rack() non-null");
+
+    if (rc && satDesc) {
+        RtChain chR;
+        chR.fx[0] = rackInst.get();
+        chR.count = 1;
+        Command rackChain;
+        rackChain.type = Cmd::SetChain; rackChain.a = 0; rackChain.p = &chR;
+        CHECK(eng.pushCommand(rackChain), "publish a chain holding one rack");
+
+        const RemoteDevice* rr = nullptr;
+        for (int i = 0; i < 600 && !(rr && rr->live); ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e)) {}
+            rr = eng.remoteDevice(rackInst.get());
+            sleepMs(10);
+        }
+        CHECK(rr && rr->live, "the engine instantiated it: device %u '%s'",
+              rr ? rr->id : 0u, rr ? rr->name.c_str() : "-");
+
+        // An EMPTY rack is a passthrough. This is the state the whole feature
+        // exists to leave behind, so it is measured rather than assumed: without
+        // it, "the rack sounds" below could be a rack that was never empty.
+        const f32 emptyRack = peakOver(eng, es, 150);
+        CHECK(std::fabs(emptyRack - dryPeak) < 0.02f,
+              "an empty rack passes the clip straight through: %.4f (dry %.4f)",
+              (double)emptyRack, (double)dryPeak);
+
+        // --- fill it, and send NOTHING -------------------------------------
+        //
+        // rc->addDevice() is exactly what a rack editor calls on the GUI's own
+        // instance. There is no command for it and there could not be one, so
+        // the handle notices by polling a fingerprint of RackState — the same
+        // shape as the parameter mirror, one level down.
+        CHECK(rc->addDevice(*satDesc), "drop a saturator into the GUI's rack");
+        CHECK(rc->deviceCount() == 1, "the GUI's rack holds one device");
+        const u64 sent0 = eng.racksPublished();
+
+        // tanh(0.5) = 0.4621 on a DC 0.5 clip, which is the saturator's own
+        // shaper and NOT "some change": the number identifies the device.
+        const f32 filled = peakOver(eng, es, 200);
+        CHECK(filled > 0.44f && filled < 0.48f,
+              "the rack's CONTENTS crossed and sound: %.4f, which is tanh(0.5) "
+              "computed by a plugin the daemon built from our state string "
+              "(empty rack was %.4f)", (double)filled, (double)emptyRack);
+        CHECK(eng.racksPublished() > sent0 && eng.racksRefused() == 0,
+              "one rack state published, none refused (%llu / %llu)",
+              (unsigned long long)eng.racksPublished(),
+              (unsigned long long)eng.racksRefused());
+
+        // --- an in-place edit three levels down is noticed ------------------
+        //
+        // The sub-device's Output, turned on the GUI's own instance inside the
+        // GUI's own rack. Nothing is sent; the fingerprint moves because it
+        // hashes the state IN FULL, and a strided one would not have — which is
+        // the notes bug (§11.4) wearing a rack.
+        PluginInstance* sub = rc->device(0);
+        CHECK(sub != nullptr, "the rack hands back its sub-device");
+        if (sub) {
+            sub->setParam(kOutput, -12.f);
+            const f32 trimmed = peakOver(eng, es, 200);
+            CHECK(trimmed < filled * 0.40f && trimmed > filled * 0.15f,
+                  "turning Output to -12 dB INSIDE the rack changed what the "
+                  "daemon renders: %.4f -> %.4f (x0.251 expected)",
+                  (double)filled, (double)trimmed);
+
+            // --- THE PARKED VALUE, across a process boundary ---------------
+            //
+            // RACKS.md: setState restores mappings STRUCTURALLY and writes the
+            // macros without driving them, precisely so a target the user parked
+            // off its macro's curve comes back parked. Here macro 0 is mapped to
+            // Output over -24..0 dB and left at 1.0 — which would DERIVE 0 dB,
+            // i.e. the full 0.4621 — while Output itself is parked at -12.
+            //
+            // 0.116 means the daemon honoured the parked value. 0.462 means
+            // something in the load path re-derived it from the macro, which is
+            // the bug that makes a set drift a little every time it is opened.
+            RackMapping mp;
+            mp.macro  = 0;
+            mp.device = 0;
+            mp.param  = 1u;              // ParamInfo::id of Output
+            mp.min    = -24.f;
+            mp.max    = 0.f;
+            CHECK(rc->addMapping(mp) >= 0, "map macro 0 to Output over -24..0 dB");
+            rackInst->setParam(0, 1.0f);   // drives Output to 0 dB, at edit time
+            sub->setParam(kOutput, -12.f); // and now PARK it off the curve
+            const f32 parked = peakOver(eng, es, 250);
+            CHECK(parked < filled * 0.40f && parked > filled * 0.15f,
+                  "the parked -12 dB survived the wire even though macro 0 sits "
+                  "at 1.0: %.4f (a re-derived target would read ~%.4f)",
+                  (double)parked, (double)filled);
+
+            // And a genuine macro move still moves it: 0.0 derives -24 dB.
+            rackInst->setParam(0, 0.0f);
+            const f32 swept = peakOver(eng, es, 250);
+            CHECK(swept < parked * 0.5f,
+                  "and sweeping the macro to 0 takes the target to -24 dB: "
+                  "%.4f -> %.4f", (double)parked, (double)swept);
+        }
+
+        CHECK(eng.racksRefused() == 0,
+              "no rack state was refused over the whole section (%llu)",
+              (unsigned long long)eng.racksRefused());
+    }
+
+    // =====================================================================
     // STEP 5: the browser lists what the DAEMON can load
     // =====================================================================
     banner("step 5: the catalog");
@@ -531,6 +742,395 @@ int main() {
                   "with their real shape: Pulse is an instrument that takes MIDI");
     CHECK(eng.catalogTruncated() == 0,
           "nothing was dropped for want of table space (%u)", eng.catalogTruncated());
+
+    // =====================================================================
+    // STEP 4c: THE ARRANGEMENT, over the wire
+    // =====================================================================
+    //
+    // The daemon has been able to take an arrangement since wave 8g —
+    // translateArrangement() and daemon_test §16b prove it plays one. What was
+    // missing until now is the near side: App builds an `RtArrangement`, a
+    // struct of pointers into one GUI-heap allocation, and something has to turn
+    // it into the blob. That is what this exercises, and the only honest proof
+    // is a timeline that SOUNDS in another process.
+    banner("step 4c: the arrangement");
+
+    // Clear the chain and stop everything, so what the meter reads is the lane
+    // and not a session slot or a device left over from step 4.
+    RtChain chNone;
+    chNone.count = 0;
+    Command clearChain;
+    clearChain.type = Cmd::SetChain; clearChain.a = 0; clearChain.p = &chNone;
+    CHECK(eng.pushCommand(clearChain), "clear track 0's chain");
+    CHECK(eng.send(Cmd::StopAll), "stop every session slot");
+    CHECK(eng.send(Cmd::SetPlaying, 0), "and stop the transport");
+    for (int i = 0; i < 60; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+    CHECK(eng.send(Cmd::Locate, 0, 0, 0.0), "locate to beat 0");
+
+    // One item, one clip: the same DC 0.5 buffer the session cell used, which is
+    // the point of sharing the pointer -> pool-ref cache. It is already in the
+    // pool, so this publication writes no samples at all.
+    RtClip arrClip{};
+    arrClip.data        = dc.data();
+    arrClip.frames      = frames;
+    arrClip.channels    = 1;
+    arrClip.loopStart   = 0;
+    arrClip.loopEnd     = frames;
+    arrClip.warp        = (int)Warp::Off;
+    arrClip.loop        = true;      // the buffer is 2 beats; the item is 16
+    arrClip.quantumIdx  = 0;
+    arrClip.lengthBeats = 2.0;
+    arrClip.gain        = 1.0f;
+    arrClip.valid       = true;
+
+    RtArrItem arrItem{};
+    arrItem.start  = 0.0;
+    // Comfortably longer than peakOver's whole window (a 0.6 s settle plus 1.5 s
+    // of measurement, i.e. ~4 beats at 120): a window that ran off the end of
+    // the item would read silence and call it a broken encoder.
+    arrItem.length = 16.0;
+    arrItem.offset = 0.0;
+    arrItem.clip   = 0;
+
+    RtArrangement lane{};
+    lane.items     = &arrItem;
+    lane.clips     = &arrClip;
+    lane.itemCount = 1;
+    lane.clipCount = 1;
+
+    const u64 arrPub0 = eng.arrangementsPublished();
+    Command setLane;
+    setLane.type = Cmd::SetArrangement; setLane.a = 0; setLane.p = &lane;
+    CHECK(eng.pushCommand(setLane),
+          "Cmd::SetArrangement with a GUI-heap RtArrangement is ACCEPTED and encoded");
+    CHECK(eng.arrangementsPublished() == arrPub0 + 1,
+          "one lane published (%llu)", (unsigned long long)eng.arrangementsPublished());
+
+    // The transport cell: a lane addressed as track -1, carrying no items and
+    // only the loop brace. Same command, same encoder, one branch.
+    RtArrangement cellArr{};
+    cellArr.loopStart = 0.0;
+    cellArr.loopEnd   = 8.0;
+    cellArr.loopOn    = 0;
+    Command setCell;
+    setCell.type = Cmd::SetArrangement; setCell.a = -1; setCell.p = &cellArr;
+    CHECK(eng.pushCommand(setCell), "and the transport cell, as track -1");
+
+    for (int i = 0; i < 100; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+    CHECK(eng.arrangementsRefused() == 0,
+          "the daemon accepted both (%llu refused)",
+          (unsigned long long)eng.arrangementsRefused());
+
+    // §4.2: a session launch takes a track OUT of the arrangement, and step 4
+    // launched one. The engine sets that bit at the quantized launch it computes,
+    // so it is cleared with a command rather than assumed away.
+    CHECK(eng.send(Cmd::BackToArrangement, -1),
+          "put every track back on the arrangement (a session launch overrode it)");
+    CHECK(eng.send(Cmd::SetPlaying, 1), "roll the transport");
+    const f32 lanePeak = peakOver(eng, es, 150);
+    CHECK(lanePeak > 0.4f && lanePeak < 0.6f,
+          "THE TIMELINE PLAYS FROM THE DAEMON: master %.4f on an item that names "
+          "a pool block the session clip already wrote", (double)lanePeak);
+    eng.poll(es);
+    CHECK(es.beat > 0.5, "and the cursor advanced (%.4f)", es.beat);
+
+    // --- the retirement stand-in, one lane out -----------------------------
+    //
+    // The GUI's RtArrangement is a single allocation App frees when
+    // Ev::ArrangementRetired comes home. Nothing crossed — the lane was COPIED
+    // into a pool blob — so there is no engine to send that event and the handle
+    // has to synthesise it, exactly as it does for a displaced RtNote[]. Without
+    // it App::arr_.retiring grows for the life of the session.
+    RtArrangement lane2 = lane;
+    Command setLane2;
+    setLane2.type = Cmd::SetArrangement; setLane2.a = 0; setLane2.p = &lane2;
+    CHECK(eng.pushCommand(setLane2), "publish a second lane for track 0");
+    void* retiredLane = nullptr;
+    for (int i = 0; i < 200 && !retiredLane; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e)) if (e.type == Ev::ArrangementRetired) retiredLane = e.p;
+        sleepMs(5);
+    }
+    CHECK(retiredLane == (void*)&lane,
+          "Ev::ArrangementRetired came home for the DISPLACED lane (%p, wanted %p)",
+          retiredLane, (void*)&lane);
+
+    // --- arrangement automation ---------------------------------------------
+    //
+    // Its own blob, its own command, its own retirement — and measurable, which
+    // is the only way to tell a set the engine EVALUATES from one it merely
+    // accepted: two points taking track 0's fader from unity to silence over the
+    // first four beats.
+    // A CONSTANT lane, not a ramp, and that is a deliberate choice about what is
+    // measurable. peakOver is a peak HOLD over a window; against a ramp it
+    // reports the loudest instant in the window, so the number depends on where
+    // the cursor happened to be and a check written round it is really a check
+    // on the sleep. Two points at the same value make the fader a constant
+    // 0.8 — which is -8.74 dB, i.e. x0.365 — for as long as the test runs.
+    RtAutoPoint pts[2];
+    pts[0].beat = 0.0;   pts[0].value = 0.8f;
+    pts[1].beat = 512.0; pts[1].value = 0.8f;
+    RtAutoLane al{};
+    al.target  = (i32)AutoTarget::TrackVol;
+    al.xform   = (i32)AutoXform::Fader;
+    al.devSlot = -1;
+    al.first   = 0;
+    al.count   = 2;
+    al.lo      = 0.f;
+    al.hi      = 1.f;
+    RtAutoSetN autos{};
+    autos.points     = pts;
+    autos.lanes      = &al;
+    autos.laneCount  = 1;
+    autos.pointCount = 2;
+
+    Command setAutos;
+    setAutos.type = Cmd::SetTrackAutos; setAutos.a = 0; setAutos.p = &autos;
+    CHECK(eng.pushCommand(setAutos), "Cmd::SetTrackAutos is accepted and encoded");
+    CHECK(eng.send(Cmd::SetPlaying, 0) && eng.send(Cmd::Locate, 0, 0, 0.0) &&
+          eng.send(Cmd::BackToArrangement, -1) && eng.send(Cmd::SetPlaying, 1),
+          "back to beat 0 and roll");
+    const f32 ducked = peakOver(eng, es, 120);
+    // Bounded on BOTH sides. Below the un-automated level proves the lane is
+    // being evaluated; above zero proves it is being evaluated rather than
+    // simply silencing the track, which is what a dropped or mis-shaped blob
+    // would look like and which a one-sided check would pass.
+    CHECK(ducked < lanePeak * 0.55f && ducked > lanePeak * 0.20f,
+          "the automation is EVALUATED in the daemon: %.4f, which is fader 0.8 "
+          "(x0.365) on the %.4f the lane plays at unity",
+          (double)ducked, (double)lanePeak);
+    CHECK(eng.arrangementsRefused() == 0,
+          "and nothing was refused over the whole section (%llu)",
+          (unsigned long long)eng.arrangementsRefused());
+
+    // --- a lane with NOTES, republished, must not allocate every time -------
+    //
+    // An arrangement's RtNote[] lives INSIDE the lane's single allocation, so
+    // every republication puts it at a NEW address and the old one is freed as
+    // soon as the retirement comes home. An address-keyed cache — which is what
+    // the SESSION clip path correctly uses — would therefore write a fresh pool
+    // block per publication and never release one, and a drag republishes the
+    // lane every frame. The audio would be right the whole time and the pool
+    // would fill up over an afternoon, which is why the only check that can see
+    // this is a block count.
+    //
+    // The lane is heap-allocated and freed each time on purpose: a stack object
+    // reused in a loop keeps one address and would make an address cache look
+    // like it worked.
+    {
+        std::vector<RtNote> notes(64);
+        for (size_t n = 0; n < notes.size(); ++n) {
+            notes[n].beat  = (f64)n * 0.25;
+            notes[n].len   = 0.2;
+            notes[n].pitch = (u8)(48 + (n % 12));
+            notes[n].vel   = 100;
+        }
+        u64 blocksAfterFirst = 0;
+        u8* prev = nullptr;             // freed only AFTER the next one exists
+        for (int rep = 0; rep < 24; ++rep) {
+            // One allocation holding the lane, its item, its clip and its notes,
+            // exactly as App builds one.
+            auto* mem = new u8[sizeof(RtArrangement) + sizeof(RtArrItem) +
+                               sizeof(RtClip) + notes.size() * sizeof(RtNote)];
+            auto* la  = new (mem) RtArrangement{};
+            auto* it  = (RtArrItem*)(mem + sizeof(RtArrangement));
+            auto* cl  = (RtClip*)((u8*)it + sizeof(RtArrItem));
+            auto* nt  = (RtNote*)((u8*)cl + sizeof(RtClip));
+            *it = RtArrItem{};
+            it->start = 0.0; it->length = 16.0; it->clip = 0;
+            *cl = RtClip{};
+            cl->notes       = nt;
+            cl->noteCount   = (i64)notes.size();
+            cl->isMidi      = true;
+            cl->lengthBeats = 16.0;
+            cl->gain        = 1.0f;
+            cl->valid       = true;
+            for (size_t n = 0; n < notes.size(); ++n) nt[n] = notes[n];
+            la->items = it; la->clips = cl; la->itemCount = 1; la->clipCount = 1;
+            la->noteCount = (i64)notes.size();
+
+            Command mc;
+            mc.type = Cmd::SetArrangement; mc.a = 1; mc.p = la;
+            bool sent = false;
+            for (int i = 0; i < 200 && !sent; ++i) {
+                eng.poll(es);
+                while (eng.popEvent(e)) {}
+                sent = eng.pushCommand(mc);
+                if (!sent) sleepMs(5);
+            }
+            if (!sent) { CHECK(false, "a notes-bearing lane would not publish"); delete[] mem; break; }
+
+            for (int i = 0; i < 20; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+            // The previous lane is freed only NOW, which is what App's
+            // retirement ordering does and what guarantees the allocator hands
+            // out a DIFFERENT address for the next one. Freeing before
+            // allocating gets the same block back every time, and an
+            // address-keyed cache then looks like it works.
+            delete[] prev;
+            prev = mem;
+            if (rep == 0) blocksAfterFirst = eng.poolBlocksLive();
+        }
+        delete[] prev;
+        CHECK(blocksAfterFirst > 0, "a notes-bearing lane put %llu block(s) in the pool",
+              (unsigned long long)blocksAfterFirst);
+        const u64 after = eng.poolBlocksLive();
+        CHECK(after <= blocksAfterFirst,
+              "and 23 more republications added none: %llu blocks, was %llu. The "
+              "lane's notes are cached BY POSITION, not by address, because the "
+              "address is new every time",
+              (unsigned long long)after, (unsigned long long)blocksAfterFirst);
+
+        Command mclear;
+        mclear.type = Cmd::SetArrangement; mclear.a = 1; mclear.p = nullptr;
+        bool done = false;
+        for (int i = 0; i < 200 && !done; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e)) {}
+            done = eng.pushCommand(mclear);
+            if (!done) sleepMs(5);
+        }
+        CHECK(done, "the lane clears again");
+    }
+
+    // --- a lane past the protocol's bounds is CONSUMED, never answered false --
+    //
+    // §11.2's rule: `false` means "try again" and App's FIFO retries it every
+    // frame until it succeeds. A lane that can never be carried must therefore
+    // be consumed, counted and logged — never refused with a false, which would
+    // wedge the queue and with it the transport.
+    const u64 refusals0 = eng.remoteRefusals();
+    RtArrangement huge{};
+    huge.items     = &arrItem;
+    huge.clips     = &arrClip;
+    huge.itemCount = (int)ipc::kMaxArrItems + 1;
+    huge.clipCount = 1;
+    Command setHuge;
+    setHuge.type = Cmd::SetArrangement; setHuge.a = 1; setHuge.p = &huge;
+    CHECK(eng.pushCommand(setHuge),
+          "a lane past kMaxArrItems is CONSUMED, not answered false");
+    CHECK(eng.remoteRefusals() == refusals0 + 1,
+          "and counted (%llu -> %llu)", (unsigned long long)refusals0,
+          (unsigned long long)eng.remoteRefusals());
+
+    // --- clear, so the sections after this one see the set they expect ------
+    Command clearLane;
+    clearLane.type = Cmd::SetArrangement; clearLane.a = 0; clearLane.p = nullptr;
+    CHECK(eng.pushCommand(clearLane), "clear track 0's lane");
+    Command clearAutos;
+    clearAutos.type = Cmd::SetTrackAutos; clearAutos.a = 0; clearAutos.p = nullptr;
+    CHECK(eng.pushCommand(clearAutos), "clear its automation");
+    Command clearCell;
+    clearCell.type = Cmd::SetArrangement; clearCell.a = -1; clearCell.p = nullptr;
+    CHECK(eng.pushCommand(clearCell), "clear the transport cell");
+    for (int i = 0; i < 100; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+    eng.send(Cmd::SetPlaying, 0);
+    eng.send(Cmd::Locate, 0, 0, 0.0);
+    CHECK(eng.send(Cmd::LaunchClip, 0, 0) && eng.send(Cmd::SetPlaying, 1),
+          "and put the session clip back for the sections that follow");
+    const f32 backToSlot = peakOver(eng, es, 150);
+    CHECK(backToSlot > 0.4f, "which sounds again: %.4f", (double)backToSlot);
+
+    // =====================================================================
+    // STEP 4d: THE SIGNATURE MAP
+    // =====================================================================
+    //
+    // Cmd::SetSignatures could not even be SENT in daemon mode until now:
+    // session.h's publishSignatures() took an Engine&, there is no Engine here,
+    // and app_chrome.cpp guarded the call on local(). So daemon mode played
+    // every set in 4/4 however the ruler was drawn — and the ruler was drawn
+    // from the session's own map, so it drew 7/8 with total confidence.
+    //
+    // What is asserted is BAR ARITHMETIC and not the signature fields, for the
+    // reason §11.6 gives about poisoning: 4/4 is what an unpublished map reads
+    // AND what an ignored one reads, so "posSigNum == 4" would pass against a
+    // daemon that never got the map. A bar boundary at 3.5 beats cannot.
+    banner("step 4d: the signature map");
+
+    CHECK(eng.send(Cmd::SetPlaying, 0), "stop the transport");
+    const auto barAtBeat = [&](f64 beat) {
+        eng.send(Cmd::Locate, 0, 0, beat);
+        for (int i = 0; i < 60; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+        return es.posBar;
+    };
+    const i32 barIn44 = barAtBeat(7.0);
+    CHECK(es.posSigNum == 4 && es.posSigDen == 4,
+          "the engine starts in 4/4 (%d/%d)", es.posSigNum, es.posSigDen);
+
+    // The array is GUI-heap and stays alive until Ev::SigsRetired names it —
+    // exactly the contract session.h's publishSignatures() documents, which is
+    // the caller this stands in for.
+    RtSig sevenEight[1];
+    sevenEight[0].bar = 0; sevenEight[0].num = 7; sevenEight[0].den = 8;
+    sevenEight[0].pad = 0; sevenEight[0].beat = 0.0;
+    Command sigCmd;
+    sigCmd.type = Cmd::SetSignatures; sigCmd.a = 1; sigCmd.p = sevenEight;
+    const u64 sigPub0 = eng.signaturesPublished();
+    CHECK(eng.pushCommand(sigCmd),
+          "Cmd::SetSignatures with a GUI-heap RtSig[] is ACCEPTED and encoded");
+    CHECK(eng.signaturesPublished() == sigPub0 + 1, "one map published (%llu)",
+          (unsigned long long)eng.signaturesPublished());
+
+    bool inSeven = false;
+    for (int i = 0; i < 300 && !inSeven; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e)) {}
+        inSeven = es.posSigNum == 7 && es.posSigDen == 8;
+        sleepMs(10);
+    }
+    CHECK(inSeven, "the engine's published signature is 7/8 (%d/%d)",
+          es.posSigNum, es.posSigDen);
+    CHECK(eng.signaturesRefused() == 0, "and nothing was refused (%llu)",
+          (unsigned long long)eng.signaturesRefused());
+
+    const i32 barIn78 = barAtBeat(7.0);
+    CHECK(barIn78 == barIn44 + 1,
+          "AND IT PLAYS IN IT: beat 7 is bar %d now and was bar %d in 4/4, i.e. "
+          "the bars are 3.5 beats long", barIn78, barIn44);
+
+    // The retirement stand-in. syncSignatures keeps the array it published and
+    // frees it when Ev::SigsRetired names it; nothing crossed (the map was
+    // COPIED into a blob), so the handle has to send that event or every map a
+    // session ever publishes is held for the life of it.
+    RtSig fiveFour[1];
+    fiveFour[0].bar = 0; fiveFour[0].num = 5; fiveFour[0].den = 4;
+    fiveFour[0].pad = 0; fiveFour[0].beat = 0.0;
+    Command sigCmd2;
+    sigCmd2.type = Cmd::SetSignatures; sigCmd2.a = 1; sigCmd2.p = fiveFour;
+    CHECK(eng.pushCommand(sigCmd2), "publish a 5/4 map over it");
+    void* retiredSigs = nullptr;
+    for (int i = 0; i < 200 && !retiredSigs; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e)) if (e.type == Ev::SigsRetired) retiredSigs = e.p;
+        sleepMs(5);
+    }
+    CHECK(retiredSigs == (void*)sevenEight,
+          "Ev::SigsRetired came home for the DISPLACED map (%p, wanted %p)",
+          retiredSigs, (void*)sevenEight);
+
+    // RETRIED, because `false` from the handle means exactly one thing: try
+    // again (§11.2). The 5/4 publication above is still un-acknowledged at this
+    // instant — the retirement event the loop just waited for is SYNTHESISED at
+    // push time and says nothing about the daemon — so the first attempt is
+    // refused on flow control, which is what App::flushPending() exists to do.
+    Command sigClear;
+    sigClear.type = Cmd::SetSignatures; sigClear.a = 0; sigClear.p = nullptr;
+    bool cleared = false;
+    for (int i = 0; i < 200 && !cleared; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e)) {}
+        cleared = eng.pushCommand(sigClear);
+        if (!cleared) sleepMs(5);
+    }
+    CHECK(cleared, "clear the map (retried through the refusal, as the FIFO does)");
+    bool backTo44 = false;
+    for (int i = 0; i < 300 && !backTo44; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e)) {}
+        backTo44 = es.posSigNum == 4 && es.posSigDen == 4;
+        sleepMs(10);
+    }
+    CHECK(backTo44, "and the engine is back in 4/4 (%d/%d)", es.posSigNum, es.posSigDen);
+    eng.send(Cmd::Locate, 0, 0, 0.0);
 
     // =====================================================================
     // STEP 6: the link state, and a restart that puts the set back
@@ -650,12 +1250,19 @@ int main() {
           "App has no idea one was replaced", (double)rePeak, (double)dryPeak);
 
     // --- refusals are counted, not silent ----------------------------------
+    //
+    // Cmd::SetSignatures used to be the archetype here and no longer is (the map
+    // crosses as a pool blob now), and Cmd::SetArrangement used to be and no
+    // longer is either. What is left in the permanent class is a command aimed
+    // at something that does not exist: it can never be carried, so it must be
+    // consumed and counted rather than answered false — a permanent false wedges
+    // App's retry FIFO and with it the transport (§11.2).
     const u64 before = eng.remoteRefusals();
-    Command arr;
-    arr.type = Cmd::SetArrangement; arr.a = 0; arr.p = (void*)0x1;
-    CHECK(eng.pushCommand(arr),
-          "Cmd::SetArrangement is CONSUMED, not answered false — a permanent "
-          "false would wedge App's retry FIFO for ever");
+    Command nowhere;
+    nowhere.type = Cmd::SetTrackAutos; nowhere.a = kMaxTracks + 99; nowhere.p = nullptr;
+    CHECK(eng.pushCommand(nowhere),
+          "a command aimed at a lane that does not exist is CONSUMED, not "
+          "answered false");
     CHECK(eng.remoteRefusals() >= before + 1,
           "and counted (%llu -> %llu)",
           (unsigned long long)before, (unsigned long long)eng.remoteRefusals());

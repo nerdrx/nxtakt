@@ -752,7 +752,18 @@ private:
 // Every set should publish once after load and once after each signature edit.
 // A set that never publishes plays in 4/4, which is what every build before this
 // one did, and is why nothing breaks while a caller has not been taught yet.
-inline const RtSig* publishSignatures(Engine& eng, const Session& s) {
+//
+// TEMPLATED on the engine, and that is the whole of routing it through the
+// handle. `EngineHandle::pushCommand(const Command&)` and
+// `Engine::pushCommand(const Command&)` are the same call with the same meaning
+// -- one goes to a ring in this process, the other encodes the map into a pool
+// blob and sends it to nxtaktd -- so the ONE thing this function needs from its
+// argument is that call. Taking Engine& is what made it uncallable in daemon
+// mode, and the set played in 4/4 as a result; naming EngineHandle instead would
+// have pulled engine_handle.h into every view translation unit that includes
+// this header, which is the include step 1 spent a wave removing.
+template <class EngineLike>
+inline const RtSig* publishSignatures(EngineLike& eng, const Session& s) {
     const std::vector<SigChange> m = normalizedSigMap(s.sigs, s.sigNum, s.sigDen);
     if (m.empty()) return nullptr;
     RtSig* a = new (std::nothrow) RtSig[m.size()];

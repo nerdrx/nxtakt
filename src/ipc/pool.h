@@ -109,7 +109,16 @@ inline constexpr u64 kPoolBlockMagic = 0x4C54435F424C4B31ull;  // "LTC_BLK1"
 //        `kind` grew: a v2 daemon handed an arrangement blob would refuse it as
 //        "not sample data", which is correct behaviour and still not a version
 //        two builds should be able to disagree about silently.
-inline constexpr u32 kPoolVersion = 4;
+//   v5 — rack contents (docs/RACKS.md, GUI-ON-DAEMON.md §12.3): PoolKindRackState.
+//        A third time the same shape — no layout moved, `kind` grew a meaning —
+//        and a third time worth a number, because a v4 daemon handed a rack-state
+//        blob refuses it as "not a string" and a rack would then silently stay
+//        empty, which is exactly the failure this feature exists to end.
+//   v6 — the signature map (PoolKindSignatures). Same shape of change again and
+//        the same argument for a number: a v5 daemon handed a signature blob
+//        refuses it, and a set that plays in 4/4 while its ruler draws 7/8 is
+//        precisely the silent disagreement this whole layer exists to prevent.
+inline constexpr u32 kPoolVersion = 6;
 
 // Every block — header and data — starts on a 64-byte line. Blocks are large
 // (a stereo bar of audio is hundreds of kilobytes) so the padding is noise,
@@ -178,6 +187,39 @@ enum : u32 {
     // behind a pointer -- and a blob that is handed to the wrong builder is
     // exactly what the `kind` field exists to refuse.
     PoolKindTrackAutos = 6,
+
+    // One rack's complete contents, as `rackStateToString()` writes them:
+    // NUL-terminated printable ASCII, no whitespace and no newline
+    // (docs/RACKS.md, "Persistence"). `frames` is the byte length including the
+    // terminator, exactly as PoolKindString's is.
+    //
+    // A SEPARATE KIND FROM PoolKindString, AND THAT IS THE POINT. The two are
+    // byte-identical in shape and could not be more different in consequence: a
+    // string blob names a plugin the daemon is about to load, a rack-state blob
+    // is a recipe the daemon will instantiate an entire sub-chain from. Handing
+    // one where the other was expected must be a refusal rather than a plausible
+    // parse, and `kind` is the field that exists to make it one. They also have
+    // different length budgets — see kMaxRackState — which a shared kind could
+    // not express.
+    PoolKindRackState = 7,
+
+    // The whole time-signature map, as a flat WireSig[], `frames` of them.
+    //
+    // The simplest pooled payload there is — one array, no nested references,
+    // nothing else in the pool named by it — which is exactly why it took the
+    // longest to cross: Cmd::SetSignatures carries a `const RtSig*` and there
+    // was no pool kind for it, so the daemon answered RejectUnknownCommand and
+    // PLAYED EVERY SET IN 4/4 while the ruler drew 7/8.
+    //
+    // TRANSLATED, NOT REINTERPRETED, and this one is worth being explicit about
+    // because WireSig mirrors RtSig field for field and a cast would compile.
+    // The engine holds the map for as long as it is the map, on the audio
+    // thread, and the pool is CLIENT-WRITABLE: a client that rewrote its own
+    // blob in place would be rewriting the array the audio thread is bisecting.
+    // A WireNote blob is safe to reinterpret because it is bounds-checked once
+    // and then read; a signature map is a live structure. So the daemon copies
+    // it into its own heap and validates it there. See Daemon::doSetSignatures.
+    PoolKindSignatures = 8,
 };
 
 // The longest string the pool will carry. Not a buffer size — a policy: the
@@ -185,6 +227,21 @@ enum : u32 {
 // be an unbounded copy driven by a peer. Every string the protocol has (a
 // plugin URI is the longest) fits several times over.
 inline constexpr u64 kMaxPoolString = 1024;
+
+// The longest rack state the pool will carry, and it needs its own number
+// because kMaxPoolString's reasoning does not reach it. A URI is bounded by what
+// a plugin author typed; a rack state is bounded by the FORMAT — up to eight
+// devices, each with its URI, its bypass flag and one `id:value` pair per
+// control, nested up to kRackMaxDepth with one escaping pass per level. Eight
+// devices of sixty controls is already past 1024 and the depth cap multiplies
+// it. 64 KiB clears the worst case the format admits by a wide margin and is
+// still a bounded copy on the daemon's pump thread, which is the property
+// kMaxPoolString was really protecting.
+//
+// The daemon copies a rack state into a std::string and not a stack buffer for
+// the same reason: 64 KiB of stack on a thread that also loads plugins is not a
+// trade worth making, and the pump is not realtime.
+inline constexpr u64 kMaxRackState = 65536;
 
 // Block lifecycle. See "the free-after-confirm rule" below — these four states
 // *are* the rule, written down.
@@ -203,6 +260,8 @@ inline const char* poolKindName(u32 k) {
         case PoolKindAutomation:  return "automation";
         case PoolKindArrangement: return "arrangement";
         case PoolKindTrackAutos:  return "track-autos";
+        case PoolKindRackState:   return "rack-state";
+        case PoolKindSignatures:  return "signatures";
         default:                  return "none";
     }
 }
@@ -240,6 +299,35 @@ static_assert(offsetof(WireNote, beat)  == offsetof(RtNote, beat));
 static_assert(offsetof(WireNote, len)   == offsetof(RtNote, len));
 static_assert(offsetof(WireNote, pitch) == offsetof(RtNote, pitch));
 static_assert(offsetof(WireNote, vel)   == offsetof(RtNote, vel));
+
+// ---------------------------------------------------------------------------
+// WireSig
+// ---------------------------------------------------------------------------
+//
+// The wire twin of lat::RtSig, asserted to mirror it field for field. Unlike
+// WireNote the mirror does NOT license a cast — see PoolKindSignatures for why
+// the daemon copies instead — it is here so that a copy is a memcpy and so that
+// a change to RtSig cannot alter the protocol without the build noticing.
+//
+// `beat` is DERIVED (engine.h): the absolute beat the entry's bar begins on. It
+// crosses rather than being recomputed because sigMapValid RE-DERIVES it and
+// refuses a map whose beats do not follow from its own bar lengths — so sending
+// it is what lets the far side check the sender's arithmetic instead of
+// trusting it.
+struct WireSig {
+    i32 bar;
+    i32 num, den;
+    i32 pad;
+    f64 beat;
+};
+
+static_assert(std::is_trivially_copyable_v<WireSig>);
+static_assert(sizeof(WireSig) == sizeof(RtSig), "WireSig must mirror RtSig");
+static_assert(alignof(WireSig) == alignof(RtSig));
+static_assert(offsetof(WireSig, bar)  == offsetof(RtSig, bar));
+static_assert(offsetof(WireSig, num)  == offsetof(RtSig, num));
+static_assert(offsetof(WireSig, den)  == offsetof(RtSig, den));
+static_assert(offsetof(WireSig, beat) == offsetof(RtSig, beat));
 
 // ---------------------------------------------------------------------------
 // PoolBlock — the inline descriptor, immediately before its data
@@ -413,6 +501,8 @@ inline bool poolValidate(const u8* base, size_t payloadBytes, const PoolHeader* 
                 : wantKind == PoolKindString      ? "block does not hold a string"
                 : wantKind == PoolKindArrangement ? "block does not hold an arrangement"
                 : wantKind == PoolKindTrackAutos  ? "block does not hold track automation"
+                : wantKind == PoolKindRackState   ? "block does not hold a rack state"
+                : wantKind == PoolKindSignatures  ? "block does not hold a signature map"
                                                   : "block is of the wrong kind");
     if (needBytes > bytes)                   return no("block is smaller than the clip claims");
     // Hand the validated extent back so callers never re-read the mutable field
@@ -647,14 +737,40 @@ public:
     // written and counted, so a daemon that trusts nothing still gets a
     // terminated buffer if it copies `bytes` of it — but it must not trust
     // that either, and does not (Daemon::readPoolString).
-    u64 writeString(const char* s) {
+    u64 writeString(const char* s) { return writeText(s, PoolKindString, kMaxPoolString); }
+
+    // A rack's contents (PoolKindRackState), i.e. rackStateToString()'s output.
+    // Same bytes-and-a-terminator shape as writeString and deliberately NOT the
+    // same kind or the same bound — see PoolKindRackState and kMaxRackState.
+    u64 writeRackState(const char* s) { return writeText(s, PoolKindRackState, kMaxRackState); }
+
+    // The shared half. `cap` is the caller's policy bound including the NUL, and
+    // it is checked BEFORE the allocation so that an over-long payload is a
+    // refusal the caller can report rather than a pool that fills with strings
+    // nobody asked for.
+    u64 writeText(const char* s, u32 kind, u64 cap) {
         if (!s) return 0;
         const size_t len = std::strlen(s);
-        if (len + 1 > kMaxPoolString) return 0;
-        const u64 ref = alloc(len + 1, PoolKindString, (i64)(len + 1), 0, 0.0, 0);
+        if (len + 1 > cap) return 0;
+        const u64 ref = alloc(len + 1, kind, (i64)(len + 1), 0, 0.0, 0);
         if (!ref) return 0;
         std::memcpy(base_ + ref, s, len);
         base_[ref + len] = '\0';
+        return ref;
+    }
+
+    // The signature map (PoolKindSignatures), `count` entries. Bounded by
+    // kMaxSigs on the way in rather than clamped, so a caller with a bigger map
+    // gets a refusal it can report rather than a map that silently loses its
+    // tail — the last entry of a signature map runs FOREVER, so a truncated one
+    // is not a shorter song, it is a different one.
+    u64 writeSignatures(const WireSig* sigs, i64 count) {
+        if (count <= 0 || count > kMaxSigs) return 0;
+        const size_t n = (size_t)count * sizeof(WireSig);
+        const u64 ref = alloc(n, PoolKindSignatures, count, 0, 0.0, 0);
+        if (!ref) return 0;
+        if (sigs) std::memcpy(base_ + ref, sigs, n);
+        else      std::memset(base_ + ref, 0, n);
         return ref;
     }
 

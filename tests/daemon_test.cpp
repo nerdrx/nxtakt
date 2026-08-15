@@ -1965,6 +1965,441 @@ static void testDevices(ipc::EngineClient& c) {
 }
 
 // ---------------------------------------------------------------------------
+// 11c. rack contents over the wire (protocol v7, docs/RACKS.md)
+// ---------------------------------------------------------------------------
+//
+// A rack is a PluginInstance that owns PluginInstances, and RACKS.md §4 is
+// explicit that its descriptor does NOT describe its contents. Before v7 that
+// meant the daemon instantiated `nxtakt:rack`, got an empty one — eight macros
+// driving nothing — and the device sounded as a straight passthrough while the
+// GUI drew a full sub-chain. This section is that gap closed, measured in the
+// meter.
+//
+// It builds the state string BY HAND, which is not laziness: this file
+// deliberately links no src/plugin, so a state written here is written against
+// the FORMAT rather than against the serialiser, and a change to
+// rackStateToString that broke the reader would fail here rather than agree
+// with itself. The URI's colon is percent-escaped because ':' is one of the five
+// structural characters (RACKS.md, "Persistence").
+//
+// THE CHECK THAT IS ACTUALLY HARD is the parked one. Macro 0 is written as 1.0
+// and mapped to the saturator's Drive over 0..36 dB, while Drive itself is
+// stored at 0. If setState re-derived the target from the macro — which is what
+// addMapping() does at EDIT time, and what a restore must not do — Drive would
+// come back at 36 dB and the meter would read ~0.46. It has to read ~0.20. That
+// is RACKS.md's "a mapped target parked off its macro's curve comes back parked"
+// asserted through a process boundary, in audio.
+static void testRackContents(ipc::EngineClient& c) {
+    banner("11c. rack contents: a sub-chain crosses as a pool blob and SOUNDS");
+
+    resetMixer(c);
+    drainEvents(c);
+    const ipc::ControlHeader& h = c.header();
+
+    const i64 kFrames = 12000;
+    const std::vector<f32> dc = makeDc(kFrames, 2, 0.2f);
+    const u64 ref = c.poolWrite(dc.data(), kFrames, 2, 48000.0, /*key*/0x2ACC1ull);
+    CHECK(ref != 0, "a 0.2 DC clip in the pool");
+    ipc::WireClip wc = audioClip(ref, kFrames, 2);
+    CHECK(c.setClip(0, 2, wc) && waitClipIdle(c, 0, 2), "published into [0][2]");
+    c.pushCommand(Cmd::LaunchClip, 0, 2);
+    CHECK(waitUntil([&] {
+        drainEvents(c);
+        return c.state().slotState[0].load() == (int)SlotState::Playing;
+    }, 3000), "and playing");
+    const f32 dry = settledPeak(c, 0, 300);
+    CHECK(std::fabs(dry - 0.2f) < 0.02f, "the dry track meter reads %.4f", (double)dry);
+
+    u32 rack = 0;
+    const bool added = addDeviceAndWait(c, ipc::DevTargetTrack, 0, -1, "nxtakt:rack",
+                                        rack, kScanTimeoutMs);
+    CHECK(added, "AddDevice nxtakt:rack -> device %u", rack);
+    if (!added) { c.clearClip(0, 2); return; }
+
+    // Hoisted, not inlined into CHECK: checkImpl is an ordinary variadic
+    // function, so the order in which its arguments are evaluated is
+    // unspecified — a readDevice() inside the condition may run AFTER the `d`
+    // the message prints. The assertion would still be right and the number
+    // beside it wrong, which is the worst way for a test to be correct.
+    ipc::DeviceMirror d;
+    bool read = c.readDevice(rack, d);
+    CHECK(read && d.params.size() == 8,
+          "its table row has the eight macros and nothing else (%zu params)",
+          d.params.size());
+    const f32 empty = settledPeak(c, 0, 300);
+    CHECK(std::fabs(empty - dry) < 0.02f,
+          "an EMPTY rack is a passthrough, which is the state this section ends: "
+          "%.4f (dry %.4f)", (double)empty, (double)dry);
+
+    // -- the state, by hand --------------------------------------------------
+    //
+    //   m=   macro 0 at 1.0, the rest at 0
+    //   d=   nxtakt:saturator, not bypassed, no nested rack, Drive PARKED at 0,
+    //        Output 0, Mix 1
+    //   x=   macro 0 -> device 0, param id 0 (Drive), over 0..36 dB
+    const char* kParked =
+        "nxrack1;m=1,0,0,0,0,0,0,0"
+        ";d=nxtakt%3Asaturator,0,-,0:0,1:0,2:1"
+        ";x=0,0,0,0,36";
+
+    // BEFORE the state, put a value in the param table that the state is about
+    // to disagree with. The rack is still empty, so this drives nothing — its
+    // only job is to leave the daemon's parameter cache holding 0.5 for macro 0
+    // where the state is about to write 1.0. What that sets up is asserted
+    // further down, under "converges on the client's value".
+    const u64 writes0 = h.paramWrites.load();
+    CHECK(c.setDeviceParam(rack, 0, 0.5f), "write macro 0 = 0.5 into the param table");
+    CHECK(waitUntil([&] { return h.paramWrites.load() > writes0; }, 2000),
+          "and the pump applied it to the empty rack, where it drives nothing");
+
+    const u64 applied0 = h.rackStatesApplied.load();
+    // Let the ADD's URI blob come home before taking the baseline, or the count
+    // below is chasing two retirements and can only be equal by luck.
+    for (int i = 0; i < 40; ++i) { drainEvents(c); sleepMs(5); }
+    const u64 blocks0  = c.pool().liveBlocks();
+    CHECK(c.setRackState(rack, c.deviceGeneration(rack), kParked),
+          "SetRackState crosses as a PoolKindRackState blob");
+
+    ipc::WireEvent chg{};
+    const bool answered = waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedRackState) &&
+                (u32)e.ref == rack) { chg = e; return true; }
+        return false;
+    }, 5000);
+    CHECK(answered, "answered by EvDeviceChanged(DeviceChangedRackState) for device %u", rack);
+    CHECK(h.rackStatesApplied.load() == applied0 + 1,
+          "and the daemon counted it applied (%llu)",
+          (unsigned long long)h.rackStatesApplied.load());
+    CHECK(waitUntil([&] {
+        drainEvents(c);
+        return c.pool().liveBlocks() == blocks0;
+    }, 3000), "the state blob came home as EvBlockRetired — a blob per edit would leak");
+
+    // THE PARKED CHECK. 0.20 means Drive stayed where the state put it; 0.46
+    // means something re-derived it from the macro.
+    const f32 parked = settledPeak(c, 0, 400);
+    CHECK(std::fabs(parked - dry) < 0.03f,
+          "Drive came back PARKED at 0 dB despite macro 0 sitting at 1.0: %.4f "
+          "(re-derived would be ~0.46)", (double)parked);
+
+    // -- the cache is re-seeded from the INSTANCE, and it converges ----------
+    //
+    // The table still says macro 0 = 0.5 (written above); the state just wrote
+    // 1.0 into the rack. Those two now disagree, and the daemon's parameter
+    // cache is re-seeded from the INSTANCE after setState precisely so the
+    // disagreement is visible to the next scan rather than swallowed: the client
+    // is the authority on where its knobs are, and a table the daemon has
+    // silently stopped agreeing with is a knob that has come off.
+    //
+    // So the next write of ANY parameter — here macro 1, which is mapped to
+    // nothing — bumps the row generation, the scan notices macro 0 differs from
+    // the cache, and the two converge on 0.5. Which, through the mapping, sweeps
+    // Drive to 18 dB and is audible.
+    //
+    // Remove the re-seed loop in doSetRackState and this goes red: the cache
+    // would still hold the 0.5 the client wrote, macro 0 would compare equal,
+    // and Drive would sit at the parked 0 dB for ever.
+    CHECK(c.setDeviceParam(rack, 1, 0.25f),
+          "write an UNRELATED macro, which is what bumps the row generation");
+    const f32 driven = settledPeak(c, 0, 400);
+    CHECK(driven > parked * 1.8f,
+          "the daemon converges on the CLIENT's macro value, and the mapping "
+          "drives its target: %.4f -> %.4f", (double)parked, (double)driven);
+    CHECK(c.setDeviceParam(rack, 0, 0.0f), "and macro 0 back to 0");
+    const f32 undriven = settledPeak(c, 0, 400);
+    CHECK(std::fabs(undriven - dry) < 0.03f, "which takes it back down: %.4f", (double)undriven);
+
+    // -- PARAMS BEFORE setState, deliberately raced ---------------------------
+    //
+    // RACKS.md's "one ordering trap", on the wire. A macro write that lands
+    // AFTER setState goes through Rack::setParam, which DRIVES its targets — so
+    // it re-derives every mapped parameter from the macro position and rounds
+    // away a value the state parked. The daemon closes it by applying the
+    // device's pending param row inside doSetRackState, before setState, and
+    // re-seeding the cache after.
+    //
+    // The daemon's pump runs pumpDeviceQueue() and then pumpParams(), one tick
+    // apart at most, so this writes the table and pushes the command back to
+    // back and lets the two land in whichever order they land in. WITH the
+    // ordering both interleavings park at 0 dB — that is the point, and it makes
+    // this check deterministic. WITHOUT it, the row generation is still
+    // unconsumed when pumpParams() reaches the freshly-stated rack, macro 0
+    // sweeps Drive to 27 dB, and the meter roughly doubles.
+    CHECK(c.setDeviceParam(rack, 0, 0.75f), "write macro 0 = 0.75 into the table");
+    CHECK(c.setRackState(rack, c.deviceGeneration(rack), kParked),
+          "and re-state the rack in the same breath");
+    CHECK(waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedRackState) &&
+                (u32)e.ref == rack) return true;
+        return false;
+    }, 5000), "which the daemon answers");
+    const f32 ordered = settledPeak(c, 0, 400);
+    CHECK(std::fabs(ordered - dry) < 0.03f,
+          "the pending macro was applied BEFORE setState, so the parked 0 dB "
+          "stands: %.4f (applied after, it would drive Drive to 27 dB)",
+          (double)ordered);
+    CHECK(c.setDeviceParam(rack, 0, 0.0f), "leave macro 0 at 0");
+
+    // -- RACKS.md §1: the latency is the chain's SUM and is not constant ------
+    //
+    // The stock limiter reports 240 frames at 48 kHz (5 ms of lookahead), and a
+    // rack's latencyFrames() is the sum of what is inside it. So a rack that
+    // reported 0 here would be the engine's delay compensation being lied to by
+    // exactly the amount we failed to declare — and the figure has to be the
+    // DAEMON's, because it owns the instances that make it up.
+    const char* kTwoLimiters =
+        "nxrack1;m=0,0,0,0,0,0,0,0"
+        ";d=nxtakt%3Alimiter,0,-"
+        ";d=nxtakt%3Alimiter,0,-";
+    CHECK(c.setRackState(rack, c.deviceGeneration(rack), kTwoLimiters),
+          "re-state the rack with two limiters in series");
+    ipc::WireEvent lat{};
+    const bool latEv = waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedRackState) &&
+                (u32)e.ref == rack) { lat = e; return true; }
+        return false;
+    }, 5000);
+    CHECK(latEv && lat.a == 480,
+          "the rack reports the SUM of its chain: %d frames (2 x 240)",
+          latEv ? lat.a : -1);
+    read = c.readDevice(rack, d);
+    CHECK(read && d.latencyFrames == 480,
+          "and the table row was republished with it (%d)", d.latencyFrames);
+
+    // -- refusals, each answered and each retiring its blob -------------------
+    //
+    // A rack state is a recipe for instantiating a whole sub-chain, so every one
+    // of these is a refusal that has to be VISIBLE: a silent one leaves a rack
+    // drawn full and sounding empty, which is precisely the state this feature
+    // exists to end.
+    struct Bad { const char* what; u32 dev; u32 gen; const char* text; u32 want; };
+    const Bad bad[] = {
+        { "a blob that is not a rack state", rack, c.deviceGeneration(rack),
+          "this is not a rack state at all", ipc::RejectBadRackState },
+        { "a stale device generation",       rack, c.deviceGeneration(rack) + 7u,
+          "nxrack1;m=0,0,0,0,0,0,0,0", ipc::RejectBadDevice },
+        { "a device id nothing occupies",    ipc::kMaxDevices - 1, 1u,
+          "nxrack1;m=0,0,0,0,0,0,0,0", ipc::RejectBadDevice },
+    };
+    for (const Bad& b : bad) {
+        drainEvents(c);
+        const u64 live0 = c.pool().liveBlocks();
+        CHECK(c.setRackState(b.dev, b.gen, b.text), "SetRackState with %s", b.what);
+        ipc::WireEvent f{};
+        const bool got = waitUntil([&] {
+            ipc::WireEvent e;
+            while (c.popEvent(e))
+                if (e.type == ipc::EvDeviceFailed && (u32)e.x == ipc::CmdSetRackState) {
+                    f = e; return true;
+                }
+            return false;
+        }, 3000);
+        CHECK(got && (u32)f.b == b.want, "  refused with %s",
+              ipc::rejectReasonName(got ? (u32)f.b : 0u));
+        CHECK(waitUntil([&] {
+            drainEvents(c);
+            return c.pool().liveBlocks() == live0;
+        }, 3000), "  and its blob was retired anyway — a refusal must not leak");
+    }
+
+    // A device that exists and is not a rack. Distinct from the above because
+    // "you named the wrong device" and "you named a device that cannot hold
+    // this" are different mistakes and a UI wants to say which.
+    u32 sat = 0;
+    if (addDeviceAndWait(c, ipc::DevTargetTrack, 1, -1, "nxtakt:saturator", sat, 5000)) {
+        drainEvents(c);
+        CHECK(c.setRackState(sat, c.deviceGeneration(sat), "nxrack1;m=0,0,0,0,0,0,0,0"),
+              "SetRackState aimed at a saturator");
+        ipc::WireEvent f{};
+        const bool got = waitUntil([&] {
+            ipc::WireEvent e;
+            while (c.popEvent(e))
+                if (e.type == ipc::EvDeviceFailed && (u32)e.x == ipc::CmdSetRackState) {
+                    f = e; return true;
+                }
+            return false;
+        }, 3000);
+        CHECK(got && (u32)f.b == ipc::RejectNotARack, "  refused with %s",
+              ipc::rejectReasonName(got ? (u32)f.b : 0u));
+        CHECK(got && (u32)f.a == sat,
+              "  and it names the DEVICE (%u), not a chain target — a client that "
+              "could not attribute a refusal would retry it forever", got ? (u32)f.a : 0u);
+        c.removeDevice(sat);
+        ipc::WireEvent rm{};
+        waitEvent(c, ipc::EvDeviceRemoved, rm, 2000);
+    }
+
+    // -- clean up ------------------------------------------------------------
+    CHECK(c.removeDevice(rack), "remove the rack");
+    ipc::WireEvent rm{};
+    CHECK(waitEvent(c, ipc::EvDeviceRemoved, rm, 3000) && (u32)rm.ref == rack,
+          "EvDeviceRemoved for it");
+    CHECK(c.alive(), "the daemon survived a section that instantiated plugins inside plugins");
+    CHECK(c.clearClip(0, 2) && waitClipIdle(c, 0, 2), "clear [0][2]");
+    waitRetired(c, ref);
+    c.poolRelease(ref);
+}
+
+// ---------------------------------------------------------------------------
+// 11d. the time-signature map (protocol v8)
+// ---------------------------------------------------------------------------
+//
+// Cmd::SetSignatures sat outside ipc::commandIsKnown's bound for several waves,
+// answering RejectUnknownCommand — which was the RIGHT way to be wrong, and had
+// one consequence: the daemon played every set in 4/4 while the ruler drew 7/8.
+// This section is that closed, and it is measured against the ENGINE's own
+// published counters rather than against anything the client believes, because
+// §11.6's whole point is that a session-derived readout and an engine playing a
+// refused map can disagree with total confidence.
+//
+// THE DISCRIMINATING MEASUREMENT is bar arithmetic, not the signature fields.
+// posSigNum/posSigDen read 4/4 for a map that never arrived AND for a map that
+// arrived and was ignored; a bar boundary at 3.5 beats can only exist if the
+// engine is walking a 7/8 map.
+static void testSignatures(ipc::EngineClient& c) {
+    banner("11d. the signature map crosses, and the engine plays in it");
+
+    resetMixer(c);
+    drainEvents(c);
+    c.pushCommand(Cmd::SetPlaying, 0);
+    waitUntil([&] { return c.state().playing.load() == 0; }, 2000);
+
+    // Where does the engine think bar boundaries are, right now? Beat 7 is
+    // deliberate: it is inside bar 1 in 4/4 (4 beats a bar) and inside bar 2 in
+    // 7/8 (3.5 beats a bar), so the SAME query answers differently under the two
+    // maps and the check needs no knowledge of whether posBar counts from 0.
+    const auto barAtBeat = [&](f64 beat) {
+        c.locate(beat);
+        i32 bar = -1;
+        waitUntil([&] {
+            drainEvents(c);
+            bar = c.state().posBar.load();
+            return std::fabs(c.state().beat.load() - beat) < 1e-6;
+        }, 3000);
+        // One more mirror pass, so the bar we read belongs to the beat we set.
+        sleepMs(60);
+        return c.state().posBar.load();
+    };
+
+    const i32 barIn44 = barAtBeat(7.0);
+    CHECK(c.state().posSigNum.load() == 4 && c.state().posSigDen.load() == 4,
+          "the engine starts in 4/4 (%d/%d) — which is also what an unpublished "
+          "map reads, hence the bar check below",
+          c.state().posSigNum.load(), c.state().posSigDen.load());
+
+    // -- a 7/8 map ----------------------------------------------------------
+    ipc::WireSig sig{};
+    sig.bar = 0; sig.num = 7; sig.den = 8; sig.pad = 0; sig.beat = 0.0;
+    const u64 blob = c.poolWriteSignatures(&sig, 1);
+    CHECK(blob != 0, "a one-entry map in the pool at %llu", (unsigned long long)blob);
+    CHECK(c.pool().blockAt(blob) &&
+          c.pool().blockAt(blob)->kind == ipc::PoolKindSignatures,
+          "and tagged PoolKindSignatures");
+
+    const u64 applied0 = c.header().signaturesApplied.load();
+    CHECK(c.setSignatures(blob, 1), "publish it");
+    CHECK(c.signaturesBusy(), "the map is blocked until the daemon answers");
+    const bool acked = waitUntil([&] {
+        drainEvents(c);
+        return !c.signaturesBusy();
+    }, 3000);
+    CHECK(acked, "EvSignaturesAck arrived");
+    CHECK(c.header().signaturesApplied.load() == applied0 + 1,
+          "the daemon translated it and handed it to the engine (%llu)",
+          (unsigned long long)c.header().signaturesApplied.load());
+    CHECK(c.signaturesShadow() == blob, "the client's shadow names the blob it sent");
+
+    const bool inSeven = waitUntil([&] {
+        drainEvents(c);
+        return c.state().posSigNum.load() == 7 && c.state().posSigDen.load() == 8;
+    }, 3000);
+    CHECK(inSeven, "the engine's published signature is 7/8 (%d/%d)",
+          c.state().posSigNum.load(), c.state().posSigDen.load());
+
+    const i32 barIn78 = barAtBeat(7.0);
+    CHECK(barIn78 == barIn44 + 1,
+          "AND THE BARS ARE 3.5 BEATS LONG: beat 7 is bar %d now and was bar %d "
+          "in 4/4 — an engine that accepted the map and ignored it would answer "
+          "the same number twice", barIn78, barIn44);
+
+    // -- a map the ENGINE's own validator refuses ---------------------------
+    //
+    // `beat` is derived and sigMapValid RE-DERIVES it, so a publisher cannot lie
+    // the engine into putting bar lines where there are none. The daemon runs
+    // the same validator before it forwards, which is the difference between a
+    // client that is TOLD and a client whose set quietly stays in 4/4.
+    ipc::WireSig bad[2] = {};
+    bad[0].bar = 0; bad[0].num = 4; bad[0].den = 4; bad[0].beat = 0.0;
+    bad[1].bar = 2; bad[1].num = 3; bad[1].den = 4; bad[1].beat = 99.0;   // should be 8.0
+    const u64 badBlob = c.poolWriteSignatures(bad, 2);
+    CHECK(badBlob != 0, "a map whose second entry's beat does not follow from bar 0");
+    drainEvents(c);
+    CHECK(c.setSignatures(badBlob, 2), "push it");
+    ipc::WireEvent sigEv{};
+    const bool refused = waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e)) if (e.type == ipc::EvSignaturesAck) { sigEv = e; return true; }
+        return false;
+    }, 3000);
+    CHECK(refused && (sigEv.flags & ipc::SigAckRefused) &&
+          (u32)sigEv.x == ipc::RejectBadSignatures,
+          "refused with %s", ipc::rejectReasonName(refused ? (u32)sigEv.x : 0u));
+    CHECK(waitUntil([&] {
+        drainEvents(c);
+        return c.state().posSigNum.load() == 7;
+    }, 2000), "and the engine kept the 7/8 map it had (%d/%d)",
+          c.state().posSigNum.load(), c.state().posSigDen.load());
+
+    // The refused blob is the client's and unreferenced; onSignaturesAck frees
+    // it rather than leaking a block whose only purpose was a refused command.
+    CHECK(c.pool().stateOf(badBlob) == ipc::BlockFree,
+          "and its blob was freed (%s) — a refusal must not leak",
+          ipc::poolStateName(c.pool().stateOf(badBlob)));
+
+    // -- a garbage offset never becomes a pointer ---------------------------
+    drainEvents(c);
+    CHECK(c.pushCommand(Cmd::SetSignatures, 1, 9999, 0.0, /*ref*/64 * 1024 + 64),
+          "a SetSignatures naming an offset nothing was ever allocated at");
+    const bool badRef = waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvSignaturesAck && (e.flags & ipc::SigAckRefused) &&
+                (u32)e.ref == 9999u) { sigEv = e; return true; }
+        return false;
+    }, 3000);
+    CHECK(badRef && (u32)sigEv.x == ipc::RejectBadPoolRef,
+          "is refused with %s, and the daemon is still alive",
+          ipc::rejectReasonName(badRef ? (u32)sigEv.x : 0u));
+    CHECK(c.alive(), "which it is");
+
+    // -- clearing goes back to 4/4 ------------------------------------------
+    CHECK(c.clearSignatures(), "clear the map");
+    const bool backTo44 = waitUntil([&] {
+        drainEvents(c);
+        return !c.signaturesBusy() && c.state().posSigNum.load() == 4;
+    }, 3000);
+    // Hoisted: checkImpl is a variadic function, so the order its arguments are
+    // evaluated in is unspecified and an inline waitUntil can run AFTER the
+    // numbers the message prints. The assertion would be right and the figure
+    // beside it stale, which is the worst way for a test to be correct.
+    CHECK(backTo44, "the engine is back in 4/4 (%d/%d)",
+          c.state().posSigNum.load(), c.state().posSigDen.load());
+    CHECK(waitUntil([&] {
+        drainEvents(c);
+        return c.pool().stateOf(blob) == ipc::BlockFree;
+    }, 3000), "and the 7/8 blob was freed on the acknowledgement (%s)",
+          ipc::poolStateName(c.pool().stateOf(blob)));
+
+    c.locate(0.0);
+}
+
+// ---------------------------------------------------------------------------
 // 12. exact retirement: the drains counter replaces the deadline
 // ---------------------------------------------------------------------------
 //
@@ -3244,6 +3679,8 @@ int main(int argc, char** argv) {
         testHostileClips(client);
         testCommandFloodHeartbeat(client);
         testDevices(client);
+        testRackContents(client);
+        testSignatures(client);
         testDrainsExactness(client);
         testArrangementCommands(client);
         testArrangementPlays(client);

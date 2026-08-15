@@ -13,6 +13,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <new>
 #include <string>
 #include <unordered_map>
@@ -122,6 +123,64 @@ u64 fingerprint(const void* p, size_t bytes, i64 a, i64 b, f64 c, size_t probes)
     return h;
 }
 
+// A RACK'S CONTENTS, HASHED IN FULL — every field of every sub-device, every
+// mapping, every macro — and the "in full" is the same decision notesRefFor
+// made, reached from the same place.
+//
+// The audio path can afford 256 strided probes because a SampleBuffer's samples
+// are immutable for the life of the allocation: the question there is only "is
+// the buffer at this address still the buffer I cached", and the address is half
+// the answer. Neither half is available here. A rack is EDITED IN PLACE all
+// session — a knob inside it, a device dropped in, a mapping dragged onto a
+// macro — so the question is genuinely "did the content change"; and there is no
+// address to key on at all, because RackControl::state() builds a fresh
+// RackState on every call, at whatever address the allocator felt like. So the
+// content is the only thing there is to hash, and a stride that skipped a field
+// would be the notes bug again: a mapping's `max` changed, the same fingerprint
+// computed, the cached publication served, and a rack in the daemon that goes on
+// sweeping the old range with nothing but the ear to notice.
+//
+// It is cheap in absolute terms, which is what makes "in full" easy: RackState
+// is bounded by the format — kRackMaxDevices sub-devices, kRackMaxMappings
+// mappings, eight macros — so a worst case is a few thousand words, hashed once
+// per rack per frame. Compare rackStateToString(), which is a shortest-round-
+// tripping snprintf per parameter and is therefore deliberately NOT on this
+// path: it runs only when this number has moved.
+//
+// Nested racks ride the same hash for free: RackState::Device::state holds the
+// nested rack's own compact form, so hashing those bytes covers every level down
+// to kRackMaxDepth.
+u64 rackFingerprint(const RackState& s) {
+    u64 h = 1469598103934665603ull;
+    auto mix = [&](u64 v) {
+        for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xffull; h *= 1099511628211ull; }
+    };
+    auto text = [&](const std::string& t) {
+        mix((u64)t.size());
+        for (unsigned char c : t) mix((u64)c);
+    };
+    auto f32bits = [&](f32 v) { u32 b = 0; std::memcpy(&b, &v, sizeof b); mix((u64)b); };
+
+    mix((u64)s.devices.size());
+    for (const RackState::Device& d : s.devices) {
+        text(d.uri);
+        mix(d.bypass ? 1ull : 0ull);
+        mix((u64)d.params.size());
+        for (const auto& p : d.params) { mix((u64)p.first); f32bits(p.second); }
+        text(d.state);                       // a nested rack, one level at a time
+    }
+    for (int i = 0; i < kRackMacros; ++i) f32bits(s.macros[i]);
+    mix((u64)s.mappings.size());
+    for (const RackMapping& m : s.mappings) {
+        mix((u64)(i64)m.macro);
+        mix((u64)(i64)m.device);
+        mix((u64)m.param);
+        f32bits(m.min);
+        f32bits(m.max);
+    }
+    return h;
+}
+
 // argv[0]'s directory plus "nxtaktd". The daemon ships beside the GUI, so
 // /proc/self/exe is the answer that keeps working from a build tree, an install
 // prefix and a test harness alike. $NXTAKT_DAEMON overrides it outright.
@@ -201,6 +260,32 @@ struct RemoteEngine {
     std::unordered_map<const void*, Cached> samples;
     std::unordered_map<const void*, Cached> notes;
 
+    // AN ARRANGEMENT'S NOTES CANNOT USE THE ADDRESS CACHE, and the reason is a
+    // difference between the two containers rather than a preference.
+    //
+    // A session cell's RtNote[] is App's own array for that cell: one
+    // allocation, edited in place, at a stable address for as long as the clip
+    // exists. That is exactly what an address-keyed cache with a content
+    // fingerprint is for. An ARRANGEMENT's notes live INSIDE the lane's single
+    // allocation ([RtArrangement][items][clips][notes], ARRANGEMENT.md §9.2), so
+    // every republication of a lane — and a drag republishes it every frame —
+    // puts them at a NEW address, and the old one is freed by App as soon as the
+    // retirement comes home. An address-keyed entry would therefore be dead the
+    // moment it was written: the map would grow by one entry per frame, each
+    // holding a pool block nothing would ever release, and the addresses would
+    // be reused by the allocator into the bargain.
+    //
+    // So the arrangement's notes are keyed by their POSITION — lane, then clip
+    // index — with the same content fingerprint beside them. That is the "last
+    // published" table this file already keeps for every other pointer the GUI
+    // hands over, and it gives the property that matters: a lane republished
+    // with the notes unchanged reuses the block it already wrote, so dragging an
+    // item does not allocate.
+    //
+    // Index kMaxTracks is the transport cell (addressed as track -1), the same
+    // convention pubArr uses.
+    std::vector<Cached> arrNotes[kMaxTracks + 1];
+
     // -- the retirement stand-in --------------------------------------------
     //
     // The engine announces a *replaced* pointer, and only when it differs from
@@ -210,6 +295,7 @@ struct RemoteEngine {
     const void* pubAutos[kMaxTracks][kMaxScenes] = {};
     const void* pubWarp [kMaxTracks][kMaxScenes] = {};
     const void* pubArr  [kMaxTracks + 1] = {};      // index kMaxTracks = transport
+    const void* pubSigs = nullptr;                 // the signature map: one array, one slot
     const void* pubTrackAutos[kMaxTracks] = {};
     const void* pubChain[kChainCount] = {};
     // ONE inbox for both the wire's events and the synthesised ones, drained by
@@ -232,6 +318,14 @@ struct RemoteEngine {
         bool bypass = false;            // what we last told the daemon
         std::vector<i32> map;           // GUI param index -> daemon index, -1 none
         std::vector<f32> pushed;        // last value written, per GUI param index
+        // The fingerprint of the rack state we last SENT for this device, or 0
+        // if it is not a rack / nothing has gone yet. It doubles as the refusal
+        // tombstone: a state the daemon rejected leaves its fingerprint here, so
+        // syncRacks() does not re-send it sixty times a second, and the next
+        // genuine edit produces a different number and genuinely retries. Same
+        // discipline as DevChain::refused, one level down.
+        u64  rackFinger = 0;
+        bool rackFailed = false;        // for the log line and for diagnostics
     };
     struct DevChain {
         u32 target = ipc::DevTargetTrack;
@@ -257,6 +351,21 @@ struct RemoteEngine {
     // would be reading freed memory.
     std::unordered_map<const PluginInstance*, RemoteDevice> devInfo;
     u64 devAdded = 0, devFailed = 0;
+    // Rack states this handle put on the wire, and the ones the daemon refused.
+    // Readable because "refused with a reason" is only true if somebody can see
+    // the reason, and because a rack that quietly never published is otherwise
+    // indistinguishable from one that published an empty state.
+    u64 racksSent = 0, racksFailed = 0;
+    // Arrangement lanes and automation sets this handle put on the wire, and the
+    // ones the daemon refused (EvArrangementAck with ArrAckRefused). A refusal
+    // means a timeline that is drawn and does not play, which is not a state a
+    // UI may be silent about.
+    u64 arrPublished = 0, arrRefused = 0;
+    // Signature maps put on the wire, and the ones the daemon refused. A
+    // refusal means the set plays in 4/4 while its ruler draws something else,
+    // which is the exact disagreement §11.6 made unrenderable in the transport
+    // readout and which still has to be sayable in the status line.
+    u64 sigsPublished = 0, sigsRefused = 0;
     bool loggedAsync = false;
 
     // -- step 5: the catalog -------------------------------------------------
@@ -452,6 +561,39 @@ struct RemoteEngine {
                           true, rc.noteCount, 0);
     }
 
+    // One RtClip, as the wire spells it: every scalar copied and the two
+    // pointers replaced by pool offsets. Shared by the session clip table and by
+    // the arrangement blob, which is what makes a clip that is in a scene AND on
+    // the timeline name ONE pool block — written once, retired once. Two copies
+    // of this conversion would be two chances for those to drift apart.
+    // `cell` >= 0 routes the NOTES through the arrangement's positional cache
+    // instead of the address one; -1 is the session-cell path. The samples go
+    // through the address cache either way, and correctly: RtClip::data points
+    // at the shared SampleBuffer on App's heap in both cases, never into the
+    // lane's allocation.
+    ipc::WireClip wireClipOf(const RtClip& rc, int cell = -1, int idx = -1) {
+        ipc::WireClip w = ipc::defaultWireClip();
+        w.sampleRef    = sampleRefFor(rc);
+        w.notesRef     = cell >= 0 ? laneNotesRef(cell, idx, rc) : notesRefFor(rc);
+        w.frames       = rc.frames;
+        w.loopStart    = rc.loopStart;
+        w.loopEnd      = rc.loopEnd;
+        w.noteCount    = rc.noteCount;
+        w.clipBpm      = rc.clipBpm;
+        w.lengthBeats  = rc.lengthBeats;
+        w.prob         = rc.prob;
+        w.followBeats  = rc.followBeats;
+        w.gain         = rc.gain;
+        w.channels     = rc.channels;
+        w.warp         = rc.warp;
+        w.quantumIdx   = rc.quantumIdx;
+        w.followAction = rc.followAction;
+        w.loop         = rc.loop ? 1u : 0u;
+        w.isMidi       = rc.isMidi ? 1u : 0u;
+        w.valid        = rc.valid ? 1u : 0u;
+        return w;
+    }
+
     // ---------------------------------------------------------------------
     // Commands
     // ---------------------------------------------------------------------
@@ -527,32 +669,11 @@ struct RemoteEngine {
                 ++refusals;
                 return false;
 
-            // These three DO go through the FIFO, so they must be consumed. The
-            // daemon can take an arrangement — it has translateArrangement() and
-            // daemon_test proves it — but only as a pool blob, and building one
-            // out of an already-built RtArrangement is the next step's work.
-            case Cmd::SetArrangement: {
-                const int cell = (c.a == -1) ? kMaxTracks : c.a;
-                if (cell >= 0 && cell <= kMaxTracks)
-                    retire(pubArr[cell], c.p, Ev::ArrangementRetired, c.a, 0);
-                return refuse(c.type, "the arrangement needs a pool blob this step "
-                                      "does not build; the timeline will not sound");
-            }
-            case Cmd::SetTrackAutos: {
-                if (c.a >= 0 && c.a < kMaxTracks)
-                    retire(pubTrackAutos[c.a], c.p, Ev::TrackAutosRetired, c.a, 0);
-                return refuse(c.type, "arrangement automation rides the arrangement blob");
-            }
-            case Cmd::SetSignatures:
-                // Not reachable today — session.h's publishSignatures() takes an
-                // Engine& and so cannot be called at all in daemon mode — but
-                // spelled out rather than left to the default, because the day it
-                // is routed through the handle this is what must happen. Note
-                // there is no retirement table: the map is one array and the
-                // caller keeps the pointer it published.
-                return refuse(c.type, "Cmd::SetSignatures is outside "
-                                      "ipc::commandIsKnown's bound, so the daemon answers "
-                                      "RejectUnknownCommand and plays the set in 4/4");
+            // Both go through App's deferred FIFO, so `false` here means "try
+            // again next frame" and nothing else — see §11.2.
+            case Cmd::SetArrangement: return pushArrangement(c);
+            case Cmd::SetTrackAutos:  return pushTrackAutos(c);
+            case Cmd::SetSignatures: return pushSignatures(c);
 
             // Every scalar returned above, through commandIsScalar()'s own
             // exhaustive switch — which is where a newly appended Cmd gets its
@@ -586,25 +707,7 @@ struct RemoteEngine {
         }
 
         const RtClip& rc = c.clip;
-        ipc::WireClip w = ipc::defaultWireClip();
-        w.sampleRef    = sampleRefFor(rc);
-        w.notesRef     = notesRefFor(rc);
-        w.frames       = rc.frames;
-        w.loopStart    = rc.loopStart;
-        w.loopEnd      = rc.loopEnd;
-        w.noteCount    = rc.noteCount;
-        w.clipBpm      = rc.clipBpm;
-        w.lengthBeats  = rc.lengthBeats;
-        w.prob         = rc.prob;
-        w.followBeats  = rc.followBeats;
-        w.gain         = rc.gain;
-        w.channels     = rc.channels;
-        w.warp         = rc.warp;
-        w.quantumIdx   = rc.quantumIdx;
-        w.followAction = rc.followAction;
-        w.loop         = rc.loop ? 1u : 0u;
-        w.isMidi       = rc.isMidi ? 1u : 0u;
-        w.valid        = rc.valid ? 1u : 0u;
+        ipc::WireClip w = wireClipOf(rc);
 
         // A clip whose bytes never reached the pool must not be published as a
         // valid one: the daemon would answer RejectBadPoolRef and the cell would
@@ -631,6 +734,286 @@ struct RemoteEngine {
         retire(pubNotes[t][s], rc.notes,   Ev::NotesRetired, t, s);
         retire(pubAutos[t][s], rc.autos,   Ev::AutosRetired, t, s);
         retire(pubWarp[t][s],  rc.markers, Ev::WarpRetired,  t, s);
+        return true;
+    }
+
+    // One arrangement clip's notes, by position. See the note on arrNotes for
+    // why this is not the address cache. Hashed IN FULL, for exactly the reason
+    // notesRefFor gives: this is the "did the content change" question, and a
+    // strided sample of a 24-byte-per-note array only ever lands on `beat`.
+    u64 laneNotesRef(int cell, int idx, const RtClip& rc) {
+        if (!rc.notes || rc.noteCount <= 0 || idx < 0) return 0;
+        std::vector<Cached>& v = arrNotes[cell];
+        if ((size_t)idx >= v.size()) v.resize((size_t)idx + 1);
+        Cached& e = v[(size_t)idx];
+
+        const size_t bytes = (size_t)rc.noteCount * sizeof(RtNote);
+        const u64 finger = fingerprint(rc.notes, bytes, rc.noteCount, 0, 0.0, 0);
+        if (e.ref && e.finger == finger) return e.ref;
+        if (e.ref) { cli.poolRelease(e.ref); e.ref = 0; e.finger = 0; }
+
+        const u64 ref = cli.poolWriteNotes((const ipc::WireNote*)rc.notes, rc.noteCount);
+        if (!ref) {
+            ++poolFull;
+            if (!loggedPoolFull) {
+                loggedPoolFull = true;
+                LOGE("the sample pool would not take %zu B of arrangement notes: %s "
+                     "[further attempts silent]", bytes, cli.error());
+            }
+            return 0;
+        }
+        e.ref = ref;
+        e.finger = finger;
+        return ref;
+    }
+
+    // Drop the positional entries past `keep`. Called after a lane is accepted,
+    // never before: until then the blocks are still named by the lane the engine
+    // is playing, and poolRelease on a Live block defers rather than frees, so
+    // "after" is both correct and the only order that is obviously correct.
+    void trimLaneNotes(int cell, size_t keep) {
+        std::vector<Cached>& v = arrNotes[cell];
+        for (size_t i = keep; i < v.size(); ++i)
+            if (v[i].ref) cli.poolRelease(v[i].ref);
+        if (v.size() > keep) v.resize(keep);
+    }
+
+    // ---------------------------------------------------------------------
+    // The arrangement (docs/ARRANGEMENT.md §9, GUI-ON-DAEMON.md §11.9)
+    // ---------------------------------------------------------------------
+    //
+    // The daemon has been able to take an arrangement since wave 8g — it has
+    // translateArrangement() and daemon_test §16b proves it plays one. What was
+    // missing was this: the GUI hands the handle an already-built
+    // `RtArrangement`, a struct of pointers into one GUI-heap allocation, and
+    // somebody has to turn it into the blob.
+    //
+    // It is the clip encoder one level out, over the same pointer -> pool-ref
+    // cache: every RtClip inside the lane goes through sampleRefFor/notesRefFor
+    // exactly as a session cell's does, so a clip used by a session slot AND by
+    // an arrangement item names ONE block, is written once, and is retired once.
+    // That sharing is not an optimisation, it is what makes a set whose scenes
+    // were dragged onto the timeline cost the same memory as the set did.
+    //
+    // WHAT IS NOT CARRIED, and it is stated per-lane rather than left to be
+    // discovered: RtClip::autos, ::markers and ::transients have no WireClip
+    // field, so an arrangement clip with an envelope, a warp map or a transient
+    // grid crosses without them — the same three gaps §11.4 named for session
+    // clips, in the same place, for the same reason.
+    bool pushArrangement(const Command& c) {
+        const int cell = (c.a == -1) ? kMaxTracks : c.a;
+        if (cell < 0 || cell > kMaxTracks) return refuse(c.type, "no such arrangement lane");
+
+        const RtArrangement* ra = (const RtArrangement*)c.p;
+
+        // Clearing is a command with ref == 0 and is always expressible. It has
+        // to go through the same busy/ring check as a publication, or a clear
+        // could overtake a publication that has not been acknowledged.
+        if (!ra) {
+            if (!cli.setArrangement(c.a, 0)) return false;
+            retire(pubArr[cell], nullptr, Ev::ArrangementRetired, c.a, 0);
+            trimLaneNotes(cell, 0);
+            return true;
+        }
+
+        // Bounds FIRST, and refused as a whole rather than truncated. The
+        // daemon applies exactly these numbers (control.h, kMaxArr*) and answers
+        // RejectBadArrangement for a blob that breaks one, so clamping here
+        // would only move the refusal somewhere it could not be attributed —
+        // and a lane silently missing its last items is worse than a lane the
+        // status line says was refused.
+        if (ra->itemCount < 0 || ra->clipCount < 0 ||
+            (i64)ra->itemCount > ipc::kMaxArrItems ||
+            (i64)ra->clipCount > ipc::kMaxArrItems ||
+            (i64)ra->noteCount > ipc::kMaxArrNotes) {
+            return refuse(c.type, "the lane is past the protocol's bounds "
+                                  "(512 items, 65536 notes); it is not published");
+        }
+        if ((ra->itemCount && !ra->items) || (ra->clipCount && !ra->clips))
+            return refuse(c.type, "the lane declares items or clips it does not carry");
+
+        std::vector<ipc::WireArrItem> items((size_t)ra->itemCount);
+        for (int i = 0; i < ra->itemCount; ++i) {
+            const RtArrItem& s = ra->items[i];
+            ipc::WireArrItem& w = items[(size_t)i];
+            w.start     = s.start;
+            w.length    = s.length;
+            w.offset    = s.offset;
+            w.fadeIn    = s.fadeIn;
+            w.fadeOut   = s.fadeOut;
+            w.fadeShape = s.fadeShape;
+            w.clip      = s.clip;
+        }
+
+        std::vector<ipc::WireClip> clips((size_t)ra->clipCount);
+        bool dropped = false, poolShort = false;
+        for (int i = 0; i < ra->clipCount; ++i) {
+            const RtClip& rc = ra->clips[i];
+            ipc::WireClip& w = clips[(size_t)i];
+            w = wireClipOf(rc, cell, i);
+            if (rc.valid && ((rc.data && !w.sampleRef) || (rc.notes && !w.notesRef)))
+                poolShort = true;
+            if (rc.valid && (rc.autos || rc.markers || rc.transients)) dropped = true;
+        }
+
+        // A lane whose audio never reached the pool must not be published as if
+        // it had: the daemon would answer RejectBadArrangement, the whole lane
+        // would be refused, and App's FIFO would retry it for ever against a
+        // pool that is still full. Consumed and reported instead.
+        if (poolShort)
+            return refuse(c.type, "the sample pool would not take this lane's audio; "
+                                  "the timeline is not published");
+        if (dropped)
+            refuse(c.type, "an arrangement clip's envelope, warp map or transients have "
+                           "no WireClip field; the lane crosses without them");
+
+        ipc::WireArrHeader h{};
+        h.noteCount = ra->noteCount;
+        h.loopStart = ra->loopStart;
+        h.loopEnd   = ra->loopEnd;
+        h.loopOn    = ra->loopOn ? 1u : 0u;
+
+        const u64 blob = cli.poolWriteArrangement(h, items, clips);
+        if (!blob) {
+            ++poolFull;
+            if (!loggedPoolFull) {
+                loggedPoolFull = true;
+                LOGE("the sample pool would not take an arrangement blob: %s "
+                     "[further attempts silent]", cli.error());
+            }
+            return false;                       // transient: the pool may free up
+        }
+        // A refused publication must free the blob it just wrote, or a busy lane
+        // dragged for a second leaks one block per frame. The client only takes
+        // ownership of a blob it accepted.
+        if (!cli.setArrangement(c.a, blob)) { cli.poolRelease(blob); return false; }
+
+        retire(pubArr[cell], c.p, Ev::ArrangementRetired, c.a, 0);
+        trimLaneNotes(cell, (size_t)ra->clipCount);
+        ++arrPublished;
+        return true;
+    }
+
+    // THE SIGNATURE MAP (protocol v8). Cmd::SetSignatures spent several waves
+    // refused with a reason — it was outside ipc::commandIsKnown's bound, the
+    // daemon answered RejectUnknownCommand, and daemon mode PLAYED EVERY SET IN
+    // 4/4 while the ruler drew 7/8. Refused-and-visible beat accepted-and-
+    // ignored, and now neither is necessary.
+    //
+    // It is the shortest of the pooled payloads: one flat array, nothing else in
+    // the pool named by it, no per-track addressing. Note there is no content
+    // cache and there should not be — session.h's syncSignatures only calls this
+    // when the map has actually changed, which is a handful of times in a
+    // session, so a cache would be a second thing to keep true in exchange for
+    // nothing.
+    bool pushSignatures(const Command& c) {
+        const RtSig* map = (const RtSig*)c.p;
+        const i32 n = c.a;
+
+        if (!map || n <= 0) {
+            if (!cli.clearSignatures()) return false;
+            retire(pubSigs, nullptr, Ev::SigsRetired, 0, 0);
+            return true;
+        }
+        if (n > kMaxSigs)
+            return refuse(c.type, "the signature map is past kMaxSigs; the set keeps "
+                                  "the map the engine already has");
+
+        // A copy, field by field, rather than a cast over the RtSig array: the
+        // two structs are asserted to mirror each other (pool.h, WireSig), but
+        // this is the one place where the wire's shape is stated rather than
+        // inherited, and the assert is what makes the copy free.
+        std::vector<ipc::WireSig> ws((size_t)n);
+        for (i32 i = 0; i < n; ++i) {
+            ws[(size_t)i].bar  = map[i].bar;
+            ws[(size_t)i].num  = map[i].num;
+            ws[(size_t)i].den  = map[i].den;
+            ws[(size_t)i].pad  = 0;
+            ws[(size_t)i].beat = map[i].beat;
+        }
+
+        const u64 blob = cli.poolWriteSignatures(ws.data(), n);
+        if (!blob) {
+            ++poolFull;
+            if (!loggedPoolFull) {
+                loggedPoolFull = true;
+                LOGE("the sample pool would not take a %d-entry signature map: %s "
+                     "[further attempts silent]", n, cli.error());
+            }
+            return false;
+        }
+        if (!cli.setSignatures(blob, n)) { cli.poolRelease(blob); return false; }
+
+        // The retirement stand-in, one array wide. The GUI keeps the RtSig[] it
+        // published until Ev::SigsRetired names it; nothing crossed (the map was
+        // COPIED into a blob), so there is no engine here to send that event and
+        // App would hold every map it ever published for the life of the session.
+        retire(pubSigs, c.p, Ev::SigsRetired, 0, 0);
+        ++sigsPublished;
+        return true;
+    }
+
+    bool pushTrackAutos(const Command& c) {
+        if (c.a < 0 || c.a >= kMaxTracks) return refuse(c.type, "no such automation lane");
+        const RtAutoSetN* as = (const RtAutoSetN*)c.p;
+
+        if (!as) {
+            if (!cli.setTrackAutos(c.a, 0)) return false;
+            retire(pubTrackAutos[c.a], nullptr, Ev::TrackAutosRetired, c.a, 0);
+            return true;
+        }
+        if (as->laneCount < 0 || as->pointCount < 0 ||
+            (i64)as->laneCount > ipc::kMaxArrLanes ||
+            (i64)as->pointCount > ipc::kMaxArrPoints)
+            return refuse(c.type, "the automation set is past the protocol's bounds "
+                                  "(32 lanes, 65536 points); it is not published");
+        if ((as->laneCount && !as->lanes) || (as->pointCount && !as->points))
+            return refuse(c.type, "the automation set declares lanes or points it does "
+                                  "not carry");
+
+        std::vector<ipc::WireAutoLane>  lanes((size_t)as->laneCount);
+        std::vector<ipc::WireAutoPoint> points((size_t)as->pointCount);
+        for (int i = 0; i < as->laneCount; ++i) {
+            const RtAutoLane& s = as->lanes[i];
+            ipc::WireAutoLane& w = lanes[(size_t)i];
+            w.target  = s.target;
+            w.index   = s.index;
+            w.devSlot = s.devSlot;
+            w.xform   = s.xform;
+            w.first   = s.first;
+            w.count   = s.count;
+            w.lo      = s.lo;
+            w.hi      = s.hi;
+            w.flags   = s.flags;
+            w.pad     = 0;
+        }
+        // Reinterpreted rather than converted would be legal here — WireAutoPoint
+        // is asserted to mirror RtAutoPoint field for field — but the copy is
+        // written out because RtAutoSetN itself holds pointers and the blob's
+        // point array has to be a separate, contiguous run either way.
+        for (int i = 0; i < as->pointCount; ++i) {
+            const RtAutoPoint& s = as->points[i];
+            ipc::WireAutoPoint& w = points[(size_t)i];
+            w.beat  = s.beat;
+            w.value = s.value;
+            w.curve = s.curve;
+            w.pad[0] = w.pad[1] = w.pad[2] = 0;
+        }
+
+        const u64 blob = cli.poolWriteTrackAutos(lanes, points);
+        if (!blob) {
+            ++poolFull;
+            if (!loggedPoolFull) {
+                loggedPoolFull = true;
+                LOGE("the sample pool would not take a track-automation blob: %s "
+                     "[further attempts silent]", cli.error());
+            }
+            return false;
+        }
+        if (!cli.setTrackAutos(c.a, blob)) { cli.poolRelease(blob); return false; }
+
+        retire(pubTrackAutos[c.a], c.p, Ev::TrackAutosRetired, c.a, 0);
+        ++arrPublished;
         return true;
     }
 
@@ -696,18 +1079,21 @@ struct RemoteEngine {
             else ch.refused.erase(ch.refused.begin() + (long)i);
         }
 
-        // docs/RACKS.md §4: a rack's descriptor does not describe its contents,
-        // and there is no wire field that could. The daemon instantiates
-        // 'nxtakt:rack' and gets an EMPTY one — eight macros driving nothing —
-        // so a rack crosses as a passthrough. Said once per chain rather than
-        // silently, because "my rack went quiet" is otherwise unattributable.
+        // docs/RACKS.md §4 says a rack's descriptor does not describe its
+        // contents, and until protocol v7 there was no wire field that could —
+        // so the daemon instantiated 'nxtakt:rack', got an EMPTY one, and the
+        // device sounded as a passthrough while the GUI drew what was supposed to
+        // be inside it. CmdSetRackState is that field: syncRacks() carries the
+        // contents as a PoolKindRackState blob and the daemon applies them with
+        // rackStateFromString + setState. The warning that used to be here is
+        // gone because the sentence it was warning about is no longer true.
         if (!ch.loggedRack)
             for (PluginInstance* p : ch.want)
                 if (p && p->rack()) {
                     ch.loggedRack = true;
-                    LOGW("daemon mode: a rack's CONTENTS have no wire field, so the "
-                         "engine loads an empty rack and it sounds as a passthrough "
-                         "(docs/RACKS.md §4)");
+                    LOGI("daemon mode: a rack's contents cross as a pool blob "
+                         "(docs/RACKS.md); the engine builds its own copy of the "
+                         "sub-chain and re-derives nothing");
                     break;
                 }
 
@@ -842,6 +1228,69 @@ struct RemoteEngine {
             }
     }
 
+    // A RACK'S CONTENTS, ONCE PER FRAME, AND ONLY WHEN THEY MOVED.
+    //
+    // The same reason syncParams() is a poll and not a hook: a user dropping a
+    // device into a rack, dragging a mapping onto a macro or turning a knob
+    // three levels down calls straight into the GUI's own RackControl and
+    // nothing tells this object. There is no command to hang a hook on, so the
+    // model is compared against what was last sent.
+    //
+    // The comparison is a fingerprint over RackState (see rackFingerprint) and
+    // NOT over rackStateToString()'s output, which is the one performance
+    // decision in here worth stating: state() is a walk of virtual getters,
+    // cheap enough for a frame; the string is a shortest-round-tripping snprintf
+    // per parameter, which for eight devices of sixty controls is hundreds of
+    // formats. So the string is built only when the fingerprint has moved, which
+    // is exactly when there is something to send.
+    //
+    // ORDER: after syncParams(), deliberately. The macros are ordinary params
+    // and go through the param table; the contents go through this command. The
+    // daemon re-orders them correctly on its own side (it applies the pending
+    // param row before setState and re-seeds its cache after — RACKS.md's
+    // ordering trap), but sending them in the order the GUI itself would apply
+    // them keeps the two sides' reasoning the same shape.
+    void syncRacks() {
+        for (int ci = 0; ci < kChainCount; ++ci)
+            for (DevSlot& s : chains[ci].live) {
+                if (!s.live || !s.src) continue;
+                RackControl* rc = s.src->rack();
+                if (!rc) continue;
+
+                const RackState st = rc->state();
+                const u64 finger = rackFingerprint(st);
+                if (finger == s.rackFinger) continue;
+
+                const std::string text = rackStateToString(st);
+                if (text.size() + 1 > ipc::kMaxRackState) {
+                    // Bounded by the format, so this needs a hostile or a
+                    // pathological rack — but a silent truncation would install a
+                    // DIFFERENT rack, not a shorter one, so it is refused and
+                    // tombstoned like any other permanent failure.
+                    if (!s.rackFailed) {
+                        s.rackFailed = true;
+                        LOGE("device %u: its rack serialises to %zu bytes, past the "
+                             "%llu the pool will carry; the engine keeps the contents "
+                             "it already has", s.id, text.size(),
+                             (unsigned long long)ipc::kMaxRackState);
+                    }
+                    s.rackFinger = finger;
+                    continue;
+                }
+
+                auto it = devInfo.find(s.src);
+                const u32 gen = it != devInfo.end() ? it->second.generation
+                                                    : cli.deviceGeneration(s.id);
+                // A refusal here is "could not send" — ring full, pool full,
+                // nothing attached — so the fingerprint is deliberately NOT
+                // advanced and the next frame tries again.
+                if (!cli.setRackState(s.id, gen, text.c_str())) continue;
+                s.rackFinger = finger;
+                s.rackFailed = false;
+                ++racksSent;
+            }
+    }
+
     // An AddDevice has been answered. Bind the id, work out which of the GUI's
     // controls each of the daemon's is, and push every value at once.
     void bindDevice(int ci, PluginInstance* src, u32 id) {
@@ -928,6 +1377,32 @@ struct RemoteEngine {
         info.error  = ipc::rejectReasonName(reason);
         LOGE("the engine would not load '%s': %s", info.uri.c_str(), info.error.c_str());
         devInfo[src] = std::move(info);
+    }
+
+    // The daemon would not take a rack's contents. The fingerprint stays where
+    // syncRacks() put it, which tombstones this exact state: it is not re-sent
+    // until the user edits the rack again, and then it is. Silence here would be
+    // a rack drawn full and sounding empty — the very thing this feature exists
+    // to end — so it is logged once per device.
+    void failRackState(u32 id, u32 reason) {
+        ++racksFailed;
+        for (int ci = 0; ci < kChainCount; ++ci)
+            for (DevSlot& s : chains[ci].live)
+                if (s.live && s.id == id) {
+                    if (!s.rackFailed) {
+                        s.rackFailed = true;
+                        auto it = devInfo.find(s.src);
+                        LOGE("the engine would not take the contents of the rack on "
+                             "device %u ('%s'): %s. It is drawn full here and sounds "
+                             "as whatever the engine already had.",
+                             id, it != devInfo.end() ? it->second.name.c_str() : "?",
+                             ipc::rejectReasonName(reason));
+                        if (it != devInfo.end()) it->second.error = ipc::rejectReasonName(reason);
+                    }
+                    return;
+                }
+        LOGW("the engine refused a rack state for device %u, which is not on any "
+             "chain we track: %s", id, ipc::rejectReasonName(reason));
     }
 
     u32 pendingDevices() const { return (u32)pendingAdds.size(); }
@@ -1047,6 +1522,12 @@ struct RemoteEngine {
                 break;
             }
             case ipc::EvDeviceFailed: {
+                // A rack-state refusal is answered against a DEVICE ID (`a`),
+                // not against the pendingAdds queue: it is not an add, so
+                // popping that queue for it would bind the next add's id to the
+                // wrong instance — the exact bug the `x` check below exists to
+                // prevent, one command wider.
+                if ((u32)w.x == ipc::CmdSetRackState) { failRackState((u32)w.a, (u32)w.b); break; }
                 if ((u32)w.x != ipc::CmdAddDevice) {
                     LOGW("the engine refused a device command: %s",
                          ipc::rejectReasonName((u32)w.b));
@@ -1061,13 +1542,51 @@ struct RemoteEngine {
             case ipc::EvScanComplete:
                 readCatalog();
                 break;
-            case ipc::EvDeviceRemoved:
+
+            // The client's own bookkeeping already ran in popEvent()'s
+            // observe() — the blob freed or kept, the blocks it named marked
+            // Live or displaced. What is left is the part only a UI can do:
+            // SAY SO. A refused lane is a timeline drawn on screen that does not
+            // play, and the acknowledgement carries the reason.
+            case ipc::EvSignaturesAck:
+                if (w.flags & ipc::SigAckRefused) {
+                    ++sigsRefused;
+                    LOGE("the engine refused the signature map: %s. The set is drawn "
+                         "in its own metre here and PLAYS IN 4/4.",
+                         ipc::rejectReasonName((u32)w.x));
+                }
+                break;
+            case ipc::EvArrangementAck:
+                if (w.flags & ipc::ArrAckRefused) {
+                    ++arrRefused;
+                    LOGE("the engine refused %s for %s: %s. That part of the "
+                         "timeline is drawn here and does not play.",
+                         (w.flags & ipc::ArrAckAutos) ? "the automation"
+                                                      : "the arrangement",
+                         w.a == -1 ? "the transport cell" : "a track",
+                         ipc::rejectReasonName((u32)w.x));
+                }
+                break;
             case ipc::EvDeviceChanged:
-                // Ours to have caused, both of them: we are the only writer of
-                // this chain and of this bypass flag, so the model already
-                // knows. The client's own bookkeeping (the slot generation the
-                // param guard is stamped with) ran in popEvent()'s observe(),
-                // which is the part that matters.
+                // Ours to have caused: we are the only writer of this chain, of
+                // this bypass flag and of this rack's contents, so the model
+                // already knows. The client's own bookkeeping (the slot
+                // generation the param guard is stamped with) ran in
+                // popEvent()'s observe(), which is the part that matters.
+                //
+                // One field is NOT ours and has to be taken: a rack's latency is
+                // the sum of the chain the DAEMON built, and RACKS.md §1 is
+                // explicit that the figure is not constant after prepare(). Ours
+                // would be the sum of the GUI's copy, which renders nothing.
+                if (w.flags & ipc::DeviceChangedRackState)
+                    for (int ci = 0; ci < kChainCount; ++ci)
+                        for (DevSlot& s : chains[ci].live)
+                            if (s.live && s.id == (u32)w.ref) {
+                                auto it = devInfo.find(s.src);
+                                if (it != devInfo.end()) it->second.latencyFrames = w.a;
+                            }
+                break;
+            case ipc::EvDeviceRemoved:
                 break;
             default:
                 // EvClipAck and EvBlockRetired are already applied by
@@ -1210,6 +1729,11 @@ struct RemoteEngine {
         openedNs = ipc::monotonicNs();
 
         const int cells = cli.republishClips();
+        // The blobs are still in the pool — it is the session's region and it
+        // outlives the engine — so putting the timeline back is one command per
+        // occupied lane and no re-encoding of anything (§10.7 step 3).
+        const int lanes = cli.republishArrangements();
+        const int sigs  = cli.republishSignatures();
         // Clips first, then scalars: a republished SetClip carries the cell's
         // gain/warp/loop from the shadow, and a Cmd::ClipGain the user moved
         // afterwards is in the scalar shadow. Replaying the scalars last is
@@ -1220,9 +1744,10 @@ struct RemoteEngine {
                 ++scalars;
 
         ++resyncs;
-        LOGI("engine restarted: pid %d, %d clip cell(s) and %d scalar(s) republished, "
-             "%zu chain(s) queued for rebuild. The transport is stopped.",
-             (int)cli.enginePid(), cells, scalars, (size_t)std::count_if(
+        LOGI("engine restarted: pid %d, %d clip cell(s), %d arrangement lane(s), "
+             "%d signature map(s) and %d scalar(s) republished, %zu chain(s) queued "
+             "for rebuild. The transport is stopped.",
+             (int)cli.enginePid(), cells, lanes, sigs, scalars, (size_t)std::count_if(
                  chains, chains + kChainCount, [](const DevChain& c) { return c.dirty; }));
         return true;
     }
@@ -1281,13 +1806,34 @@ bool EngineHandle::openDaemon(const char* session, const char* driver) {
     if (!r) { LOGE("could not allocate the engine client"); return false; }
     if (!r->open(session, driver)) return false;
     remote_ = std::move(r);
-    // Hardware MIDI does not follow. MidiInput::start() takes an Engine& and
-    // pushes straight into its ring; there is no Engine here, and src/audio is
-    // frozen this wave. §1.3's answer is to move the ALSA reader into nxtaktd,
-    // which is where it belongs anyway — a daemon that keeps playing after a GUI
-    // crash must keep answering the keyboard too. Until then daemon mode is
-    // mouse-and-computer-keyboard only, and says so rather than looking broken.
-    LOGW("daemon mode: hardware MIDI input is not connected (see GUI-ON-DAEMON.md §1.3)");
+
+    // HARDWARE MIDI, and this is §1.3's option 3 rather than its option 1.
+    //
+    // MidiInput no longer takes an Engine&; it takes a sink, and the sink is the
+    // one place in the program that knows where the engine is. So the ALSA
+    // client stays in the process the user's aconnect wiring already names, and
+    // the reader thread's messages go over the wire instead of into a ring that
+    // is not there.
+    //
+    // THE LOCK IS THE POINT. Locally the engine has two MIDI rings — one for the
+    // reader thread, one for the GUI (engine.h, pushMidi / pushMidiFromGui) — so
+    // each has exactly one producer. There is only ONE MIDI ring in the control
+    // region, and the GUI thread is already pushing the computer keyboard and
+    // the note previews into it, so the reader would be a second producer on a
+    // structure lat::Ring documents as single-producer. Two concurrent pushes
+    // can write the same slot and publish one index; it takes playing the
+    // computer keyboard and a controller in the same microsecond, and it is
+    // real. Neither producer is realtime, so a mutex costs nothing that matters
+    // — §1.3 recommends exactly this and rejects the frame-of-latency handoff
+    // because you can hear that one.
+    if (midi_.start([this](const MidiMsg& m) {
+            std::lock_guard<std::mutex> lk(midiMx_);
+            return remote_ && remote_->cli.pushMidi(m.status, m.d1, m.d2, m.frame);
+        }))
+        LOGI("midi in: alsa seq client %d:0, forwarded to the engine over the wire",
+             midi_.clientId());
+    else
+        LOGW("no MIDI input - continuing without it");
     return true;
 }
 
@@ -1401,6 +1947,7 @@ void EngineHandle::poll(EngineState& out) {
         remote_->pumpWire();
         remote_->reconcile();
         remote_->syncParams();
+        remote_->syncRacks();
         out.devicesPending = remote_->pendingDevices();
         return;
     }
@@ -1471,7 +2018,14 @@ bool EngineHandle::pushCommand(const Command& c) {
 }
 
 bool EngineHandle::pushMidi(const MidiMsg& m) {
-    if (remote_) return remote_->cli.pushMidi(m.status, m.d1, m.d2, m.frame);
+    if (remote_) {
+        // The same lock the hardware reader's sink takes. The two are the two
+        // producers on ONE shared-memory ring; see openDaemon().
+        std::lock_guard<std::mutex> lk(midiMx_);
+        return remote_->cli.pushMidi(m.status, m.d1, m.d2, m.frame);
+    }
+    // Locally the engine keeps a ring per producer, so this needs no lock: the
+    // reader thread is on pushMidi() and this is pushMidiFromGui().
     return engine_ ? engine_->pushMidiFromGui(m) : false;
 }
 
@@ -1521,9 +2075,12 @@ int EngineHandle::driverBufferSize() const {
 // All three answer "no" in daemon mode rather than lying about the GUI's own
 // (unstarted) MidiInput. The status bar draws exactly that, which is the
 // intended reading: there is no hardware MIDI on this path yet.
-bool EngineHandle::midiRunning() const { return remote_ ? false : midi_.running(); }
-int  EngineHandle::midiClientId() const { return remote_ ? -1 : midi_.clientId(); }
-u64  EngineHandle::midiReceived() const { return remote_ ? 0u : midi_.received(); }
+// All three answer for the real MidiInput on BOTH paths now. They used to say
+// "no" in daemon mode, which was honest at the time (the reader was not started)
+// and would be a lie today.
+bool EngineHandle::midiRunning() const { return midi_.running(); }
+int  EngineHandle::midiClientId() const { return midi_.clientId(); }
+u64  EngineHandle::midiReceived() const { return midi_.received(); }
 
 u64 EngineHandle::remoteRefusals() const { return remote_ ? remote_->refusals : 0u; }
 u64 EngineHandle::snapshotTears() const  { return remote_ ? remote_->tears : 0u; }
@@ -1561,6 +2118,15 @@ const RemoteDevice* EngineHandle::remoteDevice(const PluginInstance* gui) const 
 u32 EngineHandle::devicesPending() const { return remote_ ? remote_->pendingDevices() : 0u; }
 u64 EngineHandle::devicesAdded() const   { return remote_ ? remote_->devAdded : 0u; }
 u64 EngineHandle::devicesFailed() const  { return remote_ ? remote_->devFailed : 0u; }
+u64 EngineHandle::racksPublished() const { return remote_ ? remote_->racksSent : 0u; }
+u64 EngineHandle::racksRefused() const   { return remote_ ? remote_->racksFailed : 0u; }
+u64 EngineHandle::arrangementsPublished() const { return remote_ ? remote_->arrPublished : 0u; }
+u64 EngineHandle::arrangementsRefused() const   { return remote_ ? remote_->arrRefused : 0u; }
+u64 EngineHandle::poolBlocksLive() const {
+    return remote_ ? remote_->cli.pool().liveBlocks() : 0u;
+}
+u64 EngineHandle::signaturesPublished() const { return remote_ ? remote_->sigsPublished : 0u; }
+u64 EngineHandle::signaturesRefused() const   { return remote_ ? remote_->sigsRefused : 0u; }
 
 const std::vector<PluginDesc>& EngineHandle::catalog() const {
     // Empty in local mode ON PURPOSE, and callers must read it that way: there
@@ -1594,6 +2160,11 @@ i32 EngineHandle::enginePid() const {
 
 bool EngineHandle::restartEngine() {
     if (!remote_) return false;
+    // Under the MIDI lock: restart() detaches the client and re-attaches it, and
+    // the hardware reader thread is pushing into that same client from its own
+    // thread. Without this, a note arriving during the respawn dereferences a
+    // ring the detach has already unmapped.
+    std::lock_guard<std::mutex> lk(midiMx_);
     return remote_->restart();
 }
 u64 EngineHandle::resyncs() const { return remote_ ? remote_->resyncs : 0u; }

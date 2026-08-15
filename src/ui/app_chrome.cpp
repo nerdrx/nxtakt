@@ -221,10 +221,13 @@ void App::drawControlBar(const Rect& r) {
     // would have shown. syncSignatures is a compare against what it last
     // published, so on the frames where nothing moved it costs that compare.
     //
-    // Guarded on local(), like pumpJournal: Cmd::SetSignatures is not on the IPC
-    // wire yet (engine.h says so at the enumerator), so in daemon mode there is
-    // nothing to publish to and the branch is the honest way to say it.
-    if (Engine* e = eng_.local()) syncSignatures(*e, ses_);
+    // UNGUARDED as of protocol v8. It used to be `if (Engine* e = eng_.local())`,
+    // because Cmd::SetSignatures was not on the IPC wire and there was nothing to
+    // publish to in daemon mode -- with the consequence that daemon mode played
+    // every set in 4/4 however the ruler was drawn. The map crosses as a pool
+    // blob now, so the handle is the right argument on both paths and the guard
+    // was the bug.
+    syncSignatures(eng_, ses_);
     debugSignatureCheck(eng_.local(), ses_);
     chromeDebugInit();
     chromeDebugDrive(win_.input());

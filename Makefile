@@ -256,17 +256,30 @@ build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS) -ldl
 
 # EngineHandle across both of its backings: the in-process engine and a real
-# nxtaktd. Warnings stay on (it is our code, not a tool wrapper) and it links
-# no sndfile or lilv, because the handle is the seam and the seam has no
-# business knowing how a wav is decoded.
+# nxtaktd. Warnings stay on (it is our code, not a tool wrapper) and it links no
+# sndfile, because the handle is the seam and the seam has no business knowing
+# how a wav is decoded.
+#
+# It DOES link src/plugin, as of the rack-contents wave, and that is a change
+# worth a sentence. The suite's own note says the FakeDevice trick works because
+# "host.h is a header and the vtable is ours" — true for a plugin, and not true
+# for a RACK: `rackStateToString` is defined in internal_devices.cpp, and a fake
+# RackControl would only prove that the handle can serialise a fake. What has to
+# be tested is a real `nxtakt:rack` holding a real `nxtakt:saturator`, whose
+# state string the real serialiser produced and the daemon's real
+# rackStateFromString read back. Nothing here starts a scan, so lilv is a link
+# dependency and not a runtime cost.
 #
 # It spawns its own daemon, so it depends on one existing.
 build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp \
                    src/audio/backend.cpp src/audio/midi_in.cpp src/core/common.cpp \
+                   src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
+                   src/plugin/internal_devices.cpp \
                    build/nxtaktd
 	@mkdir -p build
-	$(CXX) -std=c++20 -O2 $(WARN) -I. $(filter %.cpp,$^) -o $@ \
-	  $(shell pkg-config --libs jack alsa) -lrt -lpthread -lm
+	$(CXX) -std=c++20 -O2 $(WARN) -I. -Ivendor/clap/include \
+	  $(shell pkg-config --cflags lilv-0 alsa) $(filter %.cpp,$^) -o $@ \
+	  $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -lm
 
 # Full headless check: engine unit tests, then a real render that must not be
 # silent, then a plugin scan.

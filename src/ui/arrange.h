@@ -43,6 +43,11 @@ inline constexpr f32 kArrMinGridPx = 7.f;
 
 // What the arrangement editor is allowed to see. Built by
 // App::drawArrangementView each frame.
+// Forward-declared rather than included: syncSignatures takes it by reference,
+// and pulling engine_handle.h in here would put it in every view translation
+// unit that draws the timeline.
+class EngineHandle;
+
 struct ArrangeContext {
     struct Lane {
         std::string name;
@@ -274,7 +279,11 @@ inline SigMap sigMapOf(const Session& s) {
 // drawn unconditionally and first -- so a load, an undo, a redo and every
 // signature edit are all covered by one call site and none of them can be
 // forgotten. A publication the ring refuses is simply retried next frame.
-void syncSignatures(Engine& eng, const Session& s);
+//
+// Takes the HANDLE and not an Engine: in daemon mode there is no in-process
+// Engine, and taking one is what kept this from being called there at all --
+// which is why daemon mode played every set in 4/4 however the ruler was drawn.
+void syncSignatures(EngineHandle& eng, const Session& s);
 
 // Ev::SigsRetired. Returns true when `p` was an array we published and have now
 // freed, false when it is not one of ours -- in which case the caller must leak

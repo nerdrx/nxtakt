@@ -70,7 +70,18 @@ static bool toWire(const snd_seq_event_t& ev, MidiMsg& m) {
 }
 
 bool MidiInput::start(Engine& e) {
+    // The one-line local sink. `&e` is captured raw and that is safe for exactly
+    // the reason the header states: stop() joins the reader before it drops the
+    // sink, and every caller stops this before it tears the engine down.
+    return start([&e](const MidiMsg& m) { return e.pushMidi(m); });
+}
+
+bool MidiInput::start(Sink sink) {
     if (running_.load(std::memory_order_relaxed)) return true;
+    if (!sink) {
+        LOGW("MIDI in: no sink; not opening a sequencer client");
+        return false;
+    }
 
     snd_seq_t* seq = nullptr;
     const int err = snd_seq_open(&seq, "default", SND_SEQ_OPEN_INPUT, 0);
@@ -93,7 +104,9 @@ bool MidiInput::start(Engine& e) {
     }
 
     seq_     = seq;
-    engine_  = &e;
+    // Written BEFORE the thread exists, so there is no publication question:
+    // the std::thread constructor is the synchronisation edge.
+    sink_    = std::move(sink);
     client_  = snd_seq_client_id(seq);
     port_    = port;
     received_.store(0, std::memory_order_relaxed);
@@ -113,7 +126,10 @@ void MidiInput::stop() {
     if (thread_.joinable()) thread_.join();
     snd_seq_close((snd_seq_t*)seq_);
     seq_    = nullptr;
-    engine_ = nullptr;
+    // AFTER the join, never before: the reader may be inside the sink right up
+    // until join() returns, and clearing a std::function out from under a call
+    // to it is a use-after-free with the free on this thread.
+    sink_   = nullptr;
     client_ = -1;
     port_   = -1;
 }
@@ -139,7 +155,7 @@ void MidiInput::run() {
             snd_seq_event_t* ev = nullptr;
             if (snd_seq_event_input(seq, &ev) < 0 || !ev) break;
             MidiMsg m;
-            if (toWire(*ev, m) && engine_ && engine_->pushMidi(m))
+            if (toWire(*ev, m) && sink_ && sink_(m))
                 received_.fetch_add(1, std::memory_order_relaxed);
             if (snd_seq_event_input_pending(seq, 0) <= 0) break;
         }

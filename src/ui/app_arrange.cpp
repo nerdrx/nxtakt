@@ -857,7 +857,7 @@ SigPub g_sigs;
 
 } // namespace
 
-void syncSignatures(Engine& eng, const Session& s) {
+void syncSignatures(EngineHandle& eng, const Session& s) {
     // Normalize a copy and compare. The comparison is against the NORMALIZED
     // form and not against `s.sigs`, because that is what was published: a set
     // whose map has never been normalized (a fresh Session, a parser that only

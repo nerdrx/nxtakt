@@ -181,6 +181,7 @@ public:
         // anything's state.
         rollbackPendingCells();
         rollbackPendingArrangements();
+        rollbackPendingSignatures();
         // Device ids belong to the engine that issued them and die with it: a
         // respawned daemon re-instantiates from scratch and numbers from zero.
         // Keeping the old generations would let a param write land on a
@@ -473,6 +474,68 @@ public:
     }
     bool clearTrackAutos(int track) { return publishArr(track, 0, Cmd::SetTrackAutos); }
 
+    // -----------------------------------------------------------------------
+    // The signature map (v8)
+    // -----------------------------------------------------------------------
+    //
+    // One flat WireSig[] in the pool and one 32-byte command. The same shadow
+    // discipline as an arrangement lane and for the same two reasons: a
+    // publication that has not been acknowledged must not be overwritten (or the
+    // daemon never learns what the first one displaced), and a blob that stays
+    // allocated here is what makes republishSignatures() after a respawn one
+    // command rather than a re-encode.
+    //
+    // It is deliberately NOT the string discipline — copy it out, echo the block
+    // back at once — even though the daemon does copy it out. That would work
+    // and would lose the restart: the client would have to rebuild the map from
+    // a session model it cannot see.
+
+    u64 poolWriteSignatures(const WireSig* sigs, i64 count) {
+        if (!pool_.valid()) return 0;
+        const u64 ref = pool_.writeSignatures(sigs, count);
+        if (!ref) { setErr("%s", pool_.error()); return 0; }
+        return ref;
+    }
+
+    // Publishes `blobRef` as the set's map; 0 clears. `count` is the entry
+    // count and rides `a`, exactly as it does in Command::a in-process.
+    // Refuses — changing nothing — for the same three "try again" reasons
+    // setClip() does.
+    bool setSignatures(u64 blobRef, i32 count) {
+        if (!attached()) return false;
+        if (sigPending_.generation != sigShadow_.generation) return false;
+        if (map_.cmds->size() >= CommandRing::capacity()) return false;
+        if (blobRef && (count <= 0 || count > kMaxSigs)) return false;
+
+        SigPub next;
+        next.blob       = blobRef;
+        next.count      = blobRef ? count : 0;
+        next.generation = sigShadow_.generation + 1;
+        // Marked Live for the same reason an arrangement's referenced blocks
+        // are: between here and the acknowledgement, a concurrent poolRelease()
+        // must not be able to free something the daemon is about to read.
+        if (next.blob) pool_.markLive(next.blob);
+        sigPending_ = next;
+        pushSigCommand(blobRef, next.count, next.generation);
+        return true;
+    }
+    bool clearSignatures() { return setSignatures(0, 0); }
+
+    u64  signaturesShadow() const { return sigShadow_.blob; }
+    bool signaturesBusy() const {
+        return sigPending_.generation != sigShadow_.generation;
+    }
+
+    // The respawn half. The blob is still in the pool — the session's region
+    // outlives the engine — so this is one command and no re-encoding.
+    int republishSignatures() {
+        if (!attached() || !sigShadow_.blob) return 0;
+        if (!pushSigCommand(sigShadow_.blob, sigShadow_.count, sigShadow_.generation))
+            return 0;
+        sigPending_ = sigShadow_;
+        return 1;
+    }
+
     // Both scalars, both refused by the daemon if `x` is not finite.
     bool locate(f64 beat)                 { return pushCommand(Cmd::Locate, 0, 0, beat); }
     bool backToArrangement(int track = -1) { return pushCommand(Cmd::BackToArrangement, track); }
@@ -555,9 +618,15 @@ public:
     //
     // Returns the offset, or 0 — and on 0 nothing was pushed, so the caller
     // retries next frame like any refused push.
-    u64 pushStringBlob(const char* s) {
+    u64 pushStringBlob(const char* s) { return pushTextBlob(s, PoolKindString); }
+
+    // The same, for a rack's contents. Split on `kind` rather than on a second
+    // copy of this function because the ownership dance below is the part that
+    // is easy to get wrong, and there should be exactly one of it.
+    u64 pushTextBlob(const char* s, u32 kind) {
         if (!attached() || !pool_.valid() || !s) return 0;
-        const u64 ref = pool_.writeString(s);
+        const u64 ref = kind == PoolKindRackState ? pool_.writeRackState(s)
+                                                  : pool_.writeString(s);
         if (!ref) { setErr("%s", pool_.error()); return 0; }
         pool_.markLive(ref);        // un-freeable until the daemon says otherwise
         return ref;
@@ -607,6 +676,34 @@ public:
     bool setBypass(u32 deviceId, bool on) {
         return pushDeviceCommand(CmdSetBypass, deviceId, on ? 1 : 0, 0);
     }
+    // Install a rack's contents (docs/RACKS.md). `state` is
+    // rackStateToString()'s output; `deviceGeneration` is the row generation the
+    // caller believes it is talking to, so a state that was in flight when the
+    // device was removed cannot land on its replacement — the same guard
+    // WireDeviceParams carries, and needed for the same reason but more sharply:
+    // a stale param write moves one knob, a stale rack state loads a whole
+    // chain of plugins into somebody else's device.
+    //
+    // Answered by exactly one EvDeviceChanged(DeviceChangedRackState) or
+    // EvDeviceFailed, and the blob comes back as EvBlockRetired either way.
+    // Returns false only for "could not send" — no pool, no engine, ring full,
+    // pool full, or a state longer than kMaxRackState — which is a retry.
+    bool setRackState(u32 deviceId, u32 deviceGeneration, const char* state) {
+        if (!attached() || !state) return false;
+        if (map_.cmds->size() >= CommandRing::capacity()) return false;
+        const u64 ref = pushTextBlob(state, PoolKindRackState);
+        if (!ref) return false;
+        WireCommand w{};
+        w.type  = CmdSetRackState;
+        w.flags = deviceGeneration;
+        w.a     = (i32)deviceId;
+        w.ref   = ref;
+        if (!pushCommand(w)) { dropStringBlob(ref); return false; }
+        pool_.markDisplaced(ref);
+        pool_.release(ref);
+        return true;
+    }
+
     // Start the catalog scan now instead of on the first addDevice().
     bool scanPlugins() {
         WireCommand w{};
@@ -786,6 +883,7 @@ public:
             case EvScanComplete:
                 return true;
             case EvArrangementAck: return onArrangementAck(e);
+            case EvSignaturesAck:  return onSignaturesAck(e);
             default:             return false;
         }
     }
@@ -1035,6 +1133,50 @@ private:
         return true;
     }
 
+    bool pushSigCommand(u64 blobRef, i32 count, u32 generation) {
+        WireCommand w{};
+        w.type = (u32)Cmd::SetSignatures;
+        w.a    = count;
+        w.b    = (i32)generation;
+        w.ref  = blobRef;
+        return pushCommand(w);
+    }
+
+    bool onSignaturesAck(const WireEvent& e) {
+        if (sigPending_.generation != (u32)e.ref) return true;          // stale echo
+        if (sigPending_.generation == sigShadow_.generation) return true;   // republish
+
+        if (e.flags & SigAckRefused) {
+            // The engine never saw it, so nothing was displaced and the blob is
+            // ours and unreferenced. Free it here rather than leaking a block
+            // whose only purpose was a command that was refused.
+            if (sigPending_.blob) { pool_.unmarkLive(sigPending_.blob); pool_.release(sigPending_.blob); }
+            sigShadow_.generation = sigPending_.generation;   // keep them monotonic
+            sigPending_ = sigShadow_;
+            return true;
+        }
+
+        // Accepted. The OLD blob is dead outright — the daemon copied it into
+        // its own heap at translate time and will never read it again — so
+        // unlike a sample block there is no engine-side lifetime to wait on.
+        if (sigShadow_.blob && sigShadow_.blob != sigPending_.blob) {
+            pool_.unmarkLive(sigShadow_.blob);
+            pool_.release(sigShadow_.blob);
+        }
+        sigShadow_ = sigPending_;
+        return true;
+    }
+
+    void rollbackPendingSignatures() {
+        if (sigPending_.generation == sigShadow_.generation) return;
+        if (sigPending_.blob && sigPending_.blob != sigShadow_.blob) {
+            pool_.unmarkLive(sigPending_.blob);
+            pool_.release(sigPending_.blob);
+        }
+        sigShadow_.generation = sigPending_.generation;
+        sigPending_ = sigShadow_;
+    }
+
     bool pushArrCommand(Cmd cmd, int track, u64 blobRef, u32 generation) {
         WireCommand w{};
         w.type = (u32)cmd;
@@ -1148,6 +1290,12 @@ private:
     // The same two-table idea for the arrangement, and client memory for the
     // same reason: the control region dies with the engine, and the whole point
     // of a shadow is to outlive one. Index kMaxTracks is the transport cell.
+    // The signature map's shadow. One per SET, not one per track: there is
+    // exactly one map and it is the reason this does not ride the ArrPub arrays.
+    struct SigPub { u64 blob = 0; i32 count = 0; u32 generation = 0; };
+    SigPub      sigShadow_;
+    SigPub      sigPending_;
+
     ArrPub      arrShadow_[kMaxTracks + 1];
     ArrPub      arrPending_[kMaxTracks + 1];
     ArrPub      autosShadow_[kMaxTracks];

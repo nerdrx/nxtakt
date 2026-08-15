@@ -919,14 +919,15 @@ NXTAKT_ENGINE=daemon NXTAKT_SESSION=mysession ./build/nxtakt myset.lattice
 | every polled meter, indicator and the playhead | **yes** |
 | computer-MIDI keyboard, note previews | **yes** |
 | session clips, audio and MIDI, through the pool | **yes** (step 3) |
-| device chains | refused — step 4 |
+| device chains | refused — step 4 *(landed in §12)* |
 | recording | refused — §7 |
-| the arrangement and its automation | consumed and reported — see below |
-| time signatures | refused by the daemon — `commandIsKnown`'s bound is unmoved |
-| hardware MIDI input | not connected — §1.3 |
+| the arrangement and its automation | consumed and reported — see below *(landed in §13)* |
+| time signatures | refused by the daemon — `commandIsKnown`'s bound is unmoved *(landed in §13)* |
+| hardware MIDI input | not connected — §1.3 *(landed in §13)* |
 | clip envelopes, warp markers, transients | dropped, and logged, per clip |
 
-`Cmd::SetSignatures` is deliberately still outside `ipc::commandIsKnown`'s
+**Superseded by §13**; kept because the reasoning is why the bound moved when it
+did. `Cmd::SetSignatures` was deliberately outside `ipc::commandIsKnown`'s
 bound, so `nxtaktd` answers `RejectUnknownCommand` and **plays every set in
 4/4**. Steps 2 and 3 did not make it carryable: the map is a `const RtSig*`
 with its own `Ev::SigsRetired` handshake, so honouring it means a pool kind, a
@@ -1358,14 +1359,13 @@ above to work; each moves a capability from "reachable through the handle" to
 
 **Still genuinely missing, for step 7's wave:**
 
-* **Rack contents** (§12.3). A `PoolKindRackState` blob and one field on
-  `CmdAddDevice`.
+* ~~**Rack contents** (§12.3)~~ — §13.1.
 * **`DeviceModel::inst` deleted**, which is §5 step 4 as written and which is
   what makes the browser caveat in (1) go away. It is a step-7-era change
   because it is the moment the in-process path leaves `App`, per §8 (3).
 * **Recording** (§7). Unchanged and still the reason `inproc` is the default.
-* **The arrangement over the wire** (§11.9). Unchanged.
-* **Hardware MIDI** (§11.9). Unchanged.
+* ~~**The arrangement over the wire** (§11.9)~~ — §13.2.
+* ~~**Hardware MIDI** (§11.9)~~ — §13.4.
 * **`deviceParamEngineGeneration()` is still not read.** §1.6 predicted this
   becomes load-bearing the day presets or native plugin UIs land: the daemon does
   not mirror a plugin moving its own controls back, so `syncParams()` would
@@ -1374,3 +1374,305 @@ above to work; each moves a capability from "reachable through the handle" to
   reconciler assumes it is the only writer of the device tables, which it is
   today (§4.3's reattach is not reachable). Worth a sentence in the release note
   rather than a mechanism.
+
+
+---
+
+## 13. Rack contents, the arrangement, signatures and hardware MIDI
+
+Four of the five items §12.7 left owed. What remains after this wave is
+**recording, and nothing else** (§7, §13.5).
+
+`NXTAKT_ENGINE=daemon` now plays a set's racks with their contents, plays its
+timeline, plays it in its own metre, and answers a hardware controller.
+
+### 13.1 Rack contents — `PoolKindRackState`, protocol v7
+
+§12.3 stated the problem exactly: a rack's descriptor does not describe its
+contents (`RACKS.md` §4), so the daemon instantiated `nxtakt:rack`, got an
+**empty** one — eight macros driving nothing — and the device sounded as a
+passthrough while the GUI drew a full sub-chain.
+
+**The wire.** One pool kind and one command:
+
+```
+PoolKindRackState   rackStateToString()'s output: NUL-terminated printable
+                    ASCII, bounded by kMaxRackState (64 KiB, not
+                    kMaxPoolString's 1 KiB — the format admits far more than a
+                    URI does)
+CmdSetRackState     a = device id, flags = the row generation, ref = the blob.
+                    Answered by exactly one EvDeviceChanged(DeviceChangedRackState)
+                    or EvDeviceFailed; the blob is retired either way.
+```
+
+**Why a command of its own and not a field on `CmdAddDevice`.** §12.7 sketched
+the field. Both work for a rack loaded once and never touched; only the command
+works for a rack that is *edited*, because a field on the add makes every change
+to a rack's contents a remove-and-re-add of the whole rack — every plugin inside
+it destroyed and reloaded, with an audible hole in the track for as long as that
+takes. A rack is a container people open and rearrange while the set is running.
+
+**The ordering trap, arriving on a different path.** `RACKS.md` says params
+first, then `setState`, because `setState` writes the eight macros *without*
+driving their targets — which is what makes a sub-device parameter the user
+parked off its macro's curve come back parked. Over here the parameters do not
+come from a `SavedDevice`, they come from the param table, so:
+
+1. `doSetRackState` applies the device's **pending param row** before `setState`;
+2. it re-seeds `Device::cached[]` **from the instance** afterwards, so the next
+   scan compares against what the rack now holds rather than against what the
+   client last wrote.
+
+Both are removal-tested. Without (1) a macro write still sitting in the row lands
+*after* `setState` and re-derives every mapped parameter; without (2) the daemon
+silently stops agreeing with the client's table.
+
+**Two obligations `RACKS.md` puts on the caller, honoured in the daemon:**
+
+* §1, latency: a rack's `latencyFrames()` is its chain's **sum** and is not
+  constant after `prepare()`. `doSetRackState` re-reads it, writes it into the
+  device row and republishes the chain. Tested with two stock limiters: 240 + 240
+  = **480 frames**, over the wire.
+* §2, retirement: `setState` *unlinks* the previous sub-devices rather than
+  deleting them, because nothing inside a `PluginInstance` can know when the
+  audio thread last dereferenced a pointer. The daemon **does** know — it is the
+  chain retirement proof it already computes — so `reclaim()` rides that proof
+  (`ChainPush::reclaim`). Without it a rack edited enough times in one session
+  hits the 64-retired cap and starts refusing edits for no reason the user can
+  see.
+
+**The near side is a poll, like the parameters and for the same reason:** a
+device dropped into a rack or a mapping dragged onto a macro calls straight into
+the GUI's own `RackControl` and there is no command to hook. `syncRacks()`
+compares a **fingerprint of `RackState`** once a frame and only then builds the
+string — `state()` is a walk of virtual getters, cheap; `rackStateToString()` is
+a shortest-round-tripping `snprintf` per parameter, which for eight devices of
+sixty controls is hundreds of formats.
+
+**What the fingerprint hashes, and why: everything.** This is the notes decision
+(§11.4), reached from the same place. The audio path can afford 256 strided
+probes because a `SampleBuffer`'s samples are immutable for the life of the
+allocation, so the question there is *"is the buffer at this address still the
+one I cached"* and the address is half the answer. Neither half exists here: a
+rack is edited in place all session, so the question is genuinely *"did the
+content change"*; and `state()` builds a **fresh `RackState` at a fresh address
+on every call**, so there is no address to key on at all. A stride that skipped a
+field would be the notes bug wearing a rack — a mapping's `max` changed, the same
+fingerprint computed, the cached publication served, and a rack in the daemon
+still sweeping the old range with nothing but the ear to notice. It is cheap in
+absolute terms because `RackState` is bounded by the format, and nested racks ride
+it for free (`Device::state` holds the nested compact form).
+
+### 13.2 The arrangement over the wire
+
+The daemon has been able to take an arrangement since wave 8g — it has
+`translateArrangement()` and §16b proves it plays one. What was missing was the
+encoder on this side, and §11.9 called it "the cheapest remaining feature by some
+distance". It was.
+
+`RemoteEngine::pushArrangement` builds `[WireArrHeader][WireArrItem[]][WireClip[]]`
+over the **same pointer → pool-ref cache** the clip table uses, so a clip that is
+in a scene *and* on the timeline names one block, is written once and is retired
+once. `pushTrackAutos` does the same for `RtAutoSetN`. Bounds are checked first
+and a lane past them is refused **whole** — never truncated, because the daemon
+applies exactly those numbers and a lane silently missing its last items is worse
+than one the status line says was refused.
+
+**One thing the clip path does not need and this one does: the notes cannot use
+the address cache.** A session cell's `RtNote[]` is App's own array for that
+cell — one allocation, edited in place, stable address. An arrangement's notes
+live *inside the lane's single allocation*, so every republication (and a drag
+republishes every frame) puts them at a new address and frees the old. An
+address-keyed entry would be dead the moment it was written: the map would grow
+by an entry a frame, each holding a pool block nothing would ever release. So the
+lane's notes are cached **by position** — lane, then clip index — with the same
+full-content fingerprint beside them. `handle_test` republishes a notes-bearing
+lane 24 times from fresh allocations and asserts the pool block count does not
+move; keying it by address turns that red.
+
+### 13.3 The signature map — `PoolKindSignatures`, protocol v8
+
+`Cmd::SetSignatures` sat outside `ipc::commandIsKnown`'s bound for several waves,
+answering `RejectUnknownCommand`. That was the **right way to be wrong** — §11.1
+argued refused-and-visible beats accepted-and-ignored — and it had exactly one
+consequence: **daemon mode played every set in 4/4 while the ruler drew 7/8.**
+
+The map is a flat `RtSig[]` and crosses as one blob: `a` = the entry count, `b` =
+the client's generation, `ref` = the offset (0 clears), answered by
+`EvSignaturesAck`. `commandIsKnown`'s bound moved to the last enumerator, and
+only because the daemon genuinely honours the command now.
+
+Three things worth stating:
+
+* **Translated, not reinterpreted**, even though `WireSig` mirrors `RtSig` field
+  for field and a cast would compile. A `WireNote` blob is safe to reinterpret
+  because it is bounds-checked once and then read; a signature map is *bisected
+  on every block for as long as it is the map*, and the pool is client-writable.
+* **The daemon runs `sigMapValid` itself**, which is the engine's own validator.
+  The engine runs it too and hands a map it refuses straight back — so this is
+  not belt and braces, it is the difference between a client that is TOLD its map
+  is unwalkable and one that watches its set play in 4/4 with an acknowledgement
+  in hand saying everything went fine.
+* **`publishSignatures` is a template now.** §11.1 said routing it through the
+  handle was a prerequisite for whoever picked this up. It took `Engine&`, which
+  is why it could not be called at all in daemon mode; it takes any type with
+  `pushCommand(const Command&)`, which is both `Engine` and `EngineHandle`, and
+  costs `session.h` no new include. `syncSignatures()` takes the handle, and
+  `app_chrome.cpp`'s `if (Engine* e = eng_.local())` guard — the honest way to
+  say it in §11 — was the bug and is gone.
+
+**What is measured is bar arithmetic, not the signature fields.** 4/4 is what an
+unpublished map reads AND what an ignored one reads, so `posSigNum == 4` would
+pass against a daemon that never got the map — §11.6's poisoning argument. A bar
+boundary at 3.5 beats cannot: beat 7 is bar 2 in 4/4 and bar 3 in 7/8, asked of
+the engine's own published counters.
+
+### 13.4 Hardware MIDI — §1.3's option 3, at the seam
+
+`MidiInput::start()` took an `Engine&` and pushed straight into its ring. There
+is no `Engine` in daemon mode, so hardware MIDI was simply not connected.
+
+It takes a **sink** now — `std::function<bool(const MidiMsg&)>` — so
+`EngineHandle` routes the reader thread to `Engine::pushMidi` locally and to the
+shared-memory MIDI ring remotely. §1.3 lists three ways out and this is neither
+of the two it names as end states: not option 1 (move the reader into `nxtaktd`,
+which moves the ALSA client out from under the `aconnect` wiring the user already
+made) and emphatically not option 2 (a GUI-owned queue, one frame of added
+latency on an instrument — you can hear that). It is option 3 applied at the one
+object that knows where the engine is.
+
+**The lock is the point, and it fixes §1.3's latent bug rather than reproducing
+it.** Locally the engine keeps two MIDI rings — `pushMidi` for the reader,
+`pushMidiFromGui` for the GUI — so each has one producer. There is exactly ONE
+MIDI ring in the control region and the GUI thread is already pushing the
+computer keyboard and the note previews into it, so the reader would be a second
+producer on a structure `lat::Ring` documents as single-producer. Neither is
+realtime. `EngineHandle::midiMx_` covers both, and `restartEngine()`, which
+unmaps the ring the reader is pushing into.
+
+`midiRunning()` / `midiClientId()` / `midiReceived()` answer for the real reader
+on both paths now; they used to say "no" in daemon mode, which was honest then
+and would be a lie today.
+
+### 13.5 A use-after-free ASan found, in code four waves old
+
+The handle_test section for §13.2 republishes an arrangement lane **while an item
+from it is sounding**, which nothing had done before. Under ASan the sanitised
+daemon died with a heap-use-after-free: a read in `Engine::arrHolds()` of a block
+`Daemon::pumpArrRetirements()` had already freed.
+
+The cause is a proof that does not hold for this one payload.
+`pumpArrRetirements` accepted the drain counter — "the engine has drained past
+the swap" — as a stand-in for `Ev::ArrangementRetired`, which is what every other
+retirement here does and is correct for all of them. It is not correct for a
+lane: a displaced arrangement's `RtClip`s live INSIDE the block, so a voice that
+is mid-note when the lane is replaced is still reading it, and `engine.cpp`
+therefore **parks** the displaced pointer and emits the event on the first drain
+at which no voice points inside it — in general many drains later. The comment
+saying so is right beside `arrPark()`.
+
+Arrangement retirements are **confirmed-only** now. A lost event (which
+`emitCritical` parks and counts) leaks one block instead of freeing one under a
+voice, which is the right way round; an entry that sits unconfirmed past ten
+seconds says so once and is still held.
+
+### 13.6 Evidence
+
+`make test`: **706 / 110 / 620 / 511 / 1020 / 148** (engine, ipc, daemon,
+internal_device, timesig_view, handle), zero warnings. daemon_test +63,
+handle_test +58. ASan+UBSan clean on both suites against a sanitised `nxtaktd`,
+`detect_leaks=1`, no leaks. The four demo renders are `cmp`-identical to the
+pre-wave baseline, built from `git archive HEAD` plus this wave's files.
+
+**The headless GUI, in daemon mode, measured by a second `EngineClient` that
+decodes nothing and draws nothing.** The set is the four-scene demo with a 7/8
+map, a rack on track 0 holding a saturator trimmed −12 dB, and an arrangement
+item on the same track. Everything below was decoded by the GUI, written into the
+GUI's pool, and installed and rendered by `nxtaktd`:
+
+| set | track 0 peak (daemon) | the same set rendered IN-PROCESS | sig | bar(beat 7) |
+|---|---|---|---|---|
+| rack with contents | **0.1776** | 0.1776 | 7/8 | 3 |
+| rack **empty** | **0.8809** | 0.8809 | 7/8 | 3 |
+| contents, `sig 4 4` | 0.1776 | — | 4/4 | **2** |
+
+Four decimal places, both directions. The 5× between the first two rows is the
+rack's contents; the bar number between the last two is the signature map; and
+the sound is the *arrangement* item, because nothing launched a session clip —
+13 lanes applied, 0 rejected, 1 rack state applied, 1 signature map applied, 0
+commands rejected.
+
+`handle_test` adds, against a real spawned daemon: a real `nxtakt:rack` holding a
+real `nxtakt:saturator` metering `tanh(0.5)` = **0.4621** on a DC 0.5 clip where
+an empty rack meters 0.5000; a knob turned three levels down inside that rack
+taking it to **0.1161** with nothing sent; a target **parked** at −12 dB
+surviving the wire while its macro sits at 1.0 (a re-derived one would read
+0.4621); a timeline playing at **0.5000** off a pool block the session clip had
+already written; automation evaluated in the daemon at fader 0.8; a 7/8 map whose
+bars are 3.5 beats long; and a note played into the GUI's ALSA port arriving over
+the wire.
+
+**Removal tests, run and watched go red:**
+
+| removed | red |
+|---|---|
+| `syncRacks()` from `poll()` | handle_test ×5 |
+| the sub-device param values from `rackFingerprint` | handle_test ×1 — the notes bug, wearing a rack |
+| `applyParamRow()` before `setState` | daemon_test ×1 — the parked target is re-derived |
+| the cache re-seed after `setState` | daemon_test ×1 |
+| `pushArrangement()` | handle_test ×4 |
+| the lane-notes **positional** cache (address cache instead) | handle_test ×1 — the pool grows |
+| `pushSignatures()` | handle_test ×4 |
+| `sigMapValid` from `translateSignatures` | daemon_test ×2 |
+| the daemon-mode MIDI sink | handle_test ×3 |
+
+The MIDI check's skip is gated on the **test's own** `snd_seq_open`, not on
+`midiRunning()`. Gating it on the handle would have been the obvious shape and is
+exactly wrong: it cannot tell "this box has no snd-seq" from "the handle never
+installed a sink", so removing the sink would have made the section quietly stop
+testing anything instead of going red.
+
+Two things that are **not** removal-tested and are not claimed to be: the MIDI
+mutex (a race between two threads has no deterministic red) and
+`confirmSigRetire`'s second branch (the engine handing back a map it refused,
+which the daemon's own pre-validation makes unreachable — it is there because
+"unreachable" is what leaks a block when it turns out to be wrong).
+
+### 13.7 Diffs to files this wave did not own
+
+Two beyond `Makefile` (which gained `src/plugin` and ALSA on the `handle_test`
+recipe, because a rack is the one device whose state cannot be faked):
+
+1. **`src/ui/session.h`** — `publishSignatures(Engine&, …)` becomes
+   `template <class EngineLike> publishSignatures(EngineLike&, …)`. One word plus
+   the note above it; no new include.
+2. **`src/ui/arrange.h` / `src/ui/app_arrange.cpp` / `src/ui/app_chrome.cpp`** —
+   `syncSignatures` takes `EngineHandle&` (forward-declared in `arrange.h`), and
+   the call site drops its `if (Engine* e = eng_.local())` guard.
+
+### 13.8 What the next session picks up
+
+**Recording (§7), and it is the whole of what is left.** Nothing in this wave
+touched it and nothing here makes it easier; §7's analysis stands unchanged,
+including its recommendation — the daemon writes the take to
+`$XDG_RUNTIME_DIR/nxtakt/takes/<session>/<uid>.wav` and tells the client the
+path, rather than inverting the pool's page permissions for a second region.
+What this wave *does* change is that it is now the only thing between
+`NXTAKT_ENGINE=daemon` and being the default, and §8 step 2's flip is a
+release-note decision rather than a list.
+
+Two smaller things, both visible rather than structural:
+
+* **`RemoteDevice::error` now carries a rack-state refusal reason** and nothing
+  draws it. §12.7 (3) already owes `drawDeviceStrip` the loading/failed states;
+  this is one more line in the same diff.
+* **`arrangementsRefused()` / `signaturesRefused()` are readable and undrawn.**
+  Each non-zero means a specific, audible lie on screen — a timeline that does
+  not play, a metre the engine is not in — and the status bar is where they
+  belong.
+
+And one caveat to carry rather than fix: `EvClipAck`-style flow control means a
+handful of publications answer `false` for a frame. Every caller inside App goes
+through the deferred FIFO and retries; a *test* calling `pushCommand` directly
+has to retry too, which `handle_test` now does explicitly and says so at the call
+site.

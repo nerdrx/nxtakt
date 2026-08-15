@@ -359,6 +359,19 @@ private:
         bool          arrClear = false;
         std::unique_ptr<u8[]> built;
         std::vector<PoolRef>  refs;      // what the built RtClips point INTO
+
+        // -- the signature map (v8) -----------------------------------------
+        //
+        // The simplest of the three pooled payloads: one flat array, nothing in
+        // the pool named by it, one retirement layer. `sigs` is the daemon's own
+        // copy — NOT a cast over the blob — because the engine holds the map on
+        // the audio thread for as long as it is the map, and the pool is
+        // client-writable memory (see PoolKindSignatures).
+        bool          sig      = false;
+        bool          sigClear = false;
+        u32           sigGen   = 0;
+        i32           sigCount = 0;
+        std::unique_ptr<RtSig[]> sigs;
     };
 
     // A pool block that no clip cell references any more, waiting for the
@@ -411,6 +424,23 @@ private:
         bool  confirmed = false;
     };
 
+    // The signature map the engine holds, and one on its way out. ONE LAYER,
+    // not two: the map is a flat RtSig[] that names nothing in the pool, so
+    // there is no "free the built block before echoing what it points at"
+    // ordering to get right — which is why this is a struct of two members
+    // rather than a copy of ArrBuilt/ArrRetire.
+    struct SigBuilt {
+        std::unique_ptr<RtSig[]> mem;
+        const RtSig*             p = nullptr;   // what was handed to pushCommand
+    };
+    struct SigRetire {
+        std::unique_ptr<RtSig[]> mem;
+        const RtSig* watch     = nullptr;   // matched against Ev::SigsRetired
+        u64          dueDrains = 0;
+        u64          dueNs     = 0;
+        bool         confirmed = false;
+    };
+
     // -- devices ------------------------------------------------------------
 
     // One loaded plugin. The instance lives here and nowhere else: this is
@@ -441,6 +471,11 @@ private:
         Command                  cmd{};
         std::unique_ptr<RtChain> old;    // displaced; freed once the proof lands
         std::vector<std::unique_ptr<PluginInstance>> dying;
+        // Racks whose setState UNLINKED sub-devices. They ride the same proof
+        // the displaced chain does, because "the audio thread has drained past
+        // the swap" is exactly the question RackControl::reclaim() cannot answer
+        // for itself (docs/RACKS.md §2) and exactly the one this proof answers.
+        std::vector<u32>         reclaim;
     };
 
     // The retirement pattern §2.5 describes, kept verbatim and moved inside one
@@ -449,6 +484,7 @@ private:
     struct ChainRetire {
         std::unique_ptr<RtChain> chain;
         std::vector<std::unique_ptr<PluginInstance>> dying;
+        std::vector<u32>         reclaim;   // rack device ids, see ChainPush
         const RtChain* watch = nullptr;   // matched against Ev::ChainRetired
         u64  dueDrains = 0;
         u64  dueNs     = 0;
@@ -512,6 +548,7 @@ private:
             pumpArrRetirements();
             pumpRetirements();
             pumpChainRetirements();
+            pumpSigRetirements();
             map_.hdr->heartbeat.fetch_add(1, std::memory_order_relaxed);
             timespec ts{0, 1000000};        // 1 ms
             ::nanosleep(&ts, nullptr);
@@ -658,6 +695,8 @@ private:
                 reject(w, reason);
                 if (ipc::commandIsPooled(w.type))      ackClip(w, reason);
                 if (ipc::commandIsArrangement(w.type)) ackArrangement(w, reason);
+                if (ipc::commandIsSignatures(w.type))
+                    ackSignatures((u32)w.b, reason, w.ref == 0, /*refused*/true);
                 continue;
             }
             if (!engine_->pushCommand(st.cmd)) {
@@ -678,6 +717,7 @@ private:
     void commit(Staged& st) {
         map_.hdr->commandsApplied.fetch_add(1, std::memory_order_relaxed);
         if (st.arr) { installArrangement(st); return; }
+        if (st.sig) { installSignatures(st); return; }
         if (!st.pooled) return;
         installClip(st.cmd.a, st.cmd.b, st.cell);
         map_.hdr->clipsApplied.fetch_add(1, std::memory_order_relaxed);
@@ -715,6 +755,7 @@ private:
         if (!ipc::commandIsKnown(w.type)) { reason = ipc::RejectUnknownCommand; return false; }
         if (ipc::commandIsPooled(w.type)) return translateClip(w, out, reason);
         if (ipc::commandIsArrangement(w.type)) return translateArrangement(w, out, reason);
+        if (ipc::commandIsSignatures(w.type)) return translateSignatures(w, out, reason);
         if (!ipc::commandIsScalar(w.type)) { reason = ipc::RejectPointerPayload; return false; }
         if (!std::isfinite(w.x)) { reason = ipc::RejectNotFinite; return false; }
 
@@ -1332,6 +1373,140 @@ private:
                        st.arrClear, /*refused*/false);
     }
 
+    // -- the signature map (v8) ---------------------------------------------
+    //
+    // Cmd::SetSignatures spent several waves outside commandIsKnown's bound,
+    // answering RejectUnknownCommand — which is the right way to be wrong, and
+    // meant daemon mode PLAYED EVERY SET IN 4/4 while its ruler drew 7/8. This
+    // is that closed.
+    //
+    // It is the shortest of the three pooled payloads because the map is one
+    // flat array that names nothing else in the pool: one retirement layer, no
+    // shadow rule, no ordering between two frees. The only thing worth care is
+    // that the copy is a COPY. WireSig mirrors RtSig field for field, so
+    // `(const RtSig*)pool_.at(ref)` would compile and would hand the audio
+    // thread a pointer into a region the client can rewrite at will — and unlike
+    // a WireNote blob, which is validated once and then read, a signature map is
+    // bisected on every block for as long as it is the map.
+    bool translateSignatures(const ipc::WireCommand& w, Staged& out, u32& reason) {
+        out.sig      = true;
+        out.sigGen   = (u32)w.b;
+        out.sigClear = (w.ref == 0);
+        out.cmd.type = Cmd::SetSignatures;
+
+        if (!w.ref) {                     // the clear form: no map, no array
+            out.sigCount = 0;
+            out.cmd.a    = 0;
+            out.cmd.p    = nullptr;
+            return true;
+        }
+        if (!pool_.valid()) { reason = ipc::RejectNoPool; return false; }
+        if (w.a <= 0 || w.a > kMaxSigs) { reason = ipc::RejectBadSignatures; return false; }
+
+        const u64 need = (u64)w.a * sizeof(ipc::WireSig);
+        const char* why = "";
+        if (!pool_.validate(w.ref, ipc::PoolKindSignatures, need, &why)) {
+            logBadRef("signatures", w.ref, -1, -1, why);
+            reason = ipc::RejectBadPoolRef;
+            return false;
+        }
+
+        auto a = std::unique_ptr<RtSig[]>(new (std::nothrow) RtSig[(size_t)w.a]);
+        if (!a) { reason = ipc::RejectBadSignatures; return false; }
+        const ipc::WireSig* src = (const ipc::WireSig*)pool_.at(w.ref);
+        for (i32 i = 0; i < w.a; ++i) {
+            a[(size_t)i].bar  = src[i].bar;
+            a[(size_t)i].num  = src[i].num;
+            a[(size_t)i].den  = src[i].den;
+            a[(size_t)i].pad  = 0;
+            a[(size_t)i].beat = src[i].beat;
+        }
+
+        // THE ENGINE'S OWN VALIDATOR, run here. The engine runs it too and hands
+        // a map it refuses straight back — so this is not belt and braces, it is
+        // the difference between a client that is TOLD its map is unwalkable and
+        // a client that watches its set play in 4/4 with an acknowledgement in
+        // hand saying everything went fine.
+        if (!sigMapValid(a.get(), (int)w.a)) {
+            reason = ipc::RejectBadSignatures;
+            return false;
+        }
+
+        out.sigCount = w.a;
+        out.cmd.a    = w.a;
+        out.cmd.p    = a.get();
+        out.sigs     = std::move(a);
+        return true;
+    }
+
+    void installSignatures(Staged& st) {
+        if (sigHeld_.mem || sigHeld_.p) {
+            SigRetire r;
+            r.mem       = std::move(sigHeld_.mem);
+            r.watch     = sigHeld_.p;
+            r.dueDrains = drainProof();              // read AFTER the push
+            r.dueNs     = ipc::monotonicNs() + kRetireGraceNs;
+            sigRetire_.push_back(std::move(r));
+        }
+        sigHeld_.mem = std::move(st.sigs);
+        sigHeld_.p   = (const RtSig*)st.cmd.p;
+        map_.hdr->signaturesApplied.fetch_add(1, std::memory_order_relaxed);
+        ackSignatures(st.sigGen, ipc::RejectNone, st.sigClear, /*refused*/false);
+    }
+
+    void ackSignatures(u32 generation, u32 reason, bool wasClear, bool refused) {
+        if (refused) map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
+        ipc::WireEvent e{};
+        e.type  = ipc::EvSignaturesAck;
+        e.ref   = generation;
+        e.x     = (f64)reason;
+        e.flags = (refused  ? ipc::SigAckRefused  : 0u) |
+                  (wasClear ? ipc::SigAckWasClear : 0u);
+        map_.evts->push(e);
+    }
+
+    // Ev::SigsRetired names the exact array and is pushed from inside
+    // drainCommands(), so its arrival IS the drain.
+    //
+    // TWO arrays can come back through it, which is why this looks in two
+    // places. The ordinary one is a map the daemon displaced. The other is the
+    // map the engine is CURRENTLY holding: sigMapValid runs there too, and a map
+    // it refuses is handed straight back in the same sweep while sigHeld_ still
+    // points at it. Translation runs the same validator first, so that path
+    // should be unreachable — and "should be unreachable" is exactly the kind of
+    // reasoning that leaks a block when it turns out to be wrong.
+    void confirmSigRetire(const void* p) {
+        for (SigRetire& r : sigRetire_)
+            if ((const void*)r.watch == p) { r.confirmed = true; return; }
+        if (p && sigHeld_.p == p) {
+            SigRetire r;
+            r.mem       = std::move(sigHeld_.mem);
+            r.watch     = sigHeld_.p;
+            r.confirmed = true;
+            sigHeld_.p  = nullptr;
+            sigRetire_.push_back(std::move(r));
+            LOGW("the engine handed the signature map back: it kept the one it had");
+        }
+    }
+
+    void pumpSigRetirements() {
+        if (sigRetire_.empty()) return;
+        const u64 now = ipc::monotonicNs();
+        size_t keep = 0;
+        for (size_t i = 0; i < sigRetire_.size(); ++i) {
+            SigRetire& r = sigRetire_[i];
+            const bool due = r.confirmed ||
+                             (drainsExact_ ? drainProven(r.dueDrains) : now >= r.dueNs);
+            if (!due) {
+                if (keep != i) sigRetire_[keep] = std::move(r);
+                ++keep;
+                continue;
+            }
+            r.mem.reset();                 // freed here, on the pump thread
+        }
+        sigRetire_.resize(keep);
+    }
+
     // Exactly one of these answers every SetArrangement and every
     // SetTrackAutos, accepted or refused. Same shape as EvClipAck: ref is the
     // generation the client stamped, x is the reason. A silent refusal would
@@ -1397,14 +1572,42 @@ private:
     }
 
     // THE ORDERED TWO LAYERS.
+    //
+    // AND ONE PROOF, NOT THREE. Every other retirement here accepts the drain
+    // counter (or, on an engine that does not count, a deadline) as a stand-in
+    // for the event. An arrangement may not, and the reason is written in
+    // engine.cpp beside arrPark(): a displaced lane's RtClips live INSIDE the
+    // block, so a voice that is mid-note when the lane is replaced is still
+    // reading it — the engine therefore PARKS the displaced pointer and emits
+    // Ev::ArrangementRetired on the first drain at which no voice points inside
+    // it, which is in general many drains after the swap.
+    //
+    // So "the engine has drained past the swap" is exactly the thing that is NOT
+    // sufficient here, and taking it as sufficient is a heap-use-after-free on
+    // the audio thread: ASan caught it as a read in arrHolds() of a block
+    // pumpArrRetirements() had already freed, the moment a test republished a
+    // lane while an item from it was sounding. Two earlier waves of this code
+    // never saw it because nothing republished a PLAYING lane.
+    //
+    // The consequence of confirmed-only is a leak rather than a fault if the
+    // event is ever lost (Engine::emitCritical parks and counts drops), and that
+    // is the right way round: a block nobody frees costs memory, a block freed
+    // under a voice costs the process.
     void pumpArrRetirements() {
         if (arrRetire_.empty()) return;
         const u64 now = ipc::monotonicNs();
         size_t keep = 0;
         for (size_t i = 0; i < arrRetire_.size(); ++i) {
             ArrRetire& r = arrRetire_[i];
-            const bool due = r.confirmed ||
-                             (drainsExact_ ? drainProven(r.dueDrains) : now >= r.dueNs);
+            const bool due = r.confirmed;
+            if (!due && now >= r.dueNs + kArrStuckNs && !arrStuckLogged_) {
+                arrStuckLogged_ = true;
+                LOGW("an arrangement lane has been waiting for its retirement event "
+                     "for over %llu ms and is being HELD, not freed: the engine still "
+                     "has (or lost the event for) a voice inside it. This leaks one "
+                     "block, which is the safe half of the trade. [further ones silent]",
+                     (unsigned long long)(kArrStuckNs / 1000000ull));
+            }
             if (!due) {
                 if (keep != i) arrRetire_[keep] = std::move(r);
                 ++keep;
@@ -1482,7 +1685,14 @@ private:
     void logBadRef(const char* what, u64 ref, i32 t, i32 s, const char* why) {
         if (opt_.verbose || badRefLogged_ < kRejectLogLimit) {
             ++badRefLogged_;
-            LOGW("clip [%d][%d]: %s offset %llu rejected: %s%s", (int)t, (int)s, what,
+            // t < 0 means "this offset does not belong to a clip cell" — a URI
+            // blob, a rack state, the signature map. Printing "clip [-1][-1]"
+            // for those was a reason line that named the wrong thing, which in a
+            // log whose job is attribution is worse than no line at all.
+            char where[32];
+            if (t >= 0) std::snprintf(where, sizeof where, "clip [%d][%d]", (int)t, (int)s);
+            else        std::snprintf(where, sizeof where, "%s", "the pool");
+            LOGW("%s: %s offset %llu rejected: %s%s", where, what,
                  (unsigned long long)ref, why,
                  (!opt_.verbose && badRefLogged_ == kRejectLogLimit) ? " [further bad offsets silent]" : "");
         }
@@ -1665,6 +1875,7 @@ private:
                 case ipc::CmdRemoveDevice: doRemoveDevice(w); break;
                 case ipc::CmdMoveDevice:   doMoveDevice(w);   break;
                 case ipc::CmdSetBypass:    doSetBypass(w);    break;
+                case ipc::CmdSetRackState: doSetRackState(w); break;
                 default:                   break;             // CmdScanPlugins: done
             }
         }
@@ -1681,7 +1892,24 @@ private:
     // block**. A "string" whose NUL is past its own allocation is not a string
     // that got truncated, it is a read off the end of somebody else's data.
     bool readPoolString(u64 ref, char* out, size_t cap) {
-        if (cap) out[0] = '\0';
+        std::string s;
+        if (!readPoolText(ref, ipc::PoolKindString, ipc::kMaxPoolString, s)) {
+            if (cap) out[0] = '\0';
+            return false;
+        }
+        if (s.size() + 1 > cap) { if (cap) out[0] = '\0'; return false; }
+        std::memcpy(out, s.c_str(), s.size() + 1);
+        return true;
+    }
+
+    // The shared half, and every rule in the comment above applies to both
+    // kinds. `cap` is the caller's policy bound, not a buffer size: it is what
+    // stops an unbounded copy driven by a peer, which is the property that made
+    // kMaxPoolString a policy in the first place. A rack state gets its own,
+    // larger one (kMaxRackState) because the format admits far more bytes than
+    // a URI does — see pool.h.
+    bool readPoolText(u64 ref, u32 kind, u64 cap, std::string& out) {
+        out.clear();
         if (!ref) return false;
         if (!pool_.valid()) return false;
         const char* why = "";
@@ -1691,29 +1919,33 @@ private:
         // said yes (validated with needBytes=1) made the scan run up to ~960 B
         // past the end of the mapping for a string block at the arena tail.
         u64 blockBytes = 0;
-        if (!pool_.validate(ref, ipc::PoolKindString, 1, &why, &blockBytes)) {
-            logBadRef("string", ref, 0, 0, why);
+        if (!pool_.validate(ref, kind, 1, &why, &blockBytes)) {
+            logBadRef(ipc::poolKindName(kind), ref, 0, 0, why);
             return false;
         }
-        u64 n = blockBytes < ipc::kMaxPoolString ? blockBytes : ipc::kMaxPoolString;
+        const u64 n = blockBytes < cap ? blockBytes : cap;
         const char* s = (const char*)pool_.at(ref);
         u64 len = 0;
         while (len < n && s[len]) ++len;
         if (len >= n) return false;                 // no terminator inside the block
-        if (len + 1 > cap) return false;
-        std::memcpy(out, s, (size_t)len + 1);
+        out.assign(s, (size_t)len);
         return true;
     }
 
-    // A string blob is retired the instant it has been copied. It never reaches
+    // A text blob is retired the instant it has been copied. It never reaches
     // the engine and no voice can ever be inside it, so there is nothing to be
     // quiescent *of* — the whole drain-proof apparatus below simply does not
     // apply. Queuing it as already-confirmed keeps one code path for
     // publishing retirements (and its ring-full retry) instead of two.
-    void retireString(u64 ref) {
+    //
+    // The kind is carried rather than assumed: EvBlockRetired::flags is the
+    // client's only description of what came home, and a rack state echoed back
+    // as "string" would be a diagnostic that lies in exactly the situation
+    // somebody is reading it.
+    void retireString(u64 ref, u32 kind = ipc::PoolKindString) {
         Retire r{};
         r.ref       = ref;
-        r.kind      = ipc::PoolKindString;
+        r.kind      = kind;
         r.track     = -1;
         r.slot      = -1;
         r.confirmed = true;
@@ -1921,6 +2153,129 @@ private:
         emitChanged(id, ipc::DeviceChangedBypass, -1, on ? 1 : 0);
     }
 
+    // -- SetRackState (v7) --------------------------------------------------
+    //
+    // docs/RACKS.md in one function. A rack is a PluginInstance that owns
+    // PluginInstances, its descriptor says nothing about its contents (§4), and
+    // until this existed the daemon instantiated `nxtakt:rack` and got an EMPTY
+    // one — eight macros driving nothing, the whole device sounding as a
+    // passthrough while the GUI drew what was supposed to be inside it.
+    //
+    // THE ORDERING IS THE WHOLE OF THE RISK, and it is RACKS.md's "one ordering
+    // trap" arriving on a different path than the one that doc describes. Over
+    // here the parameters do not come from a SavedDevice, they come from the
+    // param table — so "params first" means "apply whatever the client has
+    // written into this device's row BEFORE setState", and "nothing may write a
+    // macro afterwards" means the parameter cache has to be re-seeded from the
+    // instance the moment setState returns.
+    //
+    // Why that matters, stated once so it is not re-derived under pressure:
+    // setState finishes by writing the eight macros WITHOUT driving their
+    // targets, precisely so that a sub-device parameter the user parked off its
+    // macro's curve comes back parked. A macro write that lands after setState
+    // goes through Rack::setParam, which DOES drive — so it would re-derive
+    // every mapped parameter from the macro position and quietly round away the
+    // parked value. In a session that reloads its racks that is a set which
+    // drifts a little every time it is opened.
+    void doSetRackState(const ipc::WireCommand& w) {
+        // The blob first, and retired whatever happens next: a client whose
+        // command was refused must not be left holding a pool block it can never
+        // free. Exactly one echo per blob, accepted or refused.
+        std::string text;
+        const bool haveText = readPoolText(w.ref, ipc::PoolKindRackState,
+                                           ipc::kMaxRackState, text);
+        if (w.ref) retireString(w.ref, ipc::PoolKindRackState);
+
+        const u32 id = (u32)w.a;
+        Device* d = deviceById(id);
+        if (!d || !d->inst) { failRack(w, id, ipc::RejectBadDevice); return; }
+        // The same stale-write guard the param table carries, and it bites
+        // harder here: a stale param write moves one knob, a stale rack state
+        // loads a whole chain of plugins into whatever now occupies the slot.
+        if (w.flags != d->generation) { failRack(w, id, ipc::RejectBadDevice); return; }
+        if (!haveText) { failRack(w, id, w.ref ? ipc::RejectBadRackState : ipc::RejectNoPool); return; }
+
+        RackControl* rc = d->inst->rack();
+        if (!rc) { failRack(w, id, ipc::RejectNotARack); return; }
+
+        RackState st;
+        if (!rackStateFromString(text, st)) {
+            logDevice("SetRackState: device %u's state (%zu B) would not parse", id, text.size());
+            failRack(w, id, ipc::RejectBadRackState);
+            return;
+        }
+
+        // 1. PARAMS FIRST. Usually a no-op — the rack is empty, so a macro write
+        //    drives nothing — but on a RE-state (a rack the user edited while it
+        //    was loaded) the row may hold macro values that have not been applied
+        //    yet, and applying them here rather than after setState is the whole
+        //    of the trap above.
+        applyParamRow(*d);
+
+        // 2. THEN setState. Slow, allocating and able to fail: it instantiates
+        //    every sub-device. Exactly why it is on the pump thread and nowhere
+        //    near the audio callback, which is the same argument doAddDevice
+        //    makes for registry_.instantiate.
+        if (!rc->setState(st)) {
+            logDevice("SetRackState: device %u refused a %zu-device state", id, st.devices.size());
+            failRack(w, id, ipc::RejectBadRackState);
+            return;
+        }
+
+        // 3. Re-seed the cache from the INSTANCE, not from the table. The
+        //    instance is the truth now, and seeding from it is what stops the
+        //    next pump tick from seeing a difference and writing a macro back
+        //    through Rack::setParam. If the client genuinely moves a macro
+        //    afterwards the row generation changes, the difference is real, and
+        //    driving the targets is then exactly right.
+        for (int i = 0; i < d->paramCount; ++i) d->cached[i] = d->inst->getParam(i);
+
+        // 4. RACKS.md §1: a rack's latencyFrames() is the SUM of its chain and is
+        //    not constant after prepare(), so a caller that does not republish
+        //    leaves the engine's cached figure — read when the chain was
+        //    published — describing a rack that no longer exists. Republication
+        //    is free, because a chain is a declaration.
+        //
+        //    The row field is written in place on a Live row, which is what
+        //    renumberChain already does with chainPos and is safe for the same
+        //    reason: one writer, one aligned 32-bit store, and a client that is
+        //    told to re-read by the event below.
+        const i32 latency = d->inst->latencyFrames();
+        if (ipc::WireDeviceInfo* row = map_.device(id)) row->latencyFrames = latency;
+        publishChain(d->target, d->targetIdx);
+        // 5. setState UNLINKED the previous sub-devices; it did not delete them,
+        //    because nothing inside a PluginInstance can know when the audio
+        //    thread last dereferenced a pointer (RACKS.md §2). The daemon DOES
+        //    know — it is the chain retirement proof it already computes — so the
+        //    reclaim rides it. Without this a rack edited more than
+        //    kRackMaxDevices*8 times in a session hits the retired cap and starts
+        //    refusing edits, loudly, for no reason the user can see.
+        chainPush_.back().reclaim.push_back(id);
+
+        map_.hdr->rackStatesApplied.fetch_add(1, std::memory_order_relaxed);
+        emitChanged(id, ipc::DeviceChangedRackState, -1, latency);
+        LOGI("device %u: rack state applied, %zu sub-device(s), %zu mapping(s), "
+             "%d frames latency", id, st.devices.size(), st.mappings.size(), latency);
+    }
+
+    // EvDeviceFailed for a rack-state command, with `a` carrying the DEVICE ID
+    // rather than a DevTarget. The client has to know which device it is being
+    // told about: a rack state is retried from a fingerprint, and a failure it
+    // could not attribute would either be retried sixty times a second forever
+    // or silently attributed to the wrong rack.
+    void failRack(const ipc::WireCommand& w, u32 id, u32 reason) {
+        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_relaxed);
+        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
+        ipc::WireEvent e{};
+        e.type = ipc::EvDeviceFailed;
+        e.a    = (i32)id;
+        e.b    = (i32)reason;
+        e.x    = (f64)w.type;
+        e.ref  = w.ref;
+        map_.evts->push(e);
+        LOGW("device %u: rack state refused (%s)", id, ipc::rejectReasonName(reason));
+    }
+
     void emitChanged(u32 id, u32 flags, int pos, int a) {
         ipc::WireEvent e{};
         e.type  = ipc::EvDeviceChanged;
@@ -1992,8 +2347,10 @@ private:
             r.dueNs     = ipc::monotonicNs() + kRetireGraceNs;
             r.chain     = std::move(p.old);
             r.dying     = std::move(p.dying);
+            r.reclaim   = std::move(p.reclaim);
             chainPush_.pop_front();
-            if (r.chain || !r.dying.empty()) chainRetire_.push_back(std::move(r));
+            if (r.chain || !r.dying.empty() || !r.reclaim.empty())
+                chainRetire_.push_back(std::move(r));
         }
     }
 
@@ -2020,6 +2377,17 @@ private:
                 continue;
             }
             map_.hdr->chainsRetired.fetch_add(1, std::memory_order_relaxed);
+            // Same proof, same moment, one level down: the sub-devices a rack's
+            // setState unlinked are now provably out of the audio thread's
+            // reach, so this is the "when the rack is NOT in a chain the engine
+            // is processing" that RackControl::reclaim()'s contract asks for.
+            // The device may have been removed in the meantime — the reclaim
+            // list holds ids and not pointers precisely so that is a lookup
+            // miss and not a dangling read.
+            for (u32 id : r.reclaim)
+                if (Device* d = deviceById(id))
+                    if (d->inst)
+                        if (RackControl* rk = d->inst->rack()) rk->reclaim();
             // r goes out of scope at the end of the loop body -> the RtChain and
             // every instance in `dying` are destructed here, on the pump thread,
             // provably outside anything the audio thread can reach.
@@ -2072,23 +2440,33 @@ private:
     void pumpParams() {
         if (liveIds_.empty()) return;
         u64 writes = 0;
-        for (u32 id : liveIds_) {
-            Device* d = devices_[id].get();
-            ipc::WireDeviceParams* p = map_.param(id);
-            if (!d || !d->inst || !p) continue;
-            const u32 g = p->generation.load(std::memory_order_acquire);
-            if (g == d->seenParamGen) continue;
-            d->seenParamGen = g;
-            if (p->deviceGeneration.load(std::memory_order_relaxed) != d->generation) continue;
-            for (int i = 0; i < d->paramCount; ++i) {
-                const f32 v = p->value[i].load(std::memory_order_relaxed);
-                if (!std::isfinite(v) || v == d->cached[i]) continue;
-                d->cached[i] = v;
-                d->inst->setParam(i, v);
-                ++writes;
-            }
-        }
+        for (u32 id : liveIds_)
+            if (Device* d = devices_[id].get()) writes += applyParamRow(*d);
         if (writes) map_.hdr->paramWrites.fetch_add(writes, std::memory_order_relaxed);
+    }
+
+    // One device's row, applied. Factored out of pumpParams because
+    // doSetRackState has to run it at a moment of its own choosing — RACKS.md's
+    // "params first" ordering is only honoured if this happens BEFORE setState,
+    // and leaving it to the next pump tick would put it after.
+    //
+    // Returns the number of parameters actually written.
+    u64 applyParamRow(Device& d) {
+        ipc::WireDeviceParams* p = map_.param(d.id);
+        if (!d.inst || !p) return 0;
+        const u32 g = p->generation.load(std::memory_order_acquire);
+        if (g == d.seenParamGen) return 0;
+        d.seenParamGen = g;
+        if (p->deviceGeneration.load(std::memory_order_relaxed) != d.generation) return 0;
+        u64 writes = 0;
+        for (int i = 0; i < d.paramCount; ++i) {
+            const f32 v = p->value[i].load(std::memory_order_relaxed);
+            if (!std::isfinite(v) || v == d.cached[i]) continue;
+            d.cached[i] = v;
+            d.inst->setParam(i, v);
+            ++writes;
+        }
+        return writes;
     }
 
     // The device's metadata row: everything static about the instance, written
@@ -2264,6 +2642,14 @@ private:
     // observable from outside rather than inferred. When the counter is live —
     // which it is in this tree — the timer is never consulted.
     static constexpr u64 kRetireGraceNs = 100ull * 1000000ull;   // 100 ms (legacy)
+
+    // How long an ARRANGEMENT retirement may sit unconfirmed before the daemon
+    // says so. It is a LOG THRESHOLD and never a deadline: the block is held
+    // whatever this reads, because the drain counter is not a proof of
+    // quiescence for a lane (see pumpArrRetirements). Ten seconds is far longer
+    // than the longest tail a voice can hold and short enough that a genuinely
+    // lost event is reported inside one take.
+    static constexpr u64 kArrStuckNs = 10ull * 1000000000ull;
     static constexpr u64 kRetireBlocks  = 4;                     //        (legacy)
 
     // F7: the pump must keep beating under a hostile flood. Two bounds do it.
@@ -2446,6 +2832,10 @@ private:
             }
             if (ev.type == Ev::ArrangementRetired || ev.type == Ev::TrackAutosRetired) {
                 confirmArrRetire(ev.p);
+                continue;
+            }
+            if (ev.type == Ev::SigsRetired) {
+                confirmSigRetire(ev.p);
                 continue;
             }
             if (!ipc::eventIsScalar((u32)ev.type)) {
@@ -2746,7 +3136,13 @@ private:
     ArrBuilt                       arrHeld_[kMaxTracks + 1];
     ArrBuilt                       autosHeld_[kMaxTracks];
     std::vector<ArrRetire>         arrRetire_;
+
+    // -- the signature map (v8) ---------------------------------------------
+    SigBuilt                       sigHeld_;
+    std::vector<SigRetire>         sigRetire_;
+
     int                            badArrLogged_      = 0;
+    bool                           arrStuckLogged_    = false;
     bool                           journalDropLogged_ = false;
 
     // -- phase 3 ------------------------------------------------------------

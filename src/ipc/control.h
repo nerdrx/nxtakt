@@ -77,7 +77,22 @@ namespace lat::ipc {
 //        could only list what its OWN process found — which is the thing phase
 //        3 removed the GUI's plugin layer to stop being true. ControlHeader
 //        gains catalogCount/catalogTruncated out of its reserved words.
-inline constexpr u32 kProtocolVersion = 6;
+//   v7 — rack contents (docs/RACKS.md; GUI-ON-DAEMON.md §12.3 named this the
+//        cheapest remaining device feature and it is). CmdSetRackState carries a
+//        PoolKindRackState blob; RejectNotARack and RejectBadRackState say why a
+//        refusal happened; EvDeviceChanged grows DeviceChangedRackState. No
+//        section moved and no struct grew: the whole feature is one command, one
+//        pool kind and two reject reasons. Until it existed a rack in daemon mode
+//        loaded EMPTY and passed audio through, which is the loudest thing on
+//        §12.7's owed list.
+//   v8 — the signature map. Cmd::SetSignatures finally classifies and crosses,
+//        as a PoolKindSignatures blob answered by EvSignaturesAck; commandIsKnown's
+//        bound moves to the last enumerator because the daemon now genuinely
+//        honours the command rather than answering RejectUnknownCommand. Until
+//        this, daemon mode PLAYED EVERY SET IN 4/4 while the ruler drew 7/8 —
+//        refused-and-visible, which was the right way to be wrong, and is no
+//        longer necessary.
+inline constexpr u32 kProtocolVersion = 8;
 
 // Daemon-generated wire events start here, well clear of lat::Ev. The event
 // ring carries a superset of Ev: the boundary itself has things to report
@@ -115,6 +130,30 @@ enum : u32 {
     // Purely an optimisation for a GUI that knows it is about to need the
     // catalog; the lazy path is identical.
     CmdScanPlugins  = kDaemonCommandBase + 4,
+
+    // Install a rack's complete contents. a = device id, flags = the device's
+    // WireDeviceInfo generation (the same stale-write guard the param table
+    // uses), ref = a PoolKindRackState blob holding rackStateToString()'s
+    // output. Answered by exactly one EvDeviceChanged (flags &
+    // DeviceChangedRackState) or EvDeviceFailed, and the blob is retired
+    // (EvBlockRetired) either way — the URI blob's discipline, verbatim.
+    //
+    // WHY A COMMAND OF ITS OWN, AND NOT A FIELD ON CmdAddDevice. Both would
+    // work for a rack that is loaded once and never touched. Only this one works
+    // for a rack that is EDITED: a field on the add would make every change to a
+    // rack's contents a remove-and-re-add of the whole rack, which destroys and
+    // reloads every plugin inside it and puts an audible hole in the track for
+    // as long as that takes. A rack is a container people open and rearrange
+    // while the set is running, so the wire needs a verb for "its contents are
+    // now this" that is not "it is now a different device".
+    //
+    // ORDERING (docs/RACKS.md, "Persistence"): the daemon applies the device's
+    // pending param row BEFORE setState and re-seeds its parameter cache after,
+    // because setState writes the macros WITHOUT driving their targets and any
+    // macro write that lands after it would re-derive every mapped parameter
+    // from the macro position — silently rounding a target the user parked off
+    // its macro's curve. See Daemon::doSetRackState.
+    CmdSetRackState = kDaemonCommandBase + 5,
 };
 
 // What a chain belongs to. The engine has three chain commands with three
@@ -214,6 +253,22 @@ enum : u32 {
     // discipline EvClipAck established and this is the same shape: ref is the
     // generation, x is the reason, and the flags say which command it answers.
     EvArrangementAck  = kDaemonEventBase + 11,
+
+    // Answers every Cmd::SetSignatures exactly once. ref = the generation the
+    // client stamped, x = a RejectReason, flags per EvSigAckFlag below.
+    //
+    // Its own event and not a flag on EvArrangementAck, even though the two are
+    // the same shape: EvArrangementAck is addressed by TRACK and there is
+    // exactly one signature map for the whole set, so folding it in would mean
+    // an ack whose `a` means nothing and a client that has to remember which
+    // flag makes it meaningless.
+    EvSignaturesAck   = kDaemonEventBase + 12,
+};
+
+// EvSignaturesAck::flags.
+enum : u32 {
+    SigAckRefused  = 1u << 0,   // the engine did not get it; x says why
+    SigAckWasClear = 1u << 1,   // the command carried ref == 0
 };
 
 // EvArrangementAck::flags.
@@ -227,6 +282,10 @@ enum : u32 {
 enum : u32 {
     DeviceChangedMoved  = 1u << 0,
     DeviceChangedBypass = 1u << 1,
+    // A CmdSetRackState landed: the device's contents, and therefore its
+    // latencyFrames, are not what the client last read. b carries the new
+    // latency so a status bar does not have to re-read the row for it.
+    DeviceChangedRackState = 1u << 2,
 };
 
 // EvClipAck::flags.
@@ -270,6 +329,23 @@ enum : u32 {
     // something impossible is TOLD, not partially obeyed. There is no
     // "the daemon took the first forty items" outcome.
     RejectBadArrangement = 16,
+
+    // --- rack contents (v7) -------------------------------------------------
+    RejectNotARack       = 17,  // CmdSetRackState named a device with no rack()
+    // The blob did not parse, or the rack would not take it. One reason and not
+    // two on purpose: rackStateFromString and setState both answer a bare bool,
+    // and inventing a distinction the plugin layer does not make would be this
+    // header claiming to know something it does not.
+    RejectBadRackState   = 18,
+
+    // --- the signature map (v8) ---------------------------------------------
+    //
+    // The blob's own shape, or a map sigMapValid refuses. One reason for both,
+    // because the daemon runs the ENGINE's own validator: a map this reason
+    // names is a map the engine would have handed straight back, and inventing
+    // a distinction the validator does not make would be this header claiming
+    // to know something it does not.
+    RejectBadSignatures  = 19,
 };
 
 inline const char* rejectReasonName(u32 r) {
@@ -290,6 +366,9 @@ inline const char* rejectReasonName(u32 r) {
         case RejectScanBusy:        return "the plugin scan is busy and the queue is full";
         case RejectBadAutomation:   return "the automation blob is inconsistent";
         case RejectBadArrangement:  return "the arrangement blob is inconsistent";
+        case RejectNotARack:        return "that device is not a rack";
+        case RejectBadRackState:    return "the rack state would not parse or would not apply";
+        case RejectBadSignatures:   return "the signature map is not walkable";
         default:                    return "none";
     }
 }
@@ -822,12 +901,11 @@ inline constexpr bool commandIsScalar(u32 type) {
         case Cmd::SetChain: case Cmd::SetReturnChain: case Cmd::SetMasterChain:
         case Cmd::RecordSlot: case Cmd::RecordMidiSlot:
         case Cmd::SetArrangement: case Cmd::SetTrackAutos:
-        // Time signatures (wave 9): Cmd::SetSignatures carries a pointer to a
-        // GUI-built map, so it is not a scalar. It is also not in
-        // commandIsKnown's range yet, deliberately -- the daemon answers
-        // RejectUnknownCommand rather than dropping it, which is the same
-        // fail-closed state Cmd::SetArrangement sat in for a wave. Consequence
-        // today: the daemon plays every set in 4/4.
+        // Time signatures: Cmd::SetSignatures carries a pointer to a GUI-built
+        // map, so it is not a scalar. As of v8 it is a pooled BLOB
+        // (commandIsSignatures) and the daemon honours it; before that it sat
+        // outside commandIsKnown's bound on purpose, answering
+        // RejectUnknownCommand, and the daemon played every set in 4/4.
         case Cmd::SetSignatures:
             return false;
     }
@@ -854,16 +932,28 @@ inline constexpr bool commandIsArrangement(u32 type) {
            ((Cmd)type == Cmd::SetArrangement || (Cmd)type == Cmd::SetTrackAutos);
 }
 
-// Consumed by the daemon, never forwarded verbatim.
+// Carries the signature map as a PoolKindSignatures blob: a = the entry count,
+// b = the client's generation, ref = the offset (0 clears). A class of its own
+// rather than a third arrangement flavour, because it is answered by a different
+// event and because it is addressed by nothing — there is one map per set, not
+// one per track. `ref == 0` is the clear form and is legal.
+inline constexpr bool commandIsSignatures(u32 type) {
+    return type < kDaemonCommandBase && (Cmd)type == Cmd::SetSignatures;
+}
+
+// Consumed by the daemon, never forwarded verbatim. The bound is spelled as the
+// LAST daemon command for the reason commandIsKnown gives below: a hand-copied
+// name here is what left four appended commands classifying as unknown for a
+// whole wave.
 inline constexpr bool commandIsDevice(u32 type) {
-    return type >= kDaemonCommandBase && type <= CmdScanPlugins;
+    return type >= kDaemonCommandBase && type <= CmdSetRackState;
 }
 
 // Names memory the sender does not own on the receiving side. Permanently
 // refused, not deferred.
 inline constexpr bool commandCarriesPointer(u32 type) {
     return !commandIsScalar(type) && !commandIsPooled(type) && !commandIsDevice(type) &&
-           !commandIsArrangement(type);
+           !commandIsArrangement(type) && !commandIsSignatures(type);
 }
 
 // True for a type this build knows at all. An unknown type is a peer from the
@@ -877,8 +967,13 @@ inline constexpr bool commandCarriesPointer(u32 type) {
 // and it is why 8a could land the header compiled-and-unused without breaking
 // anything. Spelling the bound as the last enumerator is what keeps the next
 // append from repeating it.
+//
+// The bound moved to Cmd::SetSignatures in v8, and ONLY because the daemon now
+// genuinely honours that command. Moving it earlier would have turned a visible
+// RejectUnknownCommand into a silently accepted no-op, which is the trade this
+// whole boundary refuses to make.
 inline constexpr bool commandIsKnown(u32 type) {
-    return type <= (u32)Cmd::BackToArrangement || commandIsDevice(type);
+    return type <= (u32)Cmd::SetSignatures || commandIsDevice(type);
 }
 
 // Events that cannot cross as they stand: each hands a pointer back to whoever
@@ -1039,7 +1134,24 @@ struct ControlHeader {
     // the publication edge for the whole table.
     std::atomic<u32> catalogCount;      // rows published, <= kMaxCatalog
     std::atomic<u32> catalogTruncated;  // plugins beyond kMaxCatalog, 0 normally
-    u32  reserved[6];
+
+    // --- rack contents (v7) -------------------------------------------------
+    //
+    // CmdSetRackState commands the daemon accepted and applied. A u32 out of the
+    // reserved words rather than a u64 appended, for the reason catalogCount is
+    // one: taking from `reserved` keeps ControlHeader's size and therefore every
+    // section offset below it. Counting rack EDITS and not blocks, 2^32 of them
+    // is not a number a session reaches.
+    //
+    // Refusals are not counted separately — they are already devicesFailed, and
+    // a second counter for the same event is a second thing to keep true.
+    std::atomic<u32> rackStatesApplied;
+    // Cmd::SetSignatures commands accepted and handed to the engine. It reads 0
+    // on every build before v8 AND on a set that never publishes a map, which is
+    // why nothing asserts it equals a number on its own: the discriminating
+    // check is that it MOVED across a publication.
+    std::atomic<u32> signaturesApplied;
+    u32  reserved[4];
 
     // Creator only, before publishReady().
     void init(i32 pid, bool nullDriver, const char* driver) {
@@ -1070,6 +1182,8 @@ struct ControlHeader {
         scanPlugins.store(0, std::memory_order_relaxed);
         catalogCount.store(0, std::memory_order_relaxed);
         catalogTruncated.store(0, std::memory_order_relaxed);
+        rackStatesApplied.store(0, std::memory_order_relaxed);
+        signaturesApplied.store(0, std::memory_order_relaxed);
         engineDrains.store(0, std::memory_order_relaxed);
         drainsExact.store(0, std::memory_order_relaxed);
         reserved1.store(0, std::memory_order_relaxed);
