@@ -203,7 +203,11 @@ build/engine_test: tests/engine_test.cpp src/audio/engine.cpp src/core/common.cp
 # -lrt is only needed for shm_open on glibc < 2.34; harmless after.
 IPC_CF := -std=c++20 -O2 $(WARN)
 IPC_H  := src/ipc/shm.h src/ipc/pool.h src/ipc/control.h src/ipc/client.h
-build/ipc_test: tests/ipc_test.cpp src/ipc/shm.h
+# ALL FOUR headers, not just shm.h. The short list let ipc_test go stale: a
+# protocol bump in control.h never triggered a rebuild, every local run tested
+# yesterday's binary against today's headers, and the mismatch only surfaced on
+# a fresh CI build -- where it cost three red runs to locate from outside.
+build/ipc_test: tests/ipc_test.cpp $(IPC_H)
 	@mkdir -p build
 	$(CXX) $(IPC_CF) $< -o $@ -lrt -lpthread
 

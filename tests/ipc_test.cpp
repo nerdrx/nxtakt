@@ -960,7 +960,12 @@ static void testArrangementClassifiers() {
               (int)ipc::commandIsPooled(t), (int)ipc::commandIsArrangement(t),
               (int)ipc::commandCarriesPointer(t));
     }
-    CHECK(!ipc::commandIsKnown((u32)Cmd::BackToArrangement + 1),
+    // SetSignatures is the last enumerator as of protocol v8. This line was
+    // itself the hand-copied number it warns about -- it still said
+    // BackToArrangement + 1 after the bound moved past it, and a stale test
+    // binary (the Makefile missed control.h as a dependency) hid the mismatch
+    // from every local run while a fresh CI build caught it.
+    CHECK(!ipc::commandIsKnown((u32)Cmd::SetSignatures + 1),
           "and one past the last enumerator is still unknown — the bound is the "
           "enum's end, not a hand-copied number");
 
@@ -982,7 +987,7 @@ static void testArrangementClassifiers() {
           (unsigned long long)ipc::arrangementBytes(2, 1));
     CHECK(ipc::kMaxArrLanes == kMaxRtArrLanes,
           "the wire lane bound and the engine's agree (%d)", (int)ipc::kMaxArrLanes);
-    CHECK(ipc::kProtocolVersion == 6 && ipc::kPoolVersion == 4 && ipc::kShmVersion == 6,
+    CHECK(ipc::kProtocolVersion == 8 && ipc::kPoolVersion == 6 && ipc::kShmVersion == 6,
           "protocol v%u, pool v%u, shm v%u", ipc::kProtocolVersion, ipc::kPoolVersion,
           ipc::kShmVersion);
     CHECK(ipc::control::kJournal > ipc::control::kParams &&
