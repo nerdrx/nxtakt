@@ -11,9 +11,13 @@
 #include <xmmintrin.h>
 #endif
 
+#ifndef NXTAKT_VERSION
+#define NXTAKT_VERSION "dev"
+#endif
+
 static void usage() {
     std::printf(
-        "NxTakt — session-first DAW\n"
+        "NxTakt " NXTAKT_VERSION " — session-first DAW\n"
         "\n"
         "  nxtakt [project.lattice]\n"
         "\n"

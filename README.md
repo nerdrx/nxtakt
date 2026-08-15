@@ -50,8 +50,8 @@ as its own process, playing clips out of a shared-memory sample pool.
 
 ### CI plays what it builds
 
-Every push builds the whole application, runs the headless suite — 500+
-assertions across the engine, the lock-free IPC layer and the daemon — and then
+Every push builds the whole application, runs the headless suite — 2,500+
+assertions across the engine, the IPC layer, the daemon and the devices — and then
 renders five passes of the demo set to FLAC, printing the peak and RMS of each
 into the run summary. The pipeline does not just compile this DAW. It hands you
 the audio.
@@ -63,16 +63,17 @@ the audio.
 | | |
 |---|---|
 | **Session View** | Clip grid, scenes, per-track stop, scene launch, stop-all, mixer strip (pan, fader, peak meters, mute/solo/arm), master strip, file browser with drag-to-slot. |
-| **Piano roll** | Fold, 1/16 grid, drag / resize / delete, multi-note selection, velocity lane, live playhead. Sample-accurate playback with no stuck notes across loop wraps or clip switches. |
+| **Piano roll** | Fold (incl. fold-to-scale), scale highlight + snap (14 modes), 1/16 grid, drag / resize / delete, multi-select, velocity lane, per-note chance and velocity range (deterministic under offline render), quantize with strength, legato, live playhead. No stuck notes across loop wraps or clip switches. |
 | **MIDI in** | ALSA sequencer port plus an FL-Studio-style computer keyboard (`Ctrl+Shift+K`), routed per block to note-capable devices on armed tracks, with Live-style auto-arm on select. Overdub passes into a playing clip. |
 | **Warping** | **Beats** is a two-grain overlap-add stretcher that follows the session tempo while preserving pitch; **Repitch** transposes with the tempo; **Off** ignores it. |
 | **Recording** | Arm a track, click an empty slot. Quantised start and stop on the launch grid; takes come back as warped clips at the session tempo, with pre-chain input monitoring. |
 | **Plugins** | Per-track device chains in the signal path — **LV2** via lilv and **CLAP**, both with working note input — plus a filterable browser, bypass and parameter knobs. 410 usable on a stock Arch box. |
-| **Stock devices** | `Saturator` (compensated tanh shaper) and `Pulse` (8-voice PolyBLEP morph synth), riding the same machinery as every third-party plugin. |
+| **Stock devices** | Eleven, riding the same machinery as every third-party plugin: `Pulse` (8-voice PolyBLEP morph synth), `Saturator`, `EQ Three`, `Compressor`, `Delay`, `Reverb`, `Auto Filter`, `Chorus`, `Limiter` (true lookahead, honestly-reported latency), `Utility`, and `Rack` — 8 macro knobs over a nested chain, min>max inverts. |
 | **Buses** | Post-fader sends into four return chains and a master chain, with plugin delay compensation aligning every parallel path into the master sum. |
 | **Arrangement** | A linear timeline beside the Session grid: place, move, trim, split and fade clips, with per-track automation lanes. Play the Session live and commit the performance to the timeline — an arrangement and the performance it came from render **bit-identically**. |
 | **Automation** | Clip envelopes on any track parameter or device knob, drawn in the piano roll on the notes' own time axis. Record a knob move while armed; the engine ramps within the block and never overwrites the value you set. |
 | **Generative clips** | Launch probability and follow actions (Stop / Again / Next / Prev / First / Random), scheduled through the same quantised path and deterministic under offline render. |
+| **Time signatures** | A map of changes along the timeline, not a global pair: bar lines, metronome accents, launch quanta and the ruler all walk it. Drawn and played bar lines come from the same function and cannot disagree. |
 | **Undo** | Snapshot history over the project serializer — including the audio of unsaved takes. Gestures coalesce into one entry per drag. |
 | **Engine daemon** | `nxtaktd` hosts the transport and the sample pool in its own process, over shared-memory SPSC rings with crash-orphan reaping. |
 | **Windows** | The headless engine cross-builds with mingw-w64 and its test suite runs under Wine on every push. |
@@ -98,9 +99,10 @@ Audio comes up on JACK if it is running — playback *and* capture auto-connecte
 
 ## Under the hood
 
-- **500+ assertions**, run headless on every push: the engine suite, the
-  lock-free ring suite and the daemon suite, plus a render that fails if it
-  comes out silent and a plugin scan that must find plugins.
+- **2,500+ assertions**, run headless on every push: engine, lock-free IPC,
+  daemon, internal devices, the view's bar grid against the engine's bar
+  arithmetic, and the engine handle across both of its backings — plus a render
+  that fails if it comes out silent and a plugin scan that must find plugins.
 - **Deterministic render.** No allocation and sample-accurate scheduling mean a
   render is reproducible frame-for-frame; delay compensation is proven by
   `cmp`-identical renders, and the zero-latency path is a hard bypass that
@@ -112,8 +114,9 @@ Audio comes up on JACK if it is running — playback *and* capture auto-connecte
 - **~10M messages/sec** across the shared-memory SPSC ring the process split
   runs on — design and wire format in [`docs/PROCESS-SPLIT.md`](docs/PROCESS-SPLIT.md).
 - **Windows is tested, not assumed.** `engine_test.exe` is cross-compiled and
-  then *run* under Wine in CI, gated on a floor of 199 passing checks, so "the
-  Windows build works" is a claim about behaviour. Scope in
+  then *run* under Wine in CI, and its check count must EQUAL the native run of
+  the same source in the same job, so "the Windows build works" is a claim
+  about behaviour. Scope in
   [`docs/PORTING.md`](docs/PORTING.md).
 - **GPU-native UI.** Everything is SDF quads in one shader: resolution
   independent, hundreds of frames per second, with an explicit foreign-pass
@@ -123,10 +126,11 @@ Audio comes up on JACK if it is running — playback *and* capture auto-connecte
 
 ## Not done yet
 
-- No time-signature changes.
 - VST3 is not started (licensing).
-- The GUI still runs its own in-process engine; `nxtaktd` is not yet the
-  shipping path.
+- The in-process engine is still the default. `NXTAKT_ENGINE=daemon` runs the
+  GUI against `nxtaktd` — clips, devices, the plugin catalog and lifecycle all
+  cross the process boundary — but recording and rack contents do not yet, and
+  signature maps are refused (daemon mode plays 4/4).
 - The Windows window and audio backends compile under a Windows-targeting
   compiler but have never driven a real window station or audio endpoint.
 

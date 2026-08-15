@@ -13,6 +13,11 @@ CC       ?= gcc
 BIN      := build/nxtakt
 GEN      := build/gen
 
+# The version the binary reports and `make dist` stamps into the artifact name.
+# CI passes the tag (v0.1.0 -> 0.1.0); a working tree falls back to
+# git-describe so a dev build is identifiable, and to "dev" outside a checkout.
+VERSION  ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
+
 PKGS     := jack alsa sndfile samplerate gl x11 xcursor freetype2 fontconfig lilv-0
 WL_PKGS  := wayland-client wayland-egl wayland-cursor egl xkbcommon
 
@@ -59,7 +64,8 @@ PKG_CF   := $(shell pkg-config --cflags $(ALL_PKGS))
 PKG_LD   := $(shell pkg-config --libs $(ALL_PKGS))
 
 WARN     := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
-CXXFLAGS := -std=c++20 -fno-math-errno $(WARN) $(PKG_CF) -I$(GEN) -Ivendor/clap/include -MMD -MP
+CXXFLAGS := -std=c++20 -fno-math-errno $(WARN) $(PKG_CF) -I$(GEN) -Ivendor/clap/include \
+            -DNXTAKT_VERSION='"$(VERSION)"' -MMD -MP
 CFLAGS   := -std=c11 -w $(PKG_CF) -I$(GEN) -MMD -MP
 LDLIBS   := $(PKG_LD) -lpthread -lm -ldl
 
@@ -279,6 +285,47 @@ test: build/engine_test build/ipc_test build/daemon_test build/internal_device_t
 
 run: $(BIN)
 	./$(BIN)
+
+# ---- release artifact ------------------------------------------------------
+# One Linux tarball, shaped for NX Hub's discovery (SPEC.md): the asset name
+# contains "linux" and ends .tar.gz, so the hub classifies it archive-dir; the
+# binary heuristic matches the file named like the repo, so `nxtakt` is what a
+# desktop entry will point at; nxtaktd rides in the SAME directory because
+# daemon mode finds it beside /proc/self/exe; icon.svg is what the hub extracts
+# for the entry; and the sibling .sha256 is verified by the hub on download.
+#
+# gen_demo and render are included on purpose: a fresh install with no set to
+# open is a blank screen, and `./gen_demo ~/Music/Demo` is the two-second fix.
+#
+# CI passes VERSION from the tag. The tarball unpacks into a versioned
+# directory rather than loose files, because loose files in ~/Downloads is what
+# cheap software does.
+DISTDIR := build/dist/nxtakt-$(VERSION)-linux-x86_64
+dist: all build/nxtaktd build/gen_demo build/render
+	rm -rf build/dist
+	mkdir -p $(DISTDIR)
+	cp build/nxtakt build/nxtaktd build/gen_demo build/render $(DISTDIR)/
+	cp README.md LICENSE $(DISTDIR)/
+	cp assets/logo.svg $(DISTDIR)/icon.svg
+	printf '%s\n' \
+	  "NxTakt $(VERSION) — Linux x86_64" \
+	  "" \
+	  "  ./nxtakt [set.lattice]        the DAW" \
+	  "  ./gen_demo ~/Music/Demo       write a demo set to open" \
+	  "  ./nxtaktd                     the engine as its own process (optional)" \
+	  "  ./render set.lattice out.wav  offline render" \
+	  "" \
+	  "Runtime libraries (from your distro, all common): jack or alsa, sndfile," \
+	  "samplerate, freetype, fontconfig, GL, lilv; wayland or X11." \
+	  > $(DISTDIR)/START-HERE.txt
+	tar -C build/dist -czf build/dist/nxtakt-$(VERSION)-linux-x86_64.tar.gz \
+	  nxtakt-$(VERSION)-linux-x86_64
+	cd build/dist && sha256sum nxtakt-$(VERSION)-linux-x86_64.tar.gz \
+	  > nxtakt-$(VERSION)-linux-x86_64.tar.gz.sha256
+	@ls -la build/dist/*.tar.gz*
+	@echo "  ->  build/dist/nxtakt-$(VERSION)-linux-x86_64.tar.gz"
+
+.PHONY: dist
 
 clean:
 	rm -rf build/obj build/gen $(BIN)

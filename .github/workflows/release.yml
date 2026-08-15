@@ -1,0 +1,101 @@
+# NxTakt — release on tag
+#
+# Push a tag like v0.1.0 and this builds the Linux artifact, gates it on the
+# FULL test suite, and publishes a GitHub release. NX Hub then discovers it on
+# its own: the hub scans nerdrx repos, takes the latest release, and classifies
+# `*linux*.tar.gz` as an installable archive — no registry edit anywhere.
+#
+# The suite runs before anything is packaged, on the same runner, because a
+# release that skipped the tests is a build, not a release. If a check fails,
+# no artifact exists and no release appears — there is nothing to roll back.
+#
+# Built on ubuntu-latest deliberately: its glibc is the portability baseline.
+# A binary built on a rolling-release box runs only on rolling-release boxes.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the release and upload assets
+
+jobs:
+  release:
+    name: build, test, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # git describe needs history; the tag needs itself
+
+      - name: Install build dependencies
+        run: |
+          source .github/scripts/apt.sh
+          apt_update
+          apt_install \
+            build-essential pkg-config \
+            libjack-jackd2-dev libasound2-dev \
+            libsndfile1-dev libsamplerate0-dev \
+            libfreetype-dev libfontconfig1-dev \
+            libgl-dev libglx-dev libx11-dev libxcursor-dev \
+            liblilv-dev lv2-dev \
+            libwayland-dev libwayland-bin wayland-protocols \
+            libxkbcommon-dev libegl-dev
+
+      - name: Version from the tag
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "releasing $V from $GITHUB_REF_NAME"
+
+      - name: Build everything
+        run: make -j"$(nproc)" VERSION="$VERSION"
+
+      - name: Run the full suite (the release gate)
+        run: make test VERSION="$VERSION"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          make dist VERSION="$VERSION"
+          echo "artifact contents:"
+          tar -tzf "build/dist/nxtakt-$VERSION-linux-x86_64.tar.gz"
+
+      # The binary must at least start and identify itself on the runner it was
+      # built on, or the artifact is dead on arrival everywhere.
+      - name: Smoke the artifact
+        run: |
+          set -euo pipefail
+          tar -C /tmp -xzf "build/dist/nxtakt-$VERSION-linux-x86_64.tar.gz"
+          D="/tmp/nxtakt-$VERSION-linux-x86_64"
+          "$D/nxtakt" --help | head -1
+          "$D/nxtakt" --help | head -1 | grep -F "$VERSION"
+          "$D/gen_demo" /tmp/smoke-demo >/dev/null
+          "$D/render" /tmp/smoke-demo/demo.lattice /tmp/smoke.wav --scene 2 --bars 2
+          test -s /tmp/smoke.wav
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/dist/nxtakt-${{ env.VERSION }}-linux-x86_64.tar.gz
+            build/dist/nxtakt-${{ env.VERSION }}-linux-x86_64.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            NxTakt ${{ env.VERSION }} — session-first DAW for Linux.
+
+            Download `nxtakt-${{ env.VERSION }}-linux-x86_64.tar.gz`, unpack,
+            run `./nxtakt`. No set yet? `./gen_demo ~/Music/Demo` writes one.
+            Installable through [NX Hub](https://github.com/nerdrx/nx-hub),
+            which discovers this release automatically.
+
+            Every artifact here passed the full headless suite on this runner
+            before it was packaged — engine, IPC, daemon, devices, view and
+            handle checks, plus an offline render that must not be silent.
