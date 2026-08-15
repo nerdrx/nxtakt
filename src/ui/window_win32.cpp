@@ -23,10 +23,16 @@
 #include <cstring>
 #include <string>
 
-// No <GL/gl.h> or <GL/glew.h> here on purpose: everything this backend needs
-// (HGLRC, PIXELFORMATDESCRIPTOR, wgl*, SwapBuffers) lives in wingdi.h, and
-// staying out of glew.h avoids its include-order rules in a TU that must
-// include windows.h first anyway. renderer.cpp owns glewInit().
+// Everything this backend needs to make a context (HGLRC, PIXELFORMATDESCRIPTOR,
+// wgl*, SwapBuffers) lives in wingdi.h, already pulled in by windows.h above.
+//
+// gl.h comes in for one reason: opengl32.dll exports GL 1.1 and no more, so
+// every GL 2.0+ entry point the renderer uses has to be resolved through
+// wglGetProcAddress AFTER a context is current -- and this is the one file that
+// knows when that moment is. src/gfx/gl_win32_loader.h holds the pointers;
+// create() calls loadGLWin32() below, once, and nothing else in the program has
+// to know that Windows is different.
+#include "../gfx/gl.h"
 
 // ---------------------------------------------------------------------------
 // WGL extension bits. Declared locally with non-standard type names so this
@@ -371,6 +377,18 @@ bool Win32Backend::create(const char* title, int w, int h, Input* in) {
     // context, and the renderer needs 3.3 core. Better to fail loudly.
     if (!ctx_) { LOGE("cannot create an OpenGL 3.3 core context"); destroy(); return false; }
     if (!wglMakeCurrent(hdc_, ctx_)) { LOGE("wglMakeCurrent failed"); destroy(); return false; }
+
+    // The context is current: this is the only moment wglGetProcAddress works,
+    // and every GL call the renderer makes from here on depends on it. A driver
+    // that gave us a 3.3 core context and then cannot produce glCreateShader is
+    // broken in a way we cannot paper over, so this is fatal rather than
+    // degraded -- and it names the missing function, which "black window" does
+    // not.
+    if (!loadGLWin32([](const char* fn) { LOGE("GL entry point missing: %s", fn); })) {
+        LOGE("the GL 3.3 context is missing entry points the renderer needs");
+        destroy();
+        return false;
+    }
 
     if (wgl_.swapInterval) wgl_.swapInterval(1);
 

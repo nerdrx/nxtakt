@@ -1,9 +1,10 @@
-# NxTakt — Windows cross build (mingw-w64), HEADLESS subset.
+# NxTakt — Windows cross build (mingw-w64): the headless subset, and the GUI.
 #
 #   make -f Makefile.mingw config           show toolchain + what was detected
-#   make -f Makefile.mingw                  build everything below
+#   make -f Makefile.mingw                  build the headless subset (default)
 #   make -f Makefile.mingw check            build, then run the suite under wine
 #   make -f Makefile.mingw verify-sources   prove the file lists match Makefile
+#   make -f Makefile.mingw gui              build build-mingw/nxtakt.exe
 #   make -f Makefile.mingw clean
 #
 # What this builds
@@ -20,12 +21,13 @@
 #                                      cannot rot silently the way they did
 #                                      while they were unbuildable.
 #
+#   build-mingw/nxtakt.exe             the GUI -- NOT part of `all`, built by
+#                                      `make -f Makefile.mingw gui`. Needs a
+#                                      sysroot; `tools/win-sysroot.sh` fetches
+#                                      one. See "The GUI" at the bottom.
+#
 # What this deliberately does NOT build
 # -------------------------------------
-#   The GUI (build/nxtakt). It needs freetype, glew, sndfile and samplerate as
-#   Windows libraries, none of which apt ships cross-built, and src/ui/app.cpp
-#   plus src/gfx/font.cpp are still POSIX-only. See docs/PORTING.md.
-#
 #   src/ipc/*. tests/ipc_test.cpp is built on POSIX shared memory (shm_open,
 #   mmap, ftruncate, process-shared pthread mutexes). There is no thin shim for
 #   that on Win32 -- it is CreateFileMappingW/MapViewOfFile plus named mutexes,
@@ -125,7 +127,8 @@ DEP      := $(TEST_OBJ:.o=.d) $(WIN_ONLY_OBJ:.o=.d)
 
 EXE      := $(BUILD)/engine_test.exe
 
-.PHONY: all debug check clean config verify-sources verify-deps verify-shim winobjs
+.PHONY: all debug check clean config verify-sources verify-deps verify-shim winobjs \
+        gui gui-dlls gui-config
 
 all: $(EXE) winobjs
 debug: all
@@ -258,13 +261,17 @@ clean:
 # import or static libraries. Unlike engine_test.exe this one is not -static: a
 # static libsndfile drags in FLAC/ogg/vorbis/opus/mpg123 and the link order
 # stops being something a makefile can guess.
-WIN_DEPS ?=
+# Defaults to what tools/win-sysroot.sh populates, so neither this target nor
+# the GUI needs an argument on a machine where that script has been run.
+WIN_DEPS ?= $(BUILD)/sysroot
 RENDER_SRC := tools/render.cpp src/core/common.cpp src/core/project.cpp \
               src/audio/sample.cpp src/audio/engine.cpp
 
 $(BUILD)/render.exe: $(RENDER_SRC)
-	@test -n "$(WIN_DEPS)" || { \
-	  echo "render.exe needs WIN_DEPS=/path/to/win32/sysroot (sndfile+samplerate)"; \
+	@test -d "$(WIN_DEPS)/include" || { \
+	  echo "render.exe needs a sysroot with sndfile+samplerate:"; \
+	  echo "    tools/win-sysroot.sh          (populates $(WIN_DEPS))"; \
+	  echo "    ... or pass WIN_DEPS=/path/to/win32/sysroot"; \
 	  exit 1; }
 	@mkdir -p $(dir $@)
 	@# SHIM_INC is filtered out deliberately, and this is not a nicety. Include
@@ -278,5 +285,127 @@ $(BUILD)/render.exe: $(RENDER_SRC)
 	  $(RENDER_SRC) -o $@ \
 	  -mconsole -static-libgcc -static-libstdc++ \
 	  -L$(WIN_DEPS)/lib -lsndfile -lsamplerate
+
+# ===========================================================================
+# The GUI
+# ===========================================================================
+#
+#   tools/win-sysroot.sh                    fetch freetype/sndfile/samplerate
+#   make -f Makefile.mingw gui              -> build-mingw/nxtakt.exe (+ DLLs)
+#   tools/headless_win_test.sh              run it under wine, in gamescope
+#
+# NOT part of `all`, and not run by the windows-cross CI job: `all` must stay
+# buildable with nothing but apt's mingw-w64, which is what makes the headless
+# engine suite a check every push can afford. This target needs the sysroot.
+#
+# What is in the link, and what is not
+# ------------------------------------
+# The file list is derived the same way the native Makefile derives its own --
+# `find src -name '*.cpp'` -- so a new source file joins both builds at once.
+# Six files are then subtracted, and each one is a platform decision rather
+# than an oversight:
+#
+#   ui/window_x11.cpp      X11/GLX          window_win32.cpp replaces it
+#   ui/window_wayland.cpp  Wayland/EGL      likewise
+#   audio/backend.cpp      JACK + ALSA      backend_win32.cpp replaces it
+#   audio/midi_in.cpp      ALSA sequencer   stubbed (no WinMM backend yet)
+#   plugin/lv2_host.cpp    lilv + LV2       stubbed (CLAP covers Windows)
+#   daemon/*               separate program, as on Linux
+#
+# The two stubs live in tools/mingw-shim/win/win_stubs.cpp. Everything else --
+# every app_*.cpp, the renderer, the project format, the internal devices, the
+# CLAP host, the OSC parser -- is compiled from the same source the Linux build
+# uses, with no conditionals. tools/mingw-shim/win/ is what makes that possible
+# and its README explains the cost.
+#
+# Include-path order is load bearing. WIN_SHIM_INC has to come before the
+# toolchain's own directories (its unistd.h chains to mingw's with
+# #include_next) and SHIM_INC must NOT be here at all: the GUI links the real
+# libsndfile and would otherwise compile against the abort-on-call stubs, same
+# trap as render.exe.
+GUI_EXCLUDE  := src/ui/window_x11.cpp src/ui/window_wayland.cpp \
+                src/audio/backend.cpp src/audio/midi_in.cpp \
+                src/plugin/lv2_host.cpp
+GUI_SRC      := $(filter-out $(GUI_EXCLUDE),$(filter-out src/daemon/%,$(shell find src -name '*.cpp' | sort))) \
+                tools/mingw-shim/win/win_posix.cpp tools/mingw-shim/win/win_stubs.cpp
+
+WIN_SHIM_INC := -Itools/mingw-shim/win
+# Defined before GUI_CF, which is a := variable: a VERSION set after it would
+# expand to nothing and the binary would report its version as an empty string.
+VERSION      ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
+GUI_CF       := $(filter-out $(SHIM_INC),$(CXXFLAGS)) $(WIN_SHIM_INC) \
+                -I$(WIN_DEPS)/include -I$(WIN_DEPS)/include/freetype2 \
+                -DNXTAKT_VERSION='"$(VERSION)"'
+
+# -mconsole, not -mwindows, and that is not a placeholder: every LOGI/LOGW/LOGE
+# in this program goes to stdout, and under wine that is the only channel a
+# first-light run has. A GUI-subsystem binary would throw all of it away and
+# leave a black window and no explanation. Switch it when there is something to
+# switch it for.
+#
+# --stack: docs/PORTING.md's warning applied to the app. The GUI keeps its
+# Engine on the heap (EngineHandle owns a unique_ptr), so this is not the
+# load-bearing flag it is for engine_test.exe -- but 2 MB is also the default
+# for every thread the app spawns, and the audio callback path is deep.
+#
+# Not -static: libsndfile pulls FLAC/ogg/vorbis/opus/mpg123 and freetype pulls
+# harfbuzz/glib; the import libraries plus `gui-dlls` are what keep that link
+# line from becoming a research project. See tools/win-sysroot.sh.
+GUI_LDFLAGS  := -mconsole -static-libgcc -static-libstdc++ -Wl,--stack,16777216
+GUI_LIBS     := -L$(WIN_DEPS)/lib -lfreetype -lsndfile -lsamplerate \
+                -lopengl32 -lgdi32 -lole32 -loleaut32 -lavrt -lksuser -lwinmm -luuid
+
+GUI_OBJ      := $(patsubst %.cpp,$(OBJDIR)/gui/%.o,$(GUI_SRC))
+GUI_EXE      := $(BUILD)/nxtakt.exe
+DEP          += $(GUI_OBJ:.o=.d)
+
+gui: $(GUI_EXE) gui-dlls
+
+gui-config:
+	@echo "sysroot        : $(WIN_DEPS)"
+	@echo "sources        : $(words $(GUI_SRC)) translation units"
+	@echo "excluded       : $(GUI_EXCLUDE)"
+	@echo "cxxflags       : $(GUI_CF)"
+	@echo "libs           : $(GUI_LIBS)"
+
+$(GUI_EXE): $(GUI_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(GUI_OBJ) -o $@ $(GUI_LDFLAGS) $(GUI_LIBS)
+	@echo "  ->  $@"
+
+# Separate object tree from the headless build's: the same .cpp is compiled
+# with different include paths in the two (SHIM_INC vs the real headers), and
+# sharing $(OBJDIR) would silently hand one build the other's objects.
+$(OBJDIR)/gui/%.o: %.cpp | gui-sysroot-check
+	@mkdir -p $(dir $@)
+	$(CXX) $(GUI_CF) -c $< -o $@
+
+.PHONY: gui-sysroot-check
+gui-sysroot-check:
+	@test -f "$(WIN_DEPS)/include/sndfile.h" || { \
+	  echo "*** no Windows sysroot at $(WIN_DEPS)"; \
+	  echo "    run:  tools/win-sysroot.sh"; \
+	  echo "    (fetches pinned freetype/sndfile/samplerate + closure from MSYS2)"; \
+	  exit 1; }
+
+# The .exe imports 13 DLLs that are not part of Windows. They have to sit next
+# to it -- Wine and Windows both search the executable's own directory first --
+# so copying them is part of building, not part of packaging.
+gui-dlls: $(GUI_EXE)
+	@n=0; for dll in $$($(CROSS)-objdump -p $(GUI_EXE) | sed -n 's/.*DLL Name: //p'); do \
+	  if [ -f "$(WIN_DEPS)/bin/$$dll" ] && [ ! -f "$(BUILD)/$$dll" ]; then \
+	    cp "$(WIN_DEPS)/bin/$$dll" "$(BUILD)/"; n=$$((n+1)); \
+	  fi; \
+	done; \
+	for pass in 1 2 3; do \
+	  for f in $(BUILD)/*.dll; do \
+	    for dll in $$($(CROSS)-objdump -p $$f | sed -n 's/.*DLL Name: //p'); do \
+	      if [ -f "$(WIN_DEPS)/bin/$$dll" ] && [ ! -f "$(BUILD)/$$dll" ]; then \
+	        cp "$(WIN_DEPS)/bin/$$dll" "$(BUILD)/"; n=$$((n+1)); \
+	      fi; \
+	    done; \
+	  done; \
+	done; \
+	echo "  ->  $$n runtime DLLs beside $(GUI_EXE)"
 
 -include $(DEP)
