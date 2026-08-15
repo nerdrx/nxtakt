@@ -2,6 +2,11 @@
 // hot/active protocol: claim hot each frame from its bounds, take `active` on
 // a press that lands inside, consume Input::dx/dy only while it owns `active`,
 // and let Ui::endFrame() release ownership on mouse-up.
+//
+// Everything here is drawn in the NX design language (docs/DESIGN.md §5): glass
+// pills, recessed wells, gradient hairlines, one light source in the upper
+// left. The signatures did not change, so the whole program was re-skinned by
+// this file rather than by three hundred call sites.
 #include "widgets.h"
 #include <cstdio>
 #include <cmath>
@@ -20,6 +25,53 @@ namespace {
 constexpr f32 kPi = 3.14159265358979323846f;
 constexpr f32 kDeg = kPi / 180.f;
 
+// ---------------------------------------------------------------------------
+// §6  The motion table
+//
+// One row per widget id that has recently been hovered or pressed, holding the
+// moment each of those last CHANGED and the weight it held at that moment. A
+// weight is then `from + (to - from) * ease(now - t0)`, which means a hover
+// that reverses mid-fade continues from where it actually is instead of
+// snapping to 1 and falling again.
+//
+// Fixed size, flat, file-scope: it is scanned linearly (128 rows is a few
+// cache lines and the scan stops at the first hit), it allocates nothing on any
+// frame, and a widget that has stopped being drawn is reclaimed as the
+// least-recently-seen row. There is no per-frame sweep and nothing to free.
+//
+// 128 rows against a screen that draws perhaps thirty interactive widgets at
+// once: the table only ever holds ids that have been touched, so the working
+// set is "widgets the pointer has visited", not "widgets on screen".
+// ---------------------------------------------------------------------------
+struct MotionSlot {
+    u64  id = 0;
+    f64  seen = 0;                    // last frame this id asked
+    f64  hoverT0 = 0, pressT0 = 0;    // when the target last flipped
+    f32  hoverFrom = 0.f, pressFrom = 0.f;
+    bool hoverOn = false, pressOn = false;
+};
+
+constexpr int kMotionSlots = 128;
+MotionSlot g_motion[kMotionSlots];
+
+// One channel of the table: hold the target, ease from wherever we were.
+inline f32 rampAt(f64 now, f64 t0, f32 from, bool on) {
+    const f32 to = on ? 1.f : 0.f;
+    return from + (to - from) * nx::easeSoft.at((f32)(now - t0), nx::durFast);
+}
+
+// §5's primary fill in an arbitrary hue: the inner top highlight over the
+// tint, draining to a darker bottom-right. Exactly nx::violetFill's ramp,
+// generated rather than quoted so that a red RECORD pill, a violet PLAY pill
+// and a clip-coloured launch button are visibly the same material lit by the
+// same lamp. Interned by value, so one hue costs one gradient row per frame
+// however many pills wear it.
+nx::Grad fillOf(const Col& c) {
+    return {{{c.mix(Col(1.f, 1.f, 1.f, c.a), 0.24f), 0.00f},
+             {c,                                     0.55f},
+             {c.scale(0.60f),                        1.00f}}, 3, 170.f};
+}
+
 // Knob sweep, measured from 12 o'clock: -135deg .. +135deg. The `arc` helper
 // works in screen angles where 0 points right and the angle grows clockwise,
 // so straight up is -90deg and the sweep becomes -225deg .. +45deg.
@@ -37,6 +89,299 @@ inline f32 norm01(f32 v, f32 lo, f32 hi) {
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// §5 / §6  The NX vocabulary
+// ---------------------------------------------------------------------------
+
+UiMotion Ui::motion(u64 id, bool hot, bool held) {
+    // §6 is non-negotiable: under reduced motion the weights are the endpoints
+    // themselves, so every `* m.hover` in this file becomes an instant switch
+    // and no lift, scale, glow or slide is ever in an intermediate state.
+    if (nx::reducedMotion() || !r) return {hot ? 1.f : 0.f, held ? 1.f : 0.f};
+
+    const f64 now = r->time();
+    MotionSlot* s = nullptr;
+    MotionSlot* oldest = &g_motion[0];
+    for (MotionSlot& m : g_motion) {
+        if (m.id == id) { s = &m; break; }
+        if (m.seen < oldest->seen) oldest = &m;
+    }
+    if (!s) {
+        // A brand-new id starts settled in whatever state it is already in, so
+        // a widget that appears under the pointer does not play its hover-in.
+        s = oldest;
+        *s = MotionSlot{};
+        s->id = id;
+        s->hoverT0 = s->pressT0 = now - (f64)nx::durFast;
+        s->hoverFrom = s->hoverOn = hot;
+        s->pressFrom = s->pressOn = held;
+    }
+    s->seen = now;
+
+    if (hot != s->hoverOn) {
+        s->hoverFrom = rampAt(now, s->hoverT0, s->hoverFrom, s->hoverOn);
+        s->hoverOn = hot;
+        s->hoverT0 = now;
+    }
+    if (held != s->pressOn) {
+        s->pressFrom = rampAt(now, s->pressT0, s->pressFrom, s->pressOn);
+        s->pressOn = held;
+        s->pressT0 = now;
+    }
+    return {rampAt(now, s->hoverT0, s->hoverFrom, s->hoverOn),
+            rampAt(now, s->pressT0, s->pressFrom, s->pressOn)};
+}
+
+Rect Ui::liftPress(const Rect& b, const UiMotion& m) const {
+    const f32 dpi = r ? std::max(1.f, r->dpiScale()) : 1.f;
+    // Hover lifts 1.5px (§5 says 1-2). Press takes it back down as it shrinks,
+    // so a held button sits into the surface rather than hovering while pressed.
+    const f32 y = b.y - 1.5f * dpi * m.hover * (1.f - m.press);
+    const f32 k = 1.f - 0.04f * m.press;                 // §5: scale to 0.96
+    const f32 dw = b.w * (1.f - k) * 0.5f, dh = b.h * (1.f - k) * 0.5f;
+    return {b.x + dw, y + dh, b.w - dw * 2.f, b.h - dh * 2.f};
+}
+
+void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
+                  const UiMotion& m) const {
+    if (!r || b.w <= 0.f || b.h <= 0.f) return;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = radius < 0.f ? b.h * 0.5f : radius;
+
+    switch (kind) {
+    case Pill::Primary:
+    case Pill::Danger: {
+        // The glow: §5's "soft violet glow, bloomed on hover". It is the one
+        // shadow in the language that is not black, and it is what makes a
+        // primary action read as lit from within rather than merely filled.
+        // Alpha rides the hover weight -- the SPEC's colour, not the gradient,
+        // so animating it interns nothing.
+        const f32 glow = 0.34f + 0.30f * m.hover;
+        r->shadow(b, rad, nx::ShadowSpec{0.f, 3.f * dpi, 14.f * dpi, -2.f * dpi,
+                                         tint.alpha(glow)});
+        r->gradRect(b, rad, fillOf(tint));
+        // The lit edge, brighter while hovered. One light source, upper left.
+        r->gradStroke(b, rad, dpi, nx::edge, 0.85f + 0.15f * m.hover);
+        break;
+    }
+    case Pill::Ghost:
+        // Nothing at rest; the glass arrives with the pointer. The fill is
+        // faded through gradRect's alphaMul rather than through Grad::faded, so
+        // a row of ghosts sharing one hover value shares one gradient row.
+        if (m.hover > 0.004f || m.press > 0.004f) {
+            r->gradRect(b, rad, nx::glassChip,
+                        clampv(0.55f * m.hover + 0.45f * m.press, 0.f, 1.f));
+            r->gradStroke(b, rad, dpi, nx::edge, 0.75f * m.hover);
+        }
+        break;
+    case Pill::Secondary:
+    default:
+        r->gradRect(b, rad, nx::glassChip, 0.80f + 0.20f * m.hover);
+        r->gradStroke(b, rad, dpi, nx::edge, 0.75f + 0.25f * m.hover);
+        // A hovered secondary lifts into a faint violet wash rather than a
+        // lighter grey: §1, violet leads even in the small states.
+        if (m.hover > 0.004f)
+            r->roundRect(b, rad, nx::violet.alpha(0.10f * m.hover));
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text batching
+// ---------------------------------------------------------------------------
+
+void Ui::beginDeferText() { deferText = true; textJobN = 0; }
+
+void Ui::flushText() {
+    deferText = false;                  // before the loop: these draw for real
+    if (!r) { textJobN = 0; return; }
+    for (int i = 0; i < textJobN; ++i) {
+        const TextJob& j = textJobs[i];
+        if (!j.f) continue;
+        if (j.micro) microIn(*j.f, j.b, j.s, j.c, j.a, j.padX);
+        else         r->textIn(*j.f, j.b, j.s, j.c, j.a, j.padX);
+    }
+    textJobN = 0;
+}
+
+// Take a label into the queue, or report that it could not be taken -- because
+// the window is closed, the queue is full, or the string is longer than a slot
+// holds. A caller that gets `false` draws immediately, so overflowing this
+// queue costs the draw call it was trying to save and never a missing label.
+static bool queueText(Ui& ui, const Font& f, const Rect& b, const char* s,
+                      const Col& c, Align a, f32 padX, bool micro) {
+    if (!ui.deferText || ui.textJobN >= Ui::kMaxTextJobs) return false;
+    Ui::TextJob& j = ui.textJobs[ui.textJobN];
+    size_t n = 0;
+    while (s[n] && n < sizeof j.s - 1) { j.s[n] = s[n]; ++n; }
+    if (s[n]) return false;             // truncating would be a silent lie
+    j.s[n] = 0;
+    j.f = &f; j.b = b; j.c = c; j.a = a; j.padX = padX; j.micro = micro;
+    ++ui.textJobN;
+    return true;
+}
+
+void Ui::drawTextIn(const Font& f, const Rect& b, const char* s, const Col& c,
+                    Align a, f32 padX) {
+    if (!r || !s) return;
+    if (!queueText(*this, f, b, s, c, a, padX, false)) r->textIn(f, b, s, c, a, padX);
+}
+
+f32 Ui::microLabel(const Font& f, f32 x, f32 y, const char* s, const Col& c) {
+    if (!r || !s) return x;
+    f32 pen = std::round(x);
+    const f32 track = std::max(1.f, (f32)f.size() * nx::microTracking);
+    for (const char* p = s; *p; ++p) {
+        const char up[2] = {(char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p), 0};
+        pen = r->text(f, pen, y, up, c);
+        pen += track;
+    }
+    return pen;
+}
+
+f32 Ui::microWidth(const Font& f, const char* s) const {
+    if (!s || !*s) return 0.f;
+    f32 w = 0.f;
+    const f32 track = std::max(1.f, (f32)f.size() * nx::microTracking);
+    for (const char* p = s; *p; ++p) {
+        const char up[2] = {(char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p), 0};
+        w += f.measure(up) + track;
+    }
+    return w - track;                    // no trailing space after the last glyph
+}
+
+void Ui::microIn(const Font& f, const Rect& b, const char* s, const Col& c,
+                 Align a, f32 padX) {
+    if (!r || !s || !*s) return;
+    if (queueText(*this, f, b, s, c, a, padX, true)) return;
+    const f32 w = microWidth(f, s);
+    f32 x = b.x + padX;
+    if (a == Align::Center)     x = b.cx() - w * 0.5f;
+    else if (a == Align::Right) x = b.right() - padX - w;
+    microLabel(f, x, b.y + (b.h - f.height()) * 0.5f, s, c);
+}
+
+void Ui::chip(const Rect& b, const char* label, const Col& ink) {
+    if (!r) return;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    r->gradRect(b, b.h * 0.5f, nx::glassChip);
+    r->gradStroke(b, b.h * 0.5f, dpi, nx::edge, 0.8f);
+    Font* f = fSmall ? fSmall : fBody;
+    if (f) microIn(*f, b, label, ink, Align::Center);
+}
+
+void Ui::fieldWell(const Rect& b, f32 focus, bool deep) const {
+    if (!r || b.w <= 0.f || b.h <= 0.f) return;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = std::min(nx::radiusSm * dpi, b.h * 0.5f);
+    r->well(b, rad, deep);
+    // The border runs --line -> violet as focus arrives, and the ring blooms
+    // with it. §5: never a bare outline.
+    const f32 k = clampv(focus, 0.f, 1.f);
+    r->roundRectOutline(b, rad, std::max(1.f, std::round(dpi)),
+                        nx::line.mix(nx::violet, k));
+    if (k > 0.02f) {
+        const f32 s = std::max(1.f, dpi);
+        r->roundRectOutline(b.inset(-3.5f * s), rad + 3.5f * s, 3.f * s,
+                            nx::violet.alpha(0.20f * k));
+        r->roundRectOutline(b.inset(-1.0f * s), rad + 1.0f * s, 2.f * s,
+                            nx::violet.alpha(0.60f * k));
+    }
+}
+
+// §5's tab pill. ONE indicator, translated -- not two backgrounds toggled.
+//
+// The slide is the identity move of the whole language, so it is the one place
+// in this file that gets --ease-spring and its overshoot. `nx::spring()` hands
+// back --ease-soft under reduced motion, which is what "springs replaced"
+// means concretely.
+bool Ui::tabPill(u64 id, const Rect& b, const char* const* labels, int count, int* idx) {
+    if (!r || !idx || !labels || count <= 0) return false;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 pad = std::max(1.f, std::round(2.f * dpi));
+    const Rect track = b.inset(pad);
+    const f32 slotW = track.w / (f32)count;
+
+    *idx = clampv(*idx, 0, count - 1);
+    const int was = *idx;
+    bool changed = false;
+
+    // --- interaction: one id per slot, so hover reads per tab ---------------
+    int hotSlot = -1;
+    for (int i = 0; i < count; ++i) {
+        const Rect s{track.x + slotW * (f32)i, track.y, slotW, track.h};
+        const u64 sid = id ^ ((u64)(i + 1) * 0x9E3779B97F4A7C15ull);
+        if (setHot(sid, s) && isHot(sid)) {
+            hotSlot = i;
+            cursor = Cursor::Hand;
+            if (in->pressed[0]) active = sid;
+            if (in->released[0] && active == sid) {
+                if (i != *idx) { *idx = i; changed = true; }
+                active = 0;
+            }
+        }
+    }
+
+    // --- the indicator's position, remembered across frames -----------------
+    //
+    // A flat table keyed on the pill's own id, exactly like the motion table
+    // and for the same reason: there is no widget object to hold it. It stores
+    // where the slide started and when, so a click landing mid-slide is picked
+    // up from where the indicator actually is.
+    struct Slide { u64 id = 0; f64 seen = 0, t0 = 0; f32 from = 0.f; int to = 0; };
+    static Slide g_slide[8];
+    Slide* sl = nullptr;
+    Slide* oldest = &g_slide[0];
+    for (Slide& s : g_slide) {
+        if (s.id == id) { sl = &s; break; }
+        if (s.seen < oldest->seen) oldest = &s;
+    }
+    const f64 now = r->time();
+    if (!sl) {
+        sl = oldest;
+        *sl = Slide{};
+        sl->id = id;
+        sl->from = (f32)*idx;
+        sl->to = *idx;
+        sl->t0 = now - (f64)nx::durSlow;
+    }
+    sl->seen = now;
+    const nx::Ease& ease = nx::spring();
+    if (sl->to != *idx) {
+        sl->from = sl->from + ((f32)sl->to - sl->from) *
+                              ease.at((f32)(now - sl->t0), nx::durSlow);
+        sl->to = *idx;
+        sl->t0 = now;
+    }
+    const f32 at = sl->from + ((f32)sl->to - sl->from) *
+                              ease.at((f32)(now - sl->t0), nx::durSlow);
+
+    // --- draw: the housing, the indicator, then every label ----------------
+    // Shapes first and text after, deliberately: the batcher pays a draw call
+    // for every shape->text->shape alternation, and a tab strip that drew each
+    // slot complete would cost one per tab.
+    r->gradRect(b, b.h * 0.5f, nx::glassChip, 0.55f);
+    r->gradStroke(b, b.h * 0.5f, dpi, nx::edge, 0.7f);
+
+    const Rect ind{track.x + slotW * at, track.y, slotW, track.h};
+    const UiMotion im = motion(id, hotSlot >= 0, active != 0 && hotSlot >= 0);
+    pillRect(ind, ind.h * 0.5f, Pill::Primary, nx::violet, im);
+
+    Font* f = fSmall ? fSmall : fBody;
+    if (f) {
+        for (int i = 0; i < count; ++i) {
+            const Rect s{track.x + slotW * (f32)i, track.y, slotW, track.h};
+            // The ink follows the indicator rather than the index, so the text
+            // brightens as the pill arrives under it instead of flipping.
+            const f32 under = clampv(1.f - std::fabs(at - (f32)i), 0.f, 1.f);
+            const Col c = nx::muted.mix(nx::text, under)
+                                   .mix(nx::text, i == hotSlot ? 0.4f : 0.f);
+            microIn(*f, s, labels[i] ? labels[i] : "", c, Align::Center);
+        }
+    }
+    return changed || was != *idx;
+}
 
 // ---------------------------------------------------------------------------
 // Drawing helpers
@@ -64,11 +409,16 @@ void Ui::arc(f32 cx, f32 cy, f32 rad, f32 a0, f32 a1, f32 th, const Col& c) {
 void Ui::bevel(const Rect& b, f32 radius, const Col& fill, f32 lightness) {
     if (!r || b.w <= 0.f || b.h <= 0.f) return;
     r->roundRect(b, radius, fill);
-    // A single bright pixel row across the top edge; enough to read as raised
-    // without the cost (or the banding) of a full gradient.
+    // The top highlight, as a HAIRLINE rather than the solid pixel row this
+    // used to be: it fades out at both ends instead of stopping dead against
+    // the corner radius, which is §11's rule and, at this size, also simply
+    // looks like light rather than like a drawn line.
+    if (lightness <= 0.f) return;
     const f32 inset = std::min(radius, b.w * 0.5f);
-    const f32 hw = b.w - inset * 2.f;
-    if (hw > 0.f) r->rect({b.x + inset, b.y, hw, 1.f}, fill.scale(1.f + lightness));
+    if (b.w - inset * 2.f <= 1.f) return;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    r->hairlineH(b.x + inset, b.right() - inset, b.y,
+                 Col(1.f, 1.f, 1.f, clampv(lightness * 2.4f, 0.f, 0.5f)), dpi);
 }
 
 void Ui::playTriangle(const Rect& b, const Col& c) {
@@ -121,7 +471,13 @@ void Ui::meterV(const Rect& b, f32 lvl, f32 peak) {
 // Button
 // ---------------------------------------------------------------------------
 
+// §5's glass pill. Primary (violet-filled, inner top highlight, soft glow) when
+// `on`, secondary (--glass-chip over --edge) when not; hover lifts 1-2px and
+// blooms the glow, press scales to 0.96. `onCol` is the hue the caller means,
+// not a flat fill any more -- fillOf() lights it from the upper left like
+// everything else, so RECORD's red and the transport's violet are one material.
 bool Ui::button(u64 id, const Rect& b, const char* label, bool on, Col onCol, f32 radius) {
+    if (!r) return false;
     const bool over = setHot(id, b);
     const bool hotNow = isHot(id);
     bool clicked = false;
@@ -133,21 +489,21 @@ bool Ui::button(u64 id, const Rect& b, const char* label, bool on, Col onCol, f3
     }
 
     const bool held = (active == id) && over;
+    const UiMotion m = motion(id, hotNow, held);
+    const Rect br = liftPress(b, m);
+    lastRect = br;
+    const f32 rad = radius < 0.f ? br.h * 0.5f : radius;
 
-    Col fill = pal::panelAlt;
-    Col fg = pal::text;
-    if (on) {
-        fill = held ? onCol.scale(0.85f) : onCol;
-        fg = inkOn(fill);
-    } else if (held) {
-        fill = pal::panelAlt.scale(0.7f);
-    } else if (hotNow) {
-        fill = pal::slotHover;
-    }
+    // Danger is a role, not a colour a caller happened to pick: red arrives
+    // here only from the transport's record plate and the delete verbs, both of
+    // which §1 admits. Everything else lands on Primary and keeps its own hue.
+    const bool danger = onCol.r > 0.6f && onCol.g < 0.45f && onCol.b < 0.55f;
+    pillRect(br, rad, on ? (danger ? Pill::Danger : Pill::Primary) : Pill::Secondary,
+             onCol, m);
 
-    bevel(b, radius, fill, held ? 0.f : 0.06f);
-
-    if (label && *label && fBody) r->textIn(*fBody, b, label, fg, Align::Center, 3.f);
+    const Col fg = on ? inkOn(onCol)
+                      : nx::muted.mix(nx::text, 0.55f + 0.45f * m.hover);
+    if (label && *label && fBody) drawTextIn(*fBody, br, label, fg, Align::Center, 3.f);
     if (hotNow) cursor = Cursor::Hand;
     return clicked;
 }
@@ -169,25 +525,28 @@ bool Ui::squareToggle(u64 id, const Rect& b, const char* label, bool* value, Col
     }
 
     const bool held = (active == id) && over;
+    const UiMotion m = motion(id, hotNow, held);
+    // A badge, not a button: it keeps its footprint (these sit shoulder to
+    // shoulder in the mixer, where a lift would read as the row coming apart)
+    // and takes only the press scale. §5's chip radius, not the pill's -- an
+    // 11px square at pill radius is a dot.
+    const Rect br = liftPress(b, {0.f, m.press});
+    lastRect = br;
+    const f32 rad = std::min(nx::radiusXs * (r ? std::max(1.f, r->dpiScale()) : 1.f),
+                             std::min(br.w, br.h) * 0.34f);
 
-    Col fill = pal::panelAlt;
     Col fg = pal::textDim;
     if (*value) {
-        fill = held ? onCol.scale(0.85f) : onCol;
-        fg = inkOn(fill);
-    } else if (held) {
-        fill = pal::panelAlt.scale(0.7f);
-    } else if (hotNow) {
-        fill = pal::slotHover;
-        fg = pal::text;
+        pillRect(br, rad, Pill::Primary, onCol, m);
+        fg = inkOn(onCol);
+    } else {
+        pillRect(br, rad, Pill::Secondary, onCol, m);
+        fg = pal::textDim.mix(nx::text, m.hover);
     }
-
-    r->roundRect(b, 2.f, fill);
-    if (!*value) r->roundRectOutline(b, 2.f, 1.f, pal::divider);
 
     if (label && *label) {
         Font* f = fSmall ? fSmall : fBody;
-        if (f) r->textIn(*f, b, label, fg, Align::Center, 1.f);
+        if (f) drawTextIn(*f, br, label, fg, Align::Center, 1.f);
     }
     if (hotNow) cursor = Cursor::Hand;
     return changed;
@@ -319,22 +678,24 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
 
     // --- draw ---
     const f32 trackW = std::min(4.f, std::max(2.f, b.w * 0.22f));
+    // A trough is a WELL, not a painted slot (§4): recessed, flat, cheap. The
+    // 1px grey rule that used to sit down its left edge is gone -- §11.
     const Rect track{std::round(b.cx() - trackW * 0.5f), b.y + handleH * 0.5f,
                      trackW, b.h - handleH};
-    r->rect(track, pal::appBg);
-    r->rect({track.x, track.y, 1.f, track.h}, pal::divider);
+    r->well(track, trackW * 0.5f, true);
 
-    // Unity tick.
+    // Unity tick, as a hairline that fades at both ends.
     const f32 unityY = std::round(handleY(0.85f) + handleH * 0.5f);
-    r->rect({b.x, unityY, b.w, 1.f}, pal::ridge.alpha(0.5f));
+    r->hairlineH(b.x, b.right(), unityY, nx::hairlineInk, 1.f);
 
     const Rect handle{b.x, std::round(handleY(*t)), b.w, handleH};
     Col hc = pal::ridge;
     if (active == id) hc = pal::ridge.scale(1.25f);
     else if (hotNow) hc = pal::ridge.scale(1.12f);
     bevel(handle, 2.f, hc, 0.18f);
-    r->rect({handle.x + 1.f, std::round(handle.cy()), handle.w - 2.f, 1.f},
-            pal::appBg.alpha(0.75f));
+    // The grip line across the middle of the cap.
+    r->hairlineH(handle.x + 1.f, handle.right() - 1.f, std::round(handle.cy()),
+                 rgba(0x000000, 0.55f), 1.f);
 
     if (hotNow || active == id) cursor = Cursor::ResizeV;
     return changed;
@@ -367,17 +728,32 @@ bool Ui::dragNumber(u64 id, const Rect& b, f64* v, f64 lo, f64 hi, f64 perPixel,
     }
     if (in->released[0] && active == id) active = 0;
 
-    if (hotNow || active == id) r->rect(b, pal::slotHover);
+    // A scrubbable number is a FIELD, so it recesses rather than lighting up:
+    // the glass arrives with the pointer (Pill::Ghost), and while the drag owns
+    // it the box drops into a well with a violet hairline under the number --
+    // the same "this is being edited" language textField uses, at the weight a
+    // control that has no caret can carry.
+    const bool live = hotNow || active == id;
+    const UiMotion m = motion(id, hotNow, active == id);
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = std::min(nx::radiusXs * dpi, b.h * 0.5f);
+    if (active == id) {
+        r->well(b, rad, true);
+        r->hairlineH(b.x + rad, b.right() - rad, b.bottom() - dpi,
+                     nx::violet.alpha(0.75f), dpi);
+    } else {
+        pillRect(b, rad, Pill::Ghost, pal::accent, m);
+    }
 
     Font* f = fBody ? fBody : fSmall;
     if (f) {
         char buf[80];
         if (zeroLabel && std::fabs(*v) < 1e-9) std::snprintf(buf, sizeof buf, "%s", zeroLabel);
         else                                   std::snprintf(buf, sizeof buf, fmt ? fmt : "%.2f", *v);
-        r->textIn(*f, b, buf, (hotNow || active == id) ? pal::text : pal::textDim, align, 3.f);
+        drawTextIn(*f, b, buf, live ? nx::text : pal::textDim, align, 3.f);
     }
 
-    if (hotNow || active == id) cursor = Cursor::ResizeV;
+    if (live) cursor = Cursor::ResizeV;
     return changed;
 }
 
@@ -404,12 +780,16 @@ bool Ui::selector(u64 id, const Rect& b, int* idx, const char* const* options, i
     if (in->pressed[2] && hotNow) step(-1);
     if (hotNow && in->wheel != 0.f) step(in->wheel > 0.f ? +1 : -1);
 
-    r->roundRect(b, 2.f, hotNow ? pal::slotHover : pal::panelAlt);
+    const bool held = (active == id) && over;
+    const UiMotion m = motion(id, hotNow, held);
+    const Rect br = liftPress(b, m);
+    pillRect(br, br.h * 0.5f, Pill::Secondary, pal::accent, m);
 
     *idx = clampv(*idx, 0, count - 1);
     const char* label = options[*idx] ? options[*idx] : "";
     Font* f = fBody ? fBody : fSmall;
-    if (f) r->textIn(*f, b, label, hotNow ? pal::text : pal::textDim, Align::Center, 3.f);
+    if (f) drawTextIn(*f, br, label, pal::textDim.mix(nx::text, 0.4f + 0.6f * m.hover),
+                      Align::Center, 3.f);
 
     if (hotNow) cursor = Cursor::Hand;
     return changed;
@@ -494,12 +874,22 @@ bool Ui::textField(u64 id, const Rect& b, std::string* value, Col bg, Col fg,
     }
 
     // --- draw ---
+    //
+    // §5's input: a recessed well, a --line border that runs to violet on
+    // focus, and the two-ring focus halo -- never a bare outline. The caller's
+    // `bg` is still honoured at rest, because a clip name field wears its clip's
+    // colour and that is information, not decoration; the well takes over the
+    // moment the caret does.
     const bool nowEditing = (editId == id);
-    Col fill = bg;
-    if (nowEditing) fill = pal::appBg;
-    else if (hotNow) fill = bg.mix(pal::slotHover, 0.5f);
-    if (fill.a > 0.f) r->rect(b, fill);
-    if (nowEditing) r->roundRectOutline(b, 2.f, 1.f, pal::accent);
+    const UiMotion m = motion(id, hotNow, nowEditing);
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = std::min(nx::radiusXs * dpi, b.h * 0.5f);
+    if (nowEditing) {
+        fieldWell(b, m.press);
+    } else {
+        if (bg.a > 0.f) r->roundRect(b, rad, bg);
+        pillRect(b, rad, Pill::Ghost, pal::accent, m);
+    }
 
     Font* f = fBody ? fBody : fSmall;
     if (f) {

@@ -375,7 +375,8 @@ void Renderer::begin(int w, int h, f32 dpiScale) {
     verts_.clear();
     clips_.clear();
     curTex_ = 0;
-    gradCount_ = 0;
+    // gradCount_ deliberately NOT reset: the gradient table persists across
+    // flushes AND frames. See flush() for why.
 
     glViewport(0, 0, w, h);
     glDisable(GL_DEPTH_TEST);
@@ -437,28 +438,42 @@ void Renderer::end() {
 }
 
 void Renderer::flush() {
-    if (verts_.empty()) { gradCount_ = 0; return; }
+    if (verts_.empty()) return;
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts_.size() * sizeof(Vtx)), verts_.data(), GL_STREAM_DRAW);
-    if (gradCount_ > 0) {
+
+    // Upload only the gradient rows added since the last upload. The table
+    // used to reset every flush, which re-interned and re-uploaded the same
+    // handful of theme tokens on every gradient-carrying batch -- measured at
+    // ~8 us of driver sync apiece, and after the chrome re-skin that was ~20
+    // batches a frame: the whole visible cost of the design language was this
+    // one redundant call. The tokens are constants, so a persistent table
+    // converges within a frame or two and steady state uploads NOTHING.
+    if (gradDirtyFrom_ < gradCount_) {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, gradTex_);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kGradTexels, gradCount_,
-                        GL_RGBA, GL_FLOAT, gradData_.data());
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, gradDirtyFrom_,
+                        kGradTexels, gradCount_ - gradDirtyFrom_,
+                        GL_RGBA, GL_FLOAT,
+                        gradData_.data() + (size_t)gradDirtyFrom_ * kGradTexels * 4);
+        gradDirtyFrom_ = gradCount_;
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, curTex_);
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)verts_.size());
     verts_.clear();
-    gradCount_ = 0;
     ++drawCalls_;
 }
 
-// Gradients are interned per batch: a token used two hundred times occupies one
-// row, and the whole table is one glTexSubImage2D ahead of the draw it feeds.
-// The table is small enough that a linear scan of 64-bit hashes beats anything
-// with a bucket in it.
+// Gradients are interned into a PERSISTENT table: a token used two hundred
+// times occupies one row, forever, and only a row's first appearance is ever
+// uploaded. The table is small enough that a linear scan of 64-bit hashes
+// beats anything with a bucket in it. An animated gradient (a per-frame
+// .shifted()/.rotated() derivative) hashes fresh each frame and will fill the
+// table over time; the overflow path below makes that a periodic one-flush
+// hiccup rather than an error -- but a view that wants an animated look should
+// prefer a phase PARAMETER (as sheen() does) over mutating the gradient.
 static u64 hashGrad(const nx::Grad& g) {
     u64 h = 1469598103934665603ull;
     auto mix = [&h](f32 v) {
@@ -483,10 +498,13 @@ int Renderer::gradSlot(const nx::Grad& g) {
     const u64 h = hashGrad(g);
     for (int i = 0; i < gradCount_; ++i)
         if (gradHash_[(size_t)i] == h) return i;
-    // The table is per-batch, so overflowing costs one extra draw call rather
-    // than a dropped gradient. 256 distinct gradients in a single batch would
-    // be a view doing something very strange.
-    if (gradCount_ >= kMaxGrads) flush();
+    // Overflow: flush what is queued, then start the table over. Costs one
+    // draw call and one full re-warm; only reachable by animated gradients.
+    if (gradCount_ >= kMaxGrads) {
+        flush();
+        gradCount_ = 0;
+        gradDirtyFrom_ = 0;
+    }
 
     const int slot = gradCount_++;
     gradHash_[(size_t)slot] = h;

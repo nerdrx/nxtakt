@@ -44,6 +44,11 @@ constexpr int kPreviewHiPitch = 96;
 // A looping item repeats its material; the preview stops after this many, which
 // is far past what is legible at any zoom a hand works at.
 constexpr int kMaxPreviewReps = 128;
+// Segments in a fade's drawn curve. Fixed rather than per-pixel: the shaded
+// wedge under it is already smooth, and this is only the line that reads as the
+// curve's shape. Eight is where the joints stop being visible at the widths a
+// fade is actually dragged to.
+constexpr int kFadeCurveSegs = 8;
 
 // The colour an item draws in. An item on an OVERRIDDEN track is desaturated,
 // which is the same visual grammar an overridden automation lane already uses
@@ -186,7 +191,11 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     selTrack_ = ctx.selTrack;
     selItem_  = ctx.selItem;
 
-    rr.rect(r, pal::appBg);
+    // The whole editor is a WELL: the timeline is the material the music sits
+    // in, recessed below the chrome that frames it (docs/DESIGN.md §4). The
+    // header column and the ruler are painted back up to panel tone below, so
+    // what is left recessed is exactly the working area.
+    rr.well(r, 0.f, true);
     const f32 headW = kArrHeaderW * s;
     if (r.w < headW + 80.f * s || r.h < 60.f * s) return changed;
 
@@ -279,10 +288,13 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     };
 
     // --- ruler: bar numbers, the loop brace, the playhead -------------------
-    rr.rect(ruler, pal::panel);
-    rr.rect(corner, pal::panel);
-    rr.rect({ruler.x, ruler.bottom() - 1.f * s, ruler.w, 1.f * s}, pal::divider);
-    rr.rect({corner.right() - 1.f * s, corner.y, 1.f * s, corner.h}, pal::divider);
+    // THE RULER IS THE BOUNDARY between chrome and work: panel-toned, so it
+    // belongs to the frame, and underlined with a hairline rather than a rule,
+    // because a solid grey divider is a §11 finding.
+    rr.rect(ruler, tl::panelFill);
+    rr.rect(corner, tl::panelFill);
+    rr.hairlineH(ruler.x, ruler.right(), ruler.bottom() - 1.f * s);
+    rr.hairlineV(corner.right() - 1.f * s, corner.y, corner.bottom());
 
     const u64 rulerId = uiId(24, 0);
     ui.setHot(rulerId, ruler);
@@ -336,7 +348,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     if (ui.fSmall)
         drawRulerLabels(rr, *ui.fSmall, ta, ruler.x, ruler.right(),
                         ruler.y + (ruler.h - ui.fSmall->height()) * 0.5f, s,
-                        pal::textDim, pal::textFaint, ctx.sig, 44.f * s);
+                        tl::rulerOnBar, tl::rulerOffBar, ctx.sig, 44.f * s);
     // The signature markers. Drawn ONLY for a map that has more than one entry,
     // which is not a shortcut: a set in one signature has nothing to mark -- the
     // control bar already says what it is -- and a tag on bar 1 of every existing
@@ -354,9 +366,14 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             const f32 tw = ui.fSmall->measure(buf);
             const Rect tag{mx + 1.f * s, ruler.y + 3.f * s,
                            tw + 7.f * s, ruler.h - 6.f * s};
-            rr.roundRect(tag, 2.f * s, pal::accent.alpha(0.85f));
-            rr.textIn(*ui.fSmall, tag, buf, pal::textOnClip, Align::Center, 0.f);
-            rr.rect({mx, ruler.y, 1.f * s, ruler.h}, pal::accentHi);
+            // The one accent tag on the ruler, and it keeps its violet fill:
+            // a signature change is identity, not decoration. inkOn picks the
+            // ink -- §7's table says `text` clears 4.8:1 on a violet fill and
+            // `muted` is illegible on one, so nothing secondary may go here.
+            rr.roundRect(tag, 2.f * s, nx::violet.alpha(0.92f));
+            rr.textIn(*ui.fSmall, tag, buf, nx::inkOn(nx::violet), Align::Center, 0.f);
+            rr.rect({nx::snapPx(mx), ruler.y, std::max(1.f, s), ruler.h},
+                    nx::violetSoft.alpha(0.85f));
         }
     }
     // The brace. A disabled loop still remembers where it was (session.h), so
@@ -365,27 +382,30 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     if (ctx.loopStart && ctx.loopEnd && *ctx.loopEnd > *ctx.loopStart) {
         const f32 x0 = beatToX(ta, *ctx.loopStart), x1 = beatToX(ta, *ctx.loopEnd);
         const bool on = ctx.loopOn && *ctx.loopOn;
-        const Col c = on ? pal::accentHi : pal::textFaint;
-        rr.rect({x0, ruler.y, std::max(1.f * s, x1 - x0), 3.f * s}, c.alpha(on ? 0.9f : 0.5f));
+        // The brace is VIOLET -- the accent, because it is a thing the user set
+        // rather than a thing that is happening. Cyan is reserved for the one
+        // element on this surface that is live, and that is the playhead.
+        const Col c = nx::violetSoft.alpha(on ? 0.95f : 0.34f);
+        rr.rect({x0, ruler.y, std::max(1.f * s, x1 - x0), 3.f * s}, c);
         rr.rect({x0, ruler.y, 1.5f * s, ruler.h - 1.f * s}, c);
         rr.rect({x1 - 1.5f * s, ruler.y, 1.5f * s, ruler.h - 1.f * s}, c);
     }
     {   // The playhead's head, in the ruler, where a hand looks for it.
         const f32 px = beatToX(ta, ctx.playhead);
         if (px >= ruler.x && px <= ruler.right())
-            rr.rect({px - 1.f * s, ruler.y, 2.f * s, ruler.h}, pal::playGreen);
+            tl::drawPlayhead(rr, px, ruler.y, ruler.h, s * 1.5f, true);
     }
     rr.popClip();
 
     if (ui.fSmall) {
         char buf[32];
         std::snprintf(buf, sizeof buf, "%.0f px/beat", (double)zoom_);
-        rr.textIn(*ui.fSmall, corner, buf, pal::textFaint, Align::Left, 6.f * s);
+        rr.textIn(*ui.fSmall, corner, buf, nx::muted.alpha(0.62f), Align::Left, 6.f * s);
     }
 
     // --- the lanes ---------------------------------------------------------
     rr.pushClip(lanes);
-    rr.rect(lanes, pal::appBg);
+    rr.well(lanes, 0.f, true);
     drawTimeGrid(rr, ta, lanes, s, ctx.sig, kArrMinGridPx * s);
     // Past the loop end is still editable, so it is NOT dimmed the way the roll
     // dims past a clip's length: an arrangement has no end until something is
@@ -397,9 +417,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         const Rect band{lanes.x, topY + row.y, lanes.w, row.h};
         if (band.bottom() < lanes.y || band.y > lanes.bottom()) continue;
 
-        rr.rect(band, (i % 2) ? pal::appBg.scale(1.10f) : pal::appBg);
-        drawTimeGrid(rr, ta, band, s, ctx.sig, kArrMinGridPx * s);
-        rr.rect({band.x, band.bottom() + row.autoH, band.w, 1.f * s}, pal::divider);
+        // The stripe is a LIFT on the well, not a second fill: the canvas is
+        // already there, and odd lanes only need enough violet to be countable.
+        //
+        // Which is also why the grid is no longer redrawn per band. It used to
+        // be, because an opaque band fill painted the canvas-wide grid out; a 3%
+        // violet does not, so one pass over `lanes` now serves every lane. On a
+        // full arrangement that is the difference between one set of bar lines
+        // and one per track.
+        if (i % 2) rr.rect(band, tl::stripeLift);
+        rr.hairlineH(band.x, band.right(), band.bottom() + row.autoH);
 
         if (!L.items) continue;
         const Col base = itemColour(L.colorIdx, L.overridden);
@@ -410,8 +437,14 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             const Rect box{x0, band.y + 1.f * s, std::max(2.f * s, x1 - x0), band.h - 2.f * s};
             const bool sel = (int)i == selTrack_ && it.uid == selItem_ && it.uid != 0;
 
+            // The item, in three flat quads. The colour stays SATURATED because
+            // it is data -- which track this material came from -- and the only
+            // thing added is a 1px darkened edge, so two items that touch read
+            // as two items rather than as one wide one. No gradient, no shadow:
+            // at a hundred items on screen either would be a slideshow.
             rr.roundRect(box, 2.f * s, base.scale(0.34f));
-            rr.rect({box.x, box.y, box.w, std::min(box.h, 12.f * s)}, base.scale(0.62f));
+            rr.rect({box.x, box.y, box.w, std::min(box.h, 12.f * s)}, base.scale(0.66f));
+            rr.roundRectOutline(box, 2.f * s, std::max(1.f, s), base.scale(0.16f));
 
             rr.pushClip(box.intersect(lanes));
             // The material, drawn against the SHARED axis: a waveform for a
@@ -459,30 +492,62 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 }
             }
 
-            // The fades, as filled wedges at the corners. Drawn per column
-            // rather than as a triangle so the wedge is clipped to the item at
-            // both ends whatever the zoom.
-            const Col shade = pal::appBg.alpha(0.78f);
+            // The fades, as CURVES rather than as ramps. The shaded wedge is
+            // still one column per pixel -- that is what makes the edge smooth
+            // at any zoom and it is the same loop the waveform above already
+            // runs -- but the profile is now a raised cosine, which is what a
+            // fade sounds like and therefore what it should look like. The edge
+            // itself is a short polyline over the same curve, capped at
+            // kFadeCurveSegs segments so a fade the width of the screen costs
+            // the same handful of quads as one the width of a beat.
+            const Col shade = nx::bgTop.alpha(0.80f);
+            const Col curveInk = nx::text.alpha(0.34f);
+            // Raised cosine, 0 at t=0 and 1 at t=1: the fraction of the item's
+            // height the shade still covers.
+            const auto profile = [](f32 t) {
+                return 0.5f - 0.5f * std::cos(clampv(t, 0.f, 1.f) * 3.14159265f);
+            };
+            const auto curveEdge = [&](f32 xa, f32 xb, bool rising) {
+                if (xb <= xa) return;
+                // Segments scale with the width the curve is actually drawn at.
+                // A fade eight pixels wide has no visible curvature to spend
+                // eight quads on, and on a full arrangement most of them are.
+                const int segs = clampv((int)((xb - xa) / (8.f * s)), 1, kFadeCurveSegs);
+                f32 pxx = xa, pyy = box.y + (rising ? 0.f : box.h);
+                for (int k = 1; k <= segs; ++k) {
+                    const f32 t = (f32)k / (f32)segs;
+                    const f32 x = xa + (xb - xa) * t;
+                    const f32 y = box.y + box.h * (rising ? profile(t) : 1.f - profile(t));
+                    rr.line(pxx, pyy, x, y, 1.f * s, curveInk);
+                    pxx = x; pyy = y;
+                }
+            };
             if (it.fadeIn > 0.0) {
                 const f32 fx1 = beatToX(ta, std::min(it.start + it.fadeIn, it.end()));
                 for (f32 x = std::max(box.x, lanes.x); x < std::min(fx1, lanes.right()); x += 1.f) {
                     const f32 t = clampv((x - box.x) / std::max(1.f, fx1 - box.x), 0.f, 1.f);
-                    rr.rect({x, box.y, 1.f, box.h * (1.f - t)}, shade);
+                    rr.rect({x, box.y, 1.f, box.h * (1.f - profile(t))}, shade);
                 }
-                rr.line(box.x, box.y, fx1, box.bottom(), 1.f * s, pal::text.alpha(0.5f));
+                curveEdge(box.x, fx1, true);
             }
             if (it.fadeOut > 0.0) {
                 const f32 fx0 = beatToX(ta, std::max(it.end() - it.fadeOut, it.start));
                 for (f32 x = std::max(fx0, lanes.x); x < std::min(box.right(), lanes.right()); x += 1.f) {
                     const f32 t = clampv((x - fx0) / std::max(1.f, box.right() - fx0), 0.f, 1.f);
-                    rr.rect({x, box.y, 1.f, box.h * t}, shade);
+                    rr.rect({x, box.y, 1.f, box.h * profile(t)}, shade);
                 }
-                rr.line(fx0, box.bottom(), box.right(), box.y, 1.f * s, pal::text.alpha(0.5f));
+                curveEdge(fx0, box.right(), false);
             }
 
+            // The name as a MICRO-LABEL (§5): uppercase, wide-tracked, in the
+            // ink §7 picks for the strip it sits on. It is a chip identifying
+            // the material, not a sentence, and at 9 px the tracking is what
+            // makes it read as one.
             if (ui.fSmall && box.w > 24.f * s)
-                rr.textIn(*ui.fSmall, {box.x, box.y, box.w, 12.f * s},
-                          it.src.name.c_str(), pal::textOnClip, Align::Left, 4.f * s);
+                tl::microLabel(rr, *ui.fSmall, box.x + 4.f * s,
+                               box.y + (12.f * s - ui.fSmall->height()) * 0.5f,
+                               it.src.name.c_str(), nx::inkOn(base.scale(0.66f)),
+                               box.w - 6.f * s);
             rr.popClip();
             (void)sel;
         }
@@ -496,9 +561,18 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             if (it.uid == 0 || it.uid != selItem_) continue;
             const f32 x0 = beatToX(ta, it.start), x1 = beatToX(ta, it.end());
             if (x1 < lanes.x - 2.f || x0 > lanes.right() + 2.f) continue;
-            rr.roundRectOutline({x0, band.y + 1.f * s, std::max(2.f * s, x1 - x0),
-                                 band.h - 2.f * s},
-                                2.f * s, 1.5f * s, pal::accent);
+            const Rect sr{x0, band.y + 1.f * s, std::max(2.f * s, x1 - x0),
+                          band.h - 2.f * s};
+            // THE ONE ELEVATION CUE ON THIS SURFACE, and it is barely there: a
+            // violet glow tucked under the selected item, light arriving from
+            // the upper-left so the shadow falls down. It is permitted because
+            // it is chrome-adjacent feedback -- "this is the one you are
+            // holding" -- and it is drawn once, for one item, never per item.
+            rr.shadow(sr, 2.f * s, nx::ShadowSpec{0.f, 2.f * s, 10.f * s, -1.f * s,
+                                                  nx::violet.alpha(0.42f)});
+            rr.roundRectOutline(sr, 2.f * s, std::max(1.f, s), nx::violet);
+            rr.roundRectOutline(sr.inset(-1.f * s), 3.f * s, std::max(1.f, s),
+                                nx::violetSoft.alpha(0.35f));
         }
     }
 
@@ -506,8 +580,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     {
         const f32 px = beatToX(ta, ctx.playhead);
         if (px >= lanes.x && px <= lanes.right())
-            rr.rect({px, lanes.y, 1.5f * s, lanes.h},
-                    ctx.playing ? pal::playGreen : pal::playGreen.alpha(0.45f));
+            tl::drawPlayhead(rr, px, lanes.y, lanes.h, s, ctx.playing);
     }
     rr.popClip();
 
@@ -532,7 +605,17 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             AutoLane& al = (*L.autos)[j];
             const AutoTargets::Entry* tgt = L.targets ? L.targets->find(al.address) : nullptr;
 
-            rr.rect(lr, pal::panel.scale(0.72f));
+            // A SHALLOWER well than the clip lanes above it: the envelope is
+            // still working surface, but it sits a step nearer the surface than
+            // the material it shapes.
+            //
+            // Which is a LIFT and not a second well, because the canvas under it
+            // is already --well-deep and wells are translucent black: painting
+            // --well on top of --well-deep makes it deeper, not shallower. This
+            // alpha is the one that lands the result where --well over the bare
+            // field lands, so the lane really is one step up rather than merely
+            // a different dark.
+            rr.rect(lr, nx::panel2.alpha(0.09f));
             rr.pushClip(lr.intersect(lanes));
             drawTimeGrid(rr, ta, lr, s, ctx.sig, kArrMinGridPx * s);
             AutoLaneView& v = views[j];
@@ -551,10 +634,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             }
             const f32 px = beatToX(ta, ctx.playhead);
             if (px >= lr.x && px <= lr.right())
-                rr.rect({px, lr.y, 1.5f * s, lr.h},
-                        ctx.playing ? pal::playGreen : pal::playGreen.alpha(0.45f));
+                tl::drawPlayhead(rr, px, lr.y, lr.h, s, ctx.playing);
             rr.popClip();
-            rr.rect({lr.x, lr.y, lr.w, 1.f * s}, pal::divider.alpha(0.7f));
+            rr.hairlineH(lr.x, lr.right(), lr.y);
         }
     }
 
@@ -562,14 +644,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // Scrolls vertically with the lanes and never horizontally, the same
     // relationship drawTrackHeaders has with the clip grid.
     rr.pushClip(heads);
-    rr.rect(heads, pal::panel);
+    rr.rect(heads, tl::panelFill);
     for (size_t i = 0; i < ctx.lanes.size(); ++i) {
         ArrangeContext::Lane& L = ctx.lanes[i];
         const Row& row = rows[i];
         const Rect hb{heads.x, topY + row.y, heads.w, row.h};
         if (hb.bottom() < heads.y || hb.y > heads.bottom()) continue;
 
-        rr.rect(hb, (i % 2) ? pal::panel.scale(1.08f) : pal::panel);
+        if (i % 2) rr.rect(hb, tl::panelAlt);
+        // The colour strip is DATA -- it is how a lane is found without reading
+        // its name -- so it keeps the clip colour at full saturation.
         rr.rect({hb.x, hb.y, 3.f * s, hb.h}, itemColour(L.colorIdx, false));
 
         // The disclosure triangle. A filled triangle rather than a glyph: the
@@ -579,7 +663,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         const bool open = L.expanded && *L.expanded;
         const u64 triId = uiId(24, 1, (int)i);
         const bool hotTri = ui.setHot(triId, tri) && ui.isHot(triId);
-        const Col tc = hotTri ? pal::text : pal::textDim;
+        const Col tc = hotTri ? nx::text : nx::muted;
         if (open) rr.triangle(tri.x + 1.f * s, tri.cy() - 2.5f * s,
                               tri.x + 11.f * s, tri.cy() - 2.5f * s,
                               tri.cx(), tri.cy() + 4.f * s, tc);
@@ -598,7 +682,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
 
         if (ui.fBody)
             rr.textIn(*ui.fBody, {tri.right() + 4.f * s, hb.y, hb.w - 46.f * s, 16.f * s},
-                      L.name.c_str(), pal::text, Align::Left, 0);
+                      L.name.c_str(), nx::text, Align::Left, 0);
         if (L.armed)
             rr.circle(hb.right() - 10.f * s, hb.y + 9.f * s, 3.5f * s, pal::armRed);
 
@@ -609,9 +693,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             const Rect ov{hb.x + 6.f * s, hb.y + 18.f * s, 58.f * s, 11.f * s};
             const u64 ovId = uiId(24, 2, (int)i);
             const bool hotOv = ui.setHot(ovId, ov) && ui.isHot(ovId);
-            rr.roundRect(ov, 2.f * s, pal::meterAmber.alpha(hotOv ? 0.34f : 0.18f));
+            // Amber, and §1 means it: this is "attention", the one state on a
+            // track header that is not what the arrangement asked for. A pill,
+            // because it is a chip and chips are pills (§5).
+            rr.roundRect(ov, ov.h * 0.5f, nx::amber.alpha(hotOv ? 0.30f : 0.16f));
+            rr.roundRectOutline(ov, ov.h * 0.5f, std::max(1.f, s),
+                                nx::amber.alpha(hotOv ? 0.55f : 0.30f));
             if (ui.fSmall)
-                rr.textIn(*ui.fSmall, ov, "SESSION", pal::meterAmber, Align::Center, 0);
+                tl::microLabel(rr, *ui.fSmall, ov.x + 7.f * s,
+                               ov.y + (ov.h - ui.fSmall->height()) * 0.5f, "session",
+                               nx::amber, ov.w - 10.f * s);
             if (hotOv) {
                 ui.cursor = Cursor::Hand;
                 ui.tip = "this track is playing the session - click to give the "
@@ -648,8 +739,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 const Rect ab{heads.x, topY + row.autoY + (f32)j * kArrAutoLaneH * s,
                               heads.w, kArrAutoLaneH * s};
                 if (ab.bottom() < heads.y || ab.y > heads.bottom()) continue;
-                rr.rect(ab, pal::panel.scale(0.86f));
-                rr.rect({ab.x, ab.y, ab.w, 1.f * s}, pal::divider.alpha(0.7f));
+                rr.rect(ab, tl::panelFill);
+                rr.rect(ab, tl::deadZone);          // one step down from its track
+                rr.hairlineH(ab.x, ab.right(), ab.y);
                 const AutoTargets::Entry* tgt = L.targets ? L.targets->find(al.address) : nullptr;
                 if (ui.fSmall) {
                     // The target's short label where the address resolves and the
@@ -657,19 +749,22 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     // device must still be findable.
                     const std::string& lbl = tgt ? tgt->label : al.address;
                     rr.textIn(*ui.fSmall, {ab.x + 6.f * s, ab.y + 4.f * s, ab.w - 30.f * s, 11.f * s},
-                              lbl.c_str(), tgt ? pal::textDim : pal::textFaint, Align::Left, 0);
+                              lbl.c_str(), tgt ? nx::muted : nx::muted.alpha(0.55f),
+                              Align::Left, 0);
                 }
                 const Rect onR{ab.right() - 20.f * s, ab.y + 4.f * s, 14.f * s, 12.f * s};
                 const u64 onId = uiId(26, (int)i, (int)j);
                 bool on = al.enabled;
-                if (ui.squareToggle(onId, onR, "", &on, pal::accent)) {
+                if (ui.squareToggle(onId, onR, "", &on, nx::violet)) {
                     al.enabled = on;
                     changed |= Changed::Autos;
                     ctx.dirty.push_back((int)i);
                     lastEdit_ = kEditAuto;
                 }
+                // A lit plate means the lane is driving something -- cyan for
+                // the same reason the playhead is: it is the live one.
                 rr.circle(onR.cx(), onR.cy(), 3.f * s,
-                          al.enabled ? pal::textOnClip : pal::textFaint);
+                          al.enabled ? nx::cyan : nx::muted.alpha(0.45f));
                 if (ui.hovered(onR)) ui.tip = al.address;
                 // Removing a lane is the same right-click that removes anything
                 // else in this program.
@@ -690,8 +785,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             const Rect cb{heads.x, topY + row.autoY + (f32)L.autos->size() * kArrAutoLaneH * s,
                           heads.w, kArrAutoLaneH * s};
             if (cb.bottom() >= heads.y && cb.y <= heads.bottom()) {
-                rr.rect(cb, pal::panel.scale(0.78f));
-                rr.rect({cb.x, cb.y, cb.w, 1.f * s}, pal::divider.alpha(0.7f));
+                rr.rect(cb, tl::panelFill);
+                rr.rect(cb, tl::deadZone);
+                rr.hairlineH(cb.x, cb.right(), cb.y);
                 if (L.targets && !L.targets->entries.empty()) {
                     std::vector<const char*> names;
                     names.reserve(L.targets->entries.size());
@@ -722,12 +818,15 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                         }
                     }
                 } else if (ui.fSmall) {
-                    rr.textIn(*ui.fSmall, cb, "no targets", pal::textFaint, Align::Center, 0);
+                    rr.textIn(*ui.fSmall, cb, "no targets", nx::muted.alpha(0.55f),
+                              Align::Center, 0);
                 }
             }
         }
     }
-    rr.rect({heads.right() - 1.f * s, heads.y, 1.f * s, heads.h}, pal::divider);
+    // The seam between the header column and the work. A hairline, so the two
+    // read as one surface with a fold in it rather than as two panels.
+    rr.hairlineV(heads.right() - 1.f * s, heads.y, heads.bottom());
     rr.popClip();
 
     // --- item interaction --------------------------------------------------
@@ -946,7 +1045,8 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             ctx.dropBeat = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
             const f32 x = beatToX(ta, ctx.dropBeat);
             rr.pushClip(lanes);
-            rr.rect({x, topY + rows[(size_t)t].y, 2.f * s, rows[(size_t)t].h}, pal::accentHi);
+            rr.rect({nx::snapPx(x), topY + rows[(size_t)t].y, std::max(1.f, 2.f * s),
+                     rows[(size_t)t].h}, nx::violetSoft);
             rr.popClip();
             if (in.released[0]) ctx.dropped = true;
         }

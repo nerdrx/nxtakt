@@ -403,29 +403,48 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
     }
 
     // --- drawing -----------------------------------------------------------
-    const Col ink = dim ? pal::textDim : pal::accentHi;
+    // The curve is VIOLET-SOFT: it is the shape the user drew, which is the
+    // accent's job. A lane that is drawn but not driving anything drops to
+    // --muted, because that is a statement about the lane and not about the
+    // material (docs/DESIGN.md §1).
+    const Col ink = dim ? nx::muted : nx::violetSoft;
     const Col fillC = ink.alpha(dim ? 0.07f : 0.14f);
     const f32 floorY = va.y0 + va.h;
 
-    // "Where is unity" is the question the eye asks first.
+    // "Where is unity" is the question the eye asks first. A dashed reference
+    // rule, muted -- it is the thing the curve is measured against, not a thing
+    // in its own right.
     {
         const f32 dy = std::round(valToY(va, resolved ? def : 0.f));
+        const Col ref = nx::muted.alpha(0.26f);
         for (f32 x = r.x; x < r.right(); x += 7.f * s)
-            rr.rect({x, dy, 3.f * s, 1.f * s}, pal::ridge);
+            rr.rect({x, dy, 3.f * s, 1.f * s}, ref);
     }
 
     // One segment of the polyline, with Live's low-alpha fill down to the
     // lane's floor: the fill is what makes a glance tell you the shape.
+    //
+    // THE FILL IS TWO QUADS, not one per pixel. A trapezoid bounded above by a
+    // straight segment is exactly a rectangle plus a right triangle, and the
+    // renderer has both; the old per-column loop cost the lane's width in quads
+    // whatever the envelope contained, which on an arrangement with every track
+    // expanded was thousands of quads for a shape with four points in it. The
+    // geometry it draws is identical -- the sloped edge is now an actual edge
+    // rather than a staircase of 1px columns, so it is also cleaner.
     auto seg = [&](f32 x0, f32 y0, f32 x1, f32 y1) {
         const f32 a = std::max(x0, r.x), b = std::min(x1, r.right());
         if (b <= a || x1 <= x0) return;
         const f32 span = x1 - x0;
-        for (f32 x = a; x < b; x += 1.f) {
-            const f32 y = y0 + (y1 - y0) * ((x - x0) / span);
-            rr.rect({x, y, 1.f, std::max(0.f, floorY - y)}, fillC);
-        }
-        rr.line(a, y0 + (y1 - y0) * ((a - x0) / span),
-                b, y0 + (y1 - y0) * ((b - x0) / span), 1.5f * s, ink);
+        const f32 ya = y0 + (y1 - y0) * ((a - x0) / span);
+        const f32 yb = y0 + (y1 - y0) * ((b - x0) / span);
+        const f32 lo = std::min(ya, yb), hi = std::max(ya, yb);
+        if (floorY > hi) rr.rect({a, hi, b - a, floorY - hi}, fillC);
+        // The wedge above that rectangle. Its third corner sits under the HIGHER
+        // of the two ends -- that is the side the vertical edge of the trapezoid
+        // is on -- so the triangle closes rather than collapsing.
+        if (hi - lo > 0.5f)
+            rr.triangle(a, ya, b, yb, (ya < yb) ? a : b, hi, fillC);
+        rr.line(a, ya, b, yb, 1.5f * s, ink);
     };
 
     if (pts.empty()) {
@@ -436,8 +455,8 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
         for (f32 x = r.x; x < r.right(); x += 5.f * s)
             rr.rect({x, y, 2.5f * s, 1.f * s}, ink.alpha(0.55f));
         if (ui.fSmall && !dim)
-            rr.textIn(*ui.fSmall, r, "click to draw a breakpoint", pal::textFaint,
-                      Align::Center);
+            rr.textIn(*ui.fSmall, r, "click to draw a breakpoint",
+                      nx::muted.alpha(0.60f), Align::Center);
     } else {
         // Before the first point and after the last, the envelope holds — there
         // is no "nowhere" to ramp in from at the start, and nothing past the
@@ -458,13 +477,17 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
             if (x < r.x - half || x > r.right() + half) continue;
             const Rect pr{std::round(x - half), std::round(y - half),
                           kPtSize * s, kPtSize * s};
+            // Crisp handles: whole device pixels, 1px edges, no glow. A
+            // breakpoint is something to hit with a cursor, so the shape it
+            // presents has to be exactly the shape pointAt() tests.
+            const f32 px1 = std::max(1.f, nx::snapPx(s));
             if (sel_.has((int)i)) {
                 rr.rect(pr, ink);
                 if ((int)i == sel_.primary)
-                    rr.roundRectOutline(pr.inset(-1.f * s), 0.f, 1.f * s, pal::text);
+                    rr.roundRectOutline(pr.inset(-1.f * s), 0.f, px1, nx::text);
             } else {
-                rr.rect(pr, pal::appBg);
-                rr.roundRectOutline(pr, 0.f, 1.f * s, ink);
+                rr.rect(pr, nx::bgTop.alpha(0.86f));
+                rr.roundRectOutline(pr, 0.f, px1, ink);
             }
         }
         // What the hand is actually setting, in the target's own units.
@@ -475,13 +498,16 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
             ptScreen(p, ta, va, beatBase, x, y);
             char buf[48];
             std::snprintf(buf, sizeof buf, "%.3g %s", (double)p.value, unit ? unit : "");
+            // THE LIVE VALUE, in cyan. §1 reserves cyan for light inside the
+            // material -- a value that is changing under the hand right now is
+            // exactly that, and it is the only cyan in the lane.
             rr.textIn(*ui.fSmall, {x + 6.f * s, y - 6.f * s, 90.f * s, 12.f * s}, buf,
-                      pal::text, Align::Left, 0);
+                      nx::cyan, Align::Left, 0);
         }
     }
     if (showBand) {
-        rr.rect(bandRect, pal::accent.alpha(0.12f));
-        rr.roundRectOutline(bandRect, 0.f, 1.f * s, pal::accent);
+        rr.rect(bandRect, nx::violet.alpha(0.12f));
+        rr.roundRectOutline(bandRect, 0.f, std::max(1.f, s), nx::violetSoft);
     }
     if (ui.fSmall) {
         const char* why = nullptr;
@@ -492,7 +518,7 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
         else if (!enabled)  why = "envelope off";
         if (why)
             rr.textIn(*ui.fSmall, {r.x, r.y + 1.f * s, r.w, 11.f * s}, why,
-                      pal::textFaint, Align::Left, 5.f * s);
+                      nx::muted.alpha(0.60f), Align::Left, 5.f * s);
     }
 
     // What the cursor should be, reported rather than set: the caller decides

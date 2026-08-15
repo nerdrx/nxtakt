@@ -595,10 +595,10 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
         ui.selector(uiId(23, 1), tgtR, &targetSel_, tnames.data(), (int)tnames.size());
         const AutoTargets::Entry& sel = targets.entries[(size_t)targetSel_];
         if (sel.automated)
-            rr.circle(tgtR.right() - 3.5f * s, tgtR.y + 3.5f * s, 1.8f * s, pal::accentHi);
+            rr.circle(tgtR.right() - 3.5f * s, tgtR.y + 3.5f * s, 1.8f * s, nx::violetSoft);
         if (ui.hovered(tgtR)) ui.tip = sel.group + " " + sel.label + "  " + sel.address;
     } else if (ui.fSmall) {
-        rr.textIn(*ui.fSmall, tgtR, "no targets", pal::textFaint, Align::Center, 0);
+        rr.textIn(*ui.fSmall, tgtR, "no targets", nx::muted.alpha(0.55f), Align::Center, 0);
     }
 
     // The toggle is a lit dot rather than a word: at 46 px wide, "OFF" beside a
@@ -628,12 +628,15 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
     if (AutoLane* env = shownLane(clip)) {
         AutoLane& l = *env;
         bool on = l.enabled;
-        if (ui.squareToggle(uiId(23, 3), onR, "", &on, pal::accent)) {
+        if (ui.squareToggle(uiId(23, 3), onR, "", &on, nx::violet)) {
             l.enabled = on;
             changed = true;
             lastEdit_ = kEditAuto;
         }
-        rr.circle(onR.cx(), onR.cy(), 3.f * s, l.enabled ? pal::textOnClip : pal::textFaint);
+        // Cyan for a lane that is driving something -- the same live/inert
+        // reading the playhead and the meters use.
+        rr.circle(onR.cx(), onR.cy(), 3.f * s,
+                  l.enabled ? nx::cyan : nx::muted.alpha(0.45f));
         if (ui.hovered(onR))
             ui.tip = l.enabled ? "envelope active - click to deactivate it"
                                : "envelope deactivated - click to put it back in charge";
@@ -661,7 +664,11 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     // grid would be. Everything below that is about notes is gated on this.
     const bool midiClip = clip.kind == ClipKind::Midi;
 
-    rr.rect(r, pal::appBg);
+    // The roll is a WELL, like the arrangement and for the same reason: the
+    // material the music sits in, recessed below the chrome (docs/DESIGN.md
+    // §4). The keyboard column and the ruler are painted back up to panel tone
+    // below, so what stays recessed is exactly the working area.
+    rr.well(r, 0.f, true);
     if (r.w < 140.f * s || r.h < 70.f * s) return false;     // too small to be useful
 
     // --- layout ------------------------------------------------------------
@@ -724,7 +731,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     // pointer into clip.envelopes: it can add a lane, and a push_back moves the
     // vector. It sits in its own rect at the bottom left and overlaps nothing,
     // so being early costs it neither hover nor paint order.
-    rr.rect(laneKey, pal::panel);
+    rr.rect(laneKey, tl::panelFill);
     drawLaneKey(ui, laneKey, clip, targets, s, changed);
 
     AutoLane* const env = shownLane(clip);
@@ -1093,8 +1100,9 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     const int lastRow  = std::min(rows.count - 1, yToRow(pa, grid.bottom()));
 
     // --- ruler -------------------------------------------------------------
-    rr.rect(ruler, pal::panel);
-    rr.rect({ruler.x, ruler.bottom() - 1.f * s, ruler.w, 1.f * s}, pal::divider);
+    // The boundary between chrome and work: panel-toned, hairline-underlined.
+    rr.rect(ruler, tl::panelFill);
+    rr.hairlineH(ruler.x, ruler.right(), ruler.bottom() - 1.f * s);
 
     const Rect lenBox{ruler.right() - 70.f * s, ruler.y + 2.f * s, 66.f * s, ruler.h - 4.f * s};
     if (ui.fSmall) {
@@ -1103,7 +1111,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // now also the arrangement's, which is the point of the extraction.
         drawRulerLabels(rr, *ui.fSmall, ta, grid.x, grid.right(),
                         ruler.y + (ruler.h - ui.fSmall->height()) * 0.5f, s,
-                        pal::textDim, pal::textFaint);
+                        tl::rulerOnBar, tl::rulerOffBar);
         rr.popClip();
     }
     const Rect foldBox{ruler.x + 3.f * s, ruler.y + 2.f * s, keyW - 6.f * s, ruler.h - 4.f * s};
@@ -1134,15 +1142,20 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // An audio clip has no pitches to fold and its length belongs to the
         // sample and the warp settings on the panel beside this, not to a drag
         // in here — so both read out instead of editing.
-        rr.textIn(*ui.fSmall, foldBox, "WAVE", pal::textFaint, Align::Center, 0);
+        tl::microLabel(rr, *ui.fSmall, foldBox.x + 4.f * s,
+                       foldBox.y + (foldBox.h - ui.fSmall->height()) * 0.5f,
+                       "wave", nx::muted.alpha(0.70f), foldBox.w - 6.f * s);
         char buf[32];
         std::snprintf(buf, sizeof buf, "%.0f beats", clip.lengthBeats);
-        rr.textIn(*ui.fSmall, lenBox, buf, pal::textFaint, Align::Right, 0);
+        rr.textIn(*ui.fSmall, lenBox, buf, nx::muted.alpha(0.60f), Align::Right, 0);
     }
 
     // --- keyboard column ---------------------------------------------------
     rr.pushClip(keys);
-    rr.rect(keys, pal::panel);
+    // Chrome-adjacent: the keyboard is the frame you read a pitch off, not the
+    // surface you work on, so it takes the panel treatment and is separated
+    // from the roll by a hairline rather than by a rule.
+    rr.rect(keys, tl::panelFill);
     // With a scale on, the keyboard column says which key we are in the way a
     // keyboard does: the notes of the scale keep their plate, everything else is
     // pushed back into the background, and the ROOT is lit. That is the same
@@ -1155,12 +1168,16 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         if (p < 0) continue;
         const Rect kr{keys.x, rowToY(pa, i), keys.w, rowH};
         const bool inKey = !showKey || key.contains(p);
-        Col kc = isBlackKey(p) ? pal::panel : pal::panelAlt;
-        if (!inKey)               kc = pal::appBg;
-        else if (showKey && key.isRoot(p)) kc = kc.mix(pal::accent, 0.42f);
-        else if (showKey)         kc = kc.mix(pal::accentHi, 0.10f);
+        // Re-derived from the NX palette: the plates are --panel and --panel-2,
+        // the key lift is violet-family, and an out-of-scale row drops to the
+        // field rather than turning grey. Recession is the language.
+        Col kc = isBlackKey(p) ? tl::panelFill : tl::panelAlt;
+        if (!inKey)                        kc = nx::bgTop.alpha(0.74f);
+        else if (showKey && key.isRoot(p)) kc = kc.mix(nx::violet, 0.44f);
+        else if (showKey)                  kc = kc.mix(nx::violetSoft, 0.10f);
         rr.rect(kr, kc);
-        rr.rect({kr.x, kr.bottom() - 1.f * s, kr.w, 1.f * s}, pal::divider.alpha(0.55f));
+        rr.hairlineH(kr.x, kr.right(), kr.bottom() - 1.f * s,
+                     nx::hairlineInk.alpha(0.09f));
         // The octave label is C every twelve semitones; with a scale on, the
         // ROOT is labelled too, because "which row is the tonic" is the one
         // question a key is meant to answer at a glance.
@@ -1170,32 +1187,35 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             else             std::snprintf(buf, sizeof buf, "%s%d",
                                            kPitchNames[p % 12], p / 12 - 1);
             rr.textIn(*ui.fSmall, kr, buf,
-                      (showKey && key.isRoot(p)) ? pal::text : pal::textDim, Align::Left, 5.f * s);
+                      (showKey && key.isRoot(p)) ? nx::text : nx::muted, Align::Left, 5.f * s);
         }
     }
     if (hotGrid && midiClip) {
         const int hr = yToRow(pa, in.my);
         if (hr >= 0 && hr < rows.count)
-            rr.rect({keys.x, rowToY(pa, hr), keys.w, rowH}, pal::accent.alpha(0.16f));
+            rr.rect({keys.x, rowToY(pa, hr), keys.w, rowH}, nx::violet.alpha(0.18f));
     }
     if (!midiClip && ui.fSmall) {
         // The column stays: it is what the lane's key block hangs under, and an
         // empty gutter beside a waveform reads as a missing piece.
-        rr.textIn(*ui.fSmall, {keys.x, keys.y + 4.f * s, keys.w, 12.f * s}, "AUDIO",
-                  pal::textFaint, Align::Center, 0);
+        tl::microLabel(rr, *ui.fSmall, keys.x + 6.f * s, keys.y + 4.f * s, "audio",
+                       nx::muted.alpha(0.70f), keys.w - 8.f * s);
         if (clip.sample) {
             char buf[24];
             std::snprintf(buf, sizeof buf, "%d ch", clip.sample->channels);
             rr.textIn(*ui.fSmall, {keys.x, keys.y + 16.f * s, keys.w, 12.f * s}, buf,
-                      pal::textFaint, Align::Center, 0);
+                      nx::muted.alpha(0.55f), Align::Center, 0);
         }
     }
-    rr.rect({keys.right() - 1.f * s, keys.y, 1.f * s, keys.h}, pal::divider);
+    rr.hairlineV(keys.right() - 1.f * s, keys.y, keys.bottom());
     rr.popClip();
 
     // --- grid: note rows for a pattern, the waveform for a sample -----------
     rr.pushClip(grid);
-    if (!midiClip) rr.rect(grid, pal::slotEmpty);
+    // An audio clip's canvas is the same well the note grid sits in, with the
+    // same faint lift a white-key row gets -- one surface family, so a waveform
+    // and a pattern are read against the same material.
+    if (!midiClip) rr.rect(grid, tl::stripeLift);
     for (int i = firstRow; i <= lastRow && midiClip; ++i) {
         const int p = rows.pitchAt(i);
         if (p < 0) continue;
@@ -1205,25 +1225,34 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // background so they read as "not here" without being invisible -- a
         // note already sitting on one must still be findable and draggable, which
         // is the difference between a highlight and a fold.
-        Col rc = isBlackKey(p) ? pal::appBg : pal::slotEmpty;
+        // The row banding is a LIFT on the well, so the canvas stays one
+        // material: a black-key row is the bare well and a white-key row is the
+        // same well with the stripe on it. The key tint is violet-family and
+        // re-derived from the NX palette; an out-of-scale row recesses instead
+        // of greying, which is what keeps a note sitting on one findable.
+        if (!isBlackKey(p)) rr.rect({grid.x, y, grid.w, rowH}, tl::stripeLift);
         if (showKey) {
-            if (key.isRoot(p))        rc = rc.mix(pal::accent, 0.30f);
-            else if (key.contains(p)) rc = rc.mix(pal::accentHi, 0.075f);
-            else                      rc = rc.scale(0.62f);
+            if (key.isRoot(p))
+                rr.rect({grid.x, y, grid.w, rowH}, nx::violet.alpha(0.26f));
+            else if (key.contains(p))
+                rr.rect({grid.x, y, grid.w, rowH}, nx::violetSoft.alpha(0.055f));
+            else
+                rr.rect({grid.x, y, grid.w, rowH}, tl::deadZone.alpha(0.34f));
         }
-        rr.rect({grid.x, y, grid.w, rowH}, rc);
         // One separator per octave keeps the eye anchored without banding; with
         // a scale on it moves to the root, which is where an octave of THIS
         // piece actually begins.
         const bool divide = showKey ? key.isRoot(p) : (p % 12 == 0);
-        if (divide) rr.rect({grid.x, y + rowH - 1.f * s, grid.w, 1.f * s}, pal::divider);
+        if (divide) rr.hairlineH(grid.x, grid.right(), y + rowH - 1.f * s);
     }
     drawTimeGrid(rr, ta, grid, s);          // the shared grid (timeaxis.h)
     {   // Past the loop length is not editable, so dim it like Live does.
         const f32 endX = beatToX(ta, clip.lengthBeats);
-        if (endX < grid.right())
-            rr.rect({std::max(grid.x, endX), grid.y, grid.right() - std::max(grid.x, endX), grid.h},
-                    pal::divider.alpha(0.55f));
+        if (endX < grid.right()) {
+            const f32 x = std::max(grid.x, endX);
+            rr.rect({x, grid.y, grid.right() - x, grid.h}, tl::deadZone);
+            rr.hairlineV(x, grid.y, grid.bottom(), nx::violetSoft.alpha(0.22f));
+        }
     }
     if (!midiClip && clip.sample && clip.sample->peakBuckets > 0) {
         // The sample, drawn against the SAME time axis the lane below uses, so
@@ -1260,36 +1289,47 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // uncertain") and the solid fraction is what it reads once it looks
         // ("about a third of the time"), and neither on its own does both jobs.
         if (nt.chance < 100) {
-            rr.roundRect(nr, 2.f * s, nc.alpha(0.30f));
+            // MUTED (§1: halve anything that shouts). The ghost is quieter than
+            // it was, because the solid fraction beside it is the part that
+            // carries the number and two loud marks compete.
+            rr.roundRect(nr, 2.f * s, nc.alpha(0.22f));
             const f32 fw = nr.w * ((f32)nt.chance / 100.f);
             if (fw > 0.5f) rr.roundRect({nr.x, nr.y, fw, nr.h}, 2.f * s, nc);
         } else {
             rr.roundRect(nr, 2.f * s, nc);
         }
+        // The 1px darkened edge. Crisp beats pretty here: without it two notes
+        // that touch are one long note, which is a reading error, not a taste
+        // one. Skipped under 4 px, where an edge would be the whole note.
+        if (nr.w > 4.f * s)
+            rr.roundRectOutline(nr, 2.f * s, std::max(1.f, s), base.scale(0.28f));
         // A velocity range is a band, not a level, so it is drawn as one: a
         // hairline across the block. It is deliberately quiet -- a range changes
         // how a note feels, not whether it happens.
         if (nt.velTo != 0 && nt.velTo != nt.vel && nr.h > 4.f * s)
             rr.rect({nr.x + 1.f * s, nr.cy() - 0.5f * s, std::max(1.f, nr.w - 2.f * s), 1.f * s},
-                    pal::textOnClip.alpha(0.55f));
-        if (sel_.has((int)i)) rr.roundRectOutline(nr, 2.f * s, 1.f * s, pal::accent);
+                    nx::inkOn(nc).alpha(0.50f));
+        if (sel_.has((int)i))
+            rr.roundRectOutline(nr, 2.f * s, std::max(1.f, s), nx::violetSoft);
     }
     // The band goes over the notes it is taking, translucent enough to leave
     // them readable underneath.
     if (showBand) {
-        rr.rect(bandRect, pal::accent.alpha(0.12f));
-        rr.roundRectOutline(bandRect, 0.f, 1.f * s, pal::accent);
+        rr.rect(bandRect, nx::violet.alpha(0.12f));
+        rr.roundRectOutline(bandRect, 0.f, std::max(1.f, s), nx::violetSoft);
     }
     if (playing) {
         const f32 px = beatToX(ta, playheadBeats);
         if (px >= grid.x && px <= grid.right())
-            rr.rect({px, grid.y, 1.5f * s, grid.h}, pal::playGreen);
+            tl::drawPlayhead(rr, px, grid.y, grid.h, s, true);
     }
     rr.popClip();
 
     // --- the lane: velocity stems or one envelope ---------------------------
-    rr.rect({r.x, body.bottom(), r.w, 1.f * s}, pal::divider);
-    rr.rect(lane, pal::appBg);
+    // A well of its own, one step deeper than the grid: the stems are read
+    // against a floor, and a floor has to look like one.
+    rr.hairlineH(r.x, r.right(), body.bottom());
+    rr.well(lane, 0.f, true);
     rr.pushClip(lane);
     if (env) {
         // The lane, which is now a component and no longer a slice of this
@@ -1322,8 +1362,8 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             // them; the primary keeps the full accent so the note the gesture
             // is anchored on is still findable inside a large selection.
             const Col c = !sel_.has((int)i)        ? base.scale(0.8f)
-                          : (int)i == sel_.primary ? pal::accent
-                                                   : pal::accent.alpha(0.75f);
+                          : (int)i == sel_.primary ? nx::violetSoft
+                                                   : nx::violet.mix(nx::violetSoft, 0.45f);
             // In the RANGE lane the note's own velocity is drawn behind the
             // stem, because a range is meaningless without the value it ranges
             // FROM: the pair of marks is the span the engine will draw from, and
@@ -1340,15 +1380,15 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         }
     } else if (ui.fSmall) {
         rr.textIn(*ui.fSmall, lane, "pick a target and press + to automate it",
-                  pal::textFaint, Align::Center);
+                  nx::muted.alpha(0.60f), Align::Center);
     }
     if (playing) {
         const f32 px = beatToX(ta, playheadBeats);
         if (px >= lane.x && px <= lane.right())
-            rr.rect({px, lane.y, 1.5f * s, lane.h}, pal::playGreen);
+            tl::drawPlayhead(rr, px, lane.y, lane.h, s, true);
     }
     rr.popClip();
-    rr.rect({lane.x, lane.y, lane.w, 1.f * s}, pal::divider);
+    rr.hairlineH(lane.x, lane.right(), lane.y);
 
     // --- cursor ------------------------------------------------------------
     // The lane REPORTS rather than sets, so its answer keeps the place it had

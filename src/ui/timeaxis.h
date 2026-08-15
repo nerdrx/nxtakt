@@ -58,6 +58,105 @@ inline constexpr f32 kZoomMax      = 512.f;
 inline constexpr f32 kZoomPerNotch = 0.25f;  // octaves of zoom per wheel notch
 
 // ---------------------------------------------------------------------------
+// the timeline skin (docs/DESIGN.md §1, §2, §11)
+//
+// The NX language, as the WORKING surfaces get it. What they take from §4 is
+// the palette, the recession and the one light source; what they do not take is
+// glass, sheen, blur and per-item shadow -- the specimen sheet's "WORKING
+// SURFACE / FLAT, PRECISE, FAST" strip is the law here, and a frosted piano
+// roll is a usability bug wearing a costume (theme.h says so at the top).
+//
+// This lives with the axis rather than in each view because the arrangement,
+// the roll and the automation lanes are ONE surface family: a bar line in the
+// arrangement and a bar line in the roll must be the same line in the same ink,
+// for the same reason they are already the same geometry. Three copies of these
+// alphas would drift, and the drift would be invisible until somebody put the
+// two editors side by side.
+//
+// Everything here is a value or an inline of a few quads. Nothing allocates,
+// nothing caches, and nothing costs a draw call of its own.
+// ---------------------------------------------------------------------------
+namespace tl {
+
+// --- the grid, as hierarchy rather than as texture --------------------------
+//
+// Three weights off ONE hue -- §2's --line, a violet-black -- so the eye reads
+// depth instead of three greys. The bar is the only one meant to be findable at
+// a glance; the beat is for aiming; the 1/16 is texture you should have to look
+// for. The old values were pal::ridge (#4B3A6E, opaque) at three brightnesses,
+// which put the grid in front of the music.
+//
+// `inline const` and not constexpr only because Col::scale/alpha are not
+// constexpr; these are initialised once and read from hot loops.
+inline const Col gridBar  = nx::line.scale(1.60f).alpha(0.92f);
+inline const Col gridBeat = nx::line.alpha(0.88f);
+inline const Col gridSub  = nx::line.alpha(0.42f);
+
+// --- surfaces ---------------------------------------------------------------
+//
+// The ruler and the header column are chrome-adjacent: panel-toned, so they
+// read as the frame the work sits in. The canvas itself is a well (Renderer::
+// well), which is why there is no token for it here -- a well is a gradient,
+// not a colour.
+inline constexpr Col panelFill = rgba(0x171028, 0.92f);   // --panel
+inline constexpr Col panelAlt  = rgba(0x1D1433, 0.92f);   // --panel-2
+// The alternating lane stripe, and the row banding in the roll. Barely there on
+// purpose: §1's "if it is visible from across the room, halve it" -- this is
+// what is left after halving it twice.
+inline constexpr Col stripeLift = rgba(0x9A3CFF, 0.030f);
+// A region that is drawn but not editable (past the loop end, past the last
+// item): recessed FURTHER, never greyed. Recession is the language; grey is not.
+inline constexpr Col deadZone   = rgba(0x04020A, 0.46f);
+
+// --- ink --------------------------------------------------------------------
+inline constexpr Col rulerOnBar  = rgba(0x9A8FC0, 1.00f);   // --muted
+inline constexpr Col rulerOffBar = rgba(0x9A8FC0, 0.52f);
+
+// ---------------------------------------------------------------------------
+// The playhead. §1: cyan is light INSIDE the material, and on these surfaces it
+// is the one live element -- so it gets the only glow in the whole family, and
+// the glow is one quad at a tenth alpha rather than a bloom.
+//
+// The core is snapped to a whole device pixel because a 1px line at fractional
+// DPI scale is otherwise two half-lit pixels, which reads as a smear exactly
+// where the eye is trying to read a position.
+// ---------------------------------------------------------------------------
+inline void drawPlayhead(Renderer& rr, f32 x, f32 y, f32 h, f32 s, bool live) {
+    const f32 px = nx::snapPx(x);
+    const f32 w  = std::max(1.f, nx::snapPx(s));
+    const f32 a  = live ? 1.f : 0.42f;
+    rr.rect({px - w, y, w * 3.f, h}, nx::cyan.alpha(0.11f * a));
+    rr.rect({px,     y, w,       h}, nx::cyan.alpha(0.95f * a));
+}
+
+// ---------------------------------------------------------------------------
+// §5's micro-label: uppercase, wide-tracked, drawn glyph by glyph because the
+// renderer has no tracking parameter. At 9 px over 0.12 em that is one extra
+// pixel per character, and it is the whole difference between a chip that reads
+// as a label and one that reads as small body text.
+//
+// `maxW` stops the pen rather than ellipsising: these labels sit inside clipped
+// rects (an item name in its own box), so the clip already cuts the glyph that
+// straddles the edge and a second mechanism would only disagree with it.
+// ---------------------------------------------------------------------------
+inline f32 microLabel(Renderer& rr, const Font& f, f32 x, f32 y, const char* s,
+                      const Col& c, f32 maxW) {
+    f32 pen = nx::snapPx(x);
+    const f32 end = x + maxW;
+    const f32 track = std::max(1.f, (f32)f.size() * nx::microTracking);
+    for (const char* p = s; *p; ++p) {
+        if (pen >= end) break;
+        const char u = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+        const char g[2] = {u, 0};
+        pen = rr.text(f, pen, y, g, c);
+        pen += track;
+    }
+    return pen;
+}
+
+} // namespace tl
+
+// ---------------------------------------------------------------------------
 // the axis
 // ---------------------------------------------------------------------------
 
@@ -210,8 +309,11 @@ inline void drawRulerLabels(Renderer& rr, const Font& f, const TimeAxis& ta,
         if (sb >= bpb) std::snprintf(buf, sizeof buf, "%lld", (long long)(b / bpb + 1));
         else           std::snprintf(buf, sizeof buf, "%lld.%lld",
                                      (long long)(b / bpb + 1), (long long)(b % bpb + 1));
-        rr.text(f, std::round(beatToX(ta, (f64)b)) + 3.f * s, ty, buf,
-                (b % bpb) == 0 ? onBar : offBar);
+        // MICRO-LABEL numerals (§7): the ruler is chrome, and a chrome numeral
+        // is a wide-tracked label rather than body text. Same glyphs, same
+        // positions, same quad count -- the pen just steps a little wider.
+        tl::microLabel(rr, f, std::round(beatToX(ta, (f64)b)) + 3.f * s, ty, buf,
+                       (b % bpb) == 0 ? onBar : offBar, 1e6f);
     }
 }
 
@@ -246,9 +348,11 @@ inline void forEachUniformGridLine(const TimeAxis& ta, const Rect& r, int beatsP
 inline void drawTimeGrid(Renderer& rr, const TimeAxis& ta, const Rect& r, f32 s,
                          int beatsPerBar = kBeatsPerBar, f32 minStepPx = 0.5f) {
     forEachUniformGridLine(ta, r, beatsPerBar, minStepPx, [&](f64, f32 x, int level) {
+        // GEOMETRY UNCHANGED, ink retuned: same rect, same rounding, same order.
+        // tests/timesig_view_test.cpp asserts the positions, and a restyle that
+        // moved a bar line by a pixel would break drawn-equals-played.
         rr.rect({std::round(x), r.y, 1.f * s, r.h},
-                level == 2 ? pal::ridge.scale(1.45f)
-                           : (level == 1 ? pal::ridge : pal::divider));
+                level == 2 ? tl::gridBar : (level == 1 ? tl::gridBeat : tl::gridSub));
     });
 }
 
@@ -350,8 +454,7 @@ inline void drawTimeGrid(Renderer& rr, const TimeAxis& ta, const Rect& r, f32 s,
         const f32 x = beatToX(ta, b);
         if (x < r.x - 1.f || x > r.right()) return;
         rr.rect({std::round(x), r.y, 1.f * s, r.h},
-                level == 2 ? pal::ridge.scale(1.45f)
-                           : (level == 1 ? pal::ridge : pal::divider));
+                level == 2 ? tl::gridBar : (level == 1 ? tl::gridBeat : tl::gridSub));
     });
 }
 
@@ -381,7 +484,8 @@ inline void drawRulerLabels(Renderer& rr, const Font& f, const TimeAxis& ta,
         if (level == 2) std::snprintf(buf, sizeof buf, "%lld", (long long)p.bar + 1);
         else            std::snprintf(buf, sizeof buf, "%lld.%d",
                                       (long long)p.bar + 1, (int)p.beat + 1);
-        rr.text(f, std::round(x) + 3.f * s, ty, buf, level == 2 ? onBar : offBar);
+        tl::microLabel(rr, f, std::round(x) + 3.f * s, ty, buf,
+                       level == 2 ? onBar : offBar, 1e6f);
     });
 }
 

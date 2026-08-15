@@ -214,6 +214,7 @@ private:
     std::vector<u64> gradHash_;
     unsigned gradTex_ = 0;
     int gradCount_ = 0;
+    int gradDirtyFrom_ = 0;   // first table row not yet uploaded
 
     bool bgOn_ = true;
     int  frostCount_ = 0;

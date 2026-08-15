@@ -27,8 +27,127 @@ namespace lat {
 // Pulse for anything that is waiting for the user: 0..1, about two cycles a
 // second. Spelled once per file rather than promoted to app_internal.h, which
 // this wave does not own.
+//
+// §6: it freezes under reduced motion. A pulse that keeps breathing while every
+// other animation in the program has stopped is exactly the thing the
+// preference exists to switch off, and MIDI learn still says LEARN in violet
+// without it.
 static f32 ctlPulse01() {
+    if (nx::reducedMotion()) return 0.55f;
     return 0.5f + 0.5f * (f32)std::sin(nowSeconds() * 6.2831853 * 1.6);
+}
+
+// ---------------------------------------------------------------------------
+// The control bar's own small vocabulary (docs/DESIGN.md §5)
+//
+// Three shapes the shared widget layer deliberately does not own, because all
+// three are specific to a transport row: a MODE chip, a recessed readout, and
+// the group separator between them.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// NXTAKT_DEBUG_CHROME=<hover|press>[:<control>] -- the bar's interaction states,
+// without a mouse.
+//
+// Inside gamescope headless there is no pointer, and "hover lifts 1-2px and
+// blooms the glow, press scales to 0.96" is precisely the half of §5 that a
+// resting screenshot cannot show. So the hook moves the REAL cursor onto a
+// named control and, for `press`, holds the REAL left button down: what the
+// picture shows is the widget's own hot/active path with its own eased motion,
+// not a drawing special-cased for the camera.
+//
+// It cannot fire the control it is pointing at. A button acts on RELEASE, and
+// this never releases -- so `press` holds a transport button pressed forever
+// and the transport never moves. The named controls are deliberately all
+// release-acting for that reason; the mode chips (AUTO, ARR, KBD, MAP) act on
+// the press itself and are not addressable here.
+//
+// The target rect is recorded as the bar draws it and applied on the NEXT
+// frame, because the layout runs left to right and the play button's rect does
+// not exist yet when the cursor has to be placed. One frame of lag against a
+// screenshot taken seven seconds in.
+// ---------------------------------------------------------------------------
+namespace {
+struct ChromeDebug {
+    int  state = 0;                 // 0 off, 1 hover, 2 press
+    char what[16] = "play";
+    Rect target{};
+    bool have = false;
+};
+ChromeDebug g_chromeDbg;
+
+void chromeDebugInit() {
+    static bool once = false;
+    if (once) return;
+    once = true;
+    const char* v = env("DEBUG_CHROME");
+    if (!v || !*v) return;
+    if      (icontains(v, "press")) g_chromeDbg.state = 2;
+    else if (icontains(v, "hover")) g_chromeDbg.state = 1;
+    else { LOGW("NXTAKT_DEBUG_CHROME: want hover or press, got \"%s\"", v); return; }
+    if (const char* colon = std::strchr(v, ':')) {
+        size_t n = 0;
+        for (const char* p = colon + 1; *p && n < sizeof g_chromeDbg.what - 1; ++p, ++n)
+            g_chromeDbg.what[n] = *p;
+        g_chromeDbg.what[n] = 0;
+    }
+    LOGI("NXTAKT_DEBUG_CHROME: %s on \"%s\"",
+         g_chromeDbg.state == 2 ? "press" : "hover", g_chromeDbg.what);
+}
+
+// Called by the bar as it lays each addressable control out.
+void chromeDebugMark(const char* name, const Rect& b) {
+    if (!g_chromeDbg.state || std::strcmp(name, g_chromeDbg.what) != 0) return;
+    g_chromeDbg.target = b;
+    g_chromeDbg.have = true;
+}
+
+// Called first thing in the bar, with the rect the PREVIOUS frame recorded.
+void chromeDebugDrive(Input& in) {
+    if (!g_chromeDbg.state || !g_chromeDbg.have) return;
+    in.mx = g_chromeDbg.target.cx();
+    in.my = g_chromeDbg.target.cy();
+    if (g_chromeDbg.state == 2) { in.down[0] = true; in.pressed[0] = true; }
+}
+} // namespace
+
+// A mode chip: AUTO, ARR, KBD, MAP. Not a button -- these report a mode the bar
+// is IN rather than performing an action, so they wear §5's badge language:
+// --glass-chip at rest, a violet fill while on, an uppercase micro-label with
+// wide tracking either way. `wash` adds an extra violet bloom over the rest
+// state, which is how MIDI learn says "waiting for you" without a second hue.
+// Returns true on press.
+static bool ctlChip(Ui& ui, u64 id, const Rect& b, Font& f, const char* label,
+                    bool on, f32 wash = 0.f) {
+    const bool hot = ui.setHot(id, b) && ui.isHot(id);
+    const bool held = hot && ui.in->down[0];
+    const UiMotion m = ui.motion(id, hot, held);
+    const Rect br = ui.liftPress(b, m);
+    ui.pillRect(br, br.h * 0.5f, on ? Pill::Primary : Pill::Secondary, nx::violet, m);
+    if (!on && wash > 0.f)
+        ui.r->roundRect(br, br.h * 0.5f, nx::violet.alpha(clampv(wash, 0.f, 0.6f)));
+    ui.microIn(f, br, label,
+               on ? nx::text : pal::textFaint.mix(nx::text, 0.25f + 0.75f * m.hover),
+               Align::Center);
+    if (hot) ui.cursor = Cursor::Hand;
+    return hot && ui.in->pressed[0];
+}
+
+// A recessed readout: the position counter, the CPU number, the time
+// signature. §4 -- a region inside glass is a WELL, never a second frosted
+// layer, and the numbers a musician reads mid-take have to be the most legible
+// thing in the bar, which is what a dark recess buys them.
+static void ctlWell(Renderer& r, const Rect& b, f32 dpi, bool deep = false) {
+    r.well(b, std::min(nx::radiusSm * dpi, b.h * 0.5f), deep);
+}
+
+// The group separator. §11: no solid grey lines anywhere -- a hairline that
+// fades to nothing at both ends, inset from the bar's own edges so it reads as
+// a seam in the glass rather than as a rule drawn across it.
+static void ctlSeam(Renderer& r, f32 x, const Rect& bar, f32 dpi) {
+    const f32 inset = bar.h * 0.24f;
+    r.hairlineV(std::round(x), bar.y + inset, bar.bottom() - inset,
+                nx::hairlineInk, dpi);
 }
 
 // NXTAKT_DEBUG_SIG's second half, and the only assertion in this program that a
@@ -106,8 +225,33 @@ void App::drawControlBar(const Rect& r) {
     // nothing to publish to and the branch is the honest way to say it.
     if (Engine* e = eng_.local()) syncSignatures(*e, ses_);
     debugSignatureCheck(eng_.local(), ses_);
-    rend_.rect(r, pal::panel);
-    rend_.rect({r.x, r.bottom() - 1 * s, r.w, 1 * s}, pal::divider);
+    chromeDebugInit();
+    chromeDebugDrive(win_.input());
+    // THE BAR TIER (§4). Not a flat panel rect any more: --glass-bar over the
+    // living background, with the 1px top highlight the tier is entitled to and
+    // a hairline where it ends.
+    //
+    // Assembled rather than taken whole from nx::glass(Tier::Bar), for one
+    // reason: that style carries --shadow-bar, and this bar is drawn FIRST and
+    // then painted over by the session view, so a downward shadow would be
+    // erased three calls later. A shadow nobody can see is quads spent on
+    // nothing. The fill and the edge are the tier's own, untouched.
+    {
+        nx::GlassStyle st = nx::glass(nx::Tier::Bar);
+        st.radius = 0.f;                 // flush to the window's top corners
+        st.elev = nx::noShadow;
+        rend_.glass(r, st);
+        // The seam under the bar. §11: hairlines, never a solid rule.
+        rend_.hairlineH(r.x, r.right(), r.bottom() - 1 * s, nx::hairlineInk, 1 * s);
+    }
+
+    // ONE BATCH OF SHAPES, THEN ONE OF LABELS. Every widget in this bar draws a
+    // gradient and then a string, and the batcher breaks on the texture change
+    // between them -- which, since the re-skin, also costs a gradient-table
+    // upload apiece. The bar's controls do not overlap and nothing here pushes
+    // a clip, which is exactly the promise Ui::beginDeferText asks for. Closed
+    // at the bottom of this function, on every path (there is no early return).
+    ui_.beginDeferText();
 
     // The playhead as a musician reads it — from the ENGINE's own counters,
     // which cross in the snapshot now (posBar/posBeat/posSixteenth and the
@@ -126,12 +270,17 @@ void App::drawControlBar(const Rect& r) {
     pos.den = es_.posSigDen;
     const Input& in = win_.input();
 
-    const f32 pad = 8 * s, h = 20 * s;
-    const f32 cy = r.y + (r.h - h) * 0.5f;
+    // §11: all spacing on the 8px grid. `gap` separates controls inside a
+    // group, `sep` separates the groups themselves and carries a hairline down
+    // its middle. Widths stay content-sized -- the grid governs the space
+    // between things, not the size of a number that has to fit.
+    const f32 pad = nx::sp1 * s, gap = nx::sp1 * s, sep = nx::sp2 * s;
+    const f32 h = 22 * s;
+    const f32 cy = std::round(r.y + (r.h - h) * 0.5f);
     f32 x = pad;
 
     // --- tempo ---
-    Rect tapR{x, cy, 32 * s, h};
+    Rect tapR{x, cy, 34 * s, h};
     if (ui_.button(uiId(1, 0), tapR, "TAP")) {
         static f64 lastTap = 0.0;
         const f64 now = nowSeconds();
@@ -141,9 +290,14 @@ void App::drawControlBar(const Rect& r) {
         }
         lastTap = now;
     }
-    x += tapR.w + 4 * s;
+    x += tapR.w + gap;
 
+    // The tempo is a FIELD, so it recesses (§5). dragNumber draws nothing over
+    // a well at rest and takes the well over itself while the drag owns it, so
+    // the two agree about what a number being edited looks like.
     Rect tempoR{x, cy, 62 * s, h};
+    chromeDebugMark("tempo", tempoR);
+    ctlWell(rend_, tempoR, s);
     f64 bpm = ses_.tempo;
     // The number is edited through a copy, so the session still holds the old
     // tempo here and a plain undoPoint is enough; the drag coalesces on the
@@ -152,7 +306,7 @@ void App::drawControlBar(const Rect& r) {
         undoPoint("tempo");
         setTempo(bpm);
     }
-    x += tempoR.w + 6 * s;
+    x += tempoR.w + gap;
 
     // --- time signature ---
     //
@@ -238,8 +392,14 @@ void App::drawControlBar(const Rect& r) {
 
         char buf[16];
         snprintf(buf, sizeof buf, "%d / %d", pos.num, pos.den);
-        rend_.roundRect(sigR, 2 * s, live ? pal::slotHover : pal::panelAlt);
-        rend_.textIn(fBody_, sigR, buf, live ? pal::text : pal::textDim, Align::Center);
+        // The same well the tempo wears, because it is the same kind of thing:
+        // a number in the bar that can be dragged. The hover state is a violet
+        // wash inside the recess rather than a lighter plate -- §1, violet
+        // leads even here.
+        ctlWell(rend_, sigR, s);
+        if (live) rend_.roundRect(sigR, std::min(nx::radiusSm * s, sigR.h * 0.5f),
+                                  nx::violet.alpha(0.16f));
+        ui_.drawTextIn(fBody_, sigR, buf, live ? nx::text : pal::textDim, Align::Center);
         if (live) {
             ui_.cursor = Cursor::ResizeV;
             ui_.tip = editBar == 0
@@ -248,19 +408,21 @@ void App::drawControlBar(const Rect& r) {
                                 ": drag to change it";
         }
     }
-    x += sigR.w + 6 * s;
+    x += sigR.w + gap;
 
     Rect metR{x, cy, 36 * s, h};
+    chromeDebugMark("met", metR);
     if (ui_.button(uiId(1, 2), metR, "MET", ses_.metronome, pal::accent)) {
         undoPoint("metronome");
         ses_.metronome = !ses_.metronome;
         send(Cmd::SetMetronome, ses_.metronome ? 1 : 0);
     }
-    x += metR.w + 12 * s;
+    x += metR.w + sep;
+    ctlSeam(rend_, x - sep * 0.5f, r, s);
 
     // --- global launch quantum ---
-    rend_.textIn(fSmall_, {x, cy, 26 * s, h}, "Q", pal::textFaint, Align::Left, 0);
-    Rect quantR{x + 16 * s, cy, 62 * s, h};
+    ui_.microIn(fSmall_, {x, cy, 14 * s, h}, "Q", pal::textFaint, Align::Left);
+    Rect quantR{x + 14 * s + gap, cy, 62 * s, h};
     // The selector writes into the session and only then reports the change,
     // so the entry needs the index handed back to it.
     const int wasQuantum = ses_.quantumIdx;
@@ -268,19 +430,30 @@ void App::drawControlBar(const Rect& r) {
         undoPointWith("launch quantum", ses_.quantumIdx, wasQuantum);
         send(Cmd::SetQuantum, ses_.quantumIdx);
     }
-    x = quantR.right() + 16 * s;
+    x = quantR.right() + sep;
+    ctlSeam(rend_, x - sep * 0.5f, r, s);
 
     // --- transport ---
+    //
+    // PLAY IS VIOLET, NOT CYAN, and this is §1 rather than a preference: cyan
+    // is light inside a material, never a surface -- the moment a control is
+    // filled with it, violet has stopped leading. So the primary action wears
+    // the primary fill, and "playing" is said by the fill arriving at all,
+    // by the glow under it, and by the position counter turning cyan. The
+    // glyphs are drawn into ui_.lastRect so they ride the pill's lift and press
+    // instead of standing still while it moves.
     Rect playR{x, cy, 30 * s, h};
+    chromeDebugMark("play", playR);
     const bool playing = es_.playing;
-    if (ui_.button(uiId(1, 4), playR, "", playing, pal::playGreen)) togglePlay();
-    ui_.playTriangle(playR.insetXY(11 * s, 5 * s), playing ? pal::textOnClip : pal::text);
-    x += playR.w + 3 * s;
+    if (ui_.button(uiId(1, 4), playR, "", playing, pal::accent)) togglePlay();
+    ui_.playTriangle(ui_.lastRect.insetXY(11 * s, 6 * s),
+                     playing ? nx::text : pal::textDim.mix(nx::text, 0.5f));
+    x += playR.w + gap;
 
     Rect stopR{x, cy, 30 * s, h};
     if (ui_.button(uiId(1, 5), stopR, "")) send(Cmd::SetPlaying, 0);
-    ui_.stopSquare(stopR, pal::text);
-    x += stopR.w + 3 * s;
+    ui_.stopSquare(ui_.lastRect, pal::textDim.mix(nx::text, 0.5f));
+    x += stopR.w + gap;
 
     // Session record. This is an *intent*, not a transport action: while it is
     // lit, clicking an empty slot on an armed track starts a take in that slot;
@@ -288,16 +461,25 @@ void App::drawControlBar(const Rect& r) {
     // additionally lights while any track is actually capturing, so the bar
     // says what the engine is doing and not just what was asked for.
     Rect recR{x, cy, 30 * s, h};
+    chromeDebugMark("rec", recR);
     bool anyRec = false;
     for (size_t t = 0; t < ses_.tracks.size(); ++t)
         if (es_.recState[t] != 0) { anyRec = true; break; }
-    // A dark plate under a bright circle while capturing; the plain armed plate
-    // otherwise, so the two states never read as the same light.
-    const Col recPlate = anyRec ? pal::recRed.scale(0.4f) : pal::armRed;
+    // RED, AND STILL §1. Red is reserved for the destructive-adjacent, and a
+    // record button is exactly that: the one control in the bar whose click
+    // begins overwriting what is in a slot. It is not an exception to the rule,
+    // it is the case the rule was written for -- which is also why nothing else
+    // in this bar is allowed near it.
+    //
+    // Three states that never read as the same light: capturing is a full
+    // --danger pill under a white dot, armed is the dark plate under a bright
+    // red dot, and inert is plain glass under a dimmed one.
+    const Col recPlate = anyRec ? pal::recRed : pal::armRed;
     if (ui_.button(uiId(1, 6), recR, "", recIntent_ || anyRec, recPlate)) recIntent_ = !recIntent_;
-    rend_.circle(recR.cx(), recR.cy(), 5 * s,
-                 anyRec ? pal::recRed : (recIntent_ ? pal::textOnClip : pal::recRed.scale(0.55f)));
-    x += recR.w + 3 * s;
+    const Rect rr = ui_.lastRect;
+    rend_.circle(rr.cx(), rr.cy(), 5 * s,
+                 anyRec ? nx::text : (recIntent_ ? pal::recRed : pal::recRed.scale(0.55f)));
+    x += recR.w + gap;
 
     // Automation Arm — its own control, immediately right of the record circle
     // (docs/AUTOMATION.md §5.1, decision #10). Not implied by record-arm:
@@ -307,17 +489,12 @@ void App::drawControlBar(const Rect& r) {
     // because it is a MODE the transport row reports, not a transport action,
     // and the row already reads "the red thing is record".
     {
-        Rect autoR{x, cy, 34 * s, h};
+        Rect autoR{x, cy, 36 * s, h};
         const u64 id = uiId(1, 10);
-        const bool hot = ui_.setHot(id, autoR) && ui_.isHot(id);
-        if (hot) ui_.cursor = Cursor::Hand;
-        rend_.roundRect(autoR, 2 * s, autoArm_ ? pal::accent.alpha(0.18f)
-                                               : (hot ? pal::slotHover : pal::appBg));
-        rend_.textIn(fSmall_, autoR, "AUTO", autoArm_ ? pal::accentHi : pal::textFaint,
-                     Align::Center);
-        if (hot) ui_.tip = "Automation arm: record control moves into the playing clip";
-        if (hot && win_.input().pressed[0]) toggleAutoArm();
-        x = autoR.right() + 4 * s;
+        if (ctlChip(ui_, id, autoR, fSmall_, "AUTO", autoArm_)) toggleAutoArm();
+        if (ui_.isHot(id))
+            ui_.tip = "Automation arm: record control moves into the playing clip";
+        x = autoR.right() + gap;
     }
 
     // Arrangement arm -- a THIRD independent chip, immediately right of AUTO and
@@ -332,16 +509,12 @@ void App::drawControlBar(const Rect& r) {
     // depending on which tab is open. That is the modality AUTOMATION.md §5.1
     // refused when it made the automation arm its own control.
     {
-        Rect arrR{x, cy, 30 * s, h};
+        Rect arrR{x, cy, 32 * s, h};
         const u64 id = uiId(1, 12);
-        const bool hot = ui_.setHot(id, arrR) && ui_.isHot(id);
-        if (hot) ui_.cursor = Cursor::Hand;
-        rend_.roundRect(arrR, 2 * s, arrArm_ ? pal::accent.alpha(0.18f)
-                                             : (hot ? pal::slotHover : pal::appBg));
-        rend_.textIn(fSmall_, arrR, "ARR", arrArm_ ? pal::accentHi : pal::textFaint,
-                     Align::Center);
-        if (hot) ui_.tip = "Arrangement arm: record armed tracks onto the timeline";
-        if (hot && win_.input().pressed[0]) {
+        const bool pressed = ctlChip(ui_, id, arrR, fSmall_, "ARR", arrArm_);
+        if (ui_.isHot(id))
+            ui_.tip = "Arrangement arm: record armed tracks onto the timeline";
+        if (pressed) {
             arrArm_ = !arrArm_;
             if (arrArm_) {
                 status_ = "Arrangement arm on - recording lands on the timeline";
@@ -355,7 +528,8 @@ void App::drawControlBar(const Rect& r) {
                 status_ = "Arrangement arm off";
             }
         }
-        x = arrR.right() + 12 * s;
+        x = arrR.right() + sep;
+        ctlSeam(rend_, x - sep * 0.5f, r, s);
     }
 
     // --- position readout ---
@@ -377,10 +551,15 @@ void App::drawControlBar(const Rect& r) {
         // fills the fields the engine does not publish (barStart, unit).
         char buf[48];
         snprintf(buf, sizeof buf, "%d.%d.%d", pos.bar + 1, pos.beat + 1, pos.sixteenth + 1);
+        // The deepest well in the bar, because this is the number the bar is
+        // FOR. §1's cyan lands here and almost nowhere else in the chrome: a
+        // running counter is a live value, which is precisely what cyan is
+        // reserved for, and it is legible against a --well-deep recess in a way
+        // no glass fill would make it.
         Rect posR{x, cy, 92 * s, h};
-        rend_.roundRect(posR, 2 * s, pal::appBg);
-        rend_.textIn(fBig_, posR, buf, playing ? pal::playGreen : pal::text, Align::Center);
-        x += posR.w + 8 * s;
+        ctlWell(rend_, posR, s, true);
+        ui_.drawTextIn(fBig_, posR, buf, playing ? nx::cyan : nx::text, Align::Center);
+        x += posR.w + sep;
     }
 
     // --- the engine link, when it is news (§6) -------------------------------
@@ -390,10 +569,10 @@ void App::drawControlBar(const Rect& r) {
     // acting is legitimate. Amber, not red: attention, not danger (the set is
     // intact, and the copy says so).
     if (const char* bn = engineLinkBanner(es_.link)) {
-        const f32 bw = fBody_.measure(bn) + 16 * s;
-        Rect bnR{x + 8 * s, cy, bw, h};
-        rend_.textIn(fBody_, bnR, bn, pal::meterAmber, Align::Left);
-        f32 bx = bnR.right() + 6 * s;
+        const f32 bw = fBody_.measure(bn) + nx::sp2 * s;
+        Rect bnR{x, cy, bw, h};
+        ui_.drawTextIn(fBody_, bnR, bn, nx::amber, Align::Left);
+        f32 bx = bnR.right() + gap;
         if (engineLinkOffersRestart(es_.link)) {
             Rect rb{bx, cy, 64 * s, h};
             if (ui_.button(uiId(1, 40), rb, "RESTART", false, pal::accent)) {
@@ -413,31 +592,40 @@ void App::drawControlBar(const Rect& r) {
     // --- right side: CPU + view switch ---
     f32 rx = r.right() - pad;
     {
-        Rect vs{rx - 150 * s, cy, 150 * s, h};
-        const f32 halfW = vs.w * 0.5f;
-        Rect a{vs.x, vs.y, halfW, vs.h}, b{vs.x + halfW, vs.y, halfW, vs.h};
-        if (ui_.button(uiId(1, 7), a, "SESSION", view_ == MainView::Session, pal::accent))
-            view_ = MainView::Session;
-        if (ui_.button(uiId(1, 8), b, "ARRANGE", view_ == MainView::Arrangement, pal::accent))
-            view_ = MainView::Arrangement;
-        rx = vs.x - 10 * s;
+        // THE TAB PILL (§5), and the identity move of this whole bar: ONE
+        // indicator that slides between the two slots on --ease-spring, never
+        // two backgrounds toggling. Two lit buttons side by side is what this
+        // was, and it is exactly the pattern the spec names and refuses.
+        Rect vs{rx - 152 * s, cy, 152 * s, h};
+        // Half the pill, so the cursor lands on the tab that is NOT current.
+        chromeDebugMark("tab", {vs.x + vs.w * 0.5f, vs.y, vs.w * 0.5f, vs.h});
+        static const char* const kViews[2] = {"Session", "Arrange"};
+        int vi = view_ == MainView::Session ? 0 : 1;
+        if (ui_.tabPill(uiId(1, 7), vs, kViews, 2, &vi))
+            view_ = vi == 0 ? MainView::Session : MainView::Arrangement;
+        rx = vs.x - sep;
+        ctlSeam(rend_, rx + sep * 0.5f, r, s);
     }
     {
         const f32 cpu = es_.cpu;
         char buf[32];
         snprintf(buf, sizeof buf, "%.0f%%", cpu);
-        Rect cr{rx - 44 * s, cy, 44 * s, h};
-        rend_.roundRect(cr, 2 * s, pal::appBg);
-        const Col c = cpu > 85.f ? pal::meterRed : cpu > 60.f ? pal::meterAmber : pal::textDim;
-        rend_.textIn(fSmall_, cr, buf, c, Align::Center);
-        rx = cr.x - 8 * s;
+        Rect cr{rx - 46 * s, cy, 46 * s, h};
+        ctlWell(rend_, cr, s);
+        // Amber means attention and red means danger -- §1, and a CPU load that
+        // is about to glitch the audio is the one number in this bar that earns
+        // either of them.
+        const Col c = cpu > 85.f ? nx::danger : cpu > 60.f ? nx::amber : pal::textDim;
+        ui_.microIn(fSmall_, cr, buf, c, Align::Center);
+        rx = cr.x - gap;
     }
     {
         Rect br{rx - 60 * s, cy, 60 * s, h};
         const char* drv = eng_.driverName();
-        rend_.textIn(fSmall_, br, drv ? drv : "no audio",
-                     drv ? pal::textFaint : pal::recRed, Align::Right, 0);
-        rx = br.x - 8 * s;
+        ui_.microIn(fSmall_, br, drv ? drv : "no audio",
+                    drv ? pal::textFaint : nx::danger, Align::Right, 0);
+        rx = br.x - sep;
+        ctlSeam(rend_, rx + sep * 0.5f, r, s);
     }
     // Computer MIDI keyboard. It belongs with the audio/MIDI readouts because
     // it is an input status: while it is lit the letter keys are notes and not
@@ -448,25 +636,20 @@ void App::drawControlBar(const Rect& r) {
     {
         f64 vel = (f64)kbd_.velocity();
         Rect vr{rx - 34 * s, cy, 34 * s, h};
+        ctlWell(rend_, vr, s);
         if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f")) {
             kbd_.setVelocity((int)std::lround(vel));
             char buf[64];
             snprintf(buf, sizeof buf, "Keyboard velocity %d", kbd_.velocity());
             status_ = buf;
         }
-        rx = vr.x - 3 * s;
+        rx = vr.x - gap;
 
         char buf[24];
         snprintf(buf, sizeof buf, "KBD C%d", kbd_.octave());
         Rect kr{rx - 58 * s, cy, 58 * s, h};
-        const u64 id = uiId(1, 9);
-        const bool hot = ui_.setHot(id, kr) && ui_.isHot(id);
-        if (hot) ui_.cursor = Cursor::Hand;
-        rend_.roundRect(kr, 2 * s, kbdMidi_ ? pal::accent.alpha(0.18f)
-                                            : (hot ? pal::slotHover : pal::appBg));
-        rend_.textIn(fSmall_, kr, buf, kbdMidi_ ? pal::accent : pal::textFaint, Align::Center);
-        if (hot && win_.input().pressed[0]) toggleKbdMidi();
-        rx = kr.x - 8 * s;
+        if (ctlChip(ui_, uiId(1, 9), kr, fSmall_, buf, kbdMidi_)) toggleKbdMidi();
+        rx = kr.x - gap;
     }
 
     // Remote control. It belongs with KBD and the MIDI client id for the same
@@ -482,28 +665,25 @@ void App::drawControlBar(const Rect& r) {
 
         Rect mr{rx - 56 * s, cy, 56 * s, h};
         const u64 id = uiId(1, 11);
-        const bool hot = ui_.setHot(id, mr) && ui_.isHot(id);
-        if (hot) ui_.cursor = Cursor::Hand;
 
-        // Accent purple, pulsing, while a control is waiting to be learned —
-        // the same light the armed knob in the device panel is wearing, so the
-        // two read as one state and not as two coincidences.
+        // Violet, pulsing, while a control is waiting to be learned — the same
+        // light the armed knob in the device panel is wearing, so the two read
+        // as one state and not as two coincidences. The pulse is a WASH over
+        // the resting chip rather than a fill of its own, so a learning chip and
+        // an armed one are still visibly different things.
         const f64 sinceHit = nowSeconds() - ctlFlashAt_;
-        Col bg = pal::appBg;
-        if (learning)            bg = pal::accent.alpha(0.10f + 0.32f * ctlPulse01());
-        else if (sinceHit < 0.1) bg = pal::accent.alpha(0.18f);   // blink per applied hit
-        else if (hot)            bg = pal::slotHover;
-        rend_.roundRect(mr, 2 * s, bg);
-        rend_.textIn(fSmall_, mr, buf,
-                     learning ? pal::accentHi
-                              : (nb || osc_.running() ? pal::textDim : pal::textFaint),
-                     Align::Center);
+        f32 wash = 0.f;
+        if (learning)            wash = 0.10f + 0.30f * ctlPulse01();
+        else if (sinceHit < 0.1) wash = 0.22f;                    // per applied hit
+        const bool pressed = ctlChip(ui_, id, mr, fSmall_, buf, false, wash);
+        const bool hot = ui_.isHot(id);
         // A dot, not a word: "is anything listening on the network" is a yes/no
         // and the bar has no room for a sentence. Amber when the socket is not
-        // on loopback, which is the one fact about it worth a colour.
+        // on loopback, which is the one fact about it worth a colour; cyan when
+        // it is — a live connection, which is what cyan means (§1).
         if (osc_.running())
-            rend_.circle(mr.right() - 5 * s, mr.y + 5 * s, 2.2f * s,
-                         osc_.wide() ? pal::meterAmber : pal::playGreen);
+            rend_.circle(mr.right() - 8 * s, mr.y + 6 * s, 2.2f * s,
+                         osc_.wide() ? nx::amber : nx::cyan);
 
         if (hot) {
             char tip[320];
@@ -528,12 +708,15 @@ void App::drawControlBar(const Rect& r) {
                          oscPart);
             ui_.tip = tip;
         }
-        if (hot && win_.input().pressed[0] && learning) {
+        if (pressed && learning) {
             midiMap_.cancelLearn();
             status_ = "MIDI learn cancelled";
         }
-        rx = mr.x - 8 * s;
+        rx = mr.x - gap;
     }
+    (void)rx;
+
+    ui_.flushText();
 }
 
 
@@ -545,7 +728,9 @@ void App::drawBrowser(const Rect& r) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
     rend_.rect(r, pal::panel);
-    rend_.rect({r.right() - 1 * s, r.y, 1 * s, r.h}, pal::divider);
+    // §11, in a surface this wave otherwise leaves alone: the browser's right
+    // edge was a solid rule and is now a hairline that fades at both ends.
+    rend_.hairlineV(r.right() - 1 * s, r.y, r.bottom(), nx::hairlineInk, 1 * s);
 
     const f32 rowH = 19 * s;
     Rect head{r.x, r.y, r.w, 22 * s};
@@ -569,8 +754,8 @@ void App::drawBrowser(const Rect& r) {
         y += rowH;
     }
 
-    rend_.rect({r.x + 6 * s, y + 3 * s, r.w - 12 * s, 1 * s}, pal::divider);
-    y += 8 * s;
+    rend_.hairlineH(r.x + 6 * s, r.right() - 6 * s, y + 3 * s, nx::hairlineInk, 1 * s);
+    y += nx::sp1 * s;
 
     // Current directory label
     Rect dirRow{r.x, y, r.w, rowH};
@@ -1410,10 +1595,16 @@ void App::arrangeCommitAutos(ArrangeContext& ctx, u32 changed) {
     }
 }
 
+// A UTILITY STRIP, NOT A HERO SURFACE. It gets the Bar tier's fill at half
+// strength and nothing else: no lit edge, no glow, no elevation, no animation.
+// §1's restraint is mostly about what you leave out, and the honest reading of
+// "the status bar is where the program mutters to itself" is that it should be
+// the quietest thing on screen -- present when looked at, invisible when not.
 void App::drawStatusBar(const Rect& r) {
     const f32 s = win_.dpiScale();
-    rend_.rect(r, pal::panel);
-    rend_.rect({r.x, r.y, r.w, 1 * s}, pal::divider);
+    rend_.gradRect(r, 0.f, nx::glassBar, 0.55f);
+    // §11: the divider is a hairline that fades at both ends, not a rule.
+    rend_.hairlineH(r.x, r.right(), r.y, nx::hairlineInk, 1 * s);
     // Ui::tip is what the control under the cursor wants said about itself, and
     // the status bar is the one place in the program with room to say it. It
     // wins over `status_` only while it is set — the bar is drawn last in the
@@ -1421,9 +1612,15 @@ void App::drawStatusBar(const Rect& r) {
     // message is still there the moment the pointer moves off. Nothing else
     // rendered tips before this; the automation lane's key block needs them,
     // because a plugin parameter's name does not fit in a 46 px gutter.
+    // §7/§11's contrast requirement, measured rather than assumed. pal::textFaint
+    // over this strip samples at 3.3:1 -- quiet, and below the 4.5:1 line. Half a
+    // step towards textDim puts it at 4.8:1 while still reading as clearly
+    // subordinate to a tooltip, which is the distinction the two inks exist to
+    // draw. "Quiet" is not the same thing as "hard to read".
+    static const Col kIdleInk = pal::textFaint.mix(pal::textDim, 0.5f);
     const bool tip = !ui_.tip.empty();
     rend_.textIn(fSmall_, r, tip ? ui_.tip.c_str() : status_.c_str(),
-                 tip ? pal::textDim : pal::textFaint, Align::Left, 8 * s);
+                 tip ? pal::textDim : kIdleInk, Align::Left, nx::sp1 * s);
 
     // The MIDI tag carries the sequencer client id: nothing is auto-connected,
     // so the number is what the user needs to hand aconnect or qpwgraph.
@@ -1455,7 +1652,7 @@ void App::drawStatusBar(const Rect& r) {
              syncTag,
              midiTag,
              fps_, rend_.drawCalls());
-    rend_.textIn(fSmall_, r, buf, pal::textFaint, Align::Right, 8 * s);
+    rend_.textIn(fSmall_, r, buf, kIdleInk, Align::Right, nx::sp1 * s);
 }
 
 
