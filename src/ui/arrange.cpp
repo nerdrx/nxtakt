@@ -890,6 +890,17 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 dupMade_ = false;
                 ui.active = gesture_;
             }
+        } else if (in.dblClick) {
+            // Empty lane space. Double-click on an item splits it; the same
+            // gesture on nothing CREATES -- a one-bar note block at the
+            // quantized beat, which is the gesture every Live hand reaches
+            // for and, until this branch, found nothing under.
+            const int t = trackAtY(in.my);
+            if (t >= 0) {
+                ctx.wantCreate  = true;
+                ctx.createTrack = t;
+                ctx.createBeat  = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+            }
         } else if (in.pressed[0]) {
             if (selItem_ != 0) changed |= Changed::Selection;
             selTrack_ = -1;

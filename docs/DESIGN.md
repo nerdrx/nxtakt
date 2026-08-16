@@ -1,12 +1,12 @@
-<!-- Vendored from nerdrx/nx-hub docs/DESIGN.md (v1.1, 'angular, never rounded').
-     That file is canonical; update this copy when it changes. NxTakt is the
-     §10 native case: tokens are the contract, the SDF renderer the technology.
-     NxTakt's radii are 6/3/2/3 (gfx/theme.h) — inside v1.1's 3–6px band,
-     tuned one notch tighter for a dense instrument surface. -->
+<!-- Vendored from nerdrx/nx-hub docs/DESIGN.md (v1.3, 'light rides motion').
+     Canonical there; update this copy when it changes. NxTakt is the §10
+     native case: tokens are the contract, the SDF renderer the technology.
+     NxTakt radii 6/3/2/3 (gfx/theme.h) — inside the 3-6px band. -->
 
 # The NX Design Language
 
-**Version 1.1 · extracted from NX Hub v0.3.6 (the reference implementation)**
+**Version 1.3 · extracted from NX Hub v0.3.6 · amendments from PulseNX v1.2.1
+and the pointer-bound specular rule (2026-08-16)**
 
 This document is the canonical specification of the NX visual language —
 "liquid glass on deep space." It is written to be dropped into any project's
@@ -30,6 +30,7 @@ restraint everywhere.**
 | Signal colors | Amber `#ffb300` = update/attention. Red `#ff5470` = danger only. |
 | The mark | A beveled glass crystal hexagon (pointy-top, always) with a sculpted geometric monogram. |
 | Type | System UI stack. No webfonts. Weight and spacing do the branding. |
+| Identity accent | An NX app may carry **one** app-specific color for its core domain signal (PulseNX: heart red `#FF2D55` for live vitals). See the rules below. |
 
 Rules that make it feel expensive:
 
@@ -44,6 +45,21 @@ Rules that make it feel expensive:
   dots and spinners only.
 - One light source: **upper-left**, in every gradient, bevel, and edge. Light
   consistency is why surfaces read as one physical world.
+- **Light rides motion — it never flashes on command.** A specular sheen is a
+  *function of position*, not a time-triggered animation: bind it to the
+  pointer, the tilt, the scroll or the progress value that is actually moving,
+  so the highlight slides across the glass as the thing moves. A one-shot
+  sweep fired on hover/attention reads as an effect; light that tracks input
+  reads as material. Triggered sweeps are permitted only where no continuous
+  driver exists (indeterminate progress), and everything decorative still
+  freezes under reduced motion.
+- **The identity accent stays in its lane.** If an app has a domain signal
+  color, it marks *only* that signal (the live BPM, the recording dot). It
+  never becomes an action color, never doubles as danger or any generic
+  status, and violet still leads every screen. When a domain needs a graded
+  ramp (heart-rate zones), build it inside the cyan → violet → magenta band
+  and let the identity color cap the extreme; amber still means only
+  "attention."
 
 ## 2. Design tokens
 
@@ -185,8 +201,12 @@ element translated between equal-width tab slots with `--ease-spring`, never
 per-tab background toggles. (CSS-only via `:has()` on the active tab.)
 
 **Cards**: tier-1 glass, `--radius`, `--sp-3` internal padding. Hover: lift
-`translateY(-2px)`, `--shadow-lift`, and slide the `--sheen` band across via a
-masked pseudo-element (background-position or transform only). Card grids flow
+`translateY(-2px)` and `--shadow-lift`. The `--sheen` band is **pointer-bound**
+(see the light-rides-motion rule): a delegated pointermove writes a normalized
+CSS custom property (e.g. `--mx: 0..1`) on the hovered surface and the sheen's
+position derives from it — the highlight slides with the cursor instead of
+sweeping once on entry. Keep it one rAF-throttled listener per grid, not one
+per card; a soft opacity fade on enter/leave keeps the appearance calm. Card grids flow
 as **masonry** (CSS `columns`, `break-inside: avoid`) so mixed heights pack
 tightly — top-aligned grid rows with ragged holes read as fragmentation.
 
@@ -272,10 +292,24 @@ plainly.
 `nx_cyan #00E5FF`, `nx_bg #0A0714`, `nx_panel #171028`, `nx_text #EFEAFF`,
 `nx_muted #9A8FC0`, `nx_amber #FFB300`. Cards: `--panel`-toned surfaces with
 subtle top-light gradient (real blur is rarely worth it on mobile GPUs — fake
-tier-1 exactly like the desktop cards); wells as darker inset containers; pill
-buttons with violet fill; 8dp rhythm; the adaptive launcher icon derives from
+tier-1 exactly like the desktop cards); wells as darker inset containers;
+sharp-cut violet buttons; 8dp rhythm; the adaptive launcher icon derives from
 the mark's foreground/background split with a monochrome variant. Motion via
 `OvershootInterpolator`-class curves at the same durations.
+
+Field notes from the PulseNX implementation:
+
+- **`<stroke>` cannot take a gradient**, so `--edge` is faked: a uniform
+  low-alpha stroke plus separate lit-top and shadowed-bottom edge strips.
+  Do **not** fake the sheen with a clipped diagonal specular band — the clip
+  ends in a visible seam on real screens.
+- **Reduced motion** has no single Android flag. Treat
+  `ANIMATOR_DURATION_SCALE == 0` **or** `TRANSITION_ANIMATION_SCALE == 0` as
+  reduce, re-read both every time the window becomes visible, and give any
+  custom canvas hard stops for detach, invisibility, and battery saver.
+- **Press feedback recipe**: scale to `0.96` in 150 ms on down, release
+  through an `OvershootInterpolator(≈2.2)` over 220 ms — and the touch
+  listener must return `false` so clicks pass through.
 
 **Native desktop (Qt/GTK/imgui)** — the tier table survives translation: bar
 and sheet surfaces get real blur where the toolkit offers it, content surfaces
@@ -311,7 +345,10 @@ line per phase so logs stay readable.
 
 ## 11. The review checklist
 
-Before shipping any NX-branded surface, verify:
+Review by **looking, not by reading code**: render every view with real or
+synthetic data, screenshot it, and iterate until the list below passes — the
+failures this catches (ragged grid holes, collapsed rhythm, seamed gradients)
+are invisible in a diff. Before shipping any NX-branded surface, verify:
 
 - [ ] Light comes from the upper-left in every gradient and edge.
 - [ ] Real blur count on a busy screen ≤ ~10; cards fake it.
@@ -319,11 +356,16 @@ Before shipping any NX-branded surface, verify:
 - [ ] Violet leads, cyan accents, amber only means "attention."
 - [ ] All spacing lands on the 8px grid.
 - [ ] Hover lifts, press scales, springs only where identity lives.
+- [ ] Every sheen is position-driven (pointer/tilt/progress), never a one-shot
+      triggered sweep — except where nothing continuous exists to bind to.
 - [ ] `prefers-reduced-motion` fully honored.
 - [ ] Text contrast comfortable over every fill it sits on.
 - [ ] Mixed-height collections pack (masonry), never leave ragged holes.
 - [ ] No pill shapes; every radius is in the 3–6px band (circles = dots/spinners only).
-- [ ] The mark is pointy-top, correct variant for the size.
+- [ ] The mark is pointy-top, correct variant for the size — and an app's own
+      mark is never replaced by the NX hexagon.
+- [ ] The identity accent (if any) marks only its domain signal — never
+      actions, danger, or generic status.
 - [ ] Copy is sentence-case, concrete, and tells the user what to do next.
 
 ---

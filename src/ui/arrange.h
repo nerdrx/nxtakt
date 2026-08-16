@@ -125,6 +125,12 @@ struct ArrangeContext {
     // asks, the caller takes its point and calls the verb.
     bool wantDelete = false;
     bool wantSplit  = false;
+    // Double-click on EMPTY lane space: create a one-bar MIDI item there.
+    // The view reports where; the app decides what a fresh note block is,
+    // because the view knows nothing about clips, uids or bar lengths.
+    bool wantCreate = false;
+    int  createTrack = -1;
+    f64  createBeat  = 0.0;
 };
 
 class ArrangeView {

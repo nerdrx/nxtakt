@@ -133,19 +133,28 @@ void drawSpecimen(Renderer& r, f64 timeSeconds) {
     // -----------------------------------------------------------------------
     {
         const Rect card{colL.x, yL, colL.w, S * 28.f};
-        // Hover state on a slow cycle, so a screenshot catches the lift and the
-        // sheen at least half the time.
-        const f32 hoverPhase = std::fmod(t, 6.f) / 6.f;
-        const bool hover = hoverPhase > 0.15f && hoverPhase < 0.85f;
-        const f32 lift = hover ? nx::easeSoft(clampv((hoverPhase - 0.15f) / 0.12f, 0.f, 1.f)) : 0.f;
+        // LIGHT RIDES MOTION (spec v1.3). This used to fire the sheen as a
+        // one-shot sweep on a hover timer -- an effect, not a material. The
+        // specimen has no real pointer, so it simulates one GLIDING across the
+        // card and derives everything from that position: hover is "the
+        // pointer is over me", the sheen sits where the pointer is. In the app
+        // the driver is the real cursor: phase = (in.mx - card.x) / card.w,
+        // faded in and out on enter/leave. Never a time-triggered sweep.
+        const f32 glide = 0.5f - 0.5f * std::cos((f32)std::fmod(t, 6.0) / 6.f * 6.2831853f);
+        const f32 px = card.x + glide * card.w;              // the simulated pointer
+        const bool hover = glide > 0.06f && glide < 0.94f;   // on the card
+        const f32 lift = hover ? 1.f : 0.f;
         const Rect cr{card.x, card.y - 2.f * dpi * lift, card.w, card.h};
 
         nx::GlassStyle st = nx::glass(nx::Tier::Card);
         st.radius = nx::radius * dpi;
         if (hover) st.elev = nx::shadowLift;
         r.glass(cr, st);
-        // The sheen crosses once per hover cycle, masked to the card.
-        r.sheen(cr, st.radius, clampv((hoverPhase - 0.20f) / 0.45f, 0.f, 1.f), 1.f);
+        // Position-bound: the highlight is a function of the pointer, so it
+        // slides with it and is simply STILL when the pointer is. Reduced
+        // motion freezes the simulated glide upstream (t is frozen), so this
+        // needs no second gate.
+        if (hover) r.sheen(cr, st.radius, clampv((px - cr.x) / cr.w, 0.f, 1.f), 1.f);
 
         if (g.ok) {
             const f32 tx = cr.x + S * 3.f;      // --sp-3 internal padding (§5)
@@ -368,7 +377,12 @@ void drawSpecimen(Renderer& r, f64 timeSeconds) {
                                           : 0.10f + 0.85f * (0.5f - 0.5f * std::cos(t * 0.9f));
         const Rect fill{trough.x, trough.y, std::max(trough.h, trough.w * p), trough.h};
         r.gradRect(fill, trough.h * 0.5f, nx::liquid);
-        r.sheen(fill, trough.h * 0.5f, std::fmod(t * 0.45f, 1.f), 1.2f);
+        // v1.3: determinate progress HAS a continuous driver -- the value.
+        // The highlight rides the liquid's leading edge instead of sweeping on
+        // its own clock; frozen progress = frozen light, for free. The
+        // one-shot sweep survives only for INDETERMINATE progress, where
+        // nothing continuous exists to bind to.
+        r.sheen(fill, trough.h * 0.5f, 0.85f, 1.2f);
         yR += trough.h + S * 3.f;
     }
 

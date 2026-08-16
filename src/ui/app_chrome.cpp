@@ -1028,6 +1028,48 @@ void App::arrangeCommit(ArrangeContext& ctx, u32 changed) {
         changed |= arrView_->splitSelected(ctx);
     }
 
+    // Double-click on empty lane space: a fresh one-bar note block, selected,
+    // with the roll open on it -- so the next click is already writing notes.
+    // One BAR, not four beats: the length comes from the signature map at that
+    // position, so the block fills its bar in 7/8 exactly as it does in 4/4.
+    if (ctx.wantCreate && ctx.createTrack >= 0 &&
+        ctx.createTrack < (int)ses_.tracks.size()) {
+        std::vector<ArrangeClip>& lane = ses_.tracks[(size_t)ctx.createTrack].arrange;
+        if ((int)lane.size() < kMaxArrItems) {
+            undoPoint("create MIDI clip");
+            const f64 bar = std::floor(ses_.barOfBeat(ctx.createBeat));
+            ClipModel m;
+            m.kind = ClipKind::Midi;
+            m.uid = ses_.newUid();
+            m.name = "MIDI";
+            m.colorIdx = ses_.tracks[(size_t)ctx.createTrack].colorIdx;
+            m.lengthBeats = std::max(kMinArrBeats,
+                                     ses_.beatOfBar(bar + 1.0) - ses_.beatOfBar(bar));
+            m.loop = true;
+            ArrangeClip it;
+            it.start = ctx.createBeat;
+            it.length = m.lengthBeats;
+            it.sourceUid = m.uid;
+            it.src = std::move(m);
+            const u64 uid = it.uid;
+            lane.push_back(std::move(it));
+            arrangeRepair(lane);
+            ctx.dirty.push_back(ctx.createTrack);
+            ctx.selTrack = ctx.createTrack;
+            ctx.selItem = uid;
+            arrSelTrack_ = ctx.createTrack;
+            arrSelItem_ = uid;
+            changed |= ArrangeView::Items | ArrangeView::Selection;
+            // Open the roll on it: the point of the gesture is that the NEXT
+            // click writes a note, not that a rectangle appeared.
+            showDetail_ = true;
+            detailTab_ = DetailTab::Clip;
+            status_ = "New MIDI clip - draw notes in the roll below";
+        } else {
+            status_ = "This lane is full";
+        }
+    }
+
     // A drop from the browser or from the session grid. The VIEW reported where;
     // what to put there is this side's question, because the view knows nothing
     // about samples, slots or clip loading.
