@@ -1032,10 +1032,18 @@ static void recCancelAndMonitor() {
         h.pushRec(0, 0, rec.data(), 100000);     // toggle before it begins
         h.run(kBar120 * 2);
         const std::vector<Event> evs = drainEvents(h.e);
+        // This used to assert "no finish" -- codifying a leak. The arm handed
+        // the engine a GUI-heap buffer; a cancel that says nothing strands it
+        // in pendingRecs_ forever. The honest contract: no start, exactly one
+        // ZERO-FRAME finish carrying the caller's own pointer back.
         CHECK(countEvents(evs, Ev::RecordStarted) == 0 &&
-              countEvents(evs, Ev::RecordFinished) == 0,
-              "cancelling a queued take is silent: no start, no finish (%d/%d)",
+              countEvents(evs, Ev::RecordFinished) == 1,
+              "cancelling a queued take never starts it and hands the buffer back (%d/%d)",
               countEvents(evs, Ev::RecordStarted), countEvents(evs, Ev::RecordFinished));
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished)
+                CHECK(ev.x == 0.0 && ev.p == (void*)rec.data(),
+                      "the finish is zero frames and carries the caller's pointer");
         CHECK(h.e.recState[0].load() == 0, "and the track is idle (%d)",
               h.e.recState[0].load());
     }
@@ -2298,11 +2306,17 @@ static void midiRecHandoverAndCancel() {
         h.pushRecMidi(0, 0, take.data(), 16);    // toggle before it begins
         h.run(kBar120 * 2);
         const std::vector<Event> evs = drainEvents(h.e);
+        // Same correction as the audio case: a silent cancel strands the
+        // note buffer the arm handed over. One zero-note finish, own pointer.
         CHECK(countEvents(evs, Ev::RecordStarted) == 0 &&
-              countEvents(evs, Ev::MidiRecordFinished) == 0,
-              "cancelling it is silent: no start, no finish (%d/%d)",
+              countEvents(evs, Ev::MidiRecordFinished) == 1,
+              "cancelling never starts it and hands the note buffer back (%d/%d)",
               countEvents(evs, Ev::RecordStarted),
               countEvents(evs, Ev::MidiRecordFinished));
+        for (const Event& ev : evs)
+            if (ev.type == Ev::MidiRecordFinished)
+                CHECK(ev.x == 0.0 && ev.p == (void*)take.data(),
+                      "the finish is zero notes and carries the caller's pointer");
         CHECK(h.e.recState[0].load() == 0, "and the track is idle (%d)",
               h.e.recState[0].load());
     }

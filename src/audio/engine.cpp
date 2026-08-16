@@ -427,10 +427,25 @@ static bool appendNote(RtNote* buf, i64& len, i64 cap, const RtNote& n) {
     return true;
 }
 
-// Cancels a take that has not begun. There is no buffer to hand back, so no
-// event goes out either — it is pure state, including the hand-over request.
-template <class TrackT>
-static void cancelRec(TrackT& t) {
+// Cancels a take that has not begun. "There is no buffer to hand back" was
+// this function's comment for six waves, and it was wrong both times it could
+// be: recBuf (the armed take) and pendBuf (a queued hand-over) are GUI-heap
+// pointers the caller ALREADY gave us under the Cmd contract, and nulling
+// them without an event stranded each buffer in App::pendingRecs_ until
+// shutdown -- a silent leak locally, and across the process boundary the
+// reason the daemon had to INFER cancellation from three coincident facts.
+// A zero-frame RecordFinished is the honest statement: your buffer, nothing
+// in it. Through emitCritical, because a full ring must not destroy the only
+// hand-back either. The GUI's finishRecording already treats zero frames as
+// "cancelled" -- it is the same event the engine-lost path synthesises.
+template <class TrackT, class EvRing>
+static void cancelRec(const Engine* eng, int ti, TrackT& t, EvRing& evts) {
+    if (t.recBuf)
+        emitCritical(eng, evts, {t.recMidi ? Ev::MidiRecordFinished : Ev::RecordFinished,
+                                 ti, t.recSlot, 0.0, t.recBuf});
+    if (t.pendBuf && t.pendBuf != t.recBuf)
+        emitCritical(eng, evts, {t.pendMidi ? Ev::MidiRecordFinished : Ev::RecordFinished,
+                                 ti, t.pendSlot, 0.0, t.pendBuf});
     t.recBuf = nullptr;
     t.recCap = 0;
     t.recLen = 0;
@@ -2005,7 +2020,7 @@ void Engine::drainCommands() {
                         const RtClip* oc = overdubVoice(clips_[ti], t);
                         if (oc) finishRec(this, ti, t, evts_, t.voice.beatPos, oc->lengthBeats);
                         else    finishRec(this, ti, t, evts_, stopBeat - t.recStartBeat);
-                    } else if (t.recPhase == 1) cancelRec(t);
+                    } else if (t.recPhase == 1) cancelRec(this, ti, t, evts_);
                 }
                 // The arrangement loses its voices with everything else, but NOT
                 // its override bits: the flag is performance state and a stop is
@@ -2047,7 +2062,7 @@ void Engine::drainCommands() {
             // Stopping a track is also how you end a take on it, so this runs
             // before the "nothing to stop" bail-out below.
             if (t.recPhase == 1) {
-                cancelRec(t);
+                cancelRec(this, c.a, t, evts_);
             } else if (t.recPhase == 2) {
                 t.recPhase = 3;
                 t.recFireBeat = nextQuantum(beat_, -1);
@@ -2227,10 +2242,10 @@ void Engine::drainCommands() {
                 t.recSlot = c.b; t.recPhase = 1; t.recMidi = midi;
                 t.recFireBeat = nextQuantum(beat_, -1);
             } else if (t.recSlot == c.b) {
-                // Toggling a take that has not begun cancels it. There is no
-                // buffer to hand back, so no event goes out either.
+                // Toggling a take that has not begun cancels it; the buffer
+                // the arm handed over goes back as a zero-frame finish.
                 if (t.recPhase == 1) {
-                    cancelRec(t);
+                    cancelRec(this, c.a, t, evts_);
                 } else if (t.recPhase == 2) {
                     t.recPhase = 3;
                     t.recFireBeat = nextQuantum(beat_, -1);
