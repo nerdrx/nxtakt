@@ -72,13 +72,12 @@ inline constexpr Col brand      = violet;
 // §2  Geometry -- radii and the 8px rhythm
 // ---------------------------------------------------------------------------
 
-// GEOMETRY — deliberately NOT the hub's numbers, by the owner's call
-// (2026-08-15): the spec's 18/12/8/pill is a consumer-launcher geometry, and
-// on a dense professional instrument it reads as a toy — "buttons that don't
-// belong together". NxTakt takes NX's MATERIALS (field, glass, lit edges,
-// hairlines, restraint) with instrument-grade geometry: near-square, tight,
-// one shared control height. §10's own rule covers this: the tokens are the
-// contract, the technology — and here, the genre — is negotiable.
+// GEOMETRY — one notch tighter than the hub's numbers, inside the spec's band.
+// History: v1.0 of the spec said 18/12/8/capsule; the owner's verdict on a
+// dense professional instrument was "a toy", and spec v1.1 then codified the
+// correction globally — "angular, never rounded", radii 3–6px, pills banned
+// (the hub itself ships 6/4/3/5 now). NxTakt sits at 6/3/2/3: same band,
+// tuned for an instrument surface with one shared control height.
 inline constexpr f32 radius   = 6.f;    // cards, sheets, panels
 inline constexpr f32 radiusSm = 3.f;    // rows, wells, inputs
 inline constexpr f32 radiusXs = 2.f;    // chips, code

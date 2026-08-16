@@ -1,10 +1,12 @@
-<!-- Vendored from nerdrx/nx-hub docs/DESIGN.md (v1.0). That file is canonical;
-     update this copy when it changes. NxTakt is the §10 'native desktop' case:
-     the tokens are the contract, the SDF renderer is the technology. -->
+<!-- Vendored from nerdrx/nx-hub docs/DESIGN.md (v1.1, 'angular, never rounded').
+     That file is canonical; update this copy when it changes. NxTakt is the
+     §10 native case: tokens are the contract, the SDF renderer the technology.
+     NxTakt's radii are 6/3/2/3 (gfx/theme.h) — inside v1.1's 3–6px band,
+     tuned one notch tighter for a dense instrument surface. -->
 
 # The NX Design Language
 
-**Version 1.0 · extracted from NX Hub v0.3.3 (the reference implementation)**
+**Version 1.1 · extracted from NX Hub v0.3.6 (the reference implementation)**
 
 This document is the canonical specification of the NX visual language —
 "liquid glass on deep space." It is written to be dropped into any project's
@@ -36,6 +38,10 @@ Rules that make it feel expensive:
   the room, halve it.
 - No solid gray lines anywhere. Dividers are gradient hairlines that fade at
   both ends.
+- **Angular, never rounded.** Radii stay in the 3–6px band; pill shapes are
+  banned. The mark is a faceted crystal and every container echoes its cut
+  edges — large radii read as a toy. Perfect circles are reserved for status
+  dots and spinners only.
 - One light source: **upper-left**, in every gradient, bevel, and edge. Light
   consistency is why surfaces read as one physical world.
 
@@ -60,11 +66,12 @@ Copy these verbatim into `:root` (CSS) or mirror them as resources (Android
   --line: #2a1f45;
   --danger: #ff5470;
 
-  /* geometry */
-  --radius: 18px;      /* cards, sheets */
-  --radius-sm: 12px;   /* rows, wells, inputs */
-  --radius-xs: 8px;    /* chips, code */
-  --pill: 999px;       /* buttons, tabs, badges */
+  /* geometry — ANGULAR. Corners are cut, not rounded; sharpness echoes the
+     faceted crystal mark. Pills are banned outright. */
+  --radius: 6px;       /* cards, sheets */
+  --radius-sm: 4px;    /* rows, wells, inputs */
+  --radius-xs: 3px;    /* chips, code */
+  --pill: 5px;         /* legacy token name — buttons/tabs/badges, cut sharp */
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Cantarell, sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "Fira Code", Consolas, monospace;
 
@@ -166,14 +173,14 @@ Implementation notes:
 
 ## 5. Components
 
-**Buttons** are glass pills (`--pill` radius). Primary: violet fill with an
+**Buttons** are sharp-cut glass blocks (`--pill` radius — a 5px chamfer, not a pill). Primary: violet fill with an
 inner top highlight and a soft violet glow; hover lifts 1–2px
 (`translateY(-1px)`) and blooms the glow; press scales to `0.96`. Secondary:
 `--glass-chip` fill with `--edge` border. Danger uses `--danger` only for
 genuinely destructive actions. Amber is reserved for "update available" class
 actions. Disabled: 40% opacity, no hover response.
 
-**The tab pill**: navigation tabs share one sliding indicator — a single
+**The tab indicator**: navigation tabs share one sliding indicator — a single
 element translated between equal-width tab slots with `--ease-spring`, never
 per-tab background toggles. (CSS-only via `:has()` on the active tab.)
 
@@ -184,7 +191,7 @@ as **masonry** (CSS `columns`, `break-inside: avoid`) so mixed heights pack
 tightly — top-aligned grid rows with ragged holes read as fragmentation.
 
 **Chips / badges**: uppercase micro-labels, 10–11px, `letter-spacing: 0.12em+`,
-`--glass-chip` fill, `--pill` radius. Status chips: cyan = live/connected,
+`--glass-chip` fill, sharp-cut corners. Status chips: cyan = live/connected,
 amber = pending attention, muted = inert.
 
 **Progress**: a recessed well trough with a luminous violet→cyan liquid fill
@@ -279,6 +286,29 @@ technology is negotiable.
 for warnings, muted lavender for secondary text; uppercase wide-tracked section
 labels echo the chip language.
 
+The concrete mapping, as implemented in NX Hub's `nx` command
+(`src/cli/ansi.js`), is 24-bit SGR — no 256-colour approximations, no
+dependencies:
+
+| Token | Escape | Used for |
+| --- | --- | --- |
+| Violet `#7700FF` | `ESC[38;2;119;0;255m` | section labels, command names, the filled part of a progress bar |
+| Cyan `#00e5ff` | `ESC[38;2;0;229;255m` | live values: versions, percentages, counts, the `✓` glyph |
+| Amber `#ffb300` | `ESC[38;2;255;179;0m` | update available (`↑`), throttling, anything asking for attention |
+| Muted `#9a8fc0` | `ESC[38;2;154;143;192m` | secondary text, table headers, key columns |
+| Text `#efeaff` | `ESC[38;2;239;234;255m` | body rows |
+| Red `#ff5470` | `ESC[38;2;255;84;112m` | failures only |
+| — | `ESC[2m` (dim) | the trough of a bar, hints, the bottom "other repos" block |
+
+Section labels are `track()`ed — `"Apps"` → `A P P S` — the terminal's version
+of the uppercase micro-label chip. Status is carried by three glyphs and never
+by emoji: `✓` up to date (cyan), `↑` update available (amber), `·` not
+installed (muted). Progress is one line rewritten with `\r`: violet `█` fill on
+a dim `░` trough, cyan percentage, muted phase. Everything degrades to plain
+ASCII when the stream is not a TTY, when `NO_COLOR` is set, or on `--plain` —
+the layout is identical, only the escapes disappear, and the bar becomes one
+line per phase so logs stay readable.
+
 ## 11. The review checklist
 
 Before shipping any NX-branded surface, verify:
@@ -292,6 +322,7 @@ Before shipping any NX-branded surface, verify:
 - [ ] `prefers-reduced-motion` fully honored.
 - [ ] Text contrast comfortable over every fill it sits on.
 - [ ] Mixed-height collections pack (masonry), never leave ragged holes.
+- [ ] No pill shapes; every radius is in the 3–6px band (circles = dots/spinners only).
 - [ ] The mark is pointy-top, correct variant for the size.
 - [ ] Copy is sentence-case, concrete, and tells the user what to do next.
 
