@@ -37,6 +37,10 @@
 #include "../audio/engine.h"
 #include "pool.h"
 #include "shm.h"
+// The take's file format and its directory rule (v9). Part of the protocol in
+// the same sense the pool is: EvTakeReady names a file, and both sides have to
+// agree what is in it. Header-only and libc-only, like the rest.
+#include "take.h"
 
 namespace lat::ipc {
 
@@ -92,7 +96,20 @@ namespace lat::ipc {
 //        this, daemon mode PLAYED EVERY SET IN 4/4 while the ruler drew 7/8 —
 //        refused-and-visible, which was the right way to be wrong, and is no
 //        longer necessary.
-inline constexpr u32 kProtocolVersion = 8;
+//   v9 — RECORDING (GUI-ON-DAEMON.md §7, option 2). Cmd::RecordSlot and
+//        Cmd::RecordMidiSlot stop carrying a pointer and start carrying a
+//        CAPACITY: the client's `p` never crosses and never needs to, because
+//        the buffer the audio thread appends into is the DAEMON's. A finished
+//        take is written to a file under ControlHeader::takeDir and announced by
+//        EvTakeReady; the client copies it out and answers CmdTakeRelease, which
+//        is free-after-confirm run in the other direction (src/ipc/take.h).
+//        ControlHeader grows `takeDir` — the first field in this region that is a
+//        *path* — so every section below kHeader moves and a v8 binary and a v9
+//        binary refuse each other at attach(), which is the mechanism working.
+//
+//        This is the last item on §7's list, and with it the daemon path carries
+//        everything the in-process one does.
+inline constexpr u32 kProtocolVersion = 9;
 
 // Daemon-generated wire events start here, well clear of lat::Ev. The event
 // ring carries a superset of Ev: the boundary itself has things to report
@@ -154,6 +171,45 @@ enum : u32 {
     // from the macro position — silently rounding a target the user parked off
     // its macro's curve. See Daemon::doSetRackState.
     CmdSetRackState = kDaemonCommandBase + 5,
+
+    // "I have copied that take out of its file; it is yours to drop."
+    // ref = the take uid EvTakeReady carried, flags = TakeReleaseKeepFile.
+    //
+    // FREE-AFTER-CONFIRM, RUN THE OTHER WAY. The pool's rule is that the client
+    // may not reuse a block until the daemon has said the engine cannot reach it
+    // (EvBlockRetired); this is the mirror image, and it exists for the mirror
+    // reason. The daemon holds the take's buffer AND its file until this
+    // arrives, so a client that dies between the announcement and the copy loses
+    // nothing that a restart cannot pick up off the disk, and a client that
+    // never answers costs a bounded amount (take.h, kMaxPendingTakes) rather
+    // than the session's memory.
+    //
+    // Unanswered is not a protocol error: the daemon reclaims on the client's
+    // death (a new attach epoch sweeps the directory) rather than on a timer,
+    // because a timer would be a deadline on a GUI thread that may legitimately
+    // be busy decoding the take it was just given.
+    CmdTakeRelease  = kDaemonCommandBase + 6,
+};
+
+// CmdTakeRelease::flags.
+enum : u32 {
+    // Drop the buffer but LEAVE THE FILE. The client says this when it could not
+    // read the take: the material is still on disk, the log line says where, and
+    // the next attach's sweep is what finally removes it. A take is never
+    // destroyed on the word of the process that failed to read it.
+    TakeReleaseKeepFile = 1u << 0,
+};
+
+// Cmd::RecordSlot / Cmd::RecordMidiSlot::flags on the wire.
+enum : u32 {
+    TakeCmdMidi = 1u << 0,   // the take is notes, and `x` counts notes
+};
+
+// EvTakeReady::flags.
+enum : u32 {
+    TakeIsMidi     = 1u << 0,   // read it with readMidiTake, not readAudioTake
+    TakeWasEmpty   = 1u << 1,   // nothing was captured; there is NO file
+    TakeHitCeiling = 1u << 2,   // capture stopped because the buffer filled
 };
 
 // What a chain belongs to. The engine has three chain commands with three
@@ -263,6 +319,34 @@ enum : u32 {
     // an ack whose `a` means nothing and a client that has to remember which
     // flag makes it meaningless.
     EvSignaturesAck   = kDaemonEventBase + 12,
+
+    // --- recording (v9) -----------------------------------------------------
+    //
+    // A take is finished and its file is complete. ref = the take uid, a =
+    // track, b = slot, x = frames (or NOTES, for a MIDI take), flags per
+    // TakeIs*/TakeWas* above. The path is `takePath(header.takeDir, ref, midi)`
+    // and the client composes it from the directory the DAEMON published — never
+    // from its own environment (take.h says why).
+    //
+    // Answered by exactly one CmdTakeRelease, and RETRIED until it goes out: the
+    // take sits in the daemon's table with its buffer and its file intact for as
+    // long as the client's event ring is full, which is the property the
+    // in-process path gets from engine.cpp's parking buffer and this path has to
+    // get from somewhere. A full ring must not be able to destroy the only copy
+    // of a performance.
+    //
+    // x == 0 with TakeWasEmpty is a legal, ordinary answer: it is the take that
+    // was stopped before its quantized start ever fired. There is no file, and
+    // the client turns it into the same zero-frame Ev::RecordFinished the engine
+    // would have sent in-process.
+    EvTakeReady       = kDaemonEventBase + 13,
+
+    // The take did not happen and will not: a = track, b = slot, x = a Reject*
+    // reason, ref = the uid if one was ever assigned. The client still owes its
+    // GUI a hand-back — App's capture buffer is freed on the finish event and on
+    // nothing else — so this becomes a zero-frame Ev::RecordFinished with a log
+    // line, exactly as a refused start does.
+    EvTakeFailed      = kDaemonEventBase + 14,
 };
 
 // EvSignaturesAck::flags.
@@ -295,13 +379,13 @@ enum : u32 {
 };
 
 // Why the daemon refused a command. The pointer-payload family is what remains
-// of phase 1's scalars-only rule: SetChain and the two Record commands still
-// carry GUI-heap addresses and still cannot cross (phase 3). The pool family
-// below it is new, and every one of those reasons is a bad offset caught before
-// it could become a pointer.
+// of phase 1's scalars-only rule, and as of v9 it is the chain family alone:
+// the two Record commands stopped carrying an address when the daemon started
+// supplying the buffer. The pool family below it is every reason that is a bad
+// offset caught before it could become a pointer.
 enum : u32 {
     RejectNone           = 0,
-    RejectPointerPayload = 1,  // SetChain / RecordSlot / RecordMidiSlot
+    RejectPointerPayload = 1,  // SetChain / SetReturnChain / SetMasterChain
     RejectUnknownCommand = 2,
     RejectBadIndex       = 3,  // track/slot out of range
     RejectNotFinite      = 4,  // NaN/inf in x
@@ -346,6 +430,29 @@ enum : u32 {
     // a distinction the validator does not make would be this header claiming
     // to know something it does not.
     RejectBadSignatures  = 19,
+
+    // --- recording (v9) -----------------------------------------------------
+    //
+    // A take is already in flight on that track, or the daemon is already
+    // holding kMaxPendingTakes finished takes nobody has claimed. Both are the
+    // same answer to the client — "not now, and here is why" — and both are
+    // states App cannot reach on its own (startRecording refuses a track whose
+    // recState is not idle), so either one arriving means the two sides'
+    // pictures of the track have diverged and the log line says so.
+    RejectTakeBusy       = 20,
+    // The capacity asked for is past take.h's kMaxTakeBytes, or is not positive.
+    // Refused rather than clamped: see kMaxTakeBytes.
+    RejectTakeTooLarge   = 21,
+    // The take's own buffer could not be allocated, or its file could not be
+    // written. The one reason for both because the client's recourse is the
+    // same and because the log line — which has the errno and the path — is
+    // where the difference actually lives.
+    RejectTakeIo         = 22,
+    // CmdTakeRelease named a take this daemon is not holding. Harmless (a
+    // duplicate release, or one that outlived an engine restart) and counted
+    // anyway, because the alternative is a client that thinks it has been
+    // freeing takes for an hour.
+    RejectNoTake         = 23,
 };
 
 inline const char* rejectReasonName(u32 r) {
@@ -369,6 +476,10 @@ inline const char* rejectReasonName(u32 r) {
         case RejectNotARack:        return "that device is not a rack";
         case RejectBadRackState:    return "the rack state would not parse or would not apply";
         case RejectBadSignatures:   return "the signature map is not walkable";
+        case RejectTakeBusy:        return "a take is already in flight, or too many are unclaimed";
+        case RejectTakeTooLarge:    return "the take capacity asked for is past the ceiling";
+        case RejectTakeIo:          return "the take's buffer or its file could not be written";
+        case RejectNoTake:          return "no take with that id is held";
         default:                    return "none";
     }
 }
@@ -868,17 +979,14 @@ inline constexpr u32 kMaxCatalog = 2048;
 //   device   The five CmdAddDevice-family codes above. They are not lat::Cmd
 //            at all: the daemon consumes them, loads or unloads a plugin, and
 //            *generates* the Cmd::SetChain the engine sees. Phase 3's delta.
-//   refused  The three chain commands and the two Record commands. Their
-//            `Command::p` is an address in whoever built them, and for the
-//            chain family that is now permanently the daemon: a client has no
-//            business naming an RtChain, because it has no RtChains. This is
-//            no longer "not yet" — it is the design.
-//
-//   SetChain/SetReturnChain/SetMasterChain
-//                   Command::p is an RtChain* full of PluginInstance*, built
-//                   by the daemon from its own device table. Use AddDevice.
-//   RecordSlot      Command::p is a GUI-owned capture buffer    -> phase 4
-//   RecordMidiSlot  Command::p is a GUI-owned RtNote buffer     -> phase 4
+//   take     RecordSlot and RecordMidiSlot. v9's delta, and the one class whose
+//            payload does not travel at all: the command carries a CAPACITY and
+//            the daemon supplies the buffer. What comes back is a file.
+//   refused  The three chain commands, and now only those. Their `Command::p` is
+//            an RtChain* full of PluginInstance* built by the daemon from its own
+//            device table: a client has no business naming one, because it has
+//            no RtChains. This is not "not yet" — it is the design. Use
+//            AddDevice.
 inline constexpr bool commandIsScalar(u32 type) {
     if (type >= kDaemonCommandBase) return false;
     switch ((Cmd)type) {
@@ -949,11 +1057,29 @@ inline constexpr bool commandIsDevice(u32 type) {
     return type >= kDaemonCommandBase && type <= CmdSetRackState;
 }
 
+// A take command: `a` = track, `b` = slot, `x` = capacity in FRAMES (or in
+// NOTES when flags & TakeCmdMidi), ref unused. A class of its own and not a
+// scalar, even though every field it uses is a number, because the daemon does
+// something no scalar does with it — it allocates, it holds a per-track state
+// machine, and it owes an EvTakeReady or an EvTakeFailed for every start it
+// accepted. Classifying it as a scalar would forward it straight to the engine
+// with `p` null, which is a Record command the engine takes and then writes
+// nothing into: a silent take.
+inline constexpr bool commandIsTake(u32 type) {
+    return type < kDaemonCommandBase &&
+           ((Cmd)type == Cmd::RecordSlot || (Cmd)type == Cmd::RecordMidiSlot);
+}
+
+// The client's half of the take's free-after-confirm. Consumed by the daemon,
+// never forwarded, answers nothing.
+inline constexpr bool commandIsTakeRelease(u32 type) { return type == CmdTakeRelease; }
+
 // Names memory the sender does not own on the receiving side. Permanently
 // refused, not deferred.
 inline constexpr bool commandCarriesPointer(u32 type) {
     return !commandIsScalar(type) && !commandIsPooled(type) && !commandIsDevice(type) &&
-           !commandIsArrangement(type) && !commandIsSignatures(type);
+           !commandIsArrangement(type) && !commandIsSignatures(type) &&
+           !commandIsTake(type) && !commandIsTakeRelease(type);
 }
 
 // True for a type this build knows at all. An unknown type is a peer from the
@@ -973,7 +1099,8 @@ inline constexpr bool commandCarriesPointer(u32 type) {
 // RejectUnknownCommand into a silently accepted no-op, which is the trade this
 // whole boundary refuses to make.
 inline constexpr bool commandIsKnown(u32 type) {
-    return type <= (u32)Cmd::SetSignatures || commandIsDevice(type);
+    return type <= (u32)Cmd::SetSignatures || commandIsDevice(type) ||
+           commandIsTakeRelease(type);
 }
 
 // Events that cannot cross as they stand: each hands a pointer back to whoever
@@ -989,9 +1116,20 @@ inline constexpr bool commandIsKnown(u32 type) {
 //                     still happens, it just happens between two threads of
 //                     one process now. §3.6 said this event would disappear
 //                     from the protocol; it disappeared from the wire.
+//   Ev::RecordFinished / Ev::MidiRecordFinished
+//                     (v9) their pointer is the take buffer the DAEMON handed
+//                     the engine, so the daemon keeps it: the take is written to
+//                     a file and re-announced as EvTakeReady. Same treatment as
+//                     Ev::ChainRetired, same reason. They stay false HERE
+//                     because "false" means "may not be forwarded verbatim",
+//                     which is exactly true of an event whose payload is an
+//                     address in this process — and because the moment one of
+//                     them is forwarded verbatim the client gets a pointer it
+//                     would happily pass to delete[].
 //
-// The other three remain unreachable, because the commands that would allocate
-// their payloads are still refused. If their counter ever moves, something
+// AutosRetired, WarpRetired and SigsRetired remain unreachable, because the
+// commands that would allocate their payloads are still refused or are
+// translated into something else. If their counter ever moves, something
 // reached the engine that should not have.
 inline constexpr bool eventIsScalar(u32 type) {
     switch ((Ev)type) {
@@ -1146,15 +1284,50 @@ struct ControlHeader {
     // Refusals are not counted separately — they are already devicesFailed, and
     // a second counter for the same event is a second thing to keep true.
     std::atomic<u32> rackStatesApplied;
+
     // Cmd::SetSignatures commands accepted and handed to the engine. It reads 0
     // on every build before v8 AND on a set that never publishes a map, which is
     // why nothing asserts it equals a number on its own: the discriminating
     // check is that it MOVED across a publication.
     std::atomic<u32> signaturesApplied;
+
+    // --- recording (v9) -----------------------------------------------------
+    //
+    // Out of the reserved words, so ControlHeader's size does not move for
+    // these — `takeDir` below is what moves it, once, and these ride along.
+    //
+    // Every one of the four is a state a UI has to be able to say out loud:
+    //   started    takes the daemon accepted and armed
+    //   committed  takes whose file was written and announced
+    //   failed     starts refused, buffers not allocated, files not written
+    //   reclaimed  takes dropped because the client that owned them went away.
+    //              This is the GUI-crash arm of the crash matrix, counted rather
+    //              than inferred: a daemon that leaked instead of reclaiming and
+    //              one that reclaimed are otherwise indistinguishable from
+    //              outside until /dev/shm or RAM runs out.
+    std::atomic<u32> takesStarted;
+    std::atomic<u32> takesCommitted;
+    std::atomic<u32> takesFailed;
+    std::atomic<u32> takesReclaimed;
+
+    // WHERE THE DAEMON WRITES TAKES, absolute, NUL-terminated, or empty when it
+    // could not make a directory at all (in which case every take start is
+    // refused with RejectTakeIo — fail closed, never "record into nowhere").
+    //
+    // Published by the daemon at init(), before publishReady(), and never
+    // rewritten: a client that has read it once may keep it. The client must
+    // compose take paths from THIS and not from its own $XDG_RUNTIME_DIR — see
+    // take.h. 160 bytes covers a runtime dir, "/nxtakt/takes/", and a session
+    // name; a longer one is truncated here and the daemon logs it, because a
+    // truncated path is a path that names the wrong directory rather than one
+    // that fails to open.
+    char takeDir[160];
     u32  reserved[4];
 
-    // Creator only, before publishReady().
-    void init(i32 pid, bool nullDriver, const char* driver) {
+    // Creator only, before publishReady(). `takes` is the directory the daemon
+    // will write takes into, or null/empty if it could not make one — which is a
+    // legal state and a fully refusing one, not a silent fallback.
+    void init(i32 pid, bool nullDriver, const char* driver, const char* takes = nullptr) {
         protocolVersion = kProtocolVersion;
         flags           = 0;
         daemonPid       = pid;
@@ -1184,6 +1357,12 @@ struct ControlHeader {
         catalogTruncated.store(0, std::memory_order_relaxed);
         rackStatesApplied.store(0, std::memory_order_relaxed);
         signaturesApplied.store(0, std::memory_order_relaxed);
+        takesStarted.store(0, std::memory_order_relaxed);
+        takesCommitted.store(0, std::memory_order_relaxed);
+        takesFailed.store(0, std::memory_order_relaxed);
+        takesReclaimed.store(0, std::memory_order_relaxed);
+        std::memset(takeDir, 0, sizeof takeDir);
+        if (takes && *takes) std::snprintf(takeDir, sizeof takeDir, "%s", takes);
         engineDrains.store(0, std::memory_order_relaxed);
         drainsExact.store(0, std::memory_order_relaxed);
         reserved1.store(0, std::memory_order_relaxed);

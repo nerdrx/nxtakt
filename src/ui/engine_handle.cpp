@@ -368,6 +368,42 @@ struct RemoteEngine {
     u64 sigsPublished = 0, sigsRefused = 0;
     bool loggedAsync = false;
 
+    // -- step 7: recording ---------------------------------------------------
+    //
+    // WHAT THE GUI STILL OWNS, AND WHY IT MATTERS THAT IT DOES.
+    //
+    // App::startRecording allocates a capture buffer, hands it to pushCommand,
+    // and frees it on exactly one event: Ev::RecordFinished for that pointer.
+    // That contract (engine.h, app.h) does not change here and could not — the
+    // whole point of the seam is that App's recording UI works unedited.
+    //
+    // So the buffer stays App's, and in daemon mode it is never lent to
+    // anybody: the audio thread that appends is the daemon's, into memory the
+    // daemon allocated. What this table holds is the borrow that ISN'T — the
+    // GUI's pointer, kept only so that the take coming home as a FILE can be
+    // copied into it and handed back as the event App is waiting for.
+    //
+    // A take is therefore returned by this handle, not by the engine, in the
+    // same sense the note-array retirements above are. Every path out of a take
+    // ends in exactly one Ev::RecordFinished for the pointer that went in:
+    // arrived, empty, refused, or lost with the engine.
+    struct PendingTake {
+        int   track = -1, slot = -1;
+        bool  midi  = false;
+        void* guiBuf = nullptr;      // App's, borrowed for a memcpy and nothing else
+        i64   cap    = 0;            // frames, or notes
+    };
+    std::vector<PendingTake> takes;
+    // Releases owed to the daemon. A take the daemon holds is a file on disk
+    // and a slot out of kMaxPendingTakes, so "the command ring was full when I
+    // finished reading it" may not be the end of the story — it is retried from
+    // poll() until it goes.
+    std::deque<std::pair<u64, bool>> takeReleases;   // {uid, keepFile}
+    u64 takesReturned = 0;    // takes that became an Ev::RecordFinished with frames
+    u64 takesEmpty    = 0;    // ...with none, which is an ordinary outcome
+    u64 takesFailed   = 0;    // EvTakeFailed, or a file that would not read
+    u64 takesLost     = 0;    // cancelled because the engine went away
+
     // -- step 5: the catalog -------------------------------------------------
     std::vector<PluginDesc> catalog;
     u32  catalogCut = 0;
@@ -450,9 +486,21 @@ struct RemoteEngine {
 
     void close() {
         if (refusals)
-            LOGW("daemon mode refused %llu command(s) it cannot carry yet "
-                 "(devices, recording, the arrangement, time signatures)",
+            LOGW("daemon mode refused %llu command(s) it could not carry",
                  (unsigned long long)refusals);
+        if (takesReturned || takesEmpty || takesFailed || takesLost)
+            LOGI("takes: %llu returned, %llu empty, %llu failed, %llu lost with "
+                 "the engine", (unsigned long long)takesReturned,
+                 (unsigned long long)takesEmpty, (unsigned long long)takesFailed,
+                 (unsigned long long)takesLost);
+        // Every release still owed, on the way out. The daemon we are about to
+        // stop does not need them, but a daemon we merely ATTACHED to outlives
+        // us and would hold those files for the rest of its life.
+        pumpTakeReleases();
+        // App frees its own capture buffers after close() returns (app.cpp's
+        // shutdown), so this drops the borrow rather than answering it: an event
+        // pushed here would go into a queue nobody will drain again.
+        takes.clear();
         if (tears)
             LOGW("%llu frame(s) drawn from a state snapshot that could not be "
                  "proved coherent — the engine was stopped mid-publish",
@@ -661,13 +709,11 @@ struct RemoteEngine {
                 setChain(c);
                 return true;
 
-            // Same: startRecording() handles a refusal by freeing the capture
-            // buffer and saying "Engine busy", which is the correct behaviour
-            // until §7's take protocol exists.
+            // §7, and the last item on its list. The GUI's `p` does not cross
+            // and does not need to; its capacity does.
             case Cmd::RecordSlot:
             case Cmd::RecordMidiSlot:
-                ++refusals;
-                return false;
+                return pushTake(c);
 
             // Both go through App's deferred FIFO, so `false` here means "try
             // again next frame" and nothing else — see §11.2.
@@ -1035,6 +1081,169 @@ struct RemoteEngine {
                 target = ipc::DevTargetMaster; idx = 0; return kMasterChain;
             default:
                 return -1;
+        }
+    }
+
+    // -- recording (§7) ------------------------------------------------------
+
+    PendingTake* takeOn(int track) {
+        for (PendingTake& p : takes) if (p.track == track) return &p;
+        return nullptr;
+    }
+
+    // Hands App back the buffer it lent, as the event it is waiting for. THE
+    // ONLY WAY a capture buffer is ever returned on this path, so every exit
+    // from a take goes through here — including the ones that are failures.
+    // `frames` <= 0 is App's own "Recording cancelled", verbatim.
+    void returnTake(const PendingTake& p, i64 frames) {
+        Event e;
+        e.type = p.midi ? Ev::MidiRecordFinished : Ev::RecordFinished;
+        e.a    = p.track;
+        e.b    = p.slot;
+        e.x    = (f64)frames;
+        e.p    = p.guiBuf;
+        synth.push_back(e);
+    }
+
+    void forgetTake(int track) {
+        for (size_t i = 0; i < takes.size(); ++i)
+            if (takes[i].track == track) { takes.erase(takes.begin() + (long)i); return; }
+    }
+
+    // Cmd::RecordSlot / Cmd::RecordMidiSlot from App. A toggle on this side too,
+    // and the mirror of the daemon's: the FIRST one for a track is a start, and
+    // the table entry is what makes the second a stop.
+    //
+    // `false` is legal here and means exactly what it means everywhere else:
+    // nothing was sent, so try again. App::startRecording answers it by freeing
+    // the buffer it just allocated and saying "engine busy", which is right
+    // because the daemon's state genuinely did not move.
+    bool pushTake(const Command& c) {
+        const bool midi = (c.type == Cmd::RecordMidiSlot);
+        const int  t = c.a, s = c.b;
+        if (t < 0 || t >= kMaxTracks || s < 0 || s >= kMaxScenes)
+            return refuse(c.type, "track or slot index out of range");
+
+        if (PendingTake* live = takeOn(t)) {
+            // A stop. App resends the same payload for the same slot.
+            if (live->slot == s && live->midi == midi)
+                return cli.recordSlot(t, s, live->cap, midi);
+
+            // Anything else is a second take on a track that already has one —
+            // the engine's hand-over path, which needs a second buffer on the
+            // far side that this side has no way to have ready.
+            //
+            // ANSWERED `false`, NOT CONSUMED, and the distinction matters:
+            // consuming it would leave App holding a capture buffer that only a
+            // finish event frees, and no finish event is coming for a take that
+            // was never started. `false` is also honest rather than a
+            // convenience — this is not a permanent refusal, it is "not while
+            // that take is running", and it clears when the take ends.
+            // App::startRecording answers it by freeing the buffer and saying
+            // the engine is busy, which is the true sentence.
+            ++refusals;
+            if (!loggedCmd[(u32)c.type & 63u]) {
+                loggedCmd[(u32)c.type & 63u] = true;
+                LOGW("a take is already running on track %d slot %d; the take asked "
+                     "for on slot %d is refused until it ends", t, live->slot, s);
+            }
+            return false;
+        }
+
+        // A start. The buffer is App's and stays App's; what crosses is how big
+        // it is, because that is what the daemon has to allocate.
+        if (!c.p || !(c.x >= 1.0))
+            return refuse(c.type, "a take needs a buffer and a positive capacity");
+        const i64 cap = (i64)c.x;
+        if (!cli.recordSlot(t, s, cap, midi)) return false;
+        PendingTake p;
+        p.track = t; p.slot = s; p.midi = midi;
+        p.guiBuf = c.p; p.cap = cap;
+        takes.push_back(p);
+        return true;
+    }
+
+    // EvTakeReady: the daemon has written the take and told us where. Read it
+    // into the buffer App has been holding all along and hand it back as the
+    // event App has been waiting for.
+    //
+    // THE COPY IS ON THE GUI THREAD, deliberately and once per take. It is the
+    // one cost this design has that the in-process path does not, and it lands
+    // beside a cost App already pays in the same breath — sampleFromRecording()
+    // copies the buffer again and builds a peak envelope over it. A take is a
+    // gesture that has just ended; a frame spent finishing it is a frame nobody
+    // is playing through.
+    void takeReady(const ipc::WireEvent& w) {
+        PendingTake* pp = takeOn(w.a);
+        if (!pp) {
+            // Nothing is holding a buffer for this. Still release it: the file
+            // is the daemon's to drop, and a take nobody claims is a slot out of
+            // kMaxPendingTakes for the rest of the session.
+            LOGW("a take arrived for track %d, which is not recording here; "
+                 "releasing it", (int)w.a);
+            if (w.ref) takeReleases.emplace_back(w.ref, false);
+            return;
+        }
+        const PendingTake p = *pp;
+        forgetTake(w.a);
+
+        const i64 announced = (i64)w.x;
+        if ((w.flags & ipc::TakeWasEmpty) || announced <= 0) {
+            ++takesEmpty;
+            returnTake(p, 0);
+            if (w.ref) takeReleases.emplace_back(w.ref, false);
+            return;
+        }
+
+        char path[768];
+        cli.takePathFor(w, path, sizeof path);
+        i64 got = -1;
+        if (path[0]) {
+            got = p.midi ? ipc::readMidiTake(path, (ipc::WireNote*)p.guiBuf, p.cap)
+                         : ipc::readAudioTake(path, (f32*)p.guiBuf, p.cap, nullptr, nullptr);
+        }
+        if (got < 0) {
+            // The material is on disk and this process could not read it. Say
+            // so, name the file, and tell the daemon to KEEP it: a take is never
+            // destroyed on the word of the process that failed to pick it up.
+            ++takesFailed;
+            LOGE("take %llu was written to '%s' and could not be read back: %s. "
+                 "The file is being kept.",
+                 (unsigned long long)w.ref, path[0] ? path : "(no take directory)",
+                 std::strerror(errno));
+            returnTake(p, 0);
+            if (w.ref) takeReleases.emplace_back(w.ref, true);
+            return;
+        }
+        if (got < announced)
+            LOGW("take %llu announced %lld %s and %lld fitted the buffer",
+                 (unsigned long long)w.ref, (long long)announced,
+                 p.midi ? "notes" : "frames", (long long)got);
+        ++takesReturned;
+        returnTake(p, got);
+        if (w.ref) takeReleases.emplace_back(w.ref, false);
+    }
+
+    // Every take this handle is still holding a buffer for, handed back empty.
+    // A take in flight when the engine dies is GONE — there is no half a
+    // recording — and the one thing that must not happen is App waiting forever
+    // for an event that has no sender left, with its capture buffer pinned.
+    void cancelTakes(const char* why) {
+        if (takes.empty()) return;
+        LOGW("%zu take(s) in flight when %s; each is handed back empty",
+             takes.size(), why);
+        for (const PendingTake& p : takes) { ++takesLost; returnTake(p, 0); }
+        takes.clear();
+        takeReleases.clear();
+    }
+
+    // Retried from poll(), because a release that never lands leaves the daemon
+    // holding a file for the rest of its life.
+    void pumpTakeReleases() {
+        while (!takeReleases.empty()) {
+            const auto& r = takeReleases.front();
+            if (!cli.releaseTake(r.first, r.second)) return;
+            takeReleases.pop_front();
         }
     }
 
@@ -1588,6 +1797,23 @@ struct RemoteEngine {
                 break;
             case ipc::EvDeviceRemoved:
                 break;
+
+            // §7. The take came back as a filename; App gets it as the event it
+            // has been waiting for since it pushed the command.
+            case ipc::EvTakeReady:
+                takeReady(w);
+                break;
+            case ipc::EvTakeFailed: {
+                PendingTake* pp = takeOn(w.a);
+                LOGE("the engine refused a take on track %d slot %d: %s",
+                     (int)w.a, (int)w.b, ipc::rejectReasonName((u32)w.x));
+                if (!pp) break;
+                const PendingTake p = *pp;
+                forgetTake(w.a);
+                ++takesFailed;
+                returnTake(p, 0);
+                break;
+            }
             default:
                 // EvClipAck and EvBlockRetired are already applied by
                 // EngineClient::popEvent()'s observe().
@@ -1713,6 +1939,10 @@ struct RemoteEngine {
         ipc::EngineClient::reapStale(session.c_str());
         forgetDevices();
         synth.clear();
+        // AFTER the clear, not before: cancelTakes() answers each outstanding
+        // take through `synth`, and an answer wiped by the line above is a
+        // capture buffer App pins for the rest of the session.
+        cancelTakes("the engine was restarted");
         stopping    = false;
         spawnedDied = false;
         loggedLost  = false;
@@ -1940,11 +2170,22 @@ void EngineHandle::poll(EngineState& out) {
                  "use Restart engine to reconnect.");
         }
 
+        // THE DAEMON-CRASH ARM OF THE CRASH MATRIX. A take whose engine is
+        // provably gone will never be answered, and App frees its capture buffer
+        // on the answer and on nothing else — so a GUI that merely reported the
+        // lost engine and waited would sit there with the buffer pinned and the
+        // slot stuck in "recording" for the rest of the session. Keyed on Lost
+        // and not on Stale, for §4.4's reason: a laptop coming out of suspend is
+        // not a dead engine, and cancelling a take for it would throw away a
+        // performance that is still being made.
+        if (out.link == EngineLink::Lost) remote_->cancelTakes("the engine was lost");
+
         // The frame's housekeeping, in the one order that converges: take the
         // wire's answers first (an EvDeviceAdded arriving now binds an id this
         // pass can already use), then make the daemon's chains match the ones
         // the GUI declared, then mirror the knobs.
         remote_->pumpWire();
+        remote_->pumpTakeReleases();
         remote_->reconcile();
         remote_->syncParams();
         remote_->syncRacks();
@@ -2127,6 +2368,13 @@ u64 EngineHandle::poolBlocksLive() const {
 }
 u64 EngineHandle::signaturesPublished() const { return remote_ ? remote_->sigsPublished : 0u; }
 u64 EngineHandle::signaturesRefused() const   { return remote_ ? remote_->sigsRefused : 0u; }
+// All four are 0 in local mode, and that is the honest answer rather than a
+// missing one: a local take is handed straight back by the engine and none of
+// these four states can arise.
+u64 EngineHandle::takesReturned() const { return remote_ ? remote_->takesReturned : 0u; }
+u64 EngineHandle::takesEmpty() const    { return remote_ ? remote_->takesEmpty : 0u; }
+u64 EngineHandle::takesFailed() const   { return remote_ ? remote_->takesFailed : 0u; }
+u64 EngineHandle::takesLost() const     { return remote_ ? remote_->takesLost : 0u; }
 
 const std::vector<PluginDesc>& EngineHandle::catalog() const {
     // Empty in local mode ON PURPOSE, and callers must read it that way: there

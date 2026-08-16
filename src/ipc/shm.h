@@ -479,6 +479,22 @@ public:
 
     ShmHeader*       header()       { return (ShmHeader*)base_; }
     const ShmHeader* header() const { return (const ShmHeader*)base_; }
+
+    // Is the process that CREATED this region still running? Guarded against pid
+    // reuse by creatorStartTicks, exactly as reapIfStale() is.
+    //
+    // The point of it is asymmetry: an attacher can ask this about its peer
+    // without either side needing a heartbeat in the protocol. The daemon uses
+    // it on the *pool*, whose creator is the GUI, which is how a daemon holding
+    // takes for a client that has been SIGKILLed finds out — a mapping outlives
+    // its creator, so "I can still read it" proves nothing on its own.
+    //
+    // False for a region with no mapping at all, which is the honest answer:
+    // nothing is alive on the other end of nothing.
+    bool creatorAlive() const {
+        const ShmHeader* h = header();
+        return h && processAlive(h->creatorPid, h->creatorStartTicks);
+    }
     u8*              payload()      { return (u8*)base_ + kPayloadOffset; }
 
     // Bounds- and alignment-checked view of an object placed at `off` in the

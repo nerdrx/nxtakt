@@ -42,8 +42,16 @@
 // ALSA reader thread's messages go over the wire in daemon mode (§1.3 option 3,
 // with the lock the second producer needs).
 //
-// Not carried yet, and refused *with a reason* rather than dropped (see
-// remoteRefusals()): recording (§7). That is the whole of the remaining list.
+// And recording (§7, protocol v9), which was the whole of the remaining list.
+// The GUI's capture buffer never crosses: the command carries its CAPACITY, the
+// daemon allocates the buffer its own audio thread appends into, and the
+// finished take comes back as a FILE that this handle copies into the buffer App
+// has been holding all along. App's recording code is unchanged and unaware —
+// it pushes Cmd::RecordSlot and it gets Ev::RecordFinished for its own pointer.
+//
+// Nothing is left on the "refused with a reason" list except the three chain
+// commands, which are refused permanently and by design (a client has no
+// RtChains to name).
 //
 // Threading: GUI thread only, like everything in src/ui. The Engine it owns in
 // local mode is the one the audio thread runs; the ring pushes here are the
@@ -306,6 +314,29 @@ public:
     // will show 4/4 without explaining why.
     u64 signaturesPublished() const;
     u64 signaturesRefused() const;
+
+    // --- recording (§7, protocol v9) ----------------------------------------
+    //
+    // Four numbers, and between them they say everything a status line needs to
+    // about a take that did not become a clip. All 0 in local mode, where a take
+    // never leaves the process and none of these states exists.
+    //
+    //   returned  takes that came home with frames in them
+    //   empty     takes stopped before their quantized start fired. An ORDINARY
+    //             outcome, counted separately precisely so it is not mistaken
+    //             for one of the two below.
+    //   failed    the daemon refused the take, or wrote a file this process
+    //             could not read. Non-zero means a performance that happened and
+    //             was not kept, and the log line names the file — which still
+    //             exists, because a take is never destroyed on the word of the
+    //             process that failed to read it.
+    //   lost      takes in flight when the engine died or was restarted. Also a
+    //             performance that is gone, and the one number that distinguishes
+    //             "your engine crashed" from "your take was empty".
+    u64 takesReturned() const;
+    u64 takesEmpty() const;
+    u64 takesFailed() const;
+    u64 takesLost() const;
 
     // Pool blocks currently allocated. A diagnostic with one specific job: a
     // publication path that writes a fresh block every frame instead of reusing

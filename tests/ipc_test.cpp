@@ -18,6 +18,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include <dirent.h>
@@ -945,7 +946,13 @@ static void testArrangementClassifiers() {
         // Unchanged neighbours, so a reclassification cannot slip in unnoticed.
         {"SetClip",           Cmd::SetClip,           true,  false, true,  false, false},
         {"SetChain",          Cmd::SetChain,          true,  false, false, false, true},
-        {"RecordMidiSlot",    Cmd::RecordMidiSlot,    true,  false, false, false, true},
+        // v9: the two Record commands stopped carrying a pointer. What crosses
+        // is a capacity, and the buffer the audio thread appends into is the
+        // daemon's own -- so `pointer` here reading true again would be the
+        // daemon refusing recording outright, permanently, with no client-side
+        // workaround. It is exactly the assertion that was wrong for a wave.
+        {"RecordSlot",        Cmd::RecordSlot,        true,  false, false, false, false},
+        {"RecordMidiSlot",    Cmd::RecordMidiSlot,    true,  false, false, false, false},
         {"SetTempo",          Cmd::SetTempo,          true,  true,  false, false, false},
     };
     for (const Row& r : rows) {
@@ -987,7 +994,7 @@ static void testArrangementClassifiers() {
           (unsigned long long)ipc::arrangementBytes(2, 1));
     CHECK(ipc::kMaxArrLanes == kMaxRtArrLanes,
           "the wire lane bound and the engine's agree (%d)", (int)ipc::kMaxArrLanes);
-    CHECK(ipc::kProtocolVersion == 8 && ipc::kPoolVersion == 6 && ipc::kShmVersion == 6,
+    CHECK(ipc::kProtocolVersion == 9 && ipc::kPoolVersion == 6 && ipc::kShmVersion == 6,
           "protocol v%u, pool v%u, shm v%u", ipc::kProtocolVersion, ipc::kPoolVersion,
           ipc::kShmVersion);
     CHECK(ipc::control::kJournal > ipc::control::kParams &&
@@ -1183,6 +1190,155 @@ static void testJournalRingCrossProcess() {
 }
 
 // ---------------------------------------------------------------------------
+// 10. the take file  (docs/GUI-ON-DAEMON.md §7, src/ipc/take.h)
+// ---------------------------------------------------------------------------
+//
+// §7's choice was between a second shared region written by the daemon and a
+// FILE. This is the file half tested where it can be tested exhaustively: in
+// one process, with no daemon, no timing and no audio device. What daemon_test
+// and handle_test then have to prove is only that the two ends use it, not that
+// it works.
+//
+// The properties that matter are the ones a wrong answer would make silent:
+//   * what was written is what is read back, to the bit — a take is the
+//     performance and a resampled or rounded one is a different performance;
+//   * a short read is a FAILURE and not a short success (§5.4's rule, applied
+//     to the transport rather than to the journal);
+//   * a file that is not one of ours is refused rather than reinterpreted;
+//   * the client composes paths from a directory it was GIVEN.
+
+static void testTakeFiles() {
+    banner("10. the take file: written, read back, and refused when it is not one");
+
+    char dir[256];
+    std::snprintf(dir, sizeof dir, "/tmp/nxtakt-taketest-%d/takes/s", (int)::getpid());
+    CHECK(ipc::takeMkdirP(dir), "mkdir -p makes the whole take path ('%s')", dir);
+    CHECK(ipc::takeMkdirP(dir), "and is idempotent, because two daemons may race it");
+
+    char pw[512], pm[512];
+    ipc::takePath(dir, 7, /*midi*/false, pw, sizeof pw);
+    ipc::takePath(dir, 7, /*midi*/true,  pm, sizeof pm);
+    CHECK(std::strstr(pw, "/7.wav") && std::strstr(pm, "/7.ntk"),
+          "an audio take is <uid>.wav and a MIDI take is <uid>.ntk ('%s', '%s')",
+          std::strrchr(pw, '/'), std::strrchr(pm, '/'));
+
+    // -- audio, bit for bit -------------------------------------------------
+    //
+    // A ramp with the SIGN of the channel in it, so a reader that swapped or
+    // dropped a channel cannot pass: every odd sample is the negation of the
+    // even one before it.
+    const i64 frames = 5000;
+    std::vector<f32> src((size_t)frames * 2);
+    for (i64 i = 0; i < frames; ++i) {
+        const f32 v = (f32)(i % 65536) / 65536.f;
+        src[(size_t)i * 2]     =  v;
+        src[(size_t)i * 2 + 1] = -v;
+    }
+    CHECK(ipc::writeAudioTake(pw, src.data(), frames, 2, 48000.0), "an audio take writes");
+
+    std::vector<f32> back((size_t)frames * 2, 12345.f);
+    int ch = 0; f64 rate = 0.0;
+    const i64 got = ipc::readAudioTake(pw, back.data(), frames, &ch, &rate);
+    CHECK(got == frames, "and reads back its whole length (%lld of %lld)",
+          (long long)got, (long long)frames);
+    CHECK(ch == 2 && rate == 48000.0, "with its channel count and rate (%d ch, %.0f Hz)",
+          ch, rate);
+    CHECK(std::memcmp(src.data(), back.data(), src.size() * sizeof(f32)) == 0,
+          "and every sample is IDENTICAL — float32 in, float32 out, no conversion "
+          "anywhere on the path");
+
+    // -- a buffer smaller than the take -------------------------------------
+    //
+    // The client's buffer is App's and is exactly the capacity it asked for, so
+    // this cannot happen in the ordinary path. It can happen after an engine
+    // restart with a different sample rate, and the honest answer is "as much as
+    // fits, and say so" rather than a write past the end.
+    std::vector<f32> small(200 * 2, 0.f);
+    const i64 clipped = ipc::readAudioTake(pw, small.data(), 200, nullptr, nullptr);
+    CHECK(clipped == 200, "a buffer shorter than the take gets exactly what fits (%lld)",
+          (long long)clipped);
+    CHECK(std::memcmp(src.data(), small.data(), small.size() * sizeof(f32)) == 0,
+          "and it is the take's FIRST frames, in order");
+
+    // -- MIDI ---------------------------------------------------------------
+    std::vector<ipc::WireNote> notes(64);
+    for (size_t i = 0; i < notes.size(); ++i) {
+        notes[i] = ipc::WireNote{};
+        notes[i].beat  = (f64)i * 0.25;
+        notes[i].len   = 0.5;
+        notes[i].pitch = (u8)(36 + i % 60);
+        notes[i].vel   = (u8)(1 + i % 126);
+    }
+    CHECK(ipc::writeMidiTake(pm, notes.data(), (i64)notes.size(), 12.5), "a MIDI take writes");
+    std::vector<ipc::WireNote> nback(notes.size());
+    f64 startBeat = 0.0;
+    const i64 ngot = ipc::readMidiTake(pm, nback.data(), (i64)nback.size(), &startBeat);
+    CHECK(ngot == (i64)notes.size(), "and reads back every note (%lld)", (long long)ngot);
+    CHECK(std::memcmp(notes.data(), nback.data(), notes.size() * sizeof(ipc::WireNote)) == 0,
+          "field for field — beat, length, pitch and velocity");
+    CHECK(startBeat == 12.5, "carrying the beat the take began on (%.2f)", startBeat);
+
+    // -- what is refused ----------------------------------------------------
+    char bogus[512];
+    std::snprintf(bogus, sizeof bogus, "%s/notatake.wav", dir);
+    { FILE* f = std::fopen(bogus, "wb"); std::fwrite("not a wav at all", 1, 16, f); std::fclose(f); }
+    CHECK(ipc::readAudioTake(bogus, back.data(), frames, nullptr, nullptr) < 0,
+          "a file that is not a RIFF/WAVE is REFUSED, not reinterpreted");
+    CHECK(ipc::readMidiTake(pw, nback.data(), (i64)nback.size()) < 0,
+          "and a WAV read as a MIDI take is refused on its magic");
+    CHECK(ipc::readAudioTake("/tmp/nxtakt-there-is-no-such-take.wav", back.data(), frames,
+                             nullptr, nullptr) < 0,
+          "a take that is not there answers -1 rather than 0 frames of silence — the "
+          "difference between 'lost' and 'empty' is the whole of what a user needs");
+
+    // A take past the ceiling is refused by the WRITER, so a capacity the daemon
+    // should never have accepted cannot become a file it cannot finish.
+    CHECK(!ipc::writeAudioTake(pw, src.data(),
+                               (i64)(ipc::kMaxTakeBytes / 8ull) + 1, 2, 48000.0),
+          "a take past kMaxTakeBytes is refused at the write, not truncated");
+
+    // -- the sweep ----------------------------------------------------------
+    //
+    // The daemon's reclaim for a client that died: take files nobody will ever
+    // claim, removed by the next session that owns the directory.
+    { FILE* f = std::fopen((std::string(dir) + "/9.wav.part").c_str(), "wb"); std::fclose(f); }
+    { FILE* f = std::fopen((std::string(dir) + "/keepme.txt").c_str(), "wb"); std::fclose(f); }
+    const u32 swept = ipc::sweepTakes(dir);
+    CHECK(swept == 4, "the sweep takes the wav, the ntk, the bogus wav and the half-written "
+                      ".part (%u)", swept);
+    CHECK(::access((std::string(dir) + "/keepme.txt").c_str(), F_OK) == 0,
+          "and NOTHING else: it unlinks files, so it only ever names its own");
+    CHECK(ipc::sweepTakes("/tmp/nxtakt-there-is-no-such-directory") == 0,
+          "sweeping a directory that is not there is 0 and not an error");
+
+    ::unlink((std::string(dir) + "/keepme.txt").c_str());
+    ::rmdir(dir);
+    char up[256];
+    std::snprintf(up, sizeof up, "/tmp/nxtakt-taketest-%d/takes", (int)::getpid());
+    ::rmdir(up);
+    std::snprintf(up, sizeof up, "/tmp/nxtakt-taketest-%d", (int)::getpid());
+    ::rmdir(up);
+
+    // -- the directory rule --------------------------------------------------
+    //
+    // The formula exists in exactly one place and the client never evaluates it
+    // — the DAEMON does, and publishes the answer. This asserts the formula's
+    // own shape; testTakeDirIsTheDaemonsWord (daemon_test §17) asserts the half
+    // that matters, which is that the client uses the published value.
+    char d1[256], d2[256];
+    ::setenv("XDG_RUNTIME_DIR", "/run/user/9999", 1);
+    ipc::takeDirFor("sess", d1, sizeof d1);
+    ::unsetenv("XDG_RUNTIME_DIR");
+    ipc::takeDirFor("sess", d2, sizeof d2);
+    CHECK(!std::strcmp(d1, "/run/user/9999/nxtakt/takes/sess"),
+          "the runtime dir is where takes live ('%s')", d1);
+    CHECK(std::strstr(d2, "/tmp/nxtakt-") && std::strstr(d2, "/takes/sess"),
+          "and a daemon with no runtime dir still has somewhere to write ('%s')", d2);
+    ipc::takeDirFor(nullptr, d2, sizeof d2);
+    CHECK(std::strstr(d2, "/takes/default"), "an unnamed session is 'default' ('%s')", d2);
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);   // survives fork() without duplicating output
@@ -1202,8 +1358,9 @@ int main() {
     testAdoptedPoolLiveness();
     testArrangementClassifiers();
     testJournalRingCrossProcess();
+    testTakeFiles();
 
-    banner("10. /dev/shm is clean");
+    banner("11. /dev/shm is clean");
     cleanupShm();
     const int leftover = countNxTaktShm();
     CHECK(leftover == 0, "no nxtakt region left in /dev/shm (found %d)", leftover);

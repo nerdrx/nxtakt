@@ -70,10 +70,12 @@
 
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -146,6 +148,25 @@ public:
         block_  = block;
         l_.assign((size_t)block_, 0.f);
         r_.assign((size_t)block_, 0.f);
+        // NXTAKT_DEBUG_INPUT=ramp: a synthetic capture signal, so a headless
+        // daemon has something to record. A ramp and not a sine, because what a
+        // take has to be checked for is CONTIGUITY — every frame the engine
+        // claimed to capture, in order, none missing — and consecutive values of
+        // a ramp say that in one comparison, where a sine says only "it is
+        // loud". inR is the negation of inL, which is the same statement about
+        // interleaving. Debug hook, like NXTAKT_DEBUG_MIRRORSTALL; unset it and
+        // the driver passes null input exactly as before.
+        if (const char* s = env("DEBUG_INPUT")) {
+            if (!std::strcmp(s, "ramp")) {
+                inL_.assign((size_t)block_, 0.f);
+                inR_.assign((size_t)block_, 0.f);
+                LOGW("NXTAKT_DEBUG_INPUT=ramp: the null driver is feeding a "
+                     "synthetic capture ramp. Debug hook; it is not audio.");
+            } else {
+                LOGW("NXTAKT_DEBUG_INPUT='%s' is not a signal this build knows "
+                     "(try 'ramp'); the input stays silent", s);
+            }
+        }
         engine_->prepare(sr_, block_);
         run_.store(true, std::memory_order_release);
         thread_ = std::thread(&NullDriver::loop, this);
@@ -180,7 +201,19 @@ private:
                     want     = 1;
                 }
                 for (u64 i = 0; i < want; ++i) {
-                    engine_->process(nullptr, nullptr, l_.data(), r_.data(), block_);
+                    const f32* inL = nullptr;
+                    const f32* inR = nullptr;
+                    if (!inL_.empty()) {
+                        for (int k = 0; k < block_; ++k) {
+                            const f32 v = (f32)(rampPos_ % kRampPeriod) / (f32)kRampPeriod;
+                            inL_[(size_t)k] =  v;
+                            inR_[(size_t)k] = -v;
+                            ++rampPos_;
+                        }
+                        inL = inL_.data();
+                        inR = inR_.data();
+                    }
+                    engine_->process(inL, inR, l_.data(), r_.data(), block_);
                     ++rendered;
                     blocks_.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -194,10 +227,18 @@ private:
         }
     }
 
+    // The ramp's period, in frames. 65536 keeps every value exactly
+    // representable in a float (k/65536 is a binary fraction), so a captured
+    // frame compares EQUAL to the value the driver produced — no epsilon, no
+    // "close enough", and a contiguity check that cannot pass by rounding.
+    static constexpr u64 kRampPeriod = 65536;
+
     Engine*          engine_ = nullptr;
     f64              sr_     = 48000.0;
     int              block_  = 256;
     std::vector<f32> l_, r_;
+    std::vector<f32> inL_, inR_;      // empty unless NXTAKT_DEBUG_INPUT=ramp
+    u64              rampPos_ = 0;
     std::thread      thread_;
     std::atomic<bool> run_{false};
     std::atomic<u64>  blocks_{0};
@@ -299,9 +340,31 @@ public:
         if (!startDriver()) return 1;
 
         // 3. Initialise the payload and open for business.
+        // Takes, before the header is published: the directory the client will
+        // compose paths from has to be true the instant anything can read it.
+        // A daemon that cannot make one publishes an EMPTY takeDir and refuses
+        // every take start with RejectTakeIo — fail closed, never "record into
+        // nowhere and find out at the end".
+        //
+        // The sweep is the other half of the crash matrix: take files whose
+        // client died are unclaimed forever, and the session that starts here is
+        // the one place that can know they are stale, because a take file is
+        // only ever claimed by the client that was running when it was written.
+        ipc::takeDirFor(opt_.session, takeDir_, sizeof takeDir_);
+        if (!ipc::takeMkdirP(takeDir_)) {
+            LOGE("cannot create the take directory '%s': %s — recording will be "
+                 "refused with a reason rather than silently lost",
+                 takeDir_, std::strerror(errno));
+            takeDir_[0] = '\0';
+        } else if (const u32 swept = ipc::sweepTakes(takeDir_)) {
+            LOGW("swept %u stale take file(s) out of '%s' (a previous session left "
+                 "them unclaimed)", swept, takeDir_);
+        }
+        startTakeThread();
+
         map_.state->init(sr_, (u32)block_);
         map_.state->engineState.store(ipc::SharedState::StateRunning, std::memory_order_relaxed);
-        map_.hdr->init((i32)::getpid(), nullDriver_ != nullptr, driverName_);
+        map_.hdr->init((i32)::getpid(), nullDriver_ != nullptr, driverName_, takeDir_);
         region_.publishReady();
         LOGI("nxtaktd ready: session '%s', region %s, %.0f Hz / %d frames, driver %s",
              opt_.session, gRegionName, sr_, block_, driverName_);
@@ -538,7 +601,17 @@ private:
             pumpChainPushes();
             pumpParams();
             pumpMidi();
+            // BEFORE pumpEvents(), so a take whose buffer landed this tick is
+            // armed before the engine's events for this tick are drained, and
+            // AFTER pumpCommands(), so a start and the stop that follows it
+            // cannot be separated by a whole tick for no reason.
+            pumpTakes();
             pumpEvents();
+            // AFTER pumpEvents(), and the ordering is load-bearing: a take that
+            // really did finish has been taken off the table by finishTake()
+            // above, so what is left here can only be one the engine cancelled
+            // in silence.
+            pumpTakeCancels();
             pumpJournal();
             // Before pumpRetirements(), so a layer-2 echo that becomes legal on
             // this tick goes out on this tick. The ORDER BETWEEN THE LAYERS does
@@ -688,6 +761,14 @@ private:
             // scan that takes about a second, and the pump must keep beating
             // through it (§11.6).
             if (ipc::commandIsDevice(w.type)) { enqueueDevice(w); continue; }
+
+            // Take commands are not translated and do not reach the engine from
+            // here: a start has to wait for its buffer, and the engine command
+            // that eventually carries it is built by the take machine. Handled
+            // in this loop rather than in pumpTakes() so a start and the stop
+            // behind it keep the order the client sent them in.
+            if (ipc::commandIsTake(w.type))        { doTakeCommand(w); continue; }
+            if (ipc::commandIsTakeRelease(w.type)) { doTakeRelease(w); continue; }
 
             Staged st{};
             u32 reason = ipc::RejectNone;
@@ -1678,6 +1759,608 @@ private:
             }
             map_.hdr->journalForwarded.fetch_add(1, std::memory_order_relaxed);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Recording  (docs/GUI-ON-DAEMON.md §7, option 2)
+    // -----------------------------------------------------------------------
+    //
+    // THE ONE IDEA: the daemon becomes the GUI, for the purposes of the
+    // Cmd::RecordSlot contract in engine.h. That contract says the *caller*
+    // supplies a buffer, the engine appends into it and never frees it, and it
+    // comes back through Ev::RecordFinished. Every word of that is still true
+    // here — the caller is just a different process now. src/audio is frozen and
+    // did not need a line.
+    //
+    // So the client's `p` never crosses; its CAPACITY does. What comes back is
+    // not a buffer either: it is a file (src/ipc/take.h), announced by
+    // EvTakeReady and freed by the client's CmdTakeRelease.
+    //
+    // FOUR THREADS AND WHAT EACH MAY DO
+    // ---------------------------------
+    //   audio    appends into Take::buf. Nothing else. No allocation, no lock,
+    //            no syscall — the same discipline the in-process path has,
+    //            because it is literally the same code appending into a buffer
+    //            somebody else allocated.
+    //   pump     the state machine: it decides a take exists, hands the engine
+    //            the buffer, notices the finish event, announces the file,
+    //            frees on release. It never allocates a take buffer and never
+    //            writes a take file, because a 46 MB memset or fwrite on this
+    //            thread is a 10 ms hole in command delivery.
+    //   worker   allocates (and pre-faults) buffers; writes files. Both of the
+    //            slow, blocking things, on the one thread nothing waits for.
+    //   mirror   untouched.
+    //
+    // WHY THE START IS ASYNCHRONOUS, AND WHY THAT IS FREE
+    // --------------------------------------------------
+    // A take start cannot reach the engine until its buffer exists, and the
+    // buffer is allocated on the worker. So a start waits a tick or two. It
+    // costs nothing audible because the start is QUANTIZED — the engine fires it
+    // on the next grid line, which at any tempo anyone plays is two orders of
+    // magnitude further away than the wait. A stop that arrives while the buffer
+    // is still being made cancels the take outright: nothing was ever armed, so
+    // there is nothing to stop and nothing to commit, which is the same answer
+    // the engine gives for a stop before the quantized start (cancelRec).
+    //
+    // WHAT A FULL EVENT RING MAY NOT DO
+    // ---------------------------------
+    // Destroy a take. The engine's own parking buffer (engine.cpp, emitCritical)
+    // covers the first hop; this table covers the second. A take whose
+    // EvTakeReady will not fit the client's ring stays in `takes_` with its file
+    // written and `announced` false, and the announcement is retried every tick
+    // for as long as it takes. There is no path here that drops a take because a
+    // reader was slow.
+
+    struct Take {
+        enum State { Preparing, Armed, Writing, Ready };
+        u64   uid   = 0;
+        int   track = -1, slot = -1;
+        bool  midi  = false;
+        i64   cap   = 0;             // frames, or NOTES for a MIDI take
+        i64   len   = 0;             // what the engine actually wrote
+        f64   startBeat = 0.0;       // from Ev::RecordStarted, for the file
+        State st    = Preparing;
+        bool  cancelled = false;     // a stop landed before the buffer did
+        bool  discard   = false;     // reclaim: finish it, then throw it away
+        bool  stopSent  = false;     // queued for the engine
+        bool  started   = false;     // Ev::RecordStarted landed: the take is real
+        u64   stopDue   = 0;         // drain proof for the stop, 0 = not pushed
+        bool  announced = false;
+        // Engine-visible from the moment the start command is pushed until
+        // Ev::RecordFinished brings it home. Freed only after that, and only
+        // here — the audio thread's borrow ends with the event, exactly as
+        // App's does.
+        std::unique_ptr<f32[]> buf;
+        char  path[640] = {};
+    };
+
+    // An engine command the take machine owes, with the take it belongs to. The
+    // uid rides along because the drain proof for a STOP has to be stamped at
+    // the moment the push succeeds, not when it was queued — see
+    // pumpTakeCancels() for the one question that proof answers.
+    struct TakeCmd {
+        Command cmd{};
+        u64     uid  = 0;
+        bool    stop = false;
+    };
+
+    // A unit of work for the take thread. The buffer travels INSIDE the job in
+    // both directions, so ownership is never shared: the pump owns it while the
+    // engine may touch it, the worker owns it while it is being allocated or
+    // written, and the queue is the handover.
+    struct TakeJob {
+        u64  uid   = 0;
+        bool write = false;          // false = allocate a buffer
+        bool midi  = false;
+        i64  items = 0;              // capacity to make, or length to write
+        f64  rate  = 48000.0;
+        f64  startBeat = 0.0;
+        bool ok    = false;
+        std::unique_ptr<f32[]> buf;
+        char path[640] = {};
+    };
+
+    // How many f32 a capacity of `items` needs. A MIDI take stores RtNote
+    // through the same f32* the audio one stores samples through — engine.h's
+    // Cmd::RecordMidiSlot contract, which the GUI honours by allocating RtNote[]
+    // and casting. Operator new is aligned to at least 16 bytes, which is more
+    // than alignof(RtNote), so the cast is sound here for the same reason.
+    static size_t takeFloats(i64 items, bool midi) {
+        const u64 bytes = midi ? (u64)items * sizeof(ipc::WireNote) : (u64)items * 2ull * 4ull;
+        return (size_t)((bytes + 3ull) / 4ull);
+    }
+
+    void startTakeThread() {
+        takeRun_.store(true, std::memory_order_release);
+        takeThread_ = std::thread(&Daemon::takeLoop, this);
+    }
+
+    void stopTakeThread() {
+        {
+            std::lock_guard<std::mutex> lk(takeMx_);
+            takeRun_.store(false, std::memory_order_relaxed);
+        }
+        takeCv_.notify_all();
+        if (takeThread_.joinable()) takeThread_.join();
+    }
+
+    // The only thread in this process that allocates a take buffer or touches
+    // the filesystem for one.
+    void takeLoop() {
+        for (;;) {
+            TakeJob job;
+            {
+                std::unique_lock<std::mutex> lk(takeMx_);
+                takeCv_.wait(lk, [&] {
+                    return !takeIn_.empty() || !takeRun_.load(std::memory_order_relaxed);
+                });
+                if (takeIn_.empty()) {
+                    if (!takeRun_.load(std::memory_order_relaxed)) return;
+                    continue;
+                }
+                job = std::move(takeIn_.front());
+                takeIn_.pop_front();
+            }
+
+            if (!job.write) {
+                // VALUE-INITIALISED, and that is not tidiness. `new f32[n]()`
+                // zeroes, which touches every page — so the audio thread's first
+                // write to this buffer cannot take a page fault inside
+                // process(). The in-process path gets the same property from
+                // App's own zeroing allocation, and the comment there gives the
+                // other half of the reason: a take that stops early leaves the
+                // tail unwritten, and silence is a better failure than whatever
+                // was on that page.
+                job.buf.reset(new (std::nothrow) f32[takeFloats(job.items, job.midi)]());
+                job.ok = job.buf != nullptr;
+            } else {
+                job.ok = job.midi
+                             ? ipc::writeMidiTake(job.path, (const ipc::WireNote*)job.buf.get(),
+                                                  job.items, job.startBeat)
+                             : ipc::writeAudioTake(job.path, job.buf.get(), job.items, 2, job.rate);
+                if (!job.ok)
+                    LOGE("could not write take %llu to '%s': %s",
+                         (unsigned long long)job.uid, job.path, std::strerror(errno));
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(takeMx_);
+                takeOut_.push_back(std::move(job));
+            }
+        }
+    }
+
+    void postTakeJob(TakeJob&& j) {
+        {
+            std::lock_guard<std::mutex> lk(takeMx_);
+            takeIn_.push_back(std::move(j));
+        }
+        takeCv_.notify_one();
+    }
+
+    Take* takeByUid(u64 uid) {
+        for (auto& t : takes_) if (t->uid == uid) return t.get();
+        return nullptr;
+    }
+    // The take a track is currently making, if any. At most one: the engine has
+    // exactly one recPhase per track, so a second would be a second picture of
+    // one piece of state.
+    Take* takeOnTrack(int track) {
+        for (auto& t : takes_)
+            if (t->track == track && (t->st == Take::Preparing || t->st == Take::Armed))
+                return t.get();
+        return nullptr;
+    }
+    // The take that owns a buffer the engine just handed back.
+    Take* takeByBuf(const void* p) {
+        for (auto& t : takes_) if (t->buf.get() == (const f32*)p) return t.get();
+        return nullptr;
+    }
+
+    void queueTakeEvent(const ipc::WireEvent& e) {
+        // Bounded, because everything here is. Overflowing it needs a client
+        // that has stopped draining its event ring AND gone on sending take
+        // commands, which is a client that is not running; the counter is how
+        // that is told from a daemon that lost them for its own reasons.
+        if (takeEvts_.size() >= kTakeEvtCap) {
+            ++takeEvtsDropped_;
+            if (takeEvtsDropped_ == 1)
+                LOGE("the take announcement queue is full: the client is not draining "
+                     "its event ring. Announcements are being lost from here on, and "
+                     "the takes they name stay on disk.");
+            return;
+        }
+        takeEvts_.push_back(e);
+    }
+
+    void failTake(int track, int slot, u64 uid, u32 reason) {
+        map_.hdr->takesFailed.fetch_add(1, std::memory_order_relaxed);
+        ipc::WireEvent e{};
+        e.type = ipc::EvTakeFailed;
+        e.a    = track;
+        e.b    = slot;
+        e.x    = (f64)reason;
+        e.ref  = uid;
+        queueTakeEvent(e);
+    }
+
+    // Cmd::RecordSlot / Cmd::RecordMidiSlot off the wire. A TOGGLE, exactly as
+    // it is in-process: the first one for a track starts, the second stops.
+    void doTakeCommand(const ipc::WireCommand& w) {
+        const int  t    = w.a, s = w.b;
+        const bool midi = (w.flags & ipc::TakeCmdMidi) != 0;
+
+        if (t < 0 || t >= kMaxTracks || s < 0 || s >= kMaxScenes) {
+            reject(w, ipc::RejectBadIndex);
+            failTake(t, s, 0, ipc::RejectBadIndex);
+            return;
+        }
+
+        if (Take* live = takeOnTrack(t)) {
+            // A second command for a DIFFERENT slot is the engine's hand-over
+            // path (engine.cpp, pendBuf), which needs a second buffer that this
+            // side has no way to have ready. Refused with a reason rather than
+            // half-honoured: App cannot produce it (startRecording refuses a
+            // track whose recState is not idle), so one arriving means the two
+            // pictures of this track have diverged and the live take is the one
+            // worth protecting.
+            if (live->slot != s || live->midi != midi) {
+                reject(w, ipc::RejectTakeBusy);
+                failTake(t, s, 0, ipc::RejectTakeBusy);
+                return;
+            }
+            if (live->st == Take::Preparing) {
+                // Nothing was ever armed. Answer now — the client is holding a
+                // capture buffer that only a finish event frees.
+                live->cancelled = true;
+                return;
+            }
+            if (!live->stopSent) {
+                // The stop repeats the payload, per the Cmd::RecordSlot
+                // contract: an engine that simply reassigns recBuf lands on
+                // exactly what it already had.
+                TakeCmd tc;
+                tc.uid  = live->uid;
+                tc.stop = true;
+                tc.cmd.type = midi ? Cmd::RecordMidiSlot : Cmd::RecordSlot;
+                tc.cmd.a = t; tc.cmd.b = s;
+                tc.cmd.p = live->buf.get();
+                tc.cmd.x = (f64)live->cap;
+                takeCmds_.push_back(tc);
+                live->stopSent = true;
+            }
+            return;
+        }
+
+        // -- a start ---------------------------------------------------------
+        if (!takeDir_[0]) {
+            reject(w, ipc::RejectTakeIo);
+            failTake(t, s, 0, ipc::RejectTakeIo);
+            return;
+        }
+        if (!std::isfinite(w.x) || w.x < 1.0) {
+            reject(w, ipc::RejectTakeTooLarge);
+            failTake(t, s, 0, ipc::RejectTakeTooLarge);
+            return;
+        }
+        const i64 cap   = (i64)w.x;
+        const u64 bytes = midi ? (u64)cap * sizeof(ipc::WireNote) : (u64)cap * 8ull;
+        if (bytes > ipc::kMaxTakeBytes) {
+            reject(w, ipc::RejectTakeTooLarge);
+            failTake(t, s, 0, ipc::RejectTakeTooLarge);
+            return;
+        }
+        if (takes_.size() >= ipc::kMaxPendingTakes) {
+            reject(w, ipc::RejectTakeBusy);
+            failTake(t, s, 0, ipc::RejectTakeBusy);
+            return;
+        }
+
+        auto take = std::make_unique<Take>();
+        take->uid   = nextTakeUid_++;
+        take->track = t;
+        take->slot  = s;
+        take->midi  = midi;
+        take->cap   = cap;
+        ipc::takePath(takeDir_, take->uid, midi, take->path, sizeof take->path);
+
+        TakeJob j;
+        j.uid   = take->uid;
+        j.write = false;
+        j.midi  = midi;
+        j.items = cap;
+        takes_.push_back(std::move(take));
+        postTakeJob(std::move(j));
+        map_.hdr->takesStarted.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // The client has copied a take out. Free-after-confirm, inverted.
+    void doTakeRelease(const ipc::WireCommand& w) {
+        Take* t = takeByUid(w.ref);
+        if (!t || t->st != Take::Ready) {
+            // Not an error the client can act on, and not silent either: a
+            // duplicate release, or one for a take an engine restart took with
+            // it. Counted through the ordinary rejection path so it shows up in
+            // exactly the place every other refusal does.
+            reject(w, ipc::RejectNoTake);
+            return;
+        }
+        if (!(w.flags & ipc::TakeReleaseKeepFile)) ipc::removeTake(t->path);
+        else
+            LOGW("take %llu released but kept: the client could not read '%s'. "
+                 "The material is still there; the next session's sweep removes it.",
+                 (unsigned long long)t->uid, t->path);
+        dropTake(t->uid);
+    }
+
+    void dropTake(u64 uid) {
+        for (size_t i = 0; i < takes_.size(); ++i)
+            if (takes_[i]->uid == uid) { takes_.erase(takes_.begin() + (long)i); return; }
+    }
+
+    // Ev::RecordFinished / Ev::MidiRecordFinished, consumed rather than
+    // forwarded. Its `p` is a buffer in THIS address space; what the client gets
+    // instead is a filename, once the bytes are on disk.
+    //
+    // Returns false when the pointer belongs to no take of ours, which is the
+    // one case that must not be silent: it would mean the engine is holding a
+    // capture buffer nobody in this process allocated.
+    bool finishTake(const Event& ev) {
+        Take* t = takeByBuf(ev.p);
+        if (!t) return false;
+        t->len = (i64)ev.x;
+        if (t->len < 0) t->len = 0;
+        if (t->len > t->cap) t->len = t->cap;
+
+        if (t->discard || t->len == 0) {
+            // Nothing to write. An empty take is an ordinary outcome — the stop
+            // landed before the quantized start fired — and it still owes the
+            // client a hand-back, because App frees its capture buffer on the
+            // finish event and on nothing else.
+            if (!t->discard) {
+                ipc::WireEvent e{};
+                e.type  = ipc::EvTakeReady;
+                e.a     = t->track;
+                e.b     = t->slot;
+                e.x     = 0.0;
+                e.ref   = t->uid;
+                e.flags = ipc::TakeWasEmpty | (t->midi ? ipc::TakeIsMidi : 0u);
+                queueTakeEvent(e);
+                map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
+            }
+            dropTake(t->uid);
+            return true;
+        }
+
+        TakeJob j;
+        j.uid       = t->uid;
+        j.write     = true;
+        j.midi      = t->midi;
+        j.items     = t->len;
+        j.rate      = sr_;
+        j.startBeat = t->startBeat;
+        j.buf       = std::move(t->buf);      // the worker owns it while it writes
+        std::snprintf(j.path, sizeof j.path, "%s", t->path);
+        t->st = Take::Writing;
+        postTakeJob(std::move(j));
+        return true;
+    }
+
+    // One tick of the take machine: finished worker jobs in, engine commands
+    // out, announcements retried, a dead client's takes reclaimed.
+    void pumpTakes() {
+        // 1. What the worker finished.
+        std::deque<TakeJob> done;
+        {
+            std::lock_guard<std::mutex> lk(takeMx_);
+            done.swap(takeOut_);
+        }
+        for (TakeJob& j : done) {
+            Take* t = takeByUid(j.uid);
+            if (!t) continue;                       // reclaimed while it worked
+
+            if (!j.write) {
+                if (!j.ok) {
+                    LOGE("take %llu: could not allocate %lld %s of capture buffer",
+                         (unsigned long long)j.uid, (long long)t->cap,
+                         t->midi ? "notes" : "frames");
+                    failTake(t->track, t->slot, t->uid, ipc::RejectTakeIo);
+                    dropTake(j.uid);
+                    continue;
+                }
+                if (t->cancelled || t->discard) {
+                    // Stopped (or reclaimed) before it was ever armed. The
+                    // buffer dies here having never been seen by the engine.
+                    if (!t->discard) {
+                        ipc::WireEvent e{};
+                        e.type  = ipc::EvTakeReady;
+                        e.a     = t->track;
+                        e.b     = t->slot;
+                        e.x     = 0.0;
+                        e.ref   = t->uid;
+                        e.flags = ipc::TakeWasEmpty | (t->midi ? ipc::TakeIsMidi : 0u);
+                        queueTakeEvent(e);
+                        map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    dropTake(j.uid);
+                    continue;
+                }
+                t->buf = std::move(j.buf);
+                t->st  = Take::Armed;
+                TakeCmd tc;
+                tc.uid  = t->uid;
+                tc.stop = false;
+                tc.cmd.type = t->midi ? Cmd::RecordMidiSlot : Cmd::RecordSlot;
+                tc.cmd.a = t->track; tc.cmd.b = t->slot;
+                tc.cmd.p = t->buf.get();
+                tc.cmd.x = (f64)t->cap;
+                takeCmds_.push_back(tc);
+                continue;
+            }
+
+            // A written take. The BUFFER is done with — the client reads the
+            // file, never the memory — so it goes back now rather than being
+            // held until the release. That is what makes an unclaimed take cost
+            // a file and not a buffer, and it is the whole of the memory bound
+            // when a GUI dies holding takes.
+            j.buf.reset();
+            if (t->discard) {
+                ipc::removeTake(t->path);
+                map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
+                dropTake(j.uid);
+                continue;
+            }
+            if (!j.ok) {
+                failTake(t->track, t->slot, t->uid, ipc::RejectTakeIo);
+                dropTake(j.uid);
+                continue;
+            }
+            t->st = Take::Ready;
+            ipc::WireEvent e{};
+            e.type  = ipc::EvTakeReady;
+            e.a     = t->track;
+            e.b     = t->slot;
+            e.x     = (f64)t->len;
+            e.ref   = t->uid;
+            e.flags = (t->midi ? ipc::TakeIsMidi : 0u) |
+                      (t->len >= t->cap ? ipc::TakeHitCeiling : 0u);
+            t->announced = true;
+            queueTakeEvent(e);
+            map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
+            if (t->len >= t->cap)
+                LOGW("take %llu filled its buffer (%lld %s) and stopped there",
+                     (unsigned long long)t->uid, (long long)t->cap,
+                     t->midi ? "notes" : "frames");
+        }
+
+        // 2. Engine commands the take machine owes, in order. Backpressure by
+        //    NOT consuming, exactly as pumpCommands does: a start that will not
+        //    fit the engine's ring is retried next tick rather than dropped, and
+        //    a stop can never overtake the start in front of it.
+        while (!takeCmds_.empty()) {
+            const TakeCmd& tc = takeCmds_.front();
+            if (!engine_->pushCommand(tc.cmd)) break;
+            // The proof is taken HERE, immediately after the push, because that
+            // is the only instant it means anything (see drainProof's own note
+            // on why it is +2 and not +1).
+            if (tc.stop)
+                if (Take* t = takeByUid(tc.uid)) t->stopDue = drainProof();
+            takeCmds_.pop_front();
+        }
+
+        // 3. Announcements. THIS is the second hop's parking buffer: a take
+        //    whose event will not fit stays here, with its file on disk, and
+        //    goes out on a later tick. Nothing is dropped for a slow reader.
+        while (!takeEvts_.empty()) {
+            if (!map_.evts->push(takeEvts_.front())) break;
+            takeEvts_.pop_front();
+        }
+
+        // 4. Reclaim, if the client that asked for these takes is gone.
+        reclaimTakesIfClientGone();
+    }
+
+    // THE ONE PLACE THE ENGINE ANSWERS NOTHING.
+    //
+    // engine.cpp, Cmd::RecordSlot: "Toggling a take that has not begun cancels
+    // it. There is no buffer to hand back, so no event goes out either." That is
+    // correct in-process — App's buffer was never lent — and it is a hole across
+    // a boundary, because over here the take is a whole state machine, a
+    // capacity the client is holding a buffer for, and an EvTakeReady the client
+    // will wait for until the session ends.
+    //
+    // engine.h is frozen, so this side infers the cancel instead of being told,
+    // and it does so from three facts that together admit no other reading:
+    //
+    //   1. the take never STARTED — no Ev::RecordStarted for it, and
+    //      Ev::RecordFinished is only ever emitted from a phase the start
+    //      creates, so there is no finish event in flight to race;
+    //   2. the stop is PROVABLY drained — drainProof(), the same primitive the
+    //      clip retirements rest on, so "the engine has not looked yet" is not
+    //      mistaken for "the engine cancelled it";
+    //   3. the engine's own published recState for that track reads 0 — idle.
+    //      A take that started and is stopping publishes 2, and a take still
+    //      queued publishes 1, so 0 after (2) is the cancel and nothing else.
+    //
+    // Runs AFTER pumpEvents(), so a take that did finish has already been taken
+    // off this table by finishTake() and cannot be declared cancelled instead.
+    void pumpTakeCancels() {
+        for (size_t i = takes_.size(); i-- > 0;) {
+            Take& t = *takes_[i];
+            if (t.st != Take::Armed || t.started || !t.stopSent || !t.stopDue) continue;
+            if (!drainProven(t.stopDue)) continue;
+            if (engine_->recState[t.track].load(std::memory_order_relaxed) != 0) continue;
+
+            if (!t.discard) {
+                ipc::WireEvent e{};
+                e.type  = ipc::EvTakeReady;
+                e.a     = t.track;
+                e.b     = t.slot;
+                e.x     = 0.0;
+                e.ref   = t.uid;
+                e.flags = ipc::TakeWasEmpty | (t.midi ? ipc::TakeIsMidi : 0u);
+                queueTakeEvent(e);
+                map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
+            }
+            takes_.erase(takes_.begin() + (long)i);
+        }
+    }
+
+    // THE GUI-CRASH ARM OF THE CRASH MATRIX.
+    //
+    // The daemon has no heartbeat from its client — nothing in the protocol asks
+    // for one — but it has something better for exactly this question: the
+    // sample pool is a region the CLIENT created, so ShmHeader::creatorPid in it
+    // is the client's pid and processAlive() is the whole test. (Guarded by
+    // creatorStartTicks, so a recycled pid cannot read as alive.)
+    //
+    // What reclaim does NOT do is free a buffer the engine may still be inside.
+    // An armed take is stopped — the engine finishes it on the next grid line
+    // and hands the buffer back through the ordinary event, where `discard`
+    // makes it go in the bin instead of onto the disk. That is the retirement
+    // discipline this whole file is built out of, applied to one more pointer.
+    void reclaimTakesIfClientGone() {
+        if (takes_.empty() && takeEvts_.empty() && takeCmds_.empty()) return;
+        if (!pool_.valid()) return;             // no pool, no liveness signal
+        const u64 now = ipc::monotonicNs();
+        if (now < takeAliveCheckNs_) return;
+        takeAliveCheckNs_ = now + 250ull * 1000000ull;
+        if (pool_.creatorAlive()) return;
+
+        if (!takeClientGone_) {
+            takeClientGone_ = true;
+            LOGW("the client that owns the sample pool is gone; reclaiming %zu take(s)",
+                 takes_.size());
+        }
+        takeEvts_.clear();
+        for (auto& t : takes_) {
+            if (t->discard) continue;
+            t->discard = true;
+            if (t->st == Take::Ready) {
+                ipc::removeTake(t->path);
+                map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
+                continue;                        // erased below
+            }
+            if (t->st == Take::Armed && !t->stopSent) {
+                TakeCmd tc;
+                tc.uid  = t->uid;
+                tc.stop = true;
+                tc.cmd.type = t->midi ? Cmd::RecordMidiSlot : Cmd::RecordSlot;
+                tc.cmd.a = t->track; tc.cmd.b = t->slot;
+                tc.cmd.p = t->buf.get();
+                tc.cmd.x = (f64)t->cap;
+                takeCmds_.push_back(tc);
+                t->stopSent = true;
+            }
+        }
+        for (size_t i = takes_.size(); i-- > 0;)
+            if (takes_[i]->st == Take::Ready) takes_.erase(takes_.begin() + (long)i);
     }
 
     // Rate-limited like reject(): a GUI with a stale project can produce one of
@@ -2838,6 +3521,24 @@ private:
                 confirmSigRetire(ev.p);
                 continue;
             }
+            // The take's buffer coming home. CONSUMED, like every other event
+            // whose `p` is an address in this process: what the client gets in
+            // its place is a filename, and it gets it only once the bytes are
+            // there. finishTake() answers false for a pointer no take of ours
+            // owns, which falls through to the drop path below and is loud —
+            // it would mean the engine is holding a capture buffer nobody here
+            // allocated.
+            if (ev.type == Ev::RecordFinished || ev.type == Ev::MidiRecordFinished) {
+                if (finishTake(ev)) continue;
+                LOGE("a finished take names buffer %p, which belongs to no take "
+                     "this daemon started", ev.p);
+            }
+            // The quantized start's own beat, kept for the take FILE — a MIDI
+            // take's notes are stamped against it, and a file that outlives both
+            // processes should say where on the timeline it began. The event
+            // itself still crosses as a scalar, because App reads it too.
+            if (ev.type == Ev::RecordStarted)
+                if (Take* t = takeOnTrack(ev.a)) { t->startBeat = ev.x; t->started = true; }
             if (!ipc::eventIsScalar((u32)ev.type)) {
                 map_.hdr->eventsDropped.fetch_add(1, std::memory_order_relaxed);
                 LOGW("engine event %u carries a pointer and cannot cross",
@@ -3006,6 +3707,36 @@ private:
         if (backend_)    backend_->stop();
         if (nullDriver_) nullDriver_->stop();
 
+        // Takes, with no audio thread left to be inside a capture buffer. A take
+        // still in flight cannot be finished — the engine that would have closed
+        // it has stopped — so it is refused rather than committed short, which is
+        // docs/ARRANGEMENT.md §5.4's rule and the reason there is no "commit what
+        // we have" branch here. A take that IS on disk is left there: the client
+        // may still be attached, may still claim it, and if it is not, the next
+        // session's sweep is what removes it.
+        stopTakeThread();
+        {
+            std::deque<TakeJob> leftovers;
+            {
+                std::lock_guard<std::mutex> lk(takeMx_);
+                leftovers.swap(takeOut_);
+                takeIn_.clear();
+            }
+            leftovers.clear();          // buffers the worker was holding
+        }
+        while (!takeEvts_.empty()) {
+            if (!map_.evts->push(takeEvts_.front())) break;
+            takeEvts_.pop_front();
+        }
+        for (auto& t : takes_)
+            if (t->st == Take::Preparing || t->st == Take::Armed) {
+                LOGW("take %llu on track %d was still recording at shutdown and is "
+                     "discarded rather than committed short",
+                     (unsigned long long)t->uid, t->track);
+                ipc::removeTake(t->path);
+            }
+        takes_.clear();
+
         // With no audio thread left, every proof is trivially satisfied: the
         // engine cannot be inside a chain nobody is calling. Chains and
         // instances go first, because a plugin's destructor is the one place a
@@ -3090,6 +3821,11 @@ private:
              (unsigned long long)map_.hdr->journalForwarded.load(),
              (unsigned long long)map_.hdr->journalDropped.load(),
              map_.state->journalDropped.load());
+        LOGI("takes: %u started, %u committed, %u failed, %u reclaimed; %u "
+             "announcement(s) lost; dir '%s'",
+             map_.hdr->takesStarted.load(), map_.hdr->takesCommitted.load(),
+             map_.hdr->takesFailed.load(), map_.hdr->takesReclaimed.load(),
+             takeEvtsDropped_, takeDir_[0] ? takeDir_ : "(none)");
     }
 
     static constexpr int kRejectLogLimit = 8;
@@ -3167,6 +3903,29 @@ private:
     // hypothetical, so the legacy deadline stays reachable rather than being
     // deleted and rediscovered.
     bool                            drainsExact_ = false;
+
+    // -- recording (v9) ------------------------------------------------------
+    //
+    // How many announcements may be owed at once. Reaching it needs a client
+    // that has stopped draining its event ring *and* gone on sending take
+    // commands, i.e. one that is not running; the counter beside it is what
+    // tells that apart from a daemon losing them for its own reasons.
+    static constexpr size_t kTakeEvtCap = 64;
+
+    std::vector<std::unique_ptr<Take>> takes_;
+    std::deque<TakeCmd>                takeCmds_;   // owed to the engine, in order
+    std::deque<ipc::WireEvent>         takeEvts_;   // owed to the client, in order
+    u64                                nextTakeUid_ = 1;
+    u32                                takeEvtsDropped_ = 0;
+    u64                                takeAliveCheckNs_ = 0;
+    bool                               takeClientGone_ = false;
+    char                               takeDir_[sizeof(ipc::ControlHeader::takeDir)] = {};
+
+    std::thread                        takeThread_;
+    std::atomic<bool>                  takeRun_{false};
+    std::mutex                         takeMx_;
+    std::condition_variable            takeCv_;
+    std::deque<TakeJob>                takeIn_, takeOut_;
 };
 
 } // namespace

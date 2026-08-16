@@ -686,7 +686,8 @@ reads the pool" is a page permission (§10.1, §11.3). A take is the daemon
 
 Recommend **(2)**, with the take written to
 `$XDG_RUNTIME_DIR/lattice/takes/<session>/<uid>.wav`, promoted into the
-project directory on save. It is less code, it is crash-safe, and it turns
+project directory on save. **This is what shipped — see §14, which settles the
+choice against this section's own text and says what it cost.** It is less code, it is crash-safe, and it turns
 `PendingRec`'s "the buffer is GUI-owned for its whole life and freed only on
 the handshake" — the most delicate ownership rule left in `app.cpp` — into a
 filename.
@@ -1652,7 +1653,8 @@ recipe, because a rack is the one device whose state cannot be faked):
 
 ### 13.8 What the next session picks up
 
-**Recording (§7), and it is the whole of what is left.** Nothing in this wave
+**Recording (§7), and it is the whole of what is left.** — *and §14 is what that
+session did.* Nothing in this wave
 touched it and nothing here makes it easier; §7's analysis stands unchanged,
 including its recommendation — the daemon writes the take to
 `$XDG_RUNTIME_DIR/nxtakt/takes/<session>/<uid>.wav` and tells the client the
@@ -1676,3 +1678,249 @@ handful of publications answer `false` for a frame. Every caller inside App goes
 through the deferred FIFO and retries; a *test* calling `pushCommand` directly
 has to retry too, which `handle_test` now does explicitly and says so at the call
 site.
+
+---
+
+## 14. Recording crosses — protocol v9, and §7's last item
+
+§7 is spent. `Cmd::RecordSlot` and `Cmd::RecordMidiSlot` cross, a take comes
+home, and `NXTAKT_ENGINE=daemon` now carries everything the in-process path
+does.
+
+### 14.1 The design question, settled: option (2)
+
+§7 offered three and recommended the second; §13.8 re-affirmed it; this wave
+took it. The reasoning, stated against §7's own text rather than restated:
+
+**Option (1), a take region**, is `pool.h` with its page permissions inverted —
+a second `ShmRegion` created by the daemon, mapped read-only by the client, with
+the block/magic/validate machinery running the other way. It works. It costs a
+second allocator, a second retirement protocol, a second epoch handshake, and
+~600 lines across four files. §7's own estimate. What decided against it is not
+the line count: it is that it would make **the daemon a writer of shared memory
+the client reads**, and the one-way-ness of that mapping is the property the
+whole split is built on (`pool.h`: "a daemon bug cannot corrupt the allocator,
+because the pages are not writable in that address space"). Recording is the
+feature most likely to run for twenty minutes into a buffer; it is the last
+place to spend that guarantee.
+
+**Option (3), a write window in the pool**, §7 answers itself. Do not.
+
+**Option (2), a file**, is what a take actually is. It is written once,
+sequentially, by a thread that is not the audio thread, and read once. §7 lists
+its costs honestly and they are the real ones: one write and one read of the
+take's bytes that the in-process path does not pay (both off the audio thread),
+a decode on the GUI side, and a directory that has to be swept. Against that it
+buys three things:
+
+1. **The take survives its reader.** A GUI killed mid-take leaves a file; a
+   shared region mapped by a dead process leaves nothing anyone will ever claim.
+   §7 called this "an independent virtue" and it is the one that separates the
+   two options on the axis this feature is judged on.
+2. **`PendingRec`'s ownership rule becomes a filename.** §7's own phrasing.
+3. **Bounded memory with no new allocator.** An unclaimed take costs a file, not
+   a buffer — the capture buffer is freed the moment the file is written, so a
+   client that stops answering costs `kMaxPendingTakes` files and nothing else.
+
+§7 worried that option (2) "makes every take a file — which is arguably correct
+for a DAW and arguably wrong for a scratch loop". In practice it does not: the
+file is transient. The client copies it out, answers `CmdTakeRelease`, and the
+daemon unlinks it. What reaches the session is the same `SampleRef` the
+in-process path builds. The file is the transport, and the crash-safety is what
+falls out of the transport being a file.
+
+### 14.2 The wire
+
+Protocol **v9**. `ControlHeader` grows `takeDir`, so every section below the
+header moves and a v8 and a v9 binary refuse each other at `attach()` — the
+mechanism, not an accident.
+
+```
+client -> daemon
+  Cmd::RecordSlot / RecordMidiSlot   a = track, b = slot,
+                                     x = CAPACITY (frames, or notes),
+                                     flags & TakeCmdMidi, ref unused.
+                                     A TOGGLE, exactly as in-process.
+  CmdTakeRelease                     ref = take uid, flags & TakeReleaseKeepFile
+
+daemon -> client
+  Ev::RecordStarted                  unchanged: it was always a scalar
+  EvTakeReady                        ref = uid, a = track, b = slot,
+                                     x = frames (or notes),
+                                     flags & TakeIsMidi / TakeWasEmpty /
+                                             TakeHitCeiling
+  EvTakeFailed                       a = track, b = slot, x = Reject*, ref = uid
+
+ControlHeader
+  char takeDir[160]                  where the daemon writes. THE CLIENT NEVER
+                                     COMPOSES THIS ITSELF.
+  takesStarted / takesCommitted / takesFailed / takesReclaimed
+
+files (src/ipc/take.h)
+  <takeDir>/<uid>.wav                32-bit float WAV, engine rate, stereo
+  <takeDir>/<uid>.ntk                32-byte header + WireNote[]
+  both written to <path>.part and renamed: the rename is the publication
+```
+
+`commandCarriesPointer()` now answers true for the three chain commands and for
+nothing else. That predicate was the whole of §7's problem statement.
+
+**Why the take command is its own class and not a scalar.** Every field it uses
+is a number, so `commandIsScalar` would have taken it — and forwarded it
+straight to the engine with `p` null, which is a Record command the engine
+accepts and then writes nothing into. A silent take. It is a class of its own
+because the daemon *does* something with it that no scalar needs: it allocates,
+it runs a per-track state machine, and it owes an answer for every start it took.
+
+**Why `takeDir` is a field and not a formula.** Both sides could evaluate
+`$XDG_RUNTIME_DIR/nxtakt/takes/<session>`. Two processes evaluating one formula
+is two chances to name a different directory — a daemon started from a service
+manager has no runtime dir, and the client would then read an empty directory
+and call it a lost take. The daemon decides, publishes, and the client obeys.
+Empty means the daemon has nowhere to write, and every take start is refused
+with `RejectTakeIo` rather than recorded into nowhere.
+
+### 14.3 The daemon becomes the GUI
+
+The whole implementation is one idea: **for the purposes of the
+`Cmd::RecordSlot` contract, the daemon is the caller.** That contract says the
+caller supplies a buffer, the engine appends into it and never frees it, and it
+comes back through `Ev::RecordFinished`. Every word still holds — the caller is
+a different process now. `src/audio` needed no line.
+
+Four threads, and what each may do:
+
+| thread | may |
+|---|---|
+| audio | append into the take buffer. Nothing else — no allocation, no lock, no syscall, the same discipline the in-process path has, because it is the same code appending into a buffer somebody else allocated. |
+| pump | the state machine: create the take, hand the engine the buffer, notice the finish event, announce the file, free on release. Never allocates a take buffer, never writes a take file. |
+| take worker | allocates (and pre-faults) buffers; writes files. Both blocking things, on the one thread nothing waits for. |
+| mirror | untouched. |
+
+**The start is asynchronous** — it cannot reach the engine until its buffer
+exists. That costs nothing audible because the start is quantized: the engine
+fires it on the next grid line, two orders of magnitude further away than a
+worker hop. A stop that arrives while the buffer is still being made cancels the
+take outright, which is what the engine does for a stop before the quantized
+start anyway.
+
+**The buffer is value-initialised**, not raw. Zeroing touches every page, so the
+audio thread's first write cannot take a page fault inside `process()`. The
+in-process path gets the same property from App's own zeroing allocation.
+
+**The buffer is freed when the FILE is written**, not when the take is claimed.
+That is what makes an unclaimed take cost a file rather than a buffer, and it is
+the whole of the memory bound when a GUI dies holding takes.
+
+### 14.4 A full event ring may not destroy a take
+
+The invariant, in three hops:
+
+1. **engine → daemon.** `engine.cpp`'s `emitCritical` parks a `RecordFinished`
+   the ring would not take and retries it at the top of every `process()`.
+   Unchanged, and it is the daemon's engine now, so it is inherited rather than
+   reimplemented.
+2. **daemon → client.** The take stays in `takes_` with its file on disk and
+   `announced` false; `pumpTakes()` retries the push every tick. There is no
+   path that drops a take because a reader was slow. daemon_test §17f forces it:
+   6000 refusable commands pushed with the event ring undrained, and the take is
+   announced late and intact.
+3. **client → App.** `RemoteEngine::synth` is an unbounded deque, so once read
+   the event cannot be lost.
+
+Strictly better than the local path at hop 2, where a take exists only in the
+parking buffer.
+
+### 14.5 The one place the engine answers nothing
+
+`engine.cpp`, `Cmd::RecordSlot`: *"Toggling a take that has not begun cancels
+it. There is no buffer to hand back, so no event goes out either."* Correct
+in-process — App's buffer was never lent. Across a boundary it strands a take:
+the client is holding a capture buffer that only the finish event frees, and
+`EvTakeReady` would never come.
+
+`engine.h` is frozen, so this side **infers** the cancel from three facts that
+together admit no other reading (`Daemon::pumpTakeCancels`):
+
+1. the take never started — no `Ev::RecordStarted` for it, and
+   `Ev::RecordFinished` is only ever emitted from a phase the start creates, so
+   there is no finish event in flight to race;
+2. the stop is provably drained — `drainProof()`, the same primitive the clip
+   retirements rest on;
+3. the engine's published `recState` for that track reads 0. A take that started
+   and is stopping publishes 2; one still queued publishes 1.
+
+It runs after `pumpEvents()`, so a take that did finish has already been taken
+off the table and cannot be declared cancelled instead.
+
+**This is a latent bug in the in-process path too**, and it is not fixed here
+because `engine.cpp` is frozen: locally, a take stopped before its quantized
+start leaks its capture buffer out of `App::pendingRecs_` until `shutdown()`.
+Filed rather than fixed. The daemon path does not have it.
+
+### 14.6 The crash matrix
+
+| | what happens |
+|---|---|
+| **GUI killed mid-take** | The daemon owns everything in flight, so nothing dangles. It notices within 250 ms — the sample pool is a region the *client* created, so `ShmHeader::creatorPid` in it is the client's and `processAlive()` is the whole test — stops the capture with a queued stop, discards the buffer when the engine hands it back, unlinks any file, and bumps `takesReclaimed`. It stays up and keeps serving. Memory bound: one capture buffer, freed on the next grid line. |
+| **daemon killed mid-take** | The handle answers for the engine that cannot. The first `poll()` that sees `EngineLink::Lost` hands every take in flight back as a zero-frame `Ev::RecordFinished` for the GUI's own pointer, so App frees its buffer and prints "Recording cancelled", the slot goes idle, and nothing waits on a process that no longer exists. Keyed on `Lost` and not `Stale`, per §4.4: a laptop resuming from suspend is not a dead engine and must not lose a take that is still being made. `restartEngine()` cancels the same way. |
+
+No heartbeat was added to the protocol for either. The pool's ownership
+inversion already carries the client's liveness, which is the second thing that
+inversion has now paid for.
+
+### 14.7 Evidence
+
+* **ipc_test 110 → 134.** §10, the take file in one process: bit-for-bit round
+  trip both ways, a short buffer that gets exactly what fits, a non-RIFF file
+  refused rather than reinterpreted, a WAV refused as a MIDI take on its magic,
+  a missing take answering -1 rather than "0 frames of silence", the sweep
+  taking its own files and nothing else, and the directory rule. Plus the
+  classifier row that used to say `RecordMidiSlot` carries a pointer.
+* **daemon_test 619 → 695.** §17, against a daemon spawned with a synthetic
+  capture ramp. A take is exactly one bar at 120 BPM (96000 frames), reads back
+  its announced length, and is **contiguous frame by frame with the right
+  channel the left one's exact negation** — a gap there is a block the audio
+  thread dropped, which no length check can see. Free-after-confirm both ways,
+  a duplicate release refused with `RejectNoTake`, an empty take answered with
+  no file written, `RejectTakeTooLarge` and `RejectTakeBusy` each with their
+  reason, a live take surviving a refusal aimed at it with its whole bar intact,
+  the full-ring survival above, a MIDI take round-tripping through an `.ntk`,
+  and a poison-and-restore removal test on `takeDir`. §17i forks a client, kills
+  it mid-take with SIGKILL, and watches the daemon reclaim and go on beating.
+* **handle_test 148 → 178.** The near side, driven exactly as `app_engine.cpp`
+  drives it. The take comes home carrying **the GUI's own pointer**, and its
+  length equals an in-process take made by the same script against a real
+  `Engine` in this process: **96000 = 96000**. That is the quantization proof as
+  a measurement rather than an argument. Plus the silent-cancel case, a MIDI
+  take landing in the GUI's own `RtNote[]`, and SIGKILL of the daemon mid-take
+  answering with a zero-frame finish and a `Lost` link that does not wedge.
+* **ASan+UBSan**, `detect_leaks=1`, sanitized daemon: all three suites clean.
+* **Four demo renders `cmp`-identical** to the baseline.
+* **Headless, in gamescope, with the real GUI in daemon mode**: armed a track,
+  lit the record button, clicked an empty slot, and got
+  `recorded Rec 1  864000f  18.00s  120 BPM / 36.00 beats` — 36 beats is nine
+  bars, quantized at both ends. The clip plays: with the track disarmed (so the
+  input monitor is out of it) the track meter peaks at 0.9961 with
+  `activeSlot 0` while it runs and 0.0000 with `activeSlot -1` when stopped.
+  Then, against a daemon started outside gamescope so it was not in the reaped
+  session, the GUI was SIGKILLed mid-take and the daemon reclaimed
+  (`takesReclaimed` 0 → 1), left no file, and went on rendering.
+
+### 14.8 What is left before `daemon` can be the default
+
+Nothing in the feature list. §8 step 2's flip is now a release-note decision.
+Three things worth doing beside it, none of them blocking:
+
+1. **`takesFailed()` / `takesLost()` are readable and undrawn.** Same sentence
+   §13.8 wrote about `arrangementsRefused()`, one wave later: each non-zero is a
+   performance that happened and was not kept, and the status bar is where it
+   belongs. `takesEmpty()` is counted separately precisely so it is not drawn as
+   a failure.
+2. **A take that failed to READ leaves its file on disk** (`TakeReleaseKeepFile`)
+   and says where in the log. Nothing offers to recover it. That is the crash
+   safety option (2) was chosen for, half-cashed: the file survives and no UI
+   points at it.
+3. **The in-process silent-cancel leak** of §14.5, which needs one line in
+   `engine.cpp` (an `Ev::RecordFinished` with `x = 0` from `cancelRec`) and
+   would let the daemon delete `pumpTakeCancels()` entirely.

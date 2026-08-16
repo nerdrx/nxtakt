@@ -202,8 +202,9 @@ build/engine_test: tests/engine_test.cpp src/audio/engine.cpp src/core/common.cp
 # does not use TOOL_CF/TOOL_LIBS: no sndfile, no lilv, and warnings left on.
 # -lrt is only needed for shm_open on glibc < 2.34; harmless after.
 IPC_CF := -std=c++20 -O2 $(WARN)
-IPC_H  := src/ipc/shm.h src/ipc/pool.h src/ipc/control.h src/ipc/client.h
-# ALL FOUR headers, not just shm.h. The short list let ipc_test go stale: a
+IPC_H  := src/ipc/shm.h src/ipc/pool.h src/ipc/control.h src/ipc/client.h \
+          src/ipc/take.h
+# ALL FIVE headers, not just shm.h. The short list let ipc_test go stale: a
 # protocol bump in control.h never triggered a rebuild, every local run tested
 # yesterday's binary against today's headers, and the mismatch only surfaced on
 # a fresh CI build -- where it cost three red runs to locate from outside.
@@ -275,10 +276,18 @@ build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
 # dependency and not a runtime cost.
 #
 # It spawns its own daemon, so it depends on one existing.
+# The header list is not decoration and it is not complete by luck: this recipe
+# had NONE, so a protocol bump in src/ipc left the binary stale and every local
+# run tested yesterday's seam against today's headers. That is exactly what cost
+# build/ipc_test three red CI runs to locate; the note above $(IPC_H) is the
+# other half of the same lesson. Recording added src/ipc/take.h to that list and
+# engine_handle.h/engine_state.h to this one.
 build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp \
                    src/audio/backend.cpp src/audio/midi_in.cpp src/core/common.cpp \
                    src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
                    src/plugin/internal_devices.cpp \
+                   $(IPC_H) src/ui/engine_handle.h src/ui/engine_state.h \
+                   src/audio/engine.h src/plugin/host.h \
                    build/nxtaktd
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 $(WARN) -I. -Ivendor/clap/include \

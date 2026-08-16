@@ -33,6 +33,7 @@
 
 #include <dirent.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -538,8 +539,14 @@ static void testCommandBoundary(ipc::EngineClient& c) {
           (unsigned long long)(h.commandsApplied.load() - applied0));
     CHECK(h.commandsRejected.load() == rejected0, "and none of them was refused");
 
-    // -- the three that still cannot cross ----------------------------------
-    const Cmd pointerCmds[] = {Cmd::SetChain, Cmd::RecordSlot, Cmd::RecordMidiSlot};
+    // -- the ones that still cannot cross -----------------------------------
+    //
+    // ONE FAMILY NOW, and it is the permanent one. The two Record commands used
+    // to be here; as of protocol v9 they carry a capacity instead of an address
+    // and the daemon supplies the buffer, so a refusal for them would be
+    // recording not working at all. The chain family stays because a client has
+    // no RtChains to name — that is the design, not a phase.
+    const Cmd pointerCmds[] = {Cmd::SetChain, Cmd::SetReturnChain, Cmd::SetMasterChain};
     const int kPointerCmds  = (int)(sizeof pointerCmds / sizeof pointerCmds[0]);
     const u64 applied1 = h.commandsApplied.load();
     for (Cmd t : pointerCmds) {
@@ -552,7 +559,7 @@ static void testCommandBoundary(ipc::EngineClient& c) {
     const bool allRejected = waitUntil([&] {
         return h.commandsRejected.load() >= rejected0 + (u64)kPointerCmds;
     }, 1000);
-    CHECK(allRejected, "all three were refused (%llu rejected)",
+    CHECK(allRejected, "all three chain commands were refused (%llu rejected)",
           (unsigned long long)(h.commandsRejected.load() - rejected0));
     CHECK(h.commandsApplied.load() == applied1,
           "and not one of them reached the engine (%llu applied since)",
@@ -3331,6 +3338,498 @@ static void testJournalRing(ipc::EngineClient& c) {
 // stays allocated as the client's shadow instead of being retired after the
 // daemon copies it out.
 
+// ---------------------------------------------------------------------------
+// 17. recording across the boundary  (docs/GUI-ON-DAEMON.md §7, protocol v9)
+// ---------------------------------------------------------------------------
+//
+// The far side of the last feature on §7's list. A take here is a whole round
+// trip: a capacity out, a daemon-allocated buffer the daemon's own audio thread
+// appends into, a file, an announcement, a copy, a release.
+//
+// It gets its OWN daemon, for one reason: the take has to record something, and
+// the only signal a `--driver null` engine can capture is the synthetic ramp
+// behind NXTAKT_DEBUG_INPUT. Feeding that to the shared daemon would put input
+// into every meter test that arms a track, which is a way to make four other
+// sections pass or fail for a reason that has nothing to do with them.
+//
+// The ramp is not decoration either. It is what makes CONTIGUITY checkable: the
+// null driver's input is a monotonic 1/65536 ramp with the right channel its
+// exact negation, so "every frame the engine claimed to capture, in order, none
+// missing, channels not swapped" is two comparisons per frame and no epsilon.
+// A sine would only ever have proved the take was loud.
+
+struct TakeFixture {
+    char       session[80] = {};
+    pid_t      pid = -1;
+    ipc::EngineClient c;
+    bool       up = false;
+};
+
+static bool takeFixtureUp(TakeFixture& f, const char* suffix) {
+    std::snprintf(f.session, sizeof f.session, "%s-%s", gSession, suffix);
+    ::setenv("NXTAKT_DEBUG_INPUT", "ramp", 1);
+    f.pid = spawnDaemon(f.session);
+    ::unsetenv("NXTAKT_DEBUG_INPUT");
+    if (f.pid <= 0) return false;
+    if (!f.c.attach(f.session, 5000)) return false;
+    // The pool is not needed to record — a take never touches it — but it IS
+    // the daemon's only liveness signal for its client (§17g), and a fixture
+    // without one would make that section untestable.
+    f.c.createPool(f.session, 4u << 20);
+    f.c.publishPool();
+    f.up = true;
+    return true;
+}
+
+static void takeFixtureDown(TakeFixture& f) {
+    if (f.up) { f.c.detach(); f.c.closePool(); }
+    if (f.pid > 0) {
+        ::kill(f.pid, SIGTERM);
+        ipc::EngineClient::waitFor(f.pid, 3000);
+    }
+}
+
+// waitEvent(), with one addition: a take failure that arrives while something
+// else is being waited for is SAID. Without it a refused take looks exactly like
+// a slow one, and the section times out ten seconds later naming the wrong
+// thing.
+static bool waitTakeEvent(ipc::EngineClient& c, u32 type, ipc::WireEvent& out,
+                          int timeoutMs) {
+    return waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e)) {
+            if (e.type == ipc::EvTakeFailed && type != ipc::EvTakeFailed)
+                note("(an EvTakeFailed arrived while waiting: %s)",
+                     ipc::rejectReasonName((u32)e.x));
+            if (e.type == type) { out = e; return true; }
+        }
+        return false;
+    }, timeoutMs, 2);
+}
+
+static void testRecording() {
+    banner("17. a take crosses: capacity out, a file back");
+
+    TakeFixture f;
+    if (!takeFixtureUp(f, "rec")) {
+        CHECK(false, "could not start a recording daemon on session '%s'", f.session);
+        takeFixtureDown(f);
+        return;
+    }
+    ipc::EngineClient& c = f.c;
+
+    // -- 17a. the daemon publishes where it writes ---------------------------
+    char dir[sizeof(ipc::ControlHeader::takeDir) + 1] = {};
+    c.takeDir(dir, sizeof dir);
+    CHECK(dir[0] != '\0', "ControlHeader::takeDir names a directory ('%s')", dir);
+    struct stat dst{};
+    CHECK(::stat(dir, &dst) == 0 && S_ISDIR(dst.st_mode),
+          "and it exists — the daemon made it before it published the header, so a "
+          "client that can read the name can use it");
+    CHECK(std::strstr(dir, f.session) != nullptr,
+          "and it is this session's, not another's");
+
+    // -- 17b. one bar of a ramp ---------------------------------------------
+    //
+    // 120 BPM with a one-bar quantum, so both boundaries are grid lines two
+    // seconds apart and the take's LENGTH is arithmetic rather than timing:
+    // 4 beats * 0.5 s * 48000 = 96000 frames, whatever the host was doing.
+    // That number is the whole quantization proof on this side; handle_test
+    // compares it against the same take made in-process.
+    const i64 cap = 48000 * 10;
+    c.pushCommand(Cmd::SetTempo, 0, 0, 120.0);
+    c.pushCommand(Cmd::SetQuantum, 4);            // index 4 = 1 Bar = 4 beats
+    c.pushCommand(Cmd::SetPlaying, 1);
+    sleepMs(120);
+    drainEvents(c);
+
+    const u32 started0 = c.takesStarted();
+    CHECK(c.recordSlot(0, 0, cap, /*midi*/false), "a take starts with a capacity, not a pointer");
+    ipc::WireEvent ev{};
+    const bool armed = waitTakeEvent(c, (u32)Ev::RecordStarted, ev, 4000);
+    CHECK(armed, "Ev::RecordStarted crossed (beat %.3f)", ev.x);
+    CHECK(c.takesStarted() == started0 + 1,
+          "ControlHeader::takesStarted moved (%u -> %u) — delete the daemon's bump "
+          "and this is the check that goes red",
+          started0, c.takesStarted());
+    const f64 startBeat = ev.x;
+
+    sleepMs(300);                                  // well inside the bar
+    CHECK(c.recordSlot(0, 0, cap, false), "and the same command stops it");
+
+    ipc::WireEvent ready{};
+    const bool got = waitTakeEvent(c, ipc::EvTakeReady, ready, 6000);
+    CHECK(got, "EvTakeReady announced the take (uid %llu, %.0f frames)",
+          (unsigned long long)ready.ref, ready.x);
+    CHECK(got && !(ready.flags & ipc::TakeIsMidi) && !(ready.flags & ipc::TakeWasEmpty),
+          "as an audio take with material in it (flags 0x%x)", ready.flags);
+    CHECK((i64)ready.x == 96000,
+          "and it is EXACTLY one bar at 120 BPM: %lld frames, not %d",
+          (long long)ready.x, 96000);
+    CHECK(startBeat >= 4.0 - 1e-6 && std::fmod(startBeat, 4.0) < 1e-6,
+          "the take began on a bar line (%.4f), which is what makes that arithmetic "
+          "hold in the first place", startBeat);
+
+    char path[768] = {};
+    c.takePathFor(ready, path, sizeof path);
+    CHECK(::access(path, R_OK) == 0, "the file is there and readable ('%s')",
+          std::strrchr(path, '/') ? std::strrchr(path, '/') : path);
+
+    std::vector<f32> buf((size_t)cap * 2, 0.f);
+    int chans = 0; f64 rate = 0.0;
+    const i64 frames = ipc::readAudioTake(path, buf.data(), cap, &chans, &rate);
+    CHECK(frames == (i64)ready.x, "it reads back the announced length (%lld)",
+          (long long)frames);
+    CHECK(chans == 2 && rate == 48000.0, "stereo at the engine's rate (%d ch, %.0f Hz)",
+          chans, rate);
+
+    int breaks = 0, swapped = 0, silent = 0;
+    for (i64 i = 0; i < frames; ++i) {
+        const f32 l = buf[(size_t)i * 2], r = buf[(size_t)i * 2 + 1];
+        if (r != -l) ++swapped;
+        if (l == 0.f && r == 0.f) ++silent;
+        if (i == 0) continue;
+        const f32 prev = buf[(size_t)(i - 1) * 2];
+        const f32 step = l - prev;
+        const bool wrapped = prev > 0.9f && l < 0.1f;      // the ramp turning over
+        if (!wrapped && step != 1.f / 65536.f) ++breaks;
+    }
+    CHECK(silent < frames / 2,
+          "the take is not silence: the daemon's audio thread really appended its "
+          "INPUT (%d silent frames of %lld)", silent, (long long)frames);
+    CHECK(breaks == 0,
+          "and every frame follows the one before it — %d discontinuity/ies in %lld "
+          "frames. A gap here is a block the audio thread dropped, which is the one "
+          "failure a length check alone cannot see.",
+          breaks, (long long)frames);
+    CHECK(swapped == 0, "with the channels the right way round (%d wrong)", swapped);
+
+    // -- 17c. free-after-confirm, inverted ----------------------------------
+    const u32 committed = c.takesCommitted();
+    CHECK(committed >= 1, "takesCommitted counted it (%u)", committed);
+    CHECK(c.releaseTake(ready.ref), "the client says it has the take");
+    const bool gone = waitUntil([&] { return ::access(path, F_OK) != 0; }, 2000);
+    CHECK(gone, "and the daemon drops the file — the client's word is what frees it, "
+                "which is the pool's own rule run the other way");
+
+    drainEvents(c);
+    const u64 rejected0 = c.header().commandsRejected.load();
+    CHECK(c.releaseTake(ready.ref), "a SECOND release for the same take is sendable");
+    const bool refusedDup = waitUntil([&] {
+        return c.header().commandsRejected.load() > rejected0;
+    }, 2000);
+    CHECK(refusedDup, "and is refused with a reason rather than silently ignored");
+    {
+        std::vector<ipc::WireEvent> evs;
+        drainEvents(c, &evs);
+        const ipc::WireEvent* r = nullptr;
+        for (const ipc::WireEvent& e : evs)
+            if (e.type == ipc::EvCommandRejected && (u32)e.a == ipc::CmdTakeRelease) r = &e;
+        CHECK(r && (u32)r->b == ipc::RejectNoTake, "the reason being '%s'",
+              ipc::rejectReasonName(r ? (u32)r->b : 0u));
+    }
+
+    // -- 17d. a take that captured nothing ----------------------------------
+    //
+    // Stopped before its quantized start ever fired. It is an ORDINARY outcome
+    // and it still has to be answered: the client is holding a capture buffer
+    // that only the finish event frees.
+    drainEvents(c);
+    CHECK(c.recordSlot(1, 0, cap, false), "start a take on track 1");
+    sleepMs(20);
+    CHECK(c.recordSlot(1, 0, cap, false), "and stop it immediately, inside the same bar");
+    ipc::WireEvent empty{};
+    const bool answered = waitTakeEvent(c, ipc::EvTakeReady, empty, 6000);
+    CHECK(answered, "it is still answered exactly once");
+    CHECK(answered && (empty.flags & ipc::TakeWasEmpty) && empty.x == 0.0,
+          "marked empty, with no frames (flags 0x%x, x %.0f)", empty.flags, empty.x);
+    {
+        char p2[768];
+        c.takePathFor(empty, p2, sizeof p2);
+        CHECK(::access(p2, F_OK) != 0,
+              "and no file was written for it — an empty take is not a zero-byte wav");
+    }
+    c.releaseTake(empty.ref);
+
+    // -- 17e. refusals, each with its reason ---------------------------------
+    drainEvents(c);
+    const u32 failed0 = c.takesFailed();
+    CHECK(c.recordSlot(2, 0, (i64)(ipc::kMaxTakeBytes / 8) + 1000, false),
+          "ask for a take past kMaxTakeBytes");
+    ipc::WireEvent bad{};
+    CHECK(waitTakeEvent(c, ipc::EvTakeFailed, bad, 3000), "it is answered by EvTakeFailed");
+    CHECK((u32)bad.x == ipc::RejectTakeTooLarge, "with reason '%s'",
+          ipc::rejectReasonName((u32)bad.x));
+    CHECK(c.takesFailed() == failed0 + 1, "and takesFailed moved (%u -> %u)",
+          failed0, c.takesFailed());
+    note("refused and not clamped: a take quietly cut to a third of what was asked "
+         "for is exactly the 'committed short' failure ARRANGEMENT.md §5.4 names.");
+
+    drainEvents(c);
+    CHECK(c.recordSlot(3, 0, cap, false), "start a take on track 3");
+    CHECK(waitTakeEvent(c, (u32)Ev::RecordStarted, ev, 4000), "it arms");
+    CHECK(c.recordSlot(3, 1, cap, false), "then ask for a SECOND take on the same track");
+    ipc::WireEvent busy{};
+    CHECK(waitTakeEvent(c, ipc::EvTakeFailed, busy, 3000), "the second is refused");
+    CHECK((u32)busy.x == ipc::RejectTakeBusy, "with reason '%s'",
+          ipc::rejectReasonName((u32)busy.x));
+    CHECK(busy.b == 1, "and it names the slot that was refused (%d), not the live one",
+          (int)busy.b);
+    // The live take must have survived being refused at. Given a bar to run in,
+    // so that "survived" means captured material and not merely "answered": a
+    // stop inside the same BLOCK as the quantized start is a zero-length take by
+    // the engine's own design (its grid lines coincide), and asserting against
+    // that would be asserting nothing.
+    sleepMs(300);
+    CHECK(c.recordSlot(3, 0, cap, false), "the ORIGINAL take still stops normally");
+    ipc::WireEvent survivor{};
+    CHECK(waitTakeEvent(c, ipc::EvTakeReady, survivor, 6000),
+          "and comes home (%.0f frames)", survivor.x);
+    CHECK((i64)survivor.x == 96000 && !(survivor.flags & ipc::TakeWasEmpty),
+          "with its whole bar of material intact — a refusal aimed at a live take "
+          "may not shorten it, let alone destroy it (%lld frames, flags 0x%x)",
+          (long long)survivor.x, survivor.flags);
+    c.releaseTake(survivor.ref);
+
+    // -- 17f. a full event ring may not destroy a take ----------------------
+    //
+    // THE INVARIANT THIS WHOLE PATH RESTS ON. In-process, engine.cpp parks a
+    // RecordFinished the event ring would not take and retries it (emitCritical).
+    // Across the boundary there are two hops and the second one needs the same
+    // property: the take stays in the daemon's table with its file on disk, and
+    // the announcement is retried for as long as it takes.
+    //
+    // Forced by stopping the drain and pushing 4096 events' worth of refusals
+    // into the ring before the take finishes.
+    {
+        drainEvents(c);
+        CHECK(c.recordSlot(4, 0, 48000 * 4, false), "start a take on track 4");
+        CHECK(waitTakeEvent(c, (u32)Ev::RecordStarted, ev, 4000), "it arms");
+        CHECK(c.recordSlot(4, 0, 48000 * 4, false), "and stop it");
+
+        // Fill the event ring without draining it. Every one of these is
+        // answered by an EvCommandRejected, which is exactly 4096 events of
+        // pressure with no reader.
+        int pushed = 0;
+        for (int i = 0; i < 6000; ++i) {
+            ipc::WireCommand w{};
+            w.type = (u32)Cmd::SetChain;          // permanently refused: one event each
+            if (!c.pushCommand(w)) break;
+            ++pushed;
+            if ((i % 512) == 0) sleepMs(2);
+        }
+        note("pushed %d refusable commands with the event ring undrained", pushed);
+        sleepMs(600);                              // the take finishes in here
+
+        // Now drain. The take must still be announced — late, but announced.
+        ipc::WireEvent late{};
+        const bool survived = waitTakeEvent(c, ipc::EvTakeReady, late, 8000);
+        CHECK(survived,
+              "the take is announced AFTER the ring drains (%.0f frames): a full "
+              "event ring delays a take and may never destroy it",
+              survived ? late.x : 0.0);
+        if (survived) {
+            char p3[768];
+            c.takePathFor(late, p3, sizeof p3);
+            CHECK(::access(p3, R_OK) == 0,
+                  "and its file was on disk the whole time it could not be announced");
+            c.releaseTake(late.ref);
+        }
+        drainEvents(c);
+    }
+
+    // -- 17g. a MIDI take ----------------------------------------------------
+    //
+    // Same machine, different file. The notes go in through the MIDI ring, which
+    // is how a hardware keyboard reaches a daemon-mode engine, and come back in
+    // an .ntk.
+    {
+        drainEvents(c);
+        c.pushCommand(Cmd::TrackArm, 5, 1);
+        CHECK(c.recordSlot(5, 0, 4096, /*midi*/true), "start a MIDI take");
+        CHECK(waitTakeEvent(c, (u32)Ev::RecordStarted, ev, 4000), "it arms on a bar line");
+        // Four notes, spaced so that none of them lands outside the bar.
+        for (int n = 0; n < 4; ++n) {
+            CHECK(c.pushMidi(0x90, (u8)(60 + n), 100), "note %d on", 60 + n);
+            sleepMs(60);
+            CHECK(c.pushMidi(0x80, (u8)(60 + n), 0), "note %d off", 60 + n);
+            sleepMs(20);
+        }
+        CHECK(c.recordSlot(5, 0, 4096, true), "and stop it");
+        ipc::WireEvent mready{};
+        const bool mgot = waitTakeEvent(c, ipc::EvTakeReady, mready, 6000);
+        CHECK(mgot, "EvTakeReady announced %.0f note(s)", mgot ? mready.x : 0.0);
+        CHECK(mgot && (mready.flags & ipc::TakeIsMidi),
+              "flagged as MIDI, so the client reads it as notes and not as samples");
+        if (mgot) {
+            char mp[768];
+            c.takePathFor(mready, mp, sizeof mp);
+            CHECK(std::strstr(mp, ".ntk") != nullptr, "and its file is an .ntk");
+            std::vector<ipc::WireNote> notes(4096);
+            f64 nStart = -1.0;
+            const i64 n = ipc::readMidiTake(mp, notes.data(), (i64)notes.size(), &nStart);
+            CHECK(n == (i64)mready.x, "which reads back %lld note(s)", (long long)n);
+            CHECK(n >= 4, "all four played notes are in it (%lld)", (long long)n);
+            bool pitches = n >= 4;
+            for (i64 i = 0; i < n && i < 4; ++i)
+                if (notes[(size_t)i].pitch < 60 || notes[(size_t)i].pitch > 63) pitches = false;
+            CHECK(pitches, "with the pitches that were played");
+            bool sorted = true;
+            for (i64 i = 1; i < n; ++i)
+                if (notes[(size_t)i].beat < notes[(size_t)i - 1].beat) sorted = false;
+            CHECK(sorted, "sorted by beat, as finishRec leaves them");
+            CHECK(nStart >= 0.0, "and the file records the beat the take began on (%.3f)",
+                  nStart);
+            c.releaseTake(mready.ref);
+        }
+        c.pushCommand(Cmd::TrackArm, 5, 0);
+    }
+
+    // -- 17h. takeDir is the DAEMON's word, not the client's ------------------
+    //
+    // The removal test for the field. Poison it and the client's path follows
+    // the poison — which is only true if takePathFor() reads the header. Delete
+    // the daemon's publication (init's snprintf) and takeDir reads empty, the
+    // path comes back empty, and every take fails to read: the test below is
+    // what catches that rather than a session that silently records nowhere.
+    {
+        ipc::ControlHeader& h = const_cast<ipc::ControlHeader&>(c.header());
+        char saved[sizeof h.takeDir];
+        std::memcpy(saved, h.takeDir, sizeof saved);
+        std::snprintf(h.takeDir, sizeof h.takeDir, "%s", "/tmp/nxtakt-poisoned-take-dir");
+
+        ipc::WireEvent fake{};
+        fake.ref = 77;
+        char pp[768];
+        c.takePathFor(fake, pp, sizeof pp);
+        CHECK(!std::strcmp(pp, "/tmp/nxtakt-poisoned-take-dir/77.wav"),
+              "the client composes a take path from ControlHeader::takeDir and from "
+              "nothing else ('%s')", pp);
+
+        std::memset(h.takeDir, 0, sizeof h.takeDir);
+        c.takePathFor(fake, pp, sizeof pp);
+        CHECK(pp[0] == '\0',
+              "and an EMPTY takeDir yields no path at all, rather than one composed "
+              "from this process's own environment — two processes evaluating one "
+              "formula is two chances to name the wrong directory");
+
+        std::memcpy(h.takeDir, saved, sizeof saved);
+        c.takeDir(pp, sizeof pp);
+        CHECK(!std::strcmp(pp, dir), "restored ('%s')", pp);
+    }
+
+    takeFixtureDown(f);
+}
+
+// ---------------------------------------------------------------------------
+// 17i. the GUI dies mid-take
+// ---------------------------------------------------------------------------
+//
+// THE FIRST ARM OF THE CRASH MATRIX. The client is SIGKILLed while a take is
+// being captured. Nothing the daemon is holding belongs to the dead process —
+// that is the whole point of the daemon allocating the buffer — so what has to
+// be shown is that it does not sit on it forever either.
+//
+// The daemon has no heartbeat from its client and does not want one. What it has
+// is the sample pool, which is a region the CLIENT created, so the pid in its
+// header is the client's and processAlive() is the whole test. This is the one
+// place that mechanism is exercised.
+//
+// The child is a real fork that attaches, starts a take and stops answering.
+
+static void testTakeSurvivesClientDeath() {
+    banner("17i. the client is SIGKILLed mid-take: the daemon reclaims and lives");
+
+    TakeFixture f;
+    std::snprintf(f.session, sizeof f.session, "%s-reclaim", gSession);
+    ::setenv("NXTAKT_DEBUG_INPUT", "ramp", 1);
+    f.pid = spawnDaemon(f.session);
+    ::unsetenv("NXTAKT_DEBUG_INPUT");
+    if (f.pid <= 0) {
+        CHECK(false, "could not start a daemon for the reclaim test");
+        return;
+    }
+
+    const pid_t child = ::fork();
+    if (child == 0) {
+        // The doomed client. It owns the pool, so its death is the signal.
+        ipc::EngineClient cc;
+        if (cc.attach(f.session, 5000)) {
+            cc.createPool(f.session, 4u << 20);
+            cc.publishPool();
+            cc.pushCommand(Cmd::SetTempo, 0, 0, 120.0);
+            cc.pushCommand(Cmd::SetQuantum, 4);
+            cc.pushCommand(Cmd::SetPlaying, 1);
+            cc.recordSlot(0, 0, 48000 * 30, false);
+            for (;;) sleepMs(50);          // never stops, never releases
+        }
+        ::_exit(0);
+    }
+    CHECK(child > 0, "forked a client that starts a take and then dies (pid %d)",
+          (int)child);
+
+    // Watch from a second attachment. Two clients on one region is not a
+    // supported production shape, but it is exactly what a test needs: the
+    // counters live in the header and the header is readable by anyone.
+    ipc::EngineClient obs;
+    const bool watching = obs.attach(f.session, 5000);
+    CHECK(watching, "a second attachment can watch the counters");
+
+    const bool takeArmed = watching && waitUntil([&] {
+        return obs.takesStarted() >= 1 &&
+               obs.state().recState[0].load(std::memory_order_relaxed) == 2;
+    }, 8000);
+    CHECK(takeArmed, "the take is armed and the engine is capturing into it "
+                     "(recState %d)",
+          watching ? obs.state().recState[0].load(std::memory_order_relaxed) : -1);
+
+    const u32 reclaimed0 = watching ? obs.takesReclaimed() : 0;
+    ::kill(child, SIGKILL);
+    int st = 0;
+    ::waitpid(child, &st, 0);
+    CHECK(true, "the client is gone (SIGKILL)");
+
+    const bool reclaimed = watching && waitUntil([&] {
+        return obs.takesReclaimed() > reclaimed0;
+    }, 15000, 20);
+    CHECK(reclaimed,
+          "the daemon reclaimed the take (%u) — it stops the capture, takes the "
+          "buffer back when the engine hands it over, and unlinks whatever file it "
+          "had. Delete reclaimTakesIfClientGone() and this counter never moves.",
+          watching ? obs.takesReclaimed() : 0u);
+
+    // Still alive and still serving: a reclaim is not a shutdown.
+    const u64 hb = watching ? obs.heartbeat() : 0;
+    const bool beating = watching && waitUntil([&] { return obs.heartbeat() > hb + 20; }, 3000);
+    CHECK(beating, "and the daemon is still beating afterwards");
+    CHECK(watching && obs.pushCommand(Cmd::SetPlaying, 0) && obs.alive(),
+          "and still takes commands: a dead client is a reclaim, not a crash");
+
+    // The take directory is empty of that take.
+    if (watching) {
+        char d[sizeof(ipc::ControlHeader::takeDir) + 1];
+        obs.takeDir(d, sizeof d);
+        int left = 0;
+        if (DIR* dd = ::opendir(d)) {
+            while (dirent* e = ::readdir(dd))
+                if (std::strstr(e->d_name, ".wav") || std::strstr(e->d_name, ".ntk")) ++left;
+            ::closedir(dd);
+        }
+        CHECK(left == 0, "and left no take file behind (%d in '%s')", left, d);
+        obs.detach();
+    }
+
+    if (f.pid > 0) {
+        ::kill(f.pid, SIGTERM);
+        ipc::EngineClient::waitFor(f.pid, 3000);
+    }
+    // The pool the dead child created is nobody's now; reap it by name so §15's
+    // /dev/shm check does not fail on a region this test deliberately orphaned.
+    char pn[128];
+    ipc::poolRegionName(f.session, pn, sizeof pn);
+    ipc::ShmRegion::reapIfStale(pn);
+}
+
 static void testArrangementSurvival(ipc::EngineClient& c, pid_t& daemon) {
     banner("16g. SIGKILL with an arrangement playing: respawn and republish");
 
@@ -3582,7 +4081,7 @@ static void testCrashAndRespawn(ipc::EngineClient& c, pid_t& daemon) {
               (double)shaped);
         CHECK(c.removeDevice(fresh), "remove it again so the shutdown section is clean");
         ipc::WireEvent rm{};
-        CHECK(waitEvent(c, ipc::EvDeviceRemoved, rm, 3000), "EvDeviceRemoved");
+        CHECK(waitTakeEvent(c, ipc::EvDeviceRemoved, rm, 3000), "EvDeviceRemoved");
     }
 }
 
@@ -3697,6 +4196,8 @@ int main(int argc, char** argv) {
         testArrangementRetirementOrder(client);
         testArrangementSharedBlocks(client);
         testJournalRing(client);
+        testRecording();
+        testTakeSurvivesClientDeath();
         testArrangementSurvival(client, daemon);
         testCrashAndRespawn(client, daemon);
         testCleanShutdown(client, daemon);

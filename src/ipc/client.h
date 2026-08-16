@@ -600,6 +600,80 @@ public:
     // Bit i set == track i's arrangement lane is suspended by a session launch.
     u32 arrOverride() const { return state().arrOverride.load(std::memory_order_relaxed); }
 
+    // -- recording (v9, GUI-ON-DAEMON.md §7) ---------------------------------
+    //
+    // The client's whole side of a take is three calls: ask for one, find its
+    // file, say you have it. There is no buffer on the wire in either
+    // direction, which is the point — the audio thread that appends is the
+    // daemon's, the memory it appends into is the daemon's, and what crosses is
+    // a capacity going out and a filename coming back.
+
+    // Start or stop a take on (track, slot). TOGGLE, exactly as Cmd::RecordSlot
+    // is in-process: the first call queues a quantized start, the second a
+    // quantized stop. `capacity` is FRAMES for audio and NOTES for MIDI, and it
+    // is what the daemon allocates — so it is also the ceiling the take stops
+    // at, reported back with TakeHitCeiling.
+    //
+    // false means "could not send" (no engine, ring full) and nothing else: the
+    // daemon's state did not move, so the caller may retry with no bookkeeping
+    // to undo.
+    bool recordSlot(int track, int slot, i64 capacity, bool midi) {
+        if (!attached()) return false;
+        WireCommand w{};
+        w.type  = (u32)(midi ? Cmd::RecordMidiSlot : Cmd::RecordSlot);
+        w.flags = midi ? TakeCmdMidi : 0u;
+        w.a     = track;
+        w.b     = slot;
+        w.x     = (f64)capacity;
+        return map_.cmds->push(w);
+    }
+
+    // Where the DAEMON said it writes takes. Never composed from this process's
+    // own environment: take.h says why at length, and the short version is that
+    // two processes evaluating one formula is two chances to be wrong about a
+    // directory that must be exactly right.
+    //
+    // Empty means the daemon has no take directory, and therefore that every
+    // take start will be refused with RejectTakeIo. Bounded copy: the field is
+    // a fixed char[] the peer wrote and nothing guarantees a NUL in it — the
+    // same idiom the daemon uses for poolName, for the same reason.
+    void takeDir(char* out, size_t cap) const {
+        if (!out || cap == 0) return;
+        out[0] = '\0';
+        if (!attached()) return;
+        const std::string d = fixed(header().takeDir, sizeof header().takeDir);
+        std::snprintf(out, cap, "%s", d.c_str());
+    }
+
+    // The full path of a take EvTakeReady announced.
+    void takePathFor(const WireEvent& e, char* out, size_t cap) const {
+        char dir[sizeof(ControlHeader::takeDir) + 1];
+        takeDir(dir, sizeof dir);
+        if (!dir[0]) { if (cap) out[0] = '\0'; return; }
+        takePath(dir, e.ref, (e.flags & TakeIsMidi) != 0, out, cap);
+    }
+
+    // "I have it." The daemon holds the take's buffer AND its file until this
+    // lands, so a client that forgets costs a slot out of kMaxPendingTakes and
+    // eventually a refused start — never a corrupted one.
+    //
+    // `keepFile` is for the client that could NOT read the take: the buffer goes
+    // and the file stays, so the material survives the process that failed to
+    // pick it up.
+    bool releaseTake(u64 uid, bool keepFile = false) {
+        if (!attached() || !uid) return false;
+        WireCommand w{};
+        w.type  = CmdTakeRelease;
+        w.ref   = uid;
+        w.flags = keepFile ? TakeReleaseKeepFile : 0u;
+        return map_.cmds->push(w);
+    }
+
+    u32 takesStarted()   const { return header().takesStarted.load(std::memory_order_relaxed); }
+    u32 takesCommitted() const { return header().takesCommitted.load(std::memory_order_relaxed); }
+    u32 takesFailed()    const { return header().takesFailed.load(std::memory_order_relaxed); }
+    u32 takesReclaimed() const { return header().takesReclaimed.load(std::memory_order_relaxed); }
+
     // -----------------------------------------------------------------------
     // Devices (phase 3)
     // -----------------------------------------------------------------------
@@ -884,6 +958,14 @@ public:
                 return true;
             case EvArrangementAck: return onArrangementAck(e);
             case EvSignaturesAck:  return onSignaturesAck(e);
+            // A take carries no pool block and no cell generation, so there is
+            // no client-side bookkeeping to do here — the whole of the client's
+            // duty is to read the file and answer releaseTake(), and that is a
+            // decision only the caller can make. Claimed as "one of the
+            // protocol's own" so a caller can tell a take event from an engine
+            // event without knowing every code.
+            case EvTakeReady:
+            case EvTakeFailed:     return true;
             default:             return false;
         }
     }

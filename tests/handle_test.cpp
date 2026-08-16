@@ -27,6 +27,9 @@
 // a TEST asserting what happens at kMaxArrItems has to name the real number
 // rather than a copy of it that can drift.
 #include "src/ipc/control.h"
+// For reapStale(): a SIGKILLed daemon leaves its region behind, and picking it
+// up is the client's job (§4.1), not a tidy-up this test invented.
+#include "src/ipc/client.h"
 // For the hardware-MIDI check below, which sends a real sequencer event into
 // the GUI's own ALSA client. There is no other way to prove that path: the
 // reader thread is the producer and a fake would test the fake.
@@ -40,6 +43,8 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <csignal>
+#include <atomic>
+#include <thread>
 
 using namespace lat;
 
@@ -51,6 +56,9 @@ static int gPass = 0, gFail = 0;
 static void sleepMs(int ms) { timespec t{ms/1000,(long)(ms%1000)*1000000L}; nanosleep(&t,nullptr); }
 
 static void banner(const char* s) { std::printf("\n== %s\n", s); }
+
+static int  countShm(const char* needle);
+static void testRecording(const char* baseSession);
 
 // The master peak over `frames` polls, with the event pump running — i.e. the
 // frame loop App runs, with the meter read off the snapshot like every other
@@ -125,6 +133,402 @@ struct FakeDevice : lat::PluginInstance {
     void setBypassed(bool b) override { byp = b; }
     bool bypassed() const override { return byp; }
 };
+
+// ---------------------------------------------------------------------------
+// Recording through the seam  (docs/GUI-ON-DAEMON.md §7)
+// ---------------------------------------------------------------------------
+//
+// This is the near side of the last feature, and the ONE thing only this suite
+// can show: that App's recording code does not have to change. So everything
+// below goes through pushCommand()/popEvent() with a GUI-heap buffer, in exactly
+// the sequence app_engine.cpp uses — allocate, push Cmd::RecordSlot with `p` and
+// a capacity, push the same command again to stop, wait for Ev::RecordFinished
+// carrying that same pointer back — and asserts on what comes home.
+//
+// It also carries the quantization proof, and that needs a reference. The same
+// script is run against an IN-PROCESS engine driven by the block loop below, so
+// the two takes can be compared frame for frame rather than against a number
+// somebody worked out by hand. If the daemon's boundaries ever stopped being the
+// engine's own, this is what would say so.
+
+// A block clock for an in-process Engine, feeding the same synthetic ramp the
+// daemon's null driver feeds behind NXTAKT_DEBUG_INPUT. It is a copy of that
+// loop on purpose: the point of the reference is that the ENGINE is the same
+// code, not that the harness is.
+class LocalDriver {
+public:
+    bool start(lat::Engine& e, f64 rate, int block) {
+        eng_ = &e; sr_ = rate; block_ = block;
+        outL_.assign((size_t)block, 0.f); outR_.assign((size_t)block, 0.f);
+        inL_.assign((size_t)block, 0.f);  inR_.assign((size_t)block, 0.f);
+        run_.store(true);
+        th_ = std::thread([this] { loop(); });
+        return true;
+    }
+    void stop() { if (!run_.exchange(false)) return; if (th_.joinable()) th_.join(); }
+    ~LocalDriver() { stop(); }
+
+private:
+    void loop() {
+        const u64 blockNs = (u64)((f64)block_ / sr_ * 1e9);
+        const u64 origin = nowNs();
+        u64 rendered = 0;
+        while (run_.load()) {
+            const u64 now = nowNs();
+            const u64 due = now >= origin ? (now - origin) / blockNs + 1 : 1;
+            u64 want = due > rendered ? due - rendered : 0;
+            if (want > 32) { rendered = due - 1; want = 1; }
+            for (u64 i = 0; i < want; ++i) {
+                for (int k = 0; k < block_; ++k) {
+                    const f32 v = (f32)(ramp_ % 65536) / 65536.f;
+                    inL_[(size_t)k] = v; inR_[(size_t)k] = -v;
+                    ++ramp_;
+                }
+                eng_->process(inL_.data(), inR_.data(), outL_.data(), outR_.data(), block_);
+                ++rendered;
+            }
+            const u64 next = origin + rendered * blockNs;
+            timespec ts{(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
+            ::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+        }
+    }
+    static u64 nowNs() {
+        timespec t{};
+        ::clock_gettime(CLOCK_MONOTONIC, &t);
+        return (u64)t.tv_sec * 1000000000ull + (u64)t.tv_nsec;
+    }
+    lat::Engine* eng_ = nullptr;
+    f64 sr_ = 48000.0;
+    int block_ = 256;
+    std::vector<f32> outL_, outR_, inL_, inR_;
+    u64 ramp_ = 0;
+    std::thread th_;
+    std::atomic<bool> run_{false};
+};
+
+// App::startRecording / stopRecording / finishRecording, with App taken out.
+// Returns the frames (or notes) the finish event reported, -1 if nothing came
+// home inside the timeout, and -2 if the take was never armed.
+//
+// The buffer is the CALLER's, exactly as App's is, and the assertion that
+// matters most is inside: the event that comes home carries the caller's own
+// pointer. Anything else would be a take handed back for somebody else's buffer.
+static i64 runTake(lat::EngineHandle& eng, lat::EngineState& es, int track, int slot,
+                   bool midi, void* buf, i64 cap, int holdMs, f64* startBeatOut = nullptr) {
+    lat::Command c;
+    c.type = midi ? lat::Cmd::RecordMidiSlot : lat::Cmd::RecordSlot;
+    c.a = track; c.b = slot; c.p = buf; c.x = (f64)cap;
+    if (!eng.pushCommand(c)) return -2;
+
+    lat::Event e;
+    bool armed = false;
+    f64  startBeat = -1.0;
+    for (int i = 0; i < 600 && !armed; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e))
+            if (e.type == lat::Ev::RecordStarted && e.a == track) {
+                armed = true; startBeat = e.x;
+            }
+        if (!armed) sleepMs(10);
+    }
+    if (startBeatOut) *startBeatOut = startBeat;
+    if (!armed) return -2;
+
+    for (int i = 0; i < holdMs / 10; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+
+    if (!eng.pushCommand(c)) return -2;          // the same command stops it
+    for (int i = 0; i < 900; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(e)) {
+            const bool fin = midi ? e.type == lat::Ev::MidiRecordFinished
+                                  : e.type == lat::Ev::RecordFinished;
+            if (fin && e.p == buf) return (i64)e.x;
+            if (fin) { std::printf("  FAIL  a take came home for the WRONG buffer\n"); ++gFail; }
+        }
+        sleepMs(10);
+    }
+    return -1;
+}
+
+// How many frames a stereo ramp take is contiguous for, and whether the right
+// channel is the left one's negation throughout. Zero breaks is the property:
+// a gap is a block the audio thread dropped, which no length check can see.
+static void rampStats(const f32* buf, i64 frames, int& breaks, int& swapped, int& silent) {
+    breaks = swapped = silent = 0;
+    for (i64 i = 0; i < frames; ++i) {
+        const f32 l = buf[i * 2], r = buf[i * 2 + 1];
+        if (r != -l) ++swapped;
+        if (l == 0.f && r == 0.f) ++silent;
+        if (i == 0) continue;
+        const f32 prev = buf[(i - 1) * 2];
+        if (!(prev > 0.9f && l < 0.1f) && l - prev != 1.f / 65536.f) ++breaks;
+    }
+}
+
+static void testRecording(const char* baseSession) {
+    banner("recording through the seam: App's own sequence, unedited");
+
+    // --- the in-process reference ------------------------------------------
+    //
+    // Run FIRST, so the number the daemon has to match is a measurement and not
+    // a constant somebody typed. Same tempo, same quantum, same actions.
+    const i64 cap = 48000 * 8;
+    std::vector<f32> refBuf((size_t)cap * 2, 0.f);
+    i64 refFrames = -1;
+    f64 refStart  = -1.0;
+    {
+        lat::EngineHandle loc;
+        lat::EngineState les;
+        CHECK(loc.openLocalEngine("null"), "an in-process engine, for the reference take");
+        LocalDriver drv;
+        if (loc.local()) drv.start(*loc.local(), 48000.0, 256);
+        loc.send(lat::Cmd::SetTempo, 0, 0, 120.0);
+        loc.send(lat::Cmd::SetQuantum, 4);              // 1 Bar
+        loc.send(lat::Cmd::SetPlaying, 1);
+        sleepMs(120);
+        refFrames = runTake(loc, les, 0, 0, false, refBuf.data(), cap, 300, &refStart);
+        CHECK(refFrames > 0, "the in-process take came home (%lld frames)",
+              (long long)refFrames);
+        int b = 0, s = 0, z = 0;
+        if (refFrames > 0) rampStats(refBuf.data(), refFrames, b, s, z);
+        CHECK(refFrames > 0 && b == 0 && s == 0,
+              "contiguous, channels the right way round (%d breaks, %d swapped)", b, s);
+        drv.stop();
+        loc.close();
+        CHECK(loc.takesReturned() == 0 && loc.takesLost() == 0,
+              "and the take counters read 0 locally, because none of those states "
+              "exists in-process");
+    }
+
+    // --- the same take, through the daemon ----------------------------------
+    char rsession[80];
+    std::snprintf(rsession, sizeof rsession, "%s-rec", baseSession);
+    ::setenv("NXTAKT_SESSION", rsession, 1);
+    ::setenv("NXTAKT_DEBUG_INPUT", "ramp", 1);      // the daemon's capture signal
+    lat::EngineHandle eng;
+    lat::EngineState es;
+    const bool up = eng.open("null");
+    ::unsetenv("NXTAKT_DEBUG_INPUT");
+    CHECK(up && eng.remoteOpen(), "a daemon-mode handle on session '%s'", rsession);
+    if (!up || !eng.remoteOpen()) { ::setenv("NXTAKT_SESSION", baseSession, 1); return; }
+
+    eng.send(lat::Cmd::SetTempo, 0, 0, 120.0);
+    eng.send(lat::Cmd::SetQuantum, 4);
+    eng.send(lat::Cmd::SetPlaying, 1);
+    sleepMs(150);
+
+    std::vector<f32> buf((size_t)cap * 2, 0.f);
+    f64 remStart = -1.0;
+    const i64 frames = runTake(eng, es, 0, 0, false, buf.data(), cap, 300, &remStart);
+    CHECK(frames > 0,
+          "Ev::RecordFinished came back carrying the GUI's OWN buffer (%lld frames) "
+          "— App's finishRecording() matches on that pointer and would leak the "
+          "take if anything else arrived", (long long)frames);
+
+    // THE QUANTIZATION PROOF. The launch-quantum machinery is engine-side and
+    // identical on both paths, but "identical code" is an argument and this is a
+    // measurement: same set, same actions, same boundaries, same frame count.
+    CHECK(refFrames > 0 && frames > 0 && std::llabs((long long)(frames - refFrames)) <= 1,
+          "and it is the SAME LENGTH as the in-process take: %lld vs %lld frames "
+          "(one bar at 120 BPM). Quantized start and stop land on the same frames "
+          "on both paths.", (long long)frames, (long long)refFrames);
+    CHECK(remStart >= 0.0 && std::fabs(std::fmod(remStart, 4.0)) < 1e-6,
+          "both began on a bar line (%.4f remote, %.4f local)", remStart, refStart);
+
+    int breaks = 0, swapped = 0, silent = 0;
+    if (frames > 0) rampStats(buf.data(), frames, breaks, swapped, silent);
+    CHECK(frames > 0 && silent < frames / 2,
+          "the buffer really holds the daemon's captured input, not the zeros the "
+          "GUI allocated (%d silent of %lld)", silent, (long long)frames);
+    CHECK(breaks == 0 && swapped == 0,
+          "contiguous and correctly interleaved after crossing a file and a process "
+          "boundary (%d breaks, %d swapped)", breaks, swapped);
+    CHECK(eng.takesReturned() == 1 && eng.takesFailed() == 0 && eng.takesLost() == 0,
+          "the handle counts it returned (%llu returned, %llu empty, %llu failed, "
+          "%llu lost)", (unsigned long long)eng.takesReturned(),
+          (unsigned long long)eng.takesEmpty(), (unsigned long long)eng.takesFailed(),
+          (unsigned long long)eng.takesLost());
+
+    // --- a take that captured nothing ---------------------------------------
+    //
+    // Stopped inside the same bar it was queued in. The engine cancels it in
+    // SILENCE (engine.cpp: "there is no buffer to hand back, so no event goes
+    // out either") — which is fine in-process, where App's buffer was never
+    // lent, and would strand a daemon-mode take forever. App still has to get
+    // its buffer back, and it gets it as the zero-frame finish it already knows
+    // how to read: "Recording cancelled".
+    {
+        const u64 empty0 = eng.takesEmpty();
+        std::vector<f32> b2((size_t)48000 * 2, 0.f);
+        lat::Command c;
+        c.type = lat::Cmd::RecordSlot; c.a = 1; c.b = 0; c.p = b2.data(); c.x = 48000.0;
+        CHECK(eng.pushCommand(c), "queue a take on track 1");
+        sleepMs(30);
+        CHECK(eng.pushCommand(c), "and stop it before its bar line");
+        lat::Event e;
+        i64 got = -1;
+        for (int i = 0; i < 900 && got < 0; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e))
+                if (e.type == lat::Ev::RecordFinished && e.p == b2.data()) got = (i64)e.x;
+            sleepMs(10);
+        }
+        CHECK(got == 0,
+              "the buffer comes home with zero frames (%lld) rather than never "
+              "coming home at all", (long long)got);
+        CHECK(eng.takesEmpty() == empty0 + 1, "counted as empty, not as failed (%llu)",
+              (unsigned long long)eng.takesEmpty());
+    }
+
+    // --- a MIDI take --------------------------------------------------------
+    {
+        std::vector<lat::RtNote> notes(4096);
+        eng.send(lat::Cmd::TrackArm, 2, 1);
+        lat::Command c;
+        c.type = lat::Cmd::RecordMidiSlot;
+        c.a = 2; c.b = 0; c.p = notes.data(); c.x = (f64)notes.size();
+        CHECK(eng.pushCommand(c), "queue a MIDI take on track 2");
+        lat::Event e;
+        bool armed = false;
+        for (int i = 0; i < 600 && !armed; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e)) if (e.type == lat::Ev::RecordStarted && e.a == 2) armed = true;
+            if (!armed) sleepMs(10);
+        }
+        CHECK(armed, "it arms on a bar line");
+        for (int n = 0; n < 3; ++n) {
+            eng.pushMidi(lat::MidiMsg{0x90, (u8)(48 + n), 100, 0});
+            for (int i = 0; i < 6; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+            eng.pushMidi(lat::MidiMsg{0x80, (u8)(48 + n), 0, 0});
+            for (int i = 0; i < 2; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+        }
+        CHECK(eng.pushCommand(c), "and stop it");
+        i64 count = -1;
+        for (int i = 0; i < 900 && count < 0; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e))
+                if (e.type == lat::Ev::MidiRecordFinished && e.p == notes.data())
+                    count = (i64)e.x;
+            sleepMs(10);
+        }
+        CHECK(count >= 3, "the notes come home in the GUI's own RtNote[] (%lld)",
+              (long long)count);
+        bool pitched = count >= 3;
+        for (i64 i = 0; i < count && i < 3; ++i)
+            if (notes[(size_t)i].pitch < 48 || notes[(size_t)i].pitch > 50) pitched = false;
+        CHECK(pitched, "with the pitches that were played, in the GUI's own array — "
+                       "which is the whole of what App::finishMidiRecording reads");
+        eng.send(lat::Cmd::TrackArm, 2, 0);
+    }
+
+    // --- a second take on a busy track --------------------------------------
+    //
+    // App cannot ask for this (startRecording refuses a track whose recState is
+    // not idle), but recState is a MIRRORED atomic and a fast enough second
+    // click can read it stale. What must not happen then is a consumed command:
+    // App frees its capture buffer on the finish event and on nothing else, so
+    // "accepted" for a take that will never start is a buffer pinned for the
+    // rest of the session.
+    //
+    // `false` is the honest answer as well as the safe one — it is not a
+    // permanent refusal, it is "not while that take is running", and App reads
+    // it as "engine busy" and frees the buffer it just allocated.
+    {
+        std::vector<f32> b4((size_t)48000 * 2, 0.f), b5((size_t)48000 * 2, 0.f);
+        lat::Command c;
+        c.type = lat::Cmd::RecordSlot; c.a = 4; c.b = 0; c.p = b4.data(); c.x = 48000.0;
+        CHECK(eng.pushCommand(c), "start a take on track 4 slot 0");
+        lat::Event e;
+        bool armed = false;
+        for (int i = 0; i < 600 && !armed; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e)) if (e.type == lat::Ev::RecordStarted && e.a == 4) armed = true;
+            if (!armed) sleepMs(10);
+        }
+        CHECK(armed, "it arms");
+
+        lat::Command c2 = c;
+        c2.b = 1; c2.p = b5.data();
+        CHECK(!eng.pushCommand(c2),
+              "a second take on the SAME track, a different slot, answers false — "
+              "not consumed, so App frees the buffer instead of pinning it forever");
+
+        // And the live take is untouched by having been refused at.
+        CHECK(eng.pushCommand(c), "the original take still stops");
+        i64 got = -1;
+        for (int i = 0; i < 900 && got < 0; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e))
+                if (e.type == lat::Ev::RecordFinished && e.p == b4.data()) got = (i64)e.x;
+            sleepMs(10);
+        }
+        CHECK(got > 0, "and comes home with its material (%lld frames)", (long long)got);
+    }
+
+    // --- THE DAEMON DIES MID-TAKE -------------------------------------------
+    //
+    // The second arm of the crash matrix. App frees its capture buffer on the
+    // finish event and on nothing else, so a GUI that merely reported the lost
+    // engine would sit with the buffer pinned and the slot stuck in "recording"
+    // for the rest of the session. The handle answers for the engine that
+    // cannot: every take in flight is handed back empty, once, the moment the
+    // link is provably Lost.
+    {
+        std::vector<f32> b3((size_t)cap * 2, 0.f);
+        lat::Command c;
+        c.type = lat::Cmd::RecordSlot; c.a = 3; c.b = 0; c.p = b3.data(); c.x = (f64)cap;
+        CHECK(eng.pushCommand(c), "start a take on track 3");
+        lat::Event e;
+        bool armed = false;
+        for (int i = 0; i < 600 && !armed; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e)) if (e.type == lat::Ev::RecordStarted && e.a == 3) armed = true;
+            if (!armed) sleepMs(10);
+        }
+        CHECK(armed, "it is armed and the daemon is capturing into its own buffer");
+
+        const i32 pid = eng.enginePid();
+        CHECK(pid > 0 && ::kill(pid, SIGKILL) == 0, "SIGKILL the engine mid-take (pid %d)",
+              (int)pid);
+
+        i64 got = -1;
+        bool lost = false;
+        for (int i = 0; i < 900 && got < 0; ++i) {
+            eng.poll(es);
+            if (es.link == lat::EngineLink::Lost) lost = true;
+            while (eng.popEvent(e))
+                if (e.type == lat::Ev::RecordFinished && e.p == b3.data()) got = (i64)e.x;
+            sleepMs(10);
+        }
+        CHECK(lost, "the handle reports the engine Lost");
+        CHECK(got == 0,
+              "and hands the capture buffer back empty (%lld frames) — the GUI is "
+              "free, the slot is idle, and nothing is waiting on a process that no "
+              "longer exists", (long long)got);
+        CHECK(eng.takesLost() >= 1, "counted as lost with the engine (%llu), which is "
+              "the number that distinguishes a crash from an empty take",
+              (unsigned long long)eng.takesLost());
+
+        // Nothing wedged: the handle still polls, still answers, still restarts.
+        eng.poll(es);
+        CHECK(es.link == lat::EngineLink::Lost, "and it keeps polling without wedging");
+    }
+
+    eng.close();
+    sleepMs(400);
+    // The engine was SIGKILLed above, so its control region is an ORPHAN — it
+    // never ran the shutdown that unlinks the name. That is §4.1's whole reason
+    // for reapStale(), and calling it here is what the GUI does on its next
+    // attach rather than a tidy-up this test invented.
+    CHECK(countShm(rsession) == 1,
+          "one region is left: a SIGKILLed daemon cannot unlink its own name (%d)",
+          countShm(rsession));
+    CHECK(ipc::EngineClient::reapStale(rsession),
+          "and reapStale() takes it, because the creator is provably gone");
+    CHECK(countShm(rsession) == 0, "the recording session's regions are gone (%d left)",
+          countShm(rsession));
+    ::setenv("NXTAKT_SESSION", baseSession, 1);
+}
 
 static int countShm(const char* needle) {
     DIR* d = ::opendir("/dev/shm");
@@ -1275,6 +1679,8 @@ int main() {
     CHECK(countShm(session) == 0,
           "close() stopped the daemon it spawned and unlinked both regions "
           "(%d left in /dev/shm)", countShm(session));
+
+    testRecording(session);
 
     // =====================================================================
     // The other two backings, so the new accessors are not daemon-only

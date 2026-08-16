@@ -1167,6 +1167,14 @@ public:
         return (u64)(q - base_);
     }
 
+    // Is the GUI that created this pool still running? The pool's ownership
+    // inversion is what makes this useful to the daemon: the control region's
+    // creator is the daemon itself, so the only pid in shared memory that
+    // belongs to the *client* is this one. It is the daemon's whole answer to
+    // "my client was SIGKILLed", and it is why a take does not need a heartbeat
+    // in the protocol to be reclaimable.
+    bool creatorAlive() const { return region_.creatorAlive(); }
+
 private:
     void setErr(const char* fmt, ...) {
         va_list ap;
