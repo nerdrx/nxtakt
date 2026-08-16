@@ -1667,6 +1667,20 @@ void App::drawStatusBar(const Rect& r) {
     if (es_.devicesPending > 0)
         snprintf(syncTag, sizeof syncTag, " · syncing %u", es_.devicesPending);
 
+    // Refusals the daemon has answered with. Each non-zero is a specific
+    // audible lie somewhere on screen -- a timeline drawn but not playing, a
+    // 7/8 ruler over a 4/4 engine -- and until now the counters were readable
+    // and drawn nowhere. Amber, because it is attention and not damage: the
+    // model is intact, the engine's copy is behind. One tag, total count; the
+    // log has the per-command reasons.
+    char refuseTag[36] = "";
+    const u64 refusals = eng_.remoteRefusals()
+                       + eng_.arrangementsRefused()
+                       + eng_.signaturesRefused();
+    if (refusals > 0)
+        snprintf(refuseTag, sizeof refuseTag, " · %llu refused",
+                 (unsigned long long)refusals);
+
     char buf[224];
     snprintf(buf, sizeof buf, "%s · %s %.0f Hz / %d fr%s%s%s · %.0f fps · %d draws",
              win_.backendName(),
@@ -1678,6 +1692,11 @@ void App::drawStatusBar(const Rect& r) {
              midiTag,
              fps_, rend_.drawCalls());
     rend_.textIn(fSmall_, r, buf, kIdleInk, Align::Right, nx::sp1 * s);
+    // The refusal tag is its own draw so it can be amber -- attention, not
+    // damage -- instead of vanishing into the faint utility text beside it.
+    if (refuseTag[0])
+        rend_.textIn(fSmall_, {r.x, r.y, r.w - fSmall_.measure(buf) - 12 * s, r.h},
+                     refuseTag + 3, pal::meterAmber, Align::Right, nx::sp1 * s);
 }
 
 

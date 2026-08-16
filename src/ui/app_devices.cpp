@@ -869,8 +869,18 @@ void App::drawDeviceStrip(const Rect& r) {
         // The card's title is a micro-label (§5): 10px, uppercase, wide
         // tracking. A device name is an identity, not a sentence.
         Rect nameR{title.x + 10 * s, title.y, (isRack ? kr.x : br.x) - title.x - 12 * s, title.h};
+        // A device the DAEMON refused or has not confirmed is not an ordinary
+        // silent device, and drawing it as one was the §12.7(3) debt: the
+        // card sat in the strip looking healthy while the engine ran nothing.
+        // Amber name = attention; hover says the daemon's own reason.
+        const RemoteDevice* rd = eng_.remoteDevice(d.inst.get());
+        const bool refused = rd && !rd->error.empty();
         microFit(ui_, fSmall_, nameR, d.desc.name.c_str(),
-                 (sel ? nx::text : nx::muted).alpha(dim), Align::Left, 0);
+                 refused ? pal::meterAmber.alpha(dim)
+                         : (sel ? nx::text : nx::muted).alpha(dim),
+                 Align::Left, 0);
+        if (refused && ui_.setHot(uiId(31, (int)i + 900), nameR) && ui_.isHot(uiId(31, (int)i + 900)))
+            ui_.tip = "Engine refused this device: " + rd->error;
 
         // Bypass lives on the instance, so the chain does not have to be
         // republished; setBypassed() is GUI-safe per the host contract.
