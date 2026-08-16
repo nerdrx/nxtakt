@@ -1674,9 +1674,15 @@ void App::drawStatusBar(const Rect& r) {
     // model is intact, the engine's copy is behind. One tag, total count; the
     // log has the per-command reasons.
     char refuseTag[36] = "";
+    // takesFailed/takesLost join the family: each is a performance that
+    // happened and was not kept, which is the most expensive kind of loss
+    // this program can have. takesEmpty is deliberately NOT counted -- an
+    // empty take is a musician changing their mind, not a failure.
     const u64 refusals = eng_.remoteRefusals()
                        + eng_.arrangementsRefused()
-                       + eng_.signaturesRefused();
+                       + eng_.signaturesRefused()
+                       + eng_.takesFailed()
+                       + eng_.takesLost();
     if (refusals > 0)
         snprintf(refuseTag, sizeof refuseTag, " · %llu refused",
                  (unsigned long long)refusals);
