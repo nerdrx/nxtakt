@@ -66,7 +66,7 @@ the audio.
 | **Piano roll** | Fold (incl. fold-to-scale), scale highlight + snap (14 modes), 1/16 grid, drag / resize / delete, multi-select, velocity lane, per-note chance and velocity range (deterministic under offline render), quantize with strength, legato, live playhead. No stuck notes across loop wraps or clip switches. |
 | **MIDI in** | ALSA sequencer port plus an FL-Studio-style computer keyboard (`Ctrl+Shift+K`), routed per block to note-capable devices on armed tracks, with Live-style auto-arm on select. Overdub passes into a playing clip. |
 | **Warping** | **Beats** is a two-grain overlap-add stretcher that follows the session tempo while preserving pitch; **Repitch** transposes with the tempo; **Off** ignores it. |
-| **Recording** | Arm a track, click an empty slot. Quantised start and stop on the launch grid; takes come back as warped clips at the session tempo, with pre-chain input monitoring. |
+| **Recording** | Arm a track, click an empty slot. Quantised start and stop on the launch grid; takes come back as warped clips at the session tempo, with pre-chain input monitoring. Works identically against the engine daemon — same frames, proven. |
 | **Plugins** | Per-track device chains in the signal path — **LV2** via lilv and **CLAP**, both with working note input — plus a filterable browser, bypass and parameter knobs. 410 usable on a stock Arch box. |
 | **Stock devices** | Eleven, riding the same machinery as every third-party plugin: `Pulse` (8-voice PolyBLEP morph synth), `Saturator`, `EQ Three`, `Compressor`, `Delay`, `Reverb`, `Auto Filter`, `Chorus`, `Limiter` (true lookahead, honestly-reported latency), `Utility`, and `Rack` — 8 macro knobs over a nested chain, min>max inverts. |
 | **Buses** | Post-fader sends into four return chains and a master chain, with plugin delay compensation aligning every parallel path into the master sum. |
@@ -127,12 +127,15 @@ Audio comes up on JACK if it is running — playback *and* capture auto-connecte
 ## Not done yet
 
 - VST3 is not started (licensing).
-- The in-process engine is still the default. `NXTAKT_ENGINE=daemon` runs the
-  GUI against `nxtaktd` — clips, devices, the plugin catalog and lifecycle all
-  cross the process boundary — but recording and rack contents do not yet, and
-  signature maps are refused (daemon mode plays 4/4).
-- The Windows window and audio backends compile under a Windows-targeting
-  compiler but have never driven a real window station or audio endpoint.
+- The in-process engine is still the default, but no longer for a feature
+  reason: `NXTAKT_ENGINE=daemon` now carries everything — clips, devices,
+  racks with their contents, arrangements, signature maps, hardware MIDI and
+  recording, with kill -9 tested in both directions. It stays opt-in for one
+  release to soak before the default flips.
+- The Windows GUI has reached first light — the full interface drawn by a
+  Windows binary under Wine, WGL context, WASAPI endpoint — but has never run
+  on real Windows hardware, and most input paths are unexercised. Scope in
+  [`docs/PORTING.md`](docs/PORTING.md).
 
 ## Testing without a visible window
 
