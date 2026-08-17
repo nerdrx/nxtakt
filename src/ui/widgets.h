@@ -242,6 +242,51 @@ struct Ui {
     // segments. Callers put hairlineV seams between segments themselves.
     void segCluster(const Rect& b) const;
 
+    // --- the instrument vocabulary ----------------------------------------
+    //
+    // Additive, and added for Spectra's editor (app_spectra.cpp), which is the
+    // first surface in the program whose parameters are LOGARITHMIC, BIPOLAR
+    // and sometimes ABSENT. knob() above says none of those three: it drags
+    // linearly, it infers "bipolar" from the sign of the range, and it has no
+    // way to draw a control whose parameter the device it is pointed at does
+    // not have. All three are properties of the parameter, so they belong in a
+    // style struct rather than in six more positional arguments.
+
+    struct KnobStyle {
+        f32  lo = 0.f, hi = 1.f, def = 0.f;
+        // Drag, arc and readout all live in log space. Ignored unless lo > 0
+        // and hi > lo, so a mis-flagged parameter degrades to linear rather
+        // than to a NaN.
+        bool log = false;
+        // The arc grows out of the CENTRE rather than from the left stop, the
+        // detent is drawn at twelve o'clock, and a drag catches there.
+        bool bipolar = false;
+        // §1: violet leads, so a control's own arc is violet. Cyan is for the
+        // arcs that report something LIVE rather than something set.
+        Col  arc = nx::violet;
+        const char* fmt  = "%.2f";     // null: no readout at all
+        const char* text = nullptr;    // overrides the formatted number
+        f32  dim = 1.f;                // §5's disabled weight
+        // The device this knob was pointed at has no such parameter. Draws the
+        // socket and nothing in it, and takes no input -- see the guard note in
+        // app_spectra.cpp.
+        bool absent = false;
+    };
+    // Circular knob in the NX language: the cap is a --glass-1 surface with the
+    // 1px lit edge, like every other surface in the system. Returns true while
+    // the value is changing.
+    bool knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st);
+
+    // A recessed horizontal trough whose fill IS the value.
+    //
+    // §1's light-rides-motion rule, literally: the specular band's phase is the
+    // value, so the highlight slides along the fill as the fill grows and
+    // stands still when the value does. Nothing here is time-driven, so there
+    // is nothing for reduced motion to freeze -- and sheen() refuses to draw
+    // under it anyway.
+    bool trough(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, const Col& fill,
+                f32 dim = 1.f);
+
     // --- drawing helpers --------------------------------------------------
     void meterV(const Rect& b, f32 lvl, f32 peak);   // vertical peak meter
     void arc(f32 cx, f32 cy, f32 rad, f32 a0, f32 a1, f32 th, const Col& c);

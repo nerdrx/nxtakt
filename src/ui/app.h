@@ -450,6 +450,42 @@ private:
     void debugRackUndoCheck(RackControl* rc);   // NXTAKT_DEBUG_RACK + _UNDO
     int  rackLatencyOf(RackControl* rc) const;
 
+    // --- Spectra, the wavetable instrument's editor (app_spectra.cpp) -------
+    //
+    // The rack panel's structure, for a device that is not a container: a card
+    // that opens BESIDE its device box in the strip, because forty-two controls
+    // do not fit in 150 logical pixels and the alternative -- a floating window
+    // -- is a second window system this program does not have.
+    //
+    // The whole panel is built against docs/SPECTRA-PARAMS.md and nothing else.
+    // It never assumes the device in front of it actually has forty-two
+    // parameters: every id is guarded, so the debug hook can open it on a
+    // three-parameter delay and get a legible panel of empty sockets rather
+    // than a crash.
+    static bool isSpectra(const PluginInstance* p);
+    void drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc);
+    // Which slot of `devices` has its panel open, or -1. Resolved from the uid
+    // every frame, for the reason rackOpenUid_ is a uid: a chain edit must not
+    // slide an open panel onto a different device.
+    int  spectraOpenIdx(const std::vector<DeviceModel>& devices) const;
+    // Headless hooks: NXTAKT_DEBUG_SPECTRA=1 opens the panel on the first
+    // device of track 0 whatever that device is, and NXTAKT_DEBUG_SPECTRAPOS
+    // sweeps A Position through the slider's own code path. Inert without them.
+    void debugSeedSpectra();
+    u64  spectraOpenUid_ = 0;          // 0 = no Spectra panel open
+    // Set only by the debug hook: "open this panel even though the device is
+    // not a Spectra", which is how the guarded states get a screenshot.
+    bool spectraForced_ = false;
+    bool spectraSeeded_ = false;
+    // "Scroll the strip so the newly-opened panel is actually on screen." Acted
+    // on inside the strip's layout loop, which is the only place that knows
+    // where the panel landed.
+    bool spectraScrollTo_ = false;
+    int  spectraPreset_ = 0;           // the preset row's cursor
+    // Scratch for the wavetable trace, kept across frames so a display redrawn
+    // sixty times a second does not allocate sixty times a second.
+    std::vector<f32> spectraWave_;
+
     Session  ses_;
     MainView view_ = MainView::Session;
 

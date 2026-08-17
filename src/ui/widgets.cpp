@@ -88,6 +88,39 @@ inline f32 norm01(f32 v, f32 lo, f32 hi) {
     return (hi - lo) > 1e-9f ? clampv((v - lo) / (hi - lo), 0.f, 1.f) : 0.f;
 }
 
+// --- KnobStyle's two mappings ----------------------------------------------
+//
+// A logarithmic parameter is one whose USEFUL resolution is per-octave: an
+// 8 kHz cutoff and a 20 Hz one are one knob apart in music and three orders of
+// magnitude apart in hertz, and dragging that range linearly spends the top
+// four fifths of the sweep above 4 kHz. So both the drag and the arc live in
+// t = log(v/lo)/log(hi/lo) instead, and the flag is honoured only when the
+// range can actually carry a logarithm -- a mis-flagged parameter degrades to
+// linear rather than to a NaN that would then be written into a plugin.
+inline bool knobLog(const Ui::KnobStyle& st) {
+    return st.log && st.lo > 1e-9f && st.hi > st.lo;
+}
+inline f32 knobT(const Ui::KnobStyle& st, f32 v) {
+    const f32 lo = std::min(st.lo, st.hi), hi = std::max(st.lo, st.hi);
+    if (knobLog(st))
+        return clampv(std::log(clampv(v, lo, hi) / st.lo) / std::log(st.hi / st.lo), 0.f, 1.f);
+    return norm01(v, lo, hi);
+}
+inline f32 knobV(const Ui::KnobStyle& st, f32 t) {
+    t = clampv(t, 0.f, 1.f);
+    if (knobLog(st)) return st.lo * std::exp(t * std::log(st.hi / st.lo));
+    return st.lo + (st.hi - st.lo) * t;
+}
+
+// A liquid fill in an arbitrary hue: fillOf()'s ramp turned along the 147deg
+// axis every lit edge in the system uses, so a trough is lit by the same lamp
+// as the glass it sits in.
+nx::Grad liquidOf(const Col& c) {
+    return {{{c.mix(Col(1.f, 1.f, 1.f, c.a), 0.34f), 0.00f},
+             {c,                                     0.55f},
+             {c.scale(0.55f),                        1.00f}}, 3, 147.f};
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -678,6 +711,184 @@ bool Ui::knob(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, f32 def, const char
     }
 
     if (hotNow || active == id) cursor = Cursor::ResizeV;
+    return changed;
+}
+
+// ---------------------------------------------------------------------------
+// The instrument knob
+//
+// knob() above and this are deliberately two widgets rather than one with more
+// arguments. That one is the generic device-panel control: it takes whatever
+// range a scanned plugin declares and drags it linearly, which is right when
+// nothing is known about the parameter. This one is for a panel that KNOWS its
+// parameters -- their curve, their centre, and whether the device in front of
+// it even has them -- and it is skinned in the design language rather than in
+// the pre-NX palette: the cap is a --glass-1 surface with the 1px lit edge,
+// which is what makes a wall of forty knobs read as one material.
+// ---------------------------------------------------------------------------
+
+bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
+    if (!v || !r) return false;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    Font* vf = fSmall ? fSmall : fBody;
+    const bool showText = (st.fmt || st.text) && vf;
+    const f32 textH = showText ? vf->height() : 0.f;
+    const f32 avail = std::min(b.w, b.h - textH);
+    const f32 rad = avail * 0.5f - 2.f * dpi;
+    if (rad <= 1.f) return false;
+    const f32 cx = b.cx(), cy = b.y + 2.f * dpi + rad;
+
+    const f32 lo = std::min(st.lo, st.hi), hi = std::max(st.lo, st.hi);
+    bool changed = false, hotNow = false;
+
+    // An absent parameter takes no input at all -- not "takes it and ignores
+    // it": it never claims hot, so the pointer passes through to whatever is
+    // under it and the cursor never changes over a socket with nothing in it.
+    if (!st.absent) {
+        const bool over = setHot(id, b);
+        hotNow = isHot(id);
+        if (in->pressed[0] && hotNow) {
+            active = id;
+            dragAccum = 0.f;
+            dragStart = (f64)knobT(st, *v);
+        }
+        if (in->dblClick && over) {
+            const f32 nv = clampv(st.def, lo, hi);
+            if (nv != *v) { *v = nv; changed = true; }
+            dragStart = (f64)knobT(st, *v);
+            dragAccum = 0.f;
+        }
+        if (active == id && in->dy != 0.f) {
+            dragAccum += -in->dy * fineScale(in);          // up is more
+            f32 t = clampv((f32)dragStart + dragAccum / kKnobTravel, 0.f, 1.f);
+            // The detent CATCHES. A bipolar depth is a control whose most
+            // useful value is exactly zero, and hitting zero on a 150px sweep
+            // by hand is a coin toss; the drag accumulator keeps counting
+            // underneath, so leaving the detent costs the same pixels it cost
+            // to arrive at it.
+            if (st.bipolar) {
+                const f32 tc = knobT(st, 0.f);
+                if (std::fabs(t - tc) < 0.02f) t = tc;
+            }
+            const f32 nv = knobV(st, t);
+            if (nv != *v) { *v = nv; changed = true; }
+        }
+        if (in->released[0] && active == id) active = 0;
+    }
+
+    // --- draw --------------------------------------------------------------
+    const f32 dim  = clampv(st.dim, 0.f, 1.f);
+    const bool live = !st.absent && (hotNow || active == id);
+    const f32 t   = knobT(st, clampv(*v, lo, hi));
+    const f32 ang = kKnobA0 + (kKnobA1 - kKnobA0) * t;
+
+    // The cap. A rounded rect at radius = half its width IS a circle, so the
+    // knob gets --glass-1 and the gradient edge rather than the two flat discs
+    // the old knob paints -- same lamp, upper-left, as every other surface.
+    const Rect cap{cx - rad, cy - rad, rad * 2.f, rad * 2.f};
+    r->gradRect(cap, rad, nx::glass1, (st.absent ? 0.30f : 0.95f) * dim);
+    r->gradStroke(cap, rad, dpi, nx::edge, (st.absent ? 0.28f : 0.85f) * dim);
+
+    const f32 aRad = rad + 2.5f * dpi;
+    const f32 aTh  = std::max(1.5f * dpi, rad * 0.17f);
+    arc(cx, cy, aRad, kKnobA0, kKnobA1, aTh, nx::muted.alpha(0.20f * dim));
+
+    if (!st.absent) {
+        const Col ac = st.arc.alpha((live ? 1.f : 0.82f) * dim);
+        if (st.bipolar) {
+            const f32 centre = kKnobA0 + (kKnobA1 - kKnobA0) * knobT(st, 0.f);
+            if (std::fabs(ang - centre) > 1e-3f) arc(cx, cy, aRad, centre, ang, aTh, ac);
+        } else if (t > 0.001f) {
+            arc(cx, cy, aRad, kKnobA0, ang, aTh, ac);
+        }
+        // The indicator, from the middle of the cap outward.
+        const f32 i0 = rad * 0.28f, i1 = rad * 0.88f;
+        r->line(cx + std::cos(ang) * i0, cy + std::sin(ang) * i0,
+                cx + std::cos(ang) * i1, cy + std::sin(ang) * i1,
+                std::max(1.f, 1.5f * dpi), nx::text.alpha(dim));
+    }
+    // The detent, drawn for every bipolar control whether or not it is sitting
+    // at it: it is the mark that says this knob HAS a middle. OUTSIDE the value
+    // ring rather than across it -- at the centre the indicator points straight
+    // at twelve o'clock, and a tick under the indicator is a tick nobody can
+    // see at the one value it exists to mark.
+    if (st.bipolar) {
+        const f32 da = kKnobA0 + (kKnobA1 - kKnobA0) * knobT(st, 0.f);
+        // Two pixels, and no more: this is the one mark in the widget that
+        // reaches outside the rect it was given, and the caller's row gap is
+        // what it reaches into.
+        const f32 t0 = aRad + aTh * 0.5f + 0.5f * dpi, t1 = t0 + 2.f * dpi;
+        r->line(cx + std::cos(da) * t0, cy + std::sin(da) * t0,
+                cx + std::cos(da) * t1, cy + std::sin(da) * t1,
+                std::max(1.f, dpi), nx::muted.alpha(0.85f * dim));
+    }
+
+    if (showText) {
+        char buf[64];
+        if (st.absent)        std::snprintf(buf, sizeof buf, "-");
+        else if (st.text)     std::snprintf(buf, sizeof buf, "%s", st.text);
+        else                  std::snprintf(buf, sizeof buf, st.fmt, (double)*v);
+        const Rect tr{b.x, b.bottom() - textH, b.w, textH};
+        const Col c = st.absent ? nx::muted.alpha(0.40f * dim)
+                                : (live ? nx::text : nx::muted).alpha(dim);
+        drawTextIn(*vf, tr, buf, c, Align::Center, 0.f);
+    }
+
+    if (live) cursor = Cursor::ResizeV;
+    return changed;
+}
+
+// ---------------------------------------------------------------------------
+// The value trough
+// ---------------------------------------------------------------------------
+
+bool Ui::trough(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, const Col& fill, f32 dim) {
+    if (!v || !r || b.w <= 2.f || b.h <= 1.f) return false;
+    const f32 dpi = std::max(1.f, r->dpiScale());
+    const f32 rad = std::min(nx::radiusXs * dpi, b.h * 0.5f);
+    const f32 span = hi - lo;
+
+    setHot(id, b);
+    const bool hotNow = isHot(id);
+    bool changed = false;
+    const auto write = [&](f32 nv) {
+        nv = clampv(nv, std::min(lo, hi), std::max(lo, hi));
+        if (nv != *v) { *v = nv; changed = true; }
+    };
+
+    if (in->pressed[0] && hotNow) {
+        active = id;
+        dragAccum = 0.f;
+        // A press JUMPS: a trough this short is a target, not a handle, and
+        // hunting for a 1px head to grab would be the worse of the two.
+        write(lo + span * clampv((in->mx - b.x) / b.w, 0.f, 1.f));
+        dragStart = (f64)*v;
+    }
+    if (active == id && in->dx != 0.f) {
+        dragAccum += in->dx * fineScale(in);
+        write((f32)dragStart + span * (dragAccum / b.w));
+    }
+    if (in->released[0] && active == id) active = 0;
+
+    const f32 t = std::fabs(span) > 1e-9f ? clampv((*v - lo) / span, 0.f, 1.f) : 0.f;
+    dim = clampv(dim, 0.f, 1.f);
+
+    r->well(b, rad, true);
+    if (t > 0.001f) {
+        const Rect f{b.x, b.y, std::max(rad * 2.f, b.w * t), b.h};
+        r->gradRect(f, rad, liquidOf(fill), dim);
+        // §1: the specular is a FUNCTION OF THE VALUE. It rides the fill as the
+        // fill grows and holds still when the value does -- no timer anywhere
+        // in this widget, which is the difference between light and an effect.
+        r->sheen(f, rad, t, 0.55f * dim);
+    }
+    r->gradStroke(b, rad, dpi, nx::edge, 0.55f * dim);
+
+    const f32 hx = clampv(std::round(b.x + b.w * t) - dpi, b.x, b.right() - dpi);
+    r->rect({hx, b.y + dpi, dpi, b.h - 2.f * dpi},
+            nx::text.alpha(((hotNow || active == id) ? 0.95f : 0.55f) * dim));
+
+    if (hotNow || active == id) cursor = Cursor::ResizeH;
     return changed;
 }
 

@@ -711,7 +711,14 @@ void App::drawDeviceStrip(const Rect& r) {
     // because it needs the plugin scan the DEVICES tab triggers and the chain
     // the tab is parked on.
     static bool seeded = false;
-    if (!seeded) { seeded = true; debugSeedRack(); co = chainOwner(devOwner_); }
+    if (!seeded) {
+        seeded = true;
+        debugSeedRack();
+        // After debugSeedRack, never before: that one calls undo(), which
+        // move-assigns ses_ and dangles every DeviceModel* taken above it.
+        debugSeedSpectra();
+        co = chainOwner(devOwner_);
+    }
     if (!co.devices) return;
 
     // Once a frame, and free unless something is actually waiting: an undo that
@@ -759,6 +766,12 @@ void App::drawDeviceStrip(const Rect& r) {
     }
 
     const f32 boxW = 150 * s, gap = 5 * s, rackW = 448 * s;
+    // Spectra's editor opens the same way a rack does and is laid out to the
+    // same constraint -- a dock 200 logical pixels tall -- so it is wide and
+    // short. The number is the seven column widths plus six gaps plus two pads
+    // (app_spectra.cpp's kColW), and it fits the strip with the file browser
+    // closed; wider than the strip it simply scrolls, like everything else here.
+    const f32 specW = 1112 * s;
     // A rack that is open puts its inside into the strip, immediately after the
     // box it belongs to. Resolved before the layout because it widens it.
     RackControl* openRc = openRack();
@@ -767,8 +780,10 @@ void App::drawDeviceStrip(const Rect& r) {
         for (size_t i = 0; i < devices.size(); ++i)
             if (devices[i].uid == rackOpenUid_) { openIdx = (int)i; break; }
     if (openIdx < 0) openRc = nullptr;
+    const int specIdx = spectraOpenIdx(devices);
 
-    const f32 total = devices.size() * (boxW + gap) + (openRc ? rackW + gap : 0.f) + 6 * s;
+    const f32 total = devices.size() * (boxW + gap) + (openRc ? rackW + gap : 0.f)
+                    + (specIdx >= 0 ? specW + gap : 0.f) + 6 * s;
     const f32 maxScroll = std::max(0.f, total - area.w);
     stripScroll_ = clampv(stripScroll_, 0.f, maxScroll);
     bool wheelUsed = false;
@@ -780,16 +795,36 @@ void App::drawDeviceStrip(const Rect& r) {
         x += boxW + gap;
         Rect rackBox{x, box.y, rackW, box.h};
         if ((int)i == openIdx) x += rackW + gap;
+        Rect specBox{x, box.y, specW, box.h};
+        if ((int)i == specIdx) {
+            x += specW + gap;
+            // A panel four device boxes wide that opens off the right edge of
+            // the strip has not opened as far as the user is concerned. One
+            // scroll, on the frame after it appears (the geometry is only known
+            // here), brings its left edge to the left edge of the strip.
+            if (spectraScrollTo_) {
+                spectraScrollTo_ = false;
+                stripScroll_ = clampv(stripScroll_ + (specBox.x - area.x - 4 * s),
+                                      0.f, maxScroll);
+            }
+        }
         // The panel is drawn at the bottom of this iteration, so an off-screen
         // device box must not skip it.
         const bool boxVisible = !(box.right() < area.x || box.x > area.right());
-        const bool panelVisible = (int)i == openIdx &&
-                                  !(rackBox.right() < area.x || rackBox.x > area.right());
-        if (!boxVisible && !panelVisible) continue;
+        const bool rackVisible = (int)i == openIdx &&
+                                 !(rackBox.right() < area.x || rackBox.x > area.right());
+        const bool specVisible = (int)i == specIdx &&
+                                 !(specBox.right() < area.x || specBox.x > area.right());
+        if (!boxVisible && !rackVisible && !specVisible) continue;
         // Drawn at the END of this device's iteration, whichever way the body
         // leaves it, so the panel's own widgets take `hot` back from the box
         // beside them -- last setHot() of the frame wins, as everywhere here.
-        const auto panel = [&] { if (panelVisible) drawRackPanel(rackBox, *openRc, tc); };
+        // A device is a rack or a Spectra and never both, so the two are
+        // mutually exclusive in practice and the layout does not have to care.
+        const auto panel = [&] {
+            if (rackVisible) drawRackPanel(rackBox, *openRc, tc);
+            if (specVisible) drawSpectraPanel(specBox, d, tc);
+        };
         if (!boxVisible) { panel(); continue; }
 
         const bool sel = (int)i == selDevice_;
@@ -827,17 +862,25 @@ void App::drawDeviceStrip(const Rect& r) {
         // devices and eight macro mappings do not fit in 150 logical pixels,
         // and Live opens a rack alongside its chain for the same reason.
         const bool isRack = d.inst && d.inst->rack();
+        // "This device has a panel of its own." A rack answers rack(); Spectra
+        // answers its URI, because an editor is not a container and inventing a
+        // second virtual for one device would be the larger change. When
+        // another instrument grows one, this is the line that becomes a lookup.
+        const bool isSpec = isSpectra(d.inst.get());
         Rect kr{br.x, title.y, 0, title.h};
-        if (isRack) kr = Rect{br.x - 34 * s, title.y + 2 * s, 34 * s, 12 * s};
+        if (isRack)      kr = Rect{br.x - 34 * s, title.y + 2 * s, 34 * s, 12 * s};
+        else if (isSpec) kr = Rect{br.x - 30 * s, title.y + 2 * s, 30 * s, 12 * s};
+        const bool hasPanel = isRack || isSpec;
 
         // The card's controls are ONE cluster, not two or three little capsules
-        // adrift in the title bar: chain (a rack only), bypass, remove. The
-        // plate and the lit edge belong to the group; the segments are seams.
-        const Rect ctrls{isRack ? kr.x : br.x, br.y,
-                         xr.right() - (isRack ? kr.x : br.x), br.h};
+        // adrift in the title bar: chain or edit (only where there is one),
+        // bypass, remove. The plate and the lit edge belong to the group; the
+        // segments are seams.
+        const Rect ctrls{hasPanel ? kr.x : br.x, br.y,
+                         xr.right() - (hasPanel ? kr.x : br.x), br.h};
         ui_.segCluster(ctrls);
         rend_.hairlineV(br.x, ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
-        if (isRack) rend_.hairlineV(kr.right(), ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
+        if (hasPanel) rend_.hairlineV(kr.right(), ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
 
         if (isRack) {
             const bool open = (int)i == openIdx;
@@ -864,11 +907,34 @@ void App::drawDeviceStrip(const Rect& r) {
             }
             if (ui_.hovered(kr))
                 ui_.tip = open ? "Close the rack" : "Open this rack: its chain and its macro mappings";
+        } else if (isSpec) {
+            // The rack's "chain" chip, for an instrument: lettered, because
+            // "this device has an editor" is not a universal glyph either.
+            const bool open = (int)i == specIdx;
+            if (ui_.segButton(uiId(11, (int)i, 4), kr, open, nx::violet)) {
+                if (open) { spectraOpenUid_ = 0; spectraForced_ = false; }
+                else {
+                    spectraOpenUid_ = d.uid;
+                    spectraForced_  = false;
+                    spectraScrollTo_ = true;
+                    selDevice_ = (int)i;
+                    paramScroll_ = 0.f;
+                }
+                panel();
+                rend_.popClip();
+                return;                   // the strip's layout just changed width
+            }
+            microFit(ui_, fSmall_, ui_.lastRect, "edit",
+                     open ? nx::text : nx::muted, Align::Center);
+            if (ui_.hovered(kr))
+                ui_.tip = open ? "Close the Spectra panel"
+                               : "Open Spectra's editor: the wavetable, the oscillators, "
+                                 "the filter, the envelopes and the LFO";
         }
 
         // The card's title is a micro-label (§5): 10px, uppercase, wide
         // tracking. A device name is an identity, not a sentence.
-        Rect nameR{title.x + 10 * s, title.y, (isRack ? kr.x : br.x) - title.x - 12 * s, title.h};
+        Rect nameR{title.x + 10 * s, title.y, (hasPanel ? kr.x : br.x) - title.x - 12 * s, title.h};
         // A device the DAEMON refused or has not confirmed is not an ordinary
         // silent device, and drawing it as one was the §12.7(3) debt: the
         // card sat in the strip looking healthy while the engine ran nothing.
