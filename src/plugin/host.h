@@ -133,6 +133,27 @@ public:
 
     virtual const PluginDesc& desc() const = 0;
 
+    // GUI thread. Factory presets: named parameter sets a device ships with.
+    //
+    // Deliberately the smallest thing that can work. A preset is not a new kind
+    // of state — loadPreset() writes through setParam() and nothing else, so
+    // the parameters move exactly as if a user had turned every knob, and
+    // persistence, automation and the device strip need to learn nothing. The
+    // corollary is that a preset cannot carry anything a parameter cannot; a
+    // device that grows non-parameter state has to say so itself.
+    //
+    // Zero presets is the default and means "no selector" to the UI, so every
+    // existing backend answers correctly without being touched. presetName()
+    // returns a pointer into storage the instance owns for its own lifetime
+    // (a string literal in every implementation today), or null out of range.
+    //
+    // Nothing here is realtime. LV2 and CLAP both have native preset systems
+    // that could be surfaced through these same three calls later; the
+    // signature was chosen so that would be an implementation, not a change.
+    virtual int         presetCount() const      { return 0; }
+    virtual const char* presetName(int i) const  { (void)i; return nullptr; }
+    virtual void        loadPreset(int i)        { (void)i; }
+
     // Processing latency in frames at the prepared rate/block size. Constant
     // after prepare() and audio-thread-safe to read; the engine uses it for
     // delay compensation, so a lying plugin smears transients across parallel

@@ -3218,6 +3218,1228 @@ static void testRackLatency(PluginRegistry& reg) {
 }
 
 // ---------------------------------------------------------------------------
+// Spectra — the wavetable instrument
+//
+// docs/SPECTRA-PARAMS.md is FROZEN and is the interface between src/plugin and
+// src/ui. The first test below transcribes it by hand and compares the
+// transcription against what the device reports, so that if either side is
+// edited the suite names the divergence instead of the editor discovering it
+// at run time. Everything after that MEASURES: "it sounds fine" is not a test,
+// "the alias energy at C7 is 75 dB below the harmonic energy" is.
+// ---------------------------------------------------------------------------
+
+// The contract, transcribed from the table in the doc. Column order is the
+// doc's: id, name, min, max, int, log.
+struct SpectraParamSpec {
+    int         id;
+    const char* name;
+    f32         mn, mx;
+    bool        isInt;
+    bool        isLog;
+};
+
+static const SpectraParamSpec kSpectraContract[] = {
+    {  0, "A Table",       0.f,     7.f,     true,  false },
+    {  1, "A Position",    0.f,     1.f,     false, false },
+    {  2, "A Coarse",     -24.f,    24.f,    true,  false },
+    {  3, "A Fine",       -100.f,   100.f,   false, false },
+    {  4, "A Level",       0.f,     1.f,     false, false },
+    {  5, "A Unison",      1.f,     7.f,     true,  false },
+    {  6, "A Detune",      0.f,     100.f,   false, false },
+    {  7, "A Spread",      0.f,     1.f,     false, false },
+    {  8, "B Table",       0.f,     7.f,     true,  false },
+    {  9, "B Position",    0.f,     1.f,     false, false },
+    { 10, "B Coarse",     -24.f,    24.f,    true,  false },
+    { 11, "B Fine",       -100.f,   100.f,   false, false },
+    { 12, "B Level",       0.f,     1.f,     false, false },
+    { 13, "B Unison",      1.f,     7.f,     true,  false },
+    { 14, "B Detune",      0.f,     100.f,   false, false },
+    { 15, "B Spread",      0.f,     1.f,     false, false },
+    { 16, "Noise",         0.f,     1.f,     false, false },
+    { 17, "Sub",           0.f,     1.f,     false, false },
+    { 18, "Cutoff",        20.f,    20000.f, false, true  },
+    { 19, "Resonance",     0.f,     1.f,     false, false },
+    { 20, "Filter Type",   0.f,     2.f,     true,  false },
+    { 21, "Drive",         0.f,     24.f,    false, false },
+    { 22, "Env2>Cutoff",  -1.f,     1.f,     false, false },
+    { 23, "Keytrack",      0.f,     1.f,     false, false },
+    { 24, "Attack",        0.1f,    5000.f,  false, true  },
+    { 25, "Decay",         1.f,     5000.f,  false, true  },
+    { 26, "Sustain",       0.f,     1.f,     false, false },
+    { 27, "Release",       1.f,     8000.f,  false, true  },
+    { 28, "E2 Attack",     0.1f,    5000.f,  false, true  },
+    { 29, "E2 Decay",      1.f,     5000.f,  false, true  },
+    { 30, "E2 Sustain",    0.f,     1.f,     false, false },
+    { 31, "E2 Release",    1.f,     8000.f,  false, true  },
+    { 32, "LFO Rate",      0.01f,   40.f,    false, true  },
+    { 33, "LFO Sync",      0.f,     9.f,     true,  false },
+    { 34, "LFO>Position", -1.f,     1.f,     false, false },
+    { 35, "LFO>Cutoff",   -1.f,     1.f,     false, false },
+    { 36, "LFO>Pitch",     0.f,     100.f,   false, false },
+    { 37, "LFO Shape",     0.f,     4.f,     true,  false },
+    { 38, "Glide",         0.f,     500.f,   false, false },
+    { 39, "Voices",        1.f,     16.f,    true,  false },
+    { 40, "Master",        0.f,     1.5f,    false, false },
+    { 41, "Env2>Position",-1.f,     1.f,     false, false },
+};
+static constexpr int kSpectraContractN =
+    (int)(sizeof kSpectraContract / sizeof kSpectraContract[0]);
+
+// The preset names, also a contract: the editor's selector displays exactly
+// these, in exactly this order.
+static const char* kSpectraPresetNames[] = {
+    "Init", "Supersaw Lead", "Solid Bass", "Sub Bass", "Pluck", "Warm Pad",
+    "Formant Keys", "Bell", "Acid", "Wobble", "Air Pad", "Organ",
+};
+static constexpr int kSpectraPresetN =
+    (int)(sizeof kSpectraPresetNames / sizeof kSpectraPresetNames[0]);
+
+// --- measurement helpers ---------------------------------------------------
+
+// In-place radix-2 complex FFT. Only used by the tests, so clarity beats
+// speed; the twiddles are computed inline in f64.
+static void tFft(std::vector<f32>& re, std::vector<f32>& im) {
+    const int n = (int)re.size();
+    for (int i = 1, j = 0; i < n; ++i) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { std::swap(re[(size_t)i], re[(size_t)j]); std::swap(im[(size_t)i], im[(size_t)j]); }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        const f64 ang = -6.283185307179586 / (f64)len;
+        for (int i = 0; i < n; i += len) {
+            for (int k = 0; k < len / 2; ++k) {
+                const f64 wr = std::cos(ang * k), wi = std::sin(ang * k);
+                const int a = i + k, b = i + k + len / 2;
+                const f64 vr = (f64)re[(size_t)b] * wr - (f64)im[(size_t)b] * wi;
+                const f64 vi = (f64)re[(size_t)b] * wi + (f64)im[(size_t)b] * wr;
+                re[(size_t)b] = (f32)((f64)re[(size_t)a] - vr);
+                im[(size_t)b] = (f32)((f64)im[(size_t)a] - vi);
+                re[(size_t)a] = (f32)((f64)re[(size_t)a] + vr);
+                im[(size_t)a] = (f32)((f64)im[(size_t)a] + vi);
+            }
+        }
+    }
+}
+
+// Magnitude of one frequency in a rendered buffer, by direct projection. Exact
+// for a steady tone over a whole number of periods and good enough elsewhere;
+// this is how the voice-stealing test watches individual notes appear and go.
+static f64 tBinMag(const std::vector<f32>& x, int from, int n, f64 freq) {
+    const f64 w = 6.283185307179586 * freq / kSR;
+    f64 re = 0.0, im = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const f64 ph = w * (f64)i;
+        re += (f64)x[(size_t)(from + i)] * std::cos(ph);
+        im += (f64)x[(size_t)(from + i)] * std::sin(ph);
+    }
+    return 2.0 * std::sqrt(re * re + im * im) / (f64)n;
+}
+
+static f64 tMidiHz(f64 note) { return 440.0 * std::pow(2.0, (note - 69.0) / 12.0); }
+
+// One MIDI byte triple at an absolute frame. The render helper below delivers
+// it in whatever block happens to contain that frame, which is exactly what
+// the engine does and exactly what makes the block-size test meaningful.
+struct SpEvent { int frame; u8 st, a, b; };
+
+// Renders `frames` samples in chunks of `chunk`, delivering the (sorted) event
+// list on the way. `bpm > 0` pushes the transport before every block, like the
+// engine's process loop.
+static void spRender(PluginInstance& p, const std::vector<SpEvent>& ev, int frames,
+                     int chunk, std::vector<f32>& L, std::vector<f32>& R, f64 bpm = 0.0) {
+    L.assign((size_t)frames, 0.f);
+    R.assign((size_t)frames, 0.f);
+    std::vector<f32> bl((size_t)chunk, 0.f), br((size_t)chunk, 0.f);
+    size_t next = 0;
+    for (int i = 0; i < frames; i += chunk) {
+        const int n = (frames - i) < chunk ? (frames - i) : chunk;
+        while (next < ev.size() && ev[next].frame < i + n) {
+            const u8 m[3] = { ev[next].st, ev[next].a, ev[next].b };
+            p.midi(m, 3, ev[next].frame - i);
+            ++next;
+        }
+        if (bpm > 0.0) p.setTransport(bpm, 0.0, true);
+        std::fill(bl.begin(), bl.begin() + n, 0.f);
+        std::fill(br.begin(), br.begin() + n, 0.f);
+        f32* o[2] = { bl.data(), br.data() };
+        p.process(nullptr, o, 2, n);
+        for (int j = 0; j < n; ++j) {
+            L[(size_t)(i + j)] = bl[(size_t)j];
+            R[(size_t)(i + j)] = br[(size_t)j];
+        }
+    }
+}
+
+static int spIdx(const PluginInstance& p, const char* name) { return paramIndex(p, name); }
+
+// A patch that makes every path in the instrument move at once. Used by the
+// determinism and state tests, where the point is to leave nothing switched
+// off: two oscillators at full unison, noise, sub, a resonant driven filter, a
+// modulated cutoff and position, vibrato, glide and a sample-and-hold LFO.
+static void spBusyPatch(PluginInstance& s) {
+    s.setParam(spIdx(s, "A Table"), 5.f);
+    s.setParam(spIdx(s, "A Position"), 0.4f);
+    s.setParam(spIdx(s, "A Level"), 0.7f);
+    s.setParam(spIdx(s, "A Unison"), 7.f);
+    s.setParam(spIdx(s, "A Detune"), 35.f);
+    s.setParam(spIdx(s, "A Spread"), 0.8f);
+    s.setParam(spIdx(s, "B Table"), 3.f);
+    s.setParam(spIdx(s, "B Position"), 0.6f);
+    s.setParam(spIdx(s, "B Level"), 0.5f);
+    s.setParam(spIdx(s, "B Unison"), 5.f);
+    s.setParam(spIdx(s, "B Detune"), 22.f);
+    s.setParam(spIdx(s, "B Spread"), 0.6f);
+    s.setParam(spIdx(s, "B Coarse"), 7.f);
+    s.setParam(spIdx(s, "B Fine"), -13.f);
+    s.setParam(spIdx(s, "Noise"), 0.15f);
+    s.setParam(spIdx(s, "Sub"), 0.3f);
+    s.setParam(spIdx(s, "Cutoff"), 900.f);
+    s.setParam(spIdx(s, "Resonance"), 0.55f);
+    s.setParam(spIdx(s, "Drive"), 9.f);
+    s.setParam(spIdx(s, "Env2>Cutoff"), 0.7f);
+    s.setParam(spIdx(s, "Keytrack"), 0.4f);
+    s.setParam(spIdx(s, "Attack"), 3.f);
+    s.setParam(spIdx(s, "Decay"), 800.f);
+    s.setParam(spIdx(s, "Sustain"), 0.6f);
+    s.setParam(spIdx(s, "Release"), 250.f);
+    s.setParam(spIdx(s, "E2 Attack"), 1.f);
+    s.setParam(spIdx(s, "E2 Decay"), 300.f);
+    s.setParam(spIdx(s, "E2 Sustain"), 0.2f);
+    s.setParam(spIdx(s, "LFO Rate"), 5.5f);
+    s.setParam(spIdx(s, "LFO Shape"), 4.f);        // sample & hold
+    s.setParam(spIdx(s, "LFO>Position"), 0.6f);
+    s.setParam(spIdx(s, "LFO>Cutoff"), 0.5f);
+    s.setParam(spIdx(s, "LFO>Pitch"), 25.f);
+    s.setParam(spIdx(s, "Env2>Position"), -0.4f);
+    s.setParam(spIdx(s, "Glide"), 60.f);
+    s.setParam(spIdx(s, "Voices"), 6.f);
+    s.setParam(spIdx(s, "Master"), 0.6f);
+}
+
+// The MIDI the busy patch is driven with: overlapping notes, a chord, a
+// released note and one more note than the polyphony cap, so voice allocation,
+// stealing and glide are all exercised.
+static std::vector<SpEvent> spScript() {
+    return {
+        {     0, 0x90, 45,  90 },
+        {   700, 0x90, 57, 120 },
+        {  2300, 0x90, 64,  40 },
+        {  4001, 0x80, 45,   0 },
+        {  4600, 0x90, 69, 110 },
+        {  5000, 0x90, 72,  20 },
+        {  5003, 0x90, 76,  95 },
+        {  5100, 0x90, 79,  70 },
+        {  5111, 0x90, 84, 127 },     // one past the cap: steals
+        {  8000, 0x80, 57,   0 },
+        {  8100, 0x80, 64,   0 },
+        { 11000, 0xB0, 123,  0 },     // all notes off
+    };
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraContract(PluginRegistry& reg) {
+    banner("Spectra: the frozen parameter contract");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    CHECK(d != nullptr, "registry finds nxtakt:spectra");
+    if (!d) return;
+
+    CHECK(d->kind == PluginKind::Instrument, "descriptor: instrument");
+    CHECK(d->format == PluginFormat::Internal, "descriptor: internal");
+    CHECK(d->audioIn == 0 && d->audioOut == 2 && d->hasMidiIn,
+          "descriptor: %d in, %d out, midi %s", d->audioIn, d->audioOut,
+          d->hasMidiIn ? "yes" : "no");
+    CHECK(d->paramCount == kSpectraContractN,
+          "descriptor advertises %d parameters (contract says %d)",
+          d->paramCount, kSpectraContractN);
+
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    CHECK(s != nullptr, "instantiate + prepare");
+    if (!s) return;
+
+    CHECK(s->paramCount() == kSpectraContractN,
+          "the instance reports %d parameters (contract says %d)",
+          s->paramCount(), kSpectraContractN);
+    if (s->paramCount() != kSpectraContractN) return;
+
+    // Every row, mechanically. A mismatch names the parameter and the field, so
+    // whichever side moved is obvious from the failure line alone.
+    int bad = 0;
+    for (int i = 0; i < kSpectraContractN; ++i) {
+        const SpectraParamSpec& c = kSpectraContract[i];
+        const ParamInfo& pi = s->paramInfo(i);
+        if (pi.name != c.name) {
+            CHECK(false, "id %d: name is \"%s\", contract says \"%s\"",
+                  i, pi.name.c_str(), c.name);
+            ++bad;
+            continue;
+        }
+        if ((int)pi.id != c.id) { CHECK(false, "%s: id is %u, contract says %d", c.name, pi.id, c.id); ++bad; }
+        if (pi.min != c.mn)     { CHECK(false, "%s: min is %g, contract says %g", c.name, (double)pi.min, (double)c.mn); ++bad; }
+        if (pi.max != c.mx)     { CHECK(false, "%s: max is %g, contract says %g", c.name, (double)pi.max, (double)c.mx); ++bad; }
+        if (pi.isInt != c.isInt){ CHECK(false, "%s: isInt is %d, contract says %d", c.name, (int)pi.isInt, (int)c.isInt); ++bad; }
+        if (pi.isLogarithmic != c.isLog) {
+            CHECK(false, "%s: isLogarithmic is %d, contract says %d",
+                  c.name, (int)pi.isLogarithmic, (int)c.isLog);
+            ++bad;
+        }
+        if (pi.def < pi.min || pi.def > pi.max) {
+            CHECK(false, "%s: default %g is outside [%g, %g]",
+                  c.name, (double)pi.def, (double)pi.min, (double)pi.max);
+            ++bad;
+        }
+    }
+    CHECK(bad == 0, "all %d parameters match the contract in name, id, range, "
+                    "int flag and log flag", kSpectraContractN);
+
+    // The one default the contract states in words rather than in the table.
+    CHECK(s->getParam(12) == 0.f, "B Level defaults to 0 — osc B is off out of the box");
+
+    // Ids are indices, and that is the property that makes a saved set
+    // restorable. Stated as its own check because it is the thing a careless
+    // insertion breaks.
+    bool ids = true;
+    for (int i = 0; i < s->paramCount(); ++i) if ((int)s->paramInfo(i).id != i) ids = false;
+    CHECK(ids, "every ParamInfo::id equals its index");
+
+    // setParamRT is the base class's plain-store path; the instrument must not
+    // have broken it.
+    CHECK(s->setParamRT(18, 1234.f), "setParamRT accepted (the automation path works)");
+    CHECK(s->getParam(18) == 1234.f, "setParamRT wrote the value (%g)", (double)s->getParam(18));
+    CHECK(s->setParamRT(1000, 1.f), "setParamRT out of range is 'ignored', not 'no RT path'");
+    s->setParam(18, 20000.f);
+
+    // Out-of-range writes clamp on both paths rather than corrupting state.
+    s->setParam(5, 99.f);
+    CHECK(s->getParam(5) == 7.f, "setParam clamps to the declared max (%g)", (double)s->getParam(5));
+    s->setParam(5, -99.f);
+    CHECK(s->getParam(5) == 1.f, "setParam clamps to the declared min (%g)", (double)s->getParam(5));
+
+    CHECK(s->latencyFrames() == 0, "reports zero latency (a generator, no lookahead)");
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraVoices(PluginRegistry& reg) {
+    banner("Spectra: notes, polyphony and voice stealing");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    Buf out;
+
+    // 1. silence in, silence out.
+    CHECK(runFor(*s, out, 8) == 0.f, "no midi -> silence");
+
+    // 2. a note sounds.
+    s->setParam(spIdx(*s, "Attack"), 2.f);
+    s->setParam(spIdx(*s, "Decay"), 4000.f);
+    s->setParam(spIdx(*s, "Sustain"), 0.8f);
+    s->setParam(spIdx(*s, "Release"), 60.f);
+    noteOn(*s, 60, 100);
+    bool fin = false;
+    const f32 held = runFor(*s, out, 20, &fin);
+    CHECK(held > 0.05f, "note on -> sound (peak %.4f)", (double)held);
+    CHECK(fin, "held note stays finite");
+
+    // 3. note off returns to silence inside the release, and the release is the
+    //    thing that bounds it: 60 ms asked for, checked at 400 ms.
+    noteOff(*s, 60);
+    runFor(*s, out, (int)(0.4 * kSR / kBlock));
+    CHECK(runFor(*s, out, 8) == 0.f, "note off -> silence well inside the release");
+
+    // 4. sixteen simultaneous notes: the full polyphony, all of it audible.
+    s->setParam(spIdx(*s, "Voices"), 16.f);
+    s->setParam(spIdx(*s, "Master"), 0.3f);
+    for (int i = 0; i < 16; ++i) noteOn(*s, (u8)(40 + i * 3), (u8)(70 + i * 3), i * 4);
+    const f32 chord = runFor(*s, out, 30, &fin);
+    CHECK(fin, "16 simultaneous notes stay finite");
+    CHECK(chord > 0.05f, "16 simultaneous notes sound (peak %.4f)", (double)chord);
+
+    // 5. a seventeenth has to steal rather than allocate.
+    noteOn(*s, 88, 120);
+    CHECK(runFor(*s, out, 8, &fin) > 0.f && fin, "the 17th note steals cleanly");
+    const u8 cc[3] = { 0xB0, 123, 0 };
+    s->midi(cc, 3, 0);
+    runFor(*s, out, (int)(kSR / kBlock));
+    CHECK(runFor(*s, out, 8) == 0.f, "CC 123 all-notes-off returns to silence");
+
+    // 6. STEALING THE QUIETEST, measured rather than asserted.
+    //
+    //    The sub oscillator alone, so every voice is one clean sine an octave
+    //    below its note and the three of them can be told apart by projection.
+    //    Two voices of polyphony; a loud note, a quiet one, then a third. The
+    //    quiet one must be the one that goes.
+    {
+        auto v = reg.instantiate(*d, kSR, kBlock);
+        if (!v) return;
+        v->setParam(spIdx(*v, "A Level"), 0.f);
+        v->setParam(spIdx(*v, "Sub"), 1.f);
+        v->setParam(spIdx(*v, "Cutoff"), 20000.f);
+        v->setParam(spIdx(*v, "Resonance"), 0.f);
+        v->setParam(spIdx(*v, "Attack"), 1.f);
+        v->setParam(spIdx(*v, "Decay"), 5000.f);
+        v->setParam(spIdx(*v, "Sustain"), 1.f);
+        v->setParam(spIdx(*v, "Release"), 2.f);
+        v->setParam(spIdx(*v, "Voices"), 2.f);
+        v->setParam(spIdx(*v, "Master"), 1.f);
+
+        const f64 fLoud  = tMidiHz(72 - 12);      // sub is one octave down
+        const f64 fQuiet = tMidiHz(76 - 12);
+        const f64 fNew   = tMidiHz(79 - 12);
+
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = {
+            {     0, 0x90, 72, 127 },     // loud
+            {    10, 0x90, 76,   1 },     // quiet: velocity floor is 30%
+            { 24000, 0x90, 79, 100 },     // must steal the quiet one
+        };
+        spRender(*v, ev, 48000, kBlock, L, R);
+
+        const f64 loudBefore  = tBinMag(L, 12000, 9600, fLoud);
+        const f64 quietBefore = tBinMag(L, 12000, 9600, fQuiet);
+        const f64 loudAfter   = tBinMag(L, 36000, 9600, fLoud);
+        const f64 quietAfter  = tBinMag(L, 36000, 9600, fQuiet);
+        const f64 newAfter    = tBinMag(L, 36000, 9600, fNew);
+
+        CHECK(loudBefore > 0.2 && quietBefore > 0.05,
+              "both notes present before the steal (loud %.3f, quiet %.3f)",
+              loudBefore, quietBefore);
+        CHECK(quietBefore < loudBefore * 0.6,
+              "the second note really is the quieter one (%.3f vs %.3f)",
+              quietBefore, loudBefore);
+        CHECK(newAfter > 0.2, "the new note sounds after the steal (%.3f)", newAfter);
+        CHECK(loudAfter > loudBefore * 0.8,
+              "the LOUD note survived the steal (%.3f, was %.3f)", loudAfter, loudBefore);
+        CHECK(quietAfter < quietBefore * 0.1,
+              "the QUIET note is the one that was stolen (%.4f, was %.4f)",
+              quietAfter, quietBefore);
+    }
+
+    // 7. the polyphony cap is a cap: with Voices = 1 the second note replaces
+    //    the first outright.
+    {
+        auto v = reg.instantiate(*d, kSR, kBlock);
+        if (!v) return;
+        v->setParam(spIdx(*v, "A Level"), 0.f);
+        v->setParam(spIdx(*v, "Sub"), 1.f);
+        v->setParam(spIdx(*v, "Attack"), 1.f);
+        v->setParam(spIdx(*v, "Decay"), 5000.f);
+        v->setParam(spIdx(*v, "Sustain"), 1.f);
+        v->setParam(spIdx(*v, "Voices"), 1.f);
+        v->setParam(spIdx(*v, "Master"), 1.f);
+
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = { { 0, 0x90, 60, 100 }, { 24000, 0x90, 67, 100 } };
+        spRender(*v, ev, 48000, kBlock, L, R);
+        const f64 first = tBinMag(L, 36000, 9600, tMidiHz(48));
+        const f64 second = tBinMag(L, 36000, 9600, tMidiHz(55));
+        CHECK(second > 0.2 && first < 0.02,
+              "Voices = 1 is monophonic: the new note replaced the old (%.4f vs %.4f)",
+              second, first);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sound quality. Three claims, three measurements.
+// ---------------------------------------------------------------------------
+
+static void testSpectraQuality(PluginRegistry& reg) {
+    banner("Spectra: band-limiting, unison width and envelope edges");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // --- 1. ALIASING AT C7, every table, both ends of the position axis.
+    //
+    // A wavetable oscillator at 2093 Hz has room for eleven harmonics below
+    // Nyquist. Everything else in the spectrum is either aliasing or
+    // interpolation noise, and the mip chain exists to keep it inaudible. The
+    // measurement is a 16384-point Hann-windowed FFT of the steady part of the
+    // note: energy within 6% of a multiple of f0 is signal, everything else is
+    // not, and the ratio has to sit below -60 dB.
+    {
+        const int kN = 16384;
+        f64 worst = -300.0;
+        const char* worstAt = "";
+        bool all = true;
+        for (int tbl = 0; tbl < 8; ++tbl) {
+            for (int end = 0; end < 2; ++end) {
+                auto s = reg.instantiate(*d, kSR, kBlock);
+                if (!s) return;
+                s->setParam(spIdx(*s, "A Table"), (f32)tbl);
+                s->setParam(spIdx(*s, "A Position"), end ? 1.f : 0.f);
+                s->setParam(spIdx(*s, "A Level"), 1.f);
+                s->setParam(spIdx(*s, "A Unison"), 1.f);
+                s->setParam(spIdx(*s, "Attack"), 5.f);
+                s->setParam(spIdx(*s, "Decay"), 5000.f);
+                s->setParam(spIdx(*s, "Sustain"), 1.f);
+                s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+                s->setParam(spIdx(*s, "Resonance"), 0.f);
+                s->setParam(spIdx(*s, "Master"), 1.f);
+
+                std::vector<f32> L, R;
+                const std::vector<SpEvent> ev = { { 0, 0x90, 96, 127 } };   // C7
+                spRender(*s, ev, 8192 + kN, kBlock, L, R);
+
+                std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
+                for (int i = 0; i < kN; ++i)
+                    re[(size_t)i] = L[(size_t)(8192 + i)] *
+                        (f32)(0.5 - 0.5 * std::cos(6.283185307179586 * i / kN));
+                tFft(re, im);
+
+                const f64 f0 = tMidiHz(96);
+                const f64 binHz = kSR / (f64)kN;
+                f64 sig = 0.0, alias = 0.0;
+                for (int k = 4; k < kN / 2; ++k) {
+                    const f64 h  = (f64)k * binHz / f0;
+                    const f64 dh = std::fabs(h - std::floor(h + 0.5));
+                    const f64 e  = (f64)re[(size_t)k] * re[(size_t)k] +
+                                   (f64)im[(size_t)k] * im[(size_t)k];
+                    if (std::floor(h + 0.5) >= 1.0 && dh < 0.06) sig += e;
+                    else                                          alias += e;
+                }
+                const f64 db = 10.0 * std::log10(alias / (sig + 1e-30));
+                if (db > worst) { worst = db; worstAt = kSpectraContract[0].name; }
+                if (!(db < -60.0)) {
+                    all = false;
+                    CHECK(false, "table %d at position %d: alias/signal %.1f dB at C7 "
+                                 "(must be below -60)", tbl, end, db);
+                }
+            }
+        }
+        (void)worstAt;
+        CHECK(all, "C7, all 8 tables x both position extremes: alias energy peaks at "
+                   "%.1f dB below the harmonics (limit -60)", worst);
+    }
+
+    // --- 2. THE POSITION SWEEP ITSELF must not alias either: modulating the
+    // frame axis crossfades two band-limited frames, so the result stays band
+    // limited. Swept by an LFO across the whole axis while the same note holds.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Table"), 5.f);        // the brightest table
+        s->setParam(spIdx(*s, "A Position"), 0.5f);
+        s->setParam(spIdx(*s, "A Level"), 1.f);
+        s->setParam(spIdx(*s, "LFO Rate"), 6.f);
+        s->setParam(spIdx(*s, "LFO>Position"), 1.f);
+        s->setParam(spIdx(*s, "Attack"), 5.f);
+        s->setParam(spIdx(*s, "Decay"), 5000.f);
+        s->setParam(spIdx(*s, "Sustain"), 1.f);
+        s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+        s->setParam(spIdx(*s, "Master"), 1.f);
+
+        const int kN = 16384;
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = { { 0, 0x90, 96, 127 } };
+        spRender(*s, ev, 8192 + kN, kBlock, L, R);
+
+        std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
+        for (int i = 0; i < kN; ++i)
+            re[(size_t)i] = L[(size_t)(8192 + i)] *
+                (f32)(0.5 - 0.5 * std::cos(6.283185307179586 * i / kN));
+        tFft(re, im);
+
+        // With the position moving, the harmonics are no longer lines, so the
+        // honest measurement is coarser: everything above the last harmonic
+        // that fits under Nyquist is aliasing and nothing else can be.
+        const f64 f0 = tMidiHz(96);
+        const f64 binHz = kSR / (f64)kN;
+        const f64 top = std::floor(kSR * 0.5 / f0) * f0;        // 11 * f0
+        f64 sig = 0.0, above = 0.0;
+        for (int k = 4; k < kN / 2; ++k) {
+            const f64 f = (f64)k * binHz;
+            const f64 e = (f64)re[(size_t)k] * re[(size_t)k] +
+                          (f64)im[(size_t)k] * im[(size_t)k];
+            if (f < top + 0.25 * f0) sig += e; else above += e;
+        }
+        const f64 db = 10.0 * std::log10(above / (sig + 1e-30));
+        CHECK(db < -60.0,
+              "a full-range LFO position sweep at C7 leaves %.1f dB above the last "
+              "harmonic that fits (limit -60)", db);
+    }
+
+    // --- 3. UNISON THAT SURVIVES A MONO FOLD.
+    //
+    // Seven voices, maximum detune, maximum spread. Panning is constant power
+    // and never inverts a polarity, so the mono sum cannot cancel; the number
+    // below is what says so. 70.7% is the floor for perfectly decorrelated
+    // equal-power channels, so anything near it is the physics and not a bug.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Unison"), 7.f);
+        s->setParam(spIdx(*s, "A Detune"), 40.f);
+        s->setParam(spIdx(*s, "A Spread"), 1.f);
+        s->setParam(spIdx(*s, "A Level"), 1.f);
+        s->setParam(spIdx(*s, "Attack"), 5.f);
+        s->setParam(spIdx(*s, "Decay"), 5000.f);
+        s->setParam(spIdx(*s, "Sustain"), 1.f);
+        s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = { { 0, 0x90, 57, 110 } };
+        spRender(*s, ev, 96000, kBlock, L, R);
+
+        f64 es = 0.0, em = 0.0;
+        const int from = 24000, n = 72000;
+        for (int i = from; i < from + n; ++i) {
+            es += (f64)L[(size_t)i] * L[(size_t)i] + (f64)R[(size_t)i] * R[(size_t)i];
+            const f64 m = 0.5 * ((f64)L[(size_t)i] + (f64)R[(size_t)i]);
+            em += m * m;
+        }
+        const f64 rmsS = std::sqrt(es / (2.0 * n));
+        const f64 rmsM = std::sqrt(em / (f64)n);
+        CHECK(rmsS > 0.01, "the 7-voice unison note is actually sounding (RMS %.4f)", rmsS);
+        CHECK(rmsM >= 0.5 * rmsS,
+              "mono sum keeps %.1f%% of the stereo RMS (floor 50%%) — the fan widens "
+              "without cancelling", 100.0 * rmsM / rmsS);
+
+        // And it IS wide: identical channels would keep 100%, so a number
+        // strictly below that is the proof the spread did something.
+        CHECK(rmsM < 0.99 * rmsS, "and the channels are genuinely different (%.1f%%)",
+              100.0 * rmsM / rmsS);
+    }
+
+    // --- 4. THE ENVELOPE EDGES.
+    //
+    // Note-on with a 50 ms attack must ramp, not step. Note-off must FADE: the
+    // tail's block peaks fall monotonically and the last non-zero sample is
+    // 100 dB below the note, so the envelope's own floor is what ends it rather
+    // than a jump to zero.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Level"), 1.f);
+        s->setParam(spIdx(*s, "Attack"), 50.f);
+        s->setParam(spIdx(*s, "Decay"), 5000.f);
+        s->setParam(spIdx(*s, "Sustain"), 1.f);
+        s->setParam(spIdx(*s, "Release"), 200.f);
+        s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+        s->setParam(spIdx(*s, "Master"), 1.f);
+
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = { { 0, 0x90, 60, 110 }, { 48000, 0x80, 60, 0 } };
+        spRender(*s, ev, 48000 + 96000, kBlock, L, R);
+
+        f32 sustain = 0.f;
+        for (int i = 24000; i < 48000; ++i) sustain = std::fmax(sustain, std::fabs(L[(size_t)i]));
+        f32 firstMs = 0.f;
+        for (int i = 0; i < 48; ++i) firstMs = std::fmax(firstMs, std::fabs(L[(size_t)i]));
+        CHECK(sustain > 0.05f, "note sounds (sustain peak %.4f)", (double)sustain);
+        CHECK(firstMs < 0.05f * sustain,
+              "a 50 ms attack has moved only %.2f%% of the way after 1 ms — no note-on step",
+              100.0 * (double)(firstMs / sustain));
+
+        // Block peaks over the tail, 5 ms apart. The envelope is a one-pole, so
+        // its peaks are monotone; the oscillator underneath makes each window's
+        // peak a little noisy, hence the 2% slack.
+        const int win = 240;
+        f32 prev = 1e30f;
+        bool mono = true;
+        int lastAt = -1;
+        f32 lastMag = 0.f;
+        for (int i = 48000; i + win <= 48000 + 96000; i += win) {
+            f32 pk = 0.f;
+            for (int j = 0; j < win; ++j) pk = std::fmax(pk, std::fabs(L[(size_t)(i + j)]));
+            if (pk > prev * 1.02f + 1e-9f) mono = false;
+            prev = pk;
+        }
+        for (int i = 48000; i < 48000 + 96000; ++i)
+            if (L[(size_t)i] != 0.f) { lastAt = i; lastMag = std::fabs(L[(size_t)i]); }
+        CHECK(mono, "the release tail decays monotonically — it is a fade, not a gate");
+        CHECK(lastAt > 48000 + 4800,
+              "the tail lasts %.0f ms, i.e. the Release parameter bounds it",
+              (lastAt - 48000) / 48.0);
+        CHECK(lastMag < 1e-4f * sustain,
+              "the last non-zero sample is %.2e, %.0f dB below the note: the envelope "
+              "floor ends it, not a step to zero",
+              (double)lastMag, 20.0 * std::log10((double)(lastMag / sustain)));
+    }
+
+    // --- 5. the 0.1 ms attack IS allowed to click — that is the user's choice,
+    // and the check is only that it stays bounded and finite rather than that
+    // it is smooth.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setParam(spIdx(*s, "Attack"), 0.1f);
+        s->setParam(spIdx(*s, "A Level"), 1.f);
+        s->setParam(spIdx(*s, "Sustain"), 1.f);
+        s->setParam(spIdx(*s, "Decay"), 5000.f);
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = { { 0, 0x90, 60, 127 } };
+        spRender(*s, ev, 4800, kBlock, L, R);
+        bool fin = true;
+        f32 pk = 0.f;
+        for (f32 v : L) { if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); }
+        CHECK(fin && pk < 4.f,
+              "the shortest attack (0.1 ms) is bounded and finite (peak %.3f)", (double)pk);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraDeterminism(PluginRegistry& reg) {
+    banner("Spectra: the render does not depend on the block size");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    const int kFrames = 14000;
+    const std::vector<SpEvent> ev = spScript();
+
+    auto build = [&]() -> std::unique_ptr<PluginInstance> {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) spBusyPatch(*s);
+        return s;
+    };
+
+    std::vector<f32> refL, refR, altL, altR;
+    auto ref = build();
+    if (!ref) return;
+    spRender(*ref, ev, kFrames, kBlock, refL, refR, 120.0);
+
+    f32 energy = 0.f;
+    for (f32 v : refL) energy = std::fmax(energy, std::fabs(v));
+    CHECK(energy > 0.05f, "the reference render is not silent (peak %.4f)", (double)energy);
+
+    bool allSame = true;
+    for (int chunk : { 1, 7, 64, 300, 1024 }) {
+        auto alt = build();
+        if (!alt) break;
+        spRender(*alt, ev, kFrames, chunk, altL, altR, 120.0);
+        f32 diff = 0.f;
+        for (int i = 0; i < kFrames; ++i) {
+            diff = std::fmax(diff, std::fabs(refL[(size_t)i] - altL[(size_t)i]));
+            diff = std::fmax(diff, std::fabs(refR[(size_t)i] - altR[(size_t)i]));
+        }
+        if (diff != 0.f) allSame = false;
+        CHECK(diff == 0.f,
+              "blocks of %d are bit-identical to blocks of %d (max diff %.9f)",
+              chunk, kBlock, (double)diff);
+    }
+    CHECK(allSame, "every control path — envelopes, the LFO, sample-and-hold, the "
+                   "filter's control tick, glide — runs on absolute sample time");
+
+    // The same instance twice: the random streams are seeded in prepare(), so a
+    // re-prepared device renders the same file again. A wall-clock seed would
+    // fail here and only here.
+    {
+        auto a = build();
+        auto b = build();
+        if (a && b) {
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, ev, kFrames, kBlock, aL, aR, 120.0);
+            spRender(*b, ev, kFrames, kBlock, bL, bR, 120.0);
+            f32 diff = 0.f;
+            for (int i = 0; i < kFrames; ++i)
+                diff = std::fmax(diff, std::fabs(aL[(size_t)i] - bL[(size_t)i]));
+            CHECK(diff == 0.f,
+                  "two fresh instances render identically — the noise, the phase "
+                  "randomisation and the sample-and-hold are seeded, not clocked");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraModulation(PluginRegistry& reg) {
+    banner("Spectra: transport-synced LFO and glide");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // --- 1. a quarter note at 120 BPM IS 2 Hz. Not approximately: the two
+    // renders have to be bit-identical, which is the Delay's test pattern and
+    // the only version of this claim that cannot drift.
+    {
+        auto mk = [&](bool sync) -> std::unique_ptr<PluginInstance> {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return s;
+            s->setParam(spIdx(*s, "A Level"), 1.f);
+            s->setParam(spIdx(*s, "Cutoff"), 700.f);
+            s->setParam(spIdx(*s, "Resonance"), 0.6f);
+            s->setParam(spIdx(*s, "LFO>Cutoff"), 0.9f);
+            s->setParam(spIdx(*s, "Attack"), 3.f);
+            s->setParam(spIdx(*s, "Decay"), 5000.f);
+            s->setParam(spIdx(*s, "Sustain"), 1.f);
+            if (sync) s->setParam(spIdx(*s, "LFO Sync"), 5.f);      // 1/4
+            else      s->setParam(spIdx(*s, "LFO Rate"), 2.f);
+            return s;
+        };
+        const std::vector<SpEvent> ev = { { 0, 0x90, 45, 110 } };
+        std::vector<f32> fL, fR, sL, sR;
+        auto freeRun = mk(false);
+        auto synced  = mk(true);
+        if (freeRun && synced) {
+            spRender(*freeRun, ev, 48000, kBlock, fL, fR, 0.0);      // no transport
+            spRender(*synced,  ev, 48000, kBlock, sL, sR, 120.0);    // 120 BPM pushed
+            f32 diff = 0.f, pk = 0.f;
+            for (int i = 0; i < 48000; ++i) {
+                diff = std::fmax(diff, std::fabs(fL[(size_t)i] - sL[(size_t)i]));
+                pk   = std::fmax(pk, std::fabs(fL[(size_t)i]));
+            }
+            CHECK(pk > 0.05f, "the modulated note sounds (peak %.4f)", (double)pk);
+            CHECK(diff == 0.f,
+                  "LFO Sync = 1/4 at a pushed 120 BPM is bit-identical to 2 Hz free "
+                  "(max diff %.9f)", (double)diff);
+        }
+    }
+
+    // --- 2. the sync divisions are the ones the contract lists. Half the tempo
+    // is half the rate, and a 1/8 is twice a 1/4: checked by counting the LFO's
+    // effect rather than by reading a number out of the device.
+    {
+        auto mk = [&](int sync, f32 rate) -> std::unique_ptr<PluginInstance> {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return s;
+            s->setParam(spIdx(*s, "A Level"), 1.f);
+            s->setParam(spIdx(*s, "Cutoff"), 700.f);
+            s->setParam(spIdx(*s, "Resonance"), 0.6f);
+            s->setParam(spIdx(*s, "LFO>Cutoff"), 0.9f);
+            s->setParam(spIdx(*s, "Attack"), 3.f);
+            s->setParam(spIdx(*s, "Decay"), 5000.f);
+            s->setParam(spIdx(*s, "Sustain"), 1.f);
+            s->setParam(spIdx(*s, "LFO Sync"), (f32)sync);
+            s->setParam(spIdx(*s, "LFO Rate"), rate);
+            return s;
+        };
+        // (division index, the free rate it must equal at 120 BPM)
+        const struct { int div; f32 hz; const char* label; } kCases[] = {
+            { 1, 0.125f, "4 bars" }, { 3, 0.5f, "1 bar" }, { 4, 1.f, "1/2" },
+            { 6, 4.f, "1/8" }, { 7, 8.f, "1/16" },
+        };
+        const std::vector<SpEvent> ev = { { 0, 0x90, 45, 110 } };
+        for (const auto& c : kCases) {
+            auto a = mk(c.div, 2.f);
+            auto b = mk(0, c.hz);
+            if (!a || !b) continue;
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, ev, 24000, kBlock, aL, aR, 120.0);
+            spRender(*b, ev, 24000, kBlock, bL, bR, 0.0);
+            f32 diff = 0.f;
+            for (int i = 0; i < 24000; ++i)
+                diff = std::fmax(diff, std::fabs(aL[(size_t)i] - bL[(size_t)i]));
+            CHECK(diff == 0.f, "division %d (%s) at 120 BPM == %g Hz free (diff %.9f)",
+                  c.div, c.label, (double)c.hz, (double)diff);
+        }
+    }
+
+    // --- 3. GLIDE IS MONOTONIC. The sub oscillator alone, so the output is one
+    // clean sine and its instantaneous period can be read off the zero
+    // crossings. A rising glide must shorten every period, with no overshoot,
+    // no wobble and no step at the end.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Level"), 0.f);
+        s->setParam(spIdx(*s, "Sub"), 1.f);
+        s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+        s->setParam(spIdx(*s, "Resonance"), 0.f);
+        s->setParam(spIdx(*s, "Attack"), 1.f);
+        s->setParam(spIdx(*s, "Decay"), 5000.f);
+        s->setParam(spIdx(*s, "Sustain"), 1.f);
+        s->setParam(spIdx(*s, "Release"), 2.f);
+        s->setParam(spIdx(*s, "Voices"), 1.f);
+        s->setParam(spIdx(*s, "Glide"), 300.f);
+        s->setParam(spIdx(*s, "Master"), 1.f);
+
+        // Note 48, let it stop, then note 72: the second note glides up from
+        // where the first one was, over 300 ms.
+        const std::vector<SpEvent> ev = {
+            {     0, 0x90, 48, 110 },
+            {  9600, 0x80, 48,   0 },
+            { 12000, 0x90, 72, 110 },
+        };
+        std::vector<f32> L, R;
+        spRender(*s, ev, 48000, kBlock, L, R);
+
+        // Rising zero crossings, interpolated, over the glide window.
+        std::vector<f64> cross;
+        for (int i = 12300; i < 12000 + 14400; ++i) {
+            const f32 a = L[(size_t)(i - 1)], b = L[(size_t)i];
+            if (a <= 0.f && b > 0.f) cross.push_back((f64)i - (f64)b / ((f64)b - (f64)a));
+        }
+        CHECK(cross.size() > 20, "the glide window has %zu cycles to measure", cross.size());
+
+        bool monotone = true;
+        f64 firstP = 0.0, lastP = 0.0;
+        for (size_t i = 2; i < cross.size(); ++i) {
+            const f64 prev = cross[i - 1] - cross[i - 2];
+            const f64 cur  = cross[i] - cross[i - 1];
+            if (i == 2) firstP = prev;
+            lastP = cur;
+            // 0.6% of slack: the crossings are read off a sine that is itself
+            // changing frequency inside each cycle.
+            if (cur > prev * 1.006 + 0.05) monotone = false;
+        }
+        CHECK(monotone, "every cycle of the glide is shorter than the one before it — "
+                        "the pitch rises monotonically");
+        CHECK(firstP > lastP * 3.0,
+              "and it covers the whole two octaves (%.1f samples/cycle -> %.1f)",
+              firstP, lastP);
+
+        // After the glide the pitch has ARRIVED, exactly, rather than
+        // asymptotically approaching: constant-time portamento finishes.
+        const f64 target = tMidiHz(72 - 12);
+        const f64 mag = tBinMag(L, 30000, 12000, target);
+        CHECK(mag > 0.4, "the glide lands on the target pitch (magnitude %.3f at %.1f Hz)",
+              mag, target);
+    }
+
+    // --- 4. glide of zero is instantaneous, which is what the default must be.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Level"), 0.f);
+        s->setParam(spIdx(*s, "Sub"), 1.f);
+        s->setParam(spIdx(*s, "Attack"), 1.f);
+        s->setParam(spIdx(*s, "Decay"), 5000.f);
+        s->setParam(spIdx(*s, "Sustain"), 1.f);
+        s->setParam(spIdx(*s, "Voices"), 1.f);
+        s->setParam(spIdx(*s, "Master"), 1.f);
+        const std::vector<SpEvent> ev = { { 0, 0x90, 48, 110 }, { 4800, 0x90, 72, 110 } };
+        std::vector<f32> L, R;
+        spRender(*s, ev, 24000, kBlock, L, R);
+        const f64 hi = tBinMag(L, 5300, 4800, tMidiHz(60));
+        CHECK(hi > 0.4, "Glide = 0 arrives at the new pitch immediately (%.3f)", hi);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraSweeps(PluginRegistry& reg) {
+    banner("Spectra: every parameter sweeps under audio without breaking");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+    spBusyPatch(*s);
+
+    // One parameter at a time, over its whole declared range, while notes come
+    // and go. The established pattern from the effect suite; the only addition
+    // is that this device is being played at the same time.
+    Buf out;
+    char badParam[128] = "";
+    bool ok = true;
+    for (int pi = 0; pi < s->paramCount() && ok; ++pi) {
+        const ParamInfo& info = s->paramInfo(pi);
+        const f32 keep = s->getParam(pi);
+        for (int k = 0; k <= 24 && ok; ++k) {
+            const f32 t = (f32)k / 24.f;
+            s->setParam(pi, lerpf(info.min, info.max, t));
+            if ((k % 4) == 0) noteOn(*s, (u8)(40 + (pi * 3 + k) % 45), (u8)(60 + k), k * 3);
+            if ((k % 4) == 3) noteOff(*s, (u8)(40 + (pi * 3 + k - 3) % 45), k);
+            out.clear();
+            s->process(nullptr, out.p, 2, kBlock);
+            if (!out.finite() || out.peak() > 12.f) {
+                ok = false;
+                std::snprintf(badParam, sizeof badParam, "%s (peak %.3f)",
+                              info.name.c_str(), (double)out.peak());
+            }
+        }
+        s->setParam(pi, keep);
+    }
+    CHECK(ok, "all %d parameters sweep during playback without NaN or blow-up%s%s",
+          s->paramCount(), ok ? "" : " — failed on ", badParam);
+
+    // And it is still an instrument afterwards.
+    const u8 cc[3] = { 0xB0, 120, 0 };
+    s->midi(cc, 3, 0);
+    for (int i = 0; i < s->paramCount(); ++i) s->setParam(i, s->paramInfo(i).def);
+    s->setParam(spIdx(*s, "Sustain"), 1.f);
+    noteOn(*s, 60, 110);
+    CHECK(runFor(*s, out, 20) > 0.02f, "still plays after every knob has been swept");
+
+    // Absurd block sizes are refused rather than overrun. kMaxBlock is the
+    // documented ceiling; a block above it degrades to silence, like Pulse.
+    {
+        std::vector<f32> big((size_t)kMaxBlock + 64, 1.f), big2((size_t)kMaxBlock + 64, 1.f);
+        f32* o[2] = { big.data(), big2.data() };
+        s->process(nullptr, o, 2, kMaxBlock + 64);
+        bool silent = true;
+        for (int i = 0; i < kMaxBlock + 64; ++i) if (big[(size_t)i] != 0.f) silent = false;
+        CHECK(silent, "a block larger than kMaxBlock degrades to silence, not to a overrun");
+    }
+    // A legal oversized block (larger than the prepared one) is processed.
+    {
+        std::vector<f32> l(2048, 0.f), r(2048, 0.f);
+        f32* o[2] = { l.data(), r.data() };
+        noteOn(*s, 60, 110);
+        s->process(nullptr, o, 2, 2048);
+        f32 pk = 0.f;
+        for (f32 v : l) pk = std::fmax(pk, std::fabs(v));
+        CHECK(pk > 0.f, "a 2048-frame block on a 256-frame prepare is processed (peak %.4f)",
+              (double)pk);
+    }
+
+    // Mono output: one channel is a fold of the pair, not half the instrument.
+    {
+        auto m = reg.instantiate(*d, kSR, kBlock);
+        if (m) {
+            m->setParam(spIdx(*m, "Sustain"), 1.f);
+            m->setParam(spIdx(*m, "A Unison"), 7.f);
+            m->setParam(spIdx(*m, "A Spread"), 1.f);
+            noteOn(*m, 60, 110);
+            std::vector<f32> mono((size_t)kBlock, 0.f);
+            f32* o[1] = { mono.data() };
+            f32 pk = 0.f;
+            for (int b = 0; b < 20; ++b) {
+                std::fill(mono.begin(), mono.end(), 0.f);
+                m->process(nullptr, o, 1, kBlock);
+                for (f32 v : mono) pk = std::fmax(pk, std::fabs(v));
+            }
+            CHECK(pk > 0.02f, "a mono host gets the folded pair, not silence (peak %.4f)",
+                  (double)pk);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraState(PluginRegistry& reg) {
+    banner("Spectra: state save and restore through the parameters");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    auto src = reg.instantiate(*d, kSR, kBlock);
+    if (!src) return;
+    spBusyPatch(*src);
+
+    // What a project file stores: (ParamInfo::id, value), nothing else.
+    std::vector<std::pair<u32, f32>> saved;
+    for (int i = 0; i < src->paramCount(); ++i)
+        saved.emplace_back(src->paramInfo(i).id, src->getParam(i));
+    CHECK((int)saved.size() == kSpectraContractN, "saved %zu parameters", saved.size());
+
+    auto dst = reg.instantiate(*d, kSR, kBlock);
+    if (!dst) return;
+    for (const auto& kv : saved) {
+        // The loader resolves id -> index, exactly as the rack's does.
+        int idx = -1;
+        for (int i = 0; i < dst->paramCount(); ++i)
+            if (dst->paramInfo(i).id == kv.first) { idx = i; break; }
+        if (idx >= 0) dst->setParam(idx, kv.second);
+    }
+
+    bool same = true;
+    for (int i = 0; i < src->paramCount(); ++i)
+        if (src->getParam(i) != dst->getParam(i)) same = false;
+    CHECK(same, "every restored value is exactly the value that was saved");
+
+    // And the restored device is the same instrument, not merely the same
+    // numbers: identical MIDI has to give an identical render.
+    const std::vector<SpEvent> ev = spScript();
+    std::vector<f32> aL, aR, bL, bR;
+    spRender(*src, ev, 9000, kBlock, aL, aR, 120.0);
+    spRender(*dst, ev, 9000, kBlock, bL, bR, 120.0);
+    f32 diff = 0.f, pk = 0.f;
+    for (int i = 0; i < 9000; ++i) {
+        diff = std::fmax(diff, std::fabs(aL[(size_t)i] - bL[(size_t)i]));
+        diff = std::fmax(diff, std::fabs(aR[(size_t)i] - bR[(size_t)i]));
+        pk   = std::fmax(pk, std::fabs(aL[(size_t)i]));
+    }
+    CHECK(pk > 0.05f, "the comparison render is not silent (peak %.4f)", (double)pk);
+    CHECK(diff == 0.f, "a restored instrument renders bit-identically (max diff %.9f)",
+          (double)diff);
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraPresets(PluginRegistry& reg) {
+    banner("Spectra: factory presets");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    CHECK(s->presetCount() == kSpectraPresetN,
+          "presetCount() is %d (the editor expects %d)", s->presetCount(), kSpectraPresetN);
+    CHECK(s->presetName(-1) == nullptr && s->presetName(s->presetCount()) == nullptr,
+          "presetName() is null out of range");
+
+    bool names = true;
+    for (int i = 0; i < s->presetCount() && i < kSpectraPresetN; ++i) {
+        const char* n = s->presetName(i);
+        if (!n || std::strcmp(n, kSpectraPresetNames[i]) != 0) {
+            CHECK(false, "preset %d is \"%s\", the editor expects \"%s\"",
+                  i, n ? n : "(null)", kSpectraPresetNames[i]);
+            names = false;
+        }
+    }
+    CHECK(names, "all %d preset names match, in order — this list IS the contract "
+                 "with the editor's selector", kSpectraPresetN);
+
+    // Init is the defaults, exactly. Not approximately: a preset that drifts
+    // from the constructor is a preset that cannot be trusted as a reset.
+    {
+        auto a = reg.instantiate(*d, kSR, kBlock);
+        if (a) {
+            spBusyPatch(*a);
+            a->loadPreset(0);
+            bool def = true;
+            for (int i = 0; i < a->paramCount(); ++i)
+                if (a->getParam(i) != a->paramInfo(i).def) {
+                    CHECK(false, "Init left %s at %g, the default is %g",
+                          a->paramInfo(i).name.c_str(), (double)a->getParam(i),
+                          (double)a->paramInfo(i).def);
+                    def = false;
+                }
+            CHECK(def, "Init restores every parameter to its constructor default exactly");
+        }
+    }
+
+    // Every preset, every parameter, inside its declared range. loadPreset
+    // writes through setParam, which clamps, so this cannot fail on a stray
+    // table value alone -- what it does catch is a preset naming a parameter id
+    // that does not exist, or leaving one non-finite.
+    {
+        bool inRange = true;
+        for (int k = 0; k < s->presetCount(); ++k) {
+            auto a = reg.instantiate(*d, kSR, kBlock);
+            if (!a) break;
+            a->loadPreset(k);
+            for (int i = 0; i < a->paramCount(); ++i) {
+                const ParamInfo& pi = a->paramInfo(i);
+                const f32 v = a->getParam(i);
+                if (!std::isfinite(v) || v < pi.min || v > pi.max) {
+                    CHECK(false, "preset \"%s\" leaves %s at %g, outside [%g, %g]",
+                          kSpectraPresetNames[k], pi.name.c_str(), (double)v,
+                          (double)pi.min, (double)pi.max);
+                    inRange = false;
+                }
+                if (pi.isInt && v != std::floor(v)) {
+                    CHECK(false, "preset \"%s\" leaves the stepped parameter %s at %g",
+                          kSpectraPresetNames[k], pi.name.c_str(), (double)v);
+                    inRange = false;
+                }
+            }
+        }
+        CHECK(inRange, "every preset leaves every parameter finite, in range, and "
+                       "integral where the contract says stepped");
+    }
+
+    // A preset is COMPLETE: loading it after any other patch gives the same
+    // state as loading it into a fresh instance. This is the check that catches
+    // a preset which only lists what it changes and forgets to reset the rest.
+    {
+        bool complete = true;
+        for (int k = 0; k < s->presetCount(); ++k) {
+            auto fresh = reg.instantiate(*d, kSR, kBlock);
+            auto dirty = reg.instantiate(*d, kSR, kBlock);
+            if (!fresh || !dirty) break;
+            fresh->loadPreset(k);
+            spBusyPatch(*dirty);
+            dirty->loadPreset((k + 5) % s->presetCount());
+            dirty->loadPreset(k);
+            for (int i = 0; i < fresh->paramCount(); ++i)
+                if (fresh->getParam(i) != dirty->getParam(i)) {
+                    CHECK(false, "preset \"%s\" is not self-contained: %s is %g from a "
+                                 "dirty state and %g from a fresh one",
+                          kSpectraPresetNames[k], fresh->paramInfo(i).name.c_str(),
+                          (double)dirty->getParam(i), (double)fresh->getParam(i));
+                    complete = false;
+                    break;
+                }
+        }
+        CHECK(complete, "every preset lands on the same state from any starting patch");
+    }
+
+    // Every preset makes a sound, and the ones that are supposed to be
+    // different instruments actually are. The spectrum is reduced to sixteen
+    // logarithmic bands and compared by cosine similarity, which is a coarse
+    // enough measure that it only fires when two presets really are the same
+    // patch under two names.
+    {
+        const int kN = 8192;
+        std::vector<std::vector<f64>> bands((size_t)s->presetCount());
+        bool sounded = true;
+        for (int k = 0; k < s->presetCount(); ++k) {
+            auto a = reg.instantiate(*d, kSR, kBlock);
+            if (!a) break;
+            a->loadPreset(k);
+            std::vector<f32> L, R;
+            const std::vector<SpEvent> ev = { { 0, 0x90, 55, 110 } };
+            // Long enough that the slow pads have opened up before the window.
+            spRender(*a, ev, 48000 + kN, kBlock, L, R);
+            f32 pk = 0.f;
+            for (int i = 0; i < 48000 + kN; ++i) pk = std::fmax(pk, std::fabs(L[(size_t)i]));
+            if (!(pk > 0.01f)) {
+                CHECK(false, "preset \"%s\" is silent (peak %.5f)",
+                      kSpectraPresetNames[k], (double)pk);
+                sounded = false;
+            }
+            std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
+            for (int i = 0; i < kN; ++i)
+                re[(size_t)i] = L[(size_t)(40000 + i)] *
+                    (f32)(0.5 - 0.5 * std::cos(6.283185307179586 * i / kN));
+            tFft(re, im);
+            std::vector<f64> b(16, 0.0);
+            for (int j = 4; j < kN / 2; ++j) {
+                const f64 f = (f64)j * kSR / (f64)kN;
+                int bi = (int)((std::log2(std::fmax(f, 20.0) / 20.0)) * 16.0 / 10.0);
+                if (bi < 0) bi = 0;
+                if (bi > 15) bi = 15;
+                b[(size_t)bi] += (f64)re[(size_t)j] * re[(size_t)j] +
+                                 (f64)im[(size_t)j] * im[(size_t)j];
+            }
+            f64 norm = 0.0;
+            for (f64 v : b) norm += v * v;
+            norm = std::sqrt(norm);
+            if (norm > 0.0) for (f64& v : b) v /= norm;
+            bands[(size_t)k] = b;
+        }
+        CHECK(sounded, "every one of the %d presets renders a non-silent note",
+              s->presetCount());
+
+        // Three that must be plainly different instruments.
+        const int probe[3] = { 1, 7, 11 };            // Supersaw Lead, Bell, Organ
+        bool distinct = true;
+        f64 worst = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            for (int j = i + 1; j < 3; ++j) {
+                if (bands[(size_t)probe[i]].empty() || bands[(size_t)probe[j]].empty()) continue;
+                f64 dot = 0.0;
+                for (int k = 0; k < 16; ++k)
+                    dot += bands[(size_t)probe[i]][(size_t)k] * bands[(size_t)probe[j]][(size_t)k];
+                if (dot > worst) worst = dot;
+                if (dot > 0.95) {
+                    CHECK(false, "presets \"%s\" and \"%s\" have near-identical spectra "
+                                 "(similarity %.3f)",
+                          kSpectraPresetNames[probe[i]], kSpectraPresetNames[probe[j]], dot);
+                    distinct = false;
+                }
+            }
+        }
+        CHECK(distinct, "Supersaw Lead, Bell and Organ are three different sounds "
+                        "(worst spectral similarity %.3f, limit 0.95)", worst);
+    }
+
+    // Presets go through setParam, so they are ordinary parameter moves as far
+    // as the rest of the program is concerned. Nothing else has a preset list.
+    {
+        const PluginDesc* pd = reg.find("nxtakt:pulse");
+        if (pd) {
+            auto pulse = reg.instantiate(*pd, kSR, kBlock);
+            if (pulse)
+                CHECK(pulse->presetCount() == 0 && pulse->presetName(0) == nullptr,
+                      "a device with no presets answers 0 / null, so the UI draws no "
+                      "selector for it");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
     std::printf("internal device tests\n");
@@ -3231,13 +4453,21 @@ int main() {
         if (reg.plugins()[i].format == PluginFormat::Internal) ++internals;
         else if (firstNonInternal < 0) firstNonInternal = (int)i;
     }
-    CHECK(internals == 11, "scan lists every internal device (%d)", internals);
+    CHECK(internals == 12, "scan lists every internal device (%d)", internals);
     CHECK(firstNonInternal < 0 || firstNonInternal == internals,
           "internal devices sort to the front of the list");
 
     testLegacyUris(reg);
     testSaturator(reg);
     testPulse(reg);
+    testSpectraContract(reg);
+    testSpectraVoices(reg);
+    testSpectraQuality(reg);
+    testSpectraDeterminism(reg);
+    testSpectraModulation(reg);
+    testSpectraSweeps(reg);
+    testSpectraState(reg);
+    testSpectraPresets(reg);
     testEffectContract(reg);
     testEq3(reg);
     testCompressor(reg);
