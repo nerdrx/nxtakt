@@ -3924,6 +3924,19 @@ static void testTakeCancelRacesItsFinish() {
           "events the daemon cannot hand over",
           (unsigned long long)(h.eventsForwarded.load() - forwarded0));
 
+    // 2b. Fill the ENGINE's ring too (1024), so the cancel's finish cannot
+    //     even be pushed -- emitCritical PARKS it (PendingEv) and the retry
+    //     happens at the top of a later block. This is F1a's window: without
+    //     fact (5) the daemon observes the ring empty while the finish sits in
+    //     the park, and erases the take a block before the flush delivers it.
+    //     ~700 transport toggles emit >1024 events into a ring the daemon has
+    //     stopped draining (the client side is full), which fills it with
+    //     certainty; the surplus is ordinary events the engine may drop.
+    for (int i = 0; i < 700; ++i) {
+        while (!c.pushCommand(Cmd::SetPlaying, (i & 1) ? 1 : 0)) sleepMs(1);
+    }
+    sleepMs(400);   // let the engine drain the command ring into the event ring
+
     // 3. Arm a take and stop it before the quantized start. The engine cancels
     //    and emits a zero-frame finish, which pumpEvents cannot reach.
     CHECK(c.recordSlot(0, 0, 48000 * 4, /*midi*/false), "a take is armed");
@@ -3970,9 +3983,16 @@ static void testTakeCancelRacesItsFinish() {
     // pumpCommands one screen up parks and retries for exactly this reason.
     // Three transport stops went into the engine while nothing could be
     // forwarded; three have to come out.
-    CHECK(h.eventsForwarded.load() == forwarded0 + 3,
-          "and the three engine events emitted while the ring was full arrive "
-          "intact (%llu): a full ring is backpressure, not a shredder",
+    // ">= 3", no longer "== 3": step 2b floods the ENGINE ring with ~1400
+    // transport events to force the F1a park, and how many of those survive is
+    // the engine ring's business (ordinary events may drop at a full ring by
+    // contract -- only CRITICAL events park). The property this check owns is
+    // unchanged: the three sentinels emitted while forwarding was stalled must
+    // arrive, i.e. the daemon-side pop-then-drop bug stays dead. The sentinels
+    // are indistinguishable from the flood by type, so the floor is the proof.
+    CHECK(h.eventsForwarded.load() >= forwarded0 + 3,
+          "and the engine events emitted while the ring was full arrive "
+          "(%llu >= 3): a full ring is backpressure, not a shredder",
           (unsigned long long)(h.eventsForwarded.load() - forwarded0));
     CHECK(c.takesCommitted() == committed0 + 1,
           "and once the client reads again it is committed exactly once (%u)",

@@ -1830,6 +1830,11 @@ private:
         // The SECOND proof pumpTakeCancels needs: the value evtRingDrains_ must
         // reach before this take may be declared cancelled. 0 = not armed yet.
         u64   cancelDue = 0;
+        // The THIRD and FOURTH proofs (F1a): the engine block boundary that
+        // retries its parking buffer (Engine::drains), and the drain-to-empty
+        // after that retry. Zero = not armed yet.
+        u64   cancelFlush = 0;
+        u64   cancelDue2  = 0;
         bool  announced = false;
         // Engine-visible from the moment the start command is pushed until
         // Ev::RecordFinished brings it home. Freed only after that, and only
@@ -2368,6 +2373,22 @@ private:
             // have finished before the two facts above became true.
             if (!t.cancelDue) { t.cancelDue = evtRingDrains_ + 1; continue; }
             if (evtRingDrains_ < t.cancelDue) continue;
+            // Fact (5), F1a: AND THE ENGINE'S PARKING BUFFER HAS BEEN RETRIED
+            // SINCE. emitCritical() does not always push -- a full ring parks
+            // the event (engine.cpp, PendingEv) and flushPendingEv() re-offers
+            // it at the top of the next process() block. An empty ring is
+            // therefore not yet "no finish exists": it is precisely the state
+            // in which the next retry will deliver one. drains advancing past a
+            // proof taken at the empty-observation means a whole block -- and
+            // its retry into a ring we had just emptied -- has happened; the
+            // drain-to-empty after that consumes whatever the retry delivered.
+            // Rests on one stated assumption: a single block cannot refill a
+            // freshly emptied 1024-slot ring ahead of its own flush, which runs
+            // first in process().
+            if (!t.cancelFlush) { t.cancelFlush = drainProof(); continue; }
+            if (!drainProven(t.cancelFlush)) continue;
+            if (!t.cancelDue2) { t.cancelDue2 = evtRingDrains_ + 1; continue; }
+            if (evtRingDrains_ < t.cancelDue2) continue;
 
             t.len = 0;
             if (!t.discard) announceTake(t);
