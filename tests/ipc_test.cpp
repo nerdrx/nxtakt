@@ -1007,12 +1007,12 @@ static void testArrangementClassifiers() {
           sizeof(ipc::WireArrHeader), sizeof(ipc::WireArrItem));
     CHECK(sizeof(ipc::WireJournal) == sizeof(ArrJournal),
           "WireJournal mirrors ArrJournal (%zu B)", sizeof(ipc::WireJournal));
-    CHECK(ipc::arrangementBytes(2, 1) == 48 + 2 * 40 + 120,
-          "a two-item, one-clip blob is %llu B",
+    CHECK(ipc::arrangementBytes(2, 1) == 48 + 2 * 40 + 176,
+          "a two-item, one-clip blob is %llu B (WireClip is 176 from v11)",
           (unsigned long long)ipc::arrangementBytes(2, 1));
     CHECK(ipc::kMaxArrLanes == kMaxRtArrLanes,
           "the wire lane bound and the engine's agree (%d)", (int)ipc::kMaxArrLanes);
-    CHECK(ipc::kProtocolVersion == 10 && ipc::kPoolVersion == 7 && ipc::kShmVersion == 6,
+    CHECK(ipc::kProtocolVersion == 11 && ipc::kPoolVersion == 8 && ipc::kShmVersion == 6,
           "protocol v%u, pool v%u, shm v%u", ipc::kProtocolVersion, ipc::kPoolVersion,
           ipc::kShmVersion);
     CHECK(ipc::control::kJournal > ipc::control::kParams &&
@@ -1520,6 +1520,297 @@ static void testDeviceStateBlob() {
 }
 
 // ---------------------------------------------------------------------------
+// 12. the clip's other three pointers  (GUI-ON-DAEMON.md §17)
+// ---------------------------------------------------------------------------
+//
+// v11 gave RtClip's last three pointers a wire spelling: `autos`, `markers` and
+// `transients` became autoRef/markersRef/transientsRef with four counts beside
+// noteCount, and PoolKindAutomation stopped being reserved while PoolKindWarp
+// and PoolKindTransients were born. Until then a Beats-warped clip crossed
+// without the map that shapes it, a clip's envelopes did not cross at all, and
+// every audio clip under the default engine counted an amber refusal — three
+// silent failures, so the shapes, the kinds and the retirement are pinned here
+// in one process with no daemon, exactly as §11 pins the device state's.
+//
+// The properties a wrong answer would make silent:
+//   * the CELL is 176 bytes and its size is folded into the region layout hash.
+//     A field added without a version bump would let two builds read one clip
+//     table differently.
+//   * the three blobs are THREE KINDS, and two of them are flat pointer-free
+//     arrays that a reader would happily cast either way — a transient grid
+//     read as a warp map is every second onset reinterpreted as a beat.
+//     Nothing but `kind` stands between them.
+//   * the envelope blob is HEADERLESS: lanes then points, counts off the cell.
+//     Its arithmetic therefore has to hold for an ODD lane count, or the point
+//     array lands misaligned for exactly the clips nobody tests.
+//   * free-after-confirm reaches all three. A ref marked live and never
+//     confirmed is a leak; one freed early is a voice reading somebody else's
+//     clip.
+//
+// NOT here: the cell flow itself. writeCell() refuses without an attached
+// daemon (its first line) and clipShadow() only moves when a write lands, so
+// "one setClip marks all five refs Live" cannot be observed from a pool-only
+// process — daemon_test owns that half live. What this section owns is
+// everything up to the ring.
+
+static void testClipBlobs() {
+    banner("12. the whole clip: envelopes, warp markers and a transient grid");
+
+    // -- shapes first. sizeof(WireClip) is part of the layout hash, so a change
+    //    here is a change two builds must not be able to disagree about.
+    CHECK(sizeof(ipc::WireClip) == 176, "WireClip is %zu B", sizeof(ipc::WireClip));
+    CHECK(ipc::kProtocolVersion == 11 && ipc::kPoolVersion == 8,
+          "at protocol v%u over pool v%u", ipc::kProtocolVersion, ipc::kPoolVersion);
+    CHECK(sizeof(ipc::WireWarpMarker) == 16 && alignof(ipc::WireWarpMarker) == 8,
+          "WireWarpMarker is %zu B: one source frame pinned to one beat",
+          sizeof(ipc::WireWarpMarker));
+
+    // A half-filled cell must claim NOTHING. defaultWireClip is what a client
+    // starts from, and a stray ref in it would be an offset the daemon
+    // validates against a block the client never wrote.
+    const ipc::WireClip d = ipc::defaultWireClip();
+    CHECK(d.autoRef == 0 && d.markersRef == 0 && d.transientsRef == 0,
+          "a default clip names NO blob: all three new refs are zero");
+    CHECK(d.autoLaneCount == 0 && d.autoPointCount == 0 &&
+          d.markerCount == 0 && d.transientCount == 0,
+          "and all four new counts are zero, so the extent it claims is zero too");
+
+    // The bounds are protocol, not editor policy: each count is a multiply
+    // operand for a byte extent and an index bound the engine will trust.
+    CHECK(ipc::kMaxClipAutoLanes == 16 && ipc::kMaxClipAutoPoints == 4096 &&
+          ipc::kMaxWarpMarkers == 8192 && ipc::kMaxWireTransients == 8192,
+          "the four ceilings are %lld lanes, %lld points, %lld markers, %lld onsets",
+          (long long)ipc::kMaxClipAutoLanes, (long long)ipc::kMaxClipAutoPoints,
+          (long long)ipc::kMaxWarpMarkers,   (long long)ipc::kMaxWireTransients);
+    CHECK(ipc::RejectBadAutomation == 15,
+          "and RejectBadAutomation is live at %u: '%s'",
+          (unsigned)ipc::RejectBadAutomation,
+          ipc::rejectReasonName(ipc::RejectBadAutomation));
+
+    // No header term: the clip blob is trackAutosBytes minus the 16 the track
+    // blob spends stating counts the cell already states.
+    CHECK(ipc::clipAutosBytes(2, 3) ==
+              2 * sizeof(ipc::WireAutoLane) + 3 * sizeof(ipc::WireAutoPoint),
+          "clipAutosBytes(2,3) is %llu B — two arrays and NO header",
+          (unsigned long long)ipc::clipAutosBytes(2, 3));
+    CHECK(ipc::clipAutosBytes(2, 3) == 128, "which is 2*40 + 3*16");
+    CHECK(ipc::clipAutosBytes(0, 0) == 0, "and a set with nothing in it is 0 B");
+
+    // The odd-lane case is the one that bites, and it is why WireAutoLane
+    // spells out a trailing pad word instead of inheriting its size from the
+    // ABI: RtAutoLane's real size is 36, and 36 * an odd count would leave the
+    // f64-leading point array on a 4-byte boundary. control.h asserts this at
+    // compile time; saying it out loud here is what tells a reader why the pad
+    // may not be deleted.
+    CHECK(sizeof(ipc::WireAutoLane) == 40, "WireAutoLane is %zu B, pad word and all",
+          sizeof(ipc::WireAutoLane));
+    CHECK((7 * sizeof(ipc::WireAutoLane)) % alignof(ipc::WireAutoPoint) == 0,
+          "so an ODD lane count still lands the points aligned (7*%zu %% %zu == 0)",
+          sizeof(ipc::WireAutoLane), alignof(ipc::WireAutoPoint));
+
+    CHECK(ipc::PoolKindAutomation == 4 && ipc::PoolKindWarp == 10 &&
+          ipc::PoolKindTransients == 11,
+          "the three kinds hold distinct numbers (%d, %d, %d)",
+          (int)ipc::PoolKindAutomation, (int)ipc::PoolKindWarp,
+          (int)ipc::PoolKindTransients);
+    CHECK(!std::strcmp(ipc::poolKindName(ipc::PoolKindAutomation), "automation") &&
+          !std::strcmp(ipc::poolKindName(ipc::PoolKindWarp), "warp-markers") &&
+          !std::strcmp(ipc::poolKindName(ipc::PoolKindTransients), "transients"),
+          "and each names itself in a log line ('%s', '%s', '%s')",
+          ipc::poolKindName(ipc::PoolKindAutomation),
+          ipc::poolKindName(ipc::PoolKindWarp),
+          ipc::poolKindName(ipc::PoolKindTransients));
+
+    char session[48];
+    std::snprintf(session, sizeof session, "ipc-clipblobs-%d", (int)::getpid());
+    std::snprintf(gShmNameAlt, sizeof gShmNameAlt, "nxtakt-pool-%s", session);
+
+    ipc::EngineClient c;
+    if (!c.createPool(session, 4u << 20)) { CHECK(false, "createPool: %s", c.error()); return; }
+    ipc::SamplePool& p = c.pool();
+
+    // Through the READER's entry point, deliberately, for §11's reason: this is
+    // the one function the daemon puts between an untrusted offset and a
+    // pointer, so a kind check made anywhere else would be checking a different
+    // function than the one that matters.
+    // The reason string lands in `why` as an OUT-PARAMETER of the call, and an
+    // argument is not sequenced against the call that fills it — quoting it
+    // inline in the same CHECK prints the PREVIOUS blob's reason. So every
+    // validation below lands in `ok` first and the message reads `why` after.
+    const char* why = "";
+    bool ok = false;
+    auto validates = [&](u64 r, u32 kind, u64 need) {
+        ok = ipc::poolValidate(p.base(), p.bytes(), p.header(), r, kind, need, &why, nullptr);
+        return ok;
+    };
+
+    // What a detached client's shadow says. It is the republish source, so a
+    // ref in a cell that was never published would be an offset re-sent into a
+    // pool that no longer holds it — the one half of the cell flow that IS
+    // observable without a daemon.
+    const ipc::WireClip& sh = c.clipShadow(0, 0);
+    CHECK(sh.autoRef == 0 && sh.markersRef == 0 && sh.transientsRef == 0 && sh.valid == 0,
+          "an unpublished cell's shadow names none of the three new blobs");
+
+    // -- the envelopes. THREE lanes on purpose: odd, so the point array's
+    //    alignment is exercised by the real writer and not only by arithmetic.
+    ipc::WireAutoLane lanes[3]{};
+    for (int i = 0; i < 3; ++i) {
+        lanes[i].target = i + 1;
+        lanes[i].first  = i * 2;
+        lanes[i].count  = (i == 2) ? 1 : 2;
+        lanes[i].lo     = 0.0f;
+        lanes[i].hi     = 1.0f;
+    }
+    ipc::WireAutoPoint pts[5]{};
+    for (int i = 0; i < 5; ++i) { pts[i].beat = i * 0.5; pts[i].value = 0.25f * (f32)i; }
+
+    const u64 aref = c.poolWriteClipAutos(lanes, 3, pts, 5);
+    CHECK(aref != 0, "an envelope blob at %llu (3 lanes, 5 points)",
+          (unsigned long long)aref);
+    if (!aref) { c.closePool(); gShmNameAlt[0] = '\0'; return; }
+
+    validates(aref, ipc::PoolKindAutomation, ipc::clipAutosBytes(3, 5));
+    CHECK(ok, "it validates as clip envelopes at the extent the CELL would claim (%s)", why);
+    validates(aref, ipc::PoolKindString, 1);
+    CHECK(!ok, "and NOT as a string: '%s'", why);
+    validates(aref, ipc::PoolKindTrackAutos, 1);
+    CHECK(!ok, "and NOT as TRACK automation — different container, different builder: '%s'", why);
+
+    // Layout, read back at hand-computed offsets rather than through a struct
+    // that would hide the question: LANES FIRST, then points, nothing between.
+    const u8* ab = p.data<u8>(aref);
+    CHECK(ab != nullptr, "the blob reads back through the writer's own handle");
+    if (ab) {
+        ipc::WireAutoLane gl{};
+        std::memcpy(&gl, ab + 2 * sizeof(ipc::WireAutoLane), sizeof gl);
+        CHECK(gl.target == 3 && gl.first == 4 && gl.count == 1,
+              "the third lane sits at 2*40 (target %d, window %d+%d)",
+              gl.target, gl.first, gl.count);
+        ipc::WireAutoPoint gp{};
+        std::memcpy(&gp, ab + 3 * sizeof(ipc::WireAutoLane) + 4 * sizeof(ipc::WireAutoPoint),
+                    sizeof gp);
+        CHECK(gp.beat == 2.0 && gp.value == 1.0f,
+              "and the fifth point at 3*40 + 4*16 (beat %.2f, value %.2f)",
+              gp.beat, (f64)gp.value);
+    }
+    note("the block's own frame field holds the lane count, but the daemon reads "
+         "the counts off the CELL — a block field is a number the client chose");
+
+    // Lanes with no points is a legal set (a lane that is declared and empty);
+    // NO lanes is not, and the writer says so before it allocates.
+    const u64 aref2 = c.poolWriteClipAutos(lanes, 3, nullptr, 0);
+    CHECK(aref2 != 0, "lanes with no points is still a set (%llu)",
+          (unsigned long long)aref2);
+    CHECK(c.poolWriteClipAutos(lanes, 0, pts, 5) == 0,
+          "but a set with NO LANES is refused: it addresses nothing");
+    CHECK(c.poolWriteClipAutos(lanes, -1, pts, 5) == 0,
+          "and a negative lane count is refused before it becomes a memcpy length");
+
+    // -- the warp map.
+    ipc::WireWarpMarker mk[4]{};
+    for (int i = 0; i < 4; ++i) { mk[i].srcFrame = (i64)i * 24000; mk[i].beat = (f64)i; }
+    const u64 wref = c.poolWriteWarp(mk, 4);
+    CHECK(wref != 0, "a warp map at %llu (4 markers)", (unsigned long long)wref);
+    validates(wref, ipc::PoolKindWarp, 4 * sizeof(ipc::WireWarpMarker));
+    CHECK(ok, "it validates as warp markers (%s)", why);
+    validates(wref, ipc::PoolKindNotes, 1);
+    CHECK(!ok, "and NOT as notes: '%s'", why);
+    validates(wref, ipc::PoolKindSamples, 1);
+    CHECK(!ok, "and NOT as sample data: '%s'", why);
+    const ipc::WireWarpMarker* gm = p.data<ipc::WireWarpMarker>(wref);
+    CHECK(gm != nullptr, "the map reads back as a marker array");
+    if (gm)
+        CHECK(gm[3].srcFrame == 72000 && gm[3].beat == 3.0,
+              "REINTERPRETED, not translated: the last pin is frame %lld at beat %.1f",
+              (long long)gm[3].srcFrame, gm[3].beat);
+
+    // -- the transient grid. Its key is the SAMPLE's content key, because its
+    //    lifetime is the sample's: built once at load, shared by every clip
+    //    over that sample, so two such clips must name ONE block.
+    const u64 kKey = 0xC0FFEEull;
+    const i64 onsets[6] = {0, 12000, 24500, 36000, 48000, 60000};
+    const u64 tref = c.poolWriteTransients(onsets, 6, kKey);
+    CHECK(tref != 0, "a transient grid at %llu (6 onsets)", (unsigned long long)tref);
+    validates(tref, ipc::PoolKindTransients, 6 * sizeof(i64));
+    CHECK(ok, "it validates as a transient grid (%s)", why);
+    validates(tref, ipc::PoolKindSamples, 1);
+    CHECK(!ok, "and NOT as sample data: '%s'", why);
+    validates(tref, ipc::PoolKindWarp, 1);
+    CHECK(!ok, "and NOT as a warp map — that cast would read every second onset as a "
+          "BEAT: '%s'", why);
+    // The key is asserted on the block header rather than through findByKey(),
+    // and that is not fastidiousness: findByKey's arena walk guards on the NEXT
+    // header fitting under the high-water mark, so a trailing block shorter
+    // than 128 B — which a six-onset grid is — is invisible to it. The property
+    // this test is about is that the grid CARRIES the sample's key, which is
+    // what makes two clips over one sample name one grid.
+    const ipc::PoolBlock* tb = p.blockAt(tref);
+    CHECK(tb != nullptr && tb->key == kKey,
+          "the grid carries the SAMPLE's content key (0x%llx), because its "
+          "lifetime is the sample's and not the clip's",
+          (unsigned long long)(tb ? tb->key : 0));
+    const i64* gt = p.data<i64>(tref);
+    CHECK(gt != nullptr, "the grid reads back as i64[]");
+    if (gt)
+        CHECK(gt[2] == 24500 && gt[5] == 60000,
+              "onsets in source frames, strictly increasing (%lld, %lld)",
+              (long long)gt[2], (long long)gt[5]);
+
+    // The writers refuse only what is theirs to refuse — "nothing to write".
+    CHECK(c.poolWriteWarp(nullptr, 4) == 0 && c.poolWriteWarp(mk, 0) == 0,
+          "a warp write with no markers is 0, not an empty block");
+    CHECK(c.poolWriteTransients(nullptr, 6) == 0 && c.poolWriteTransients(onsets, -3) == 0,
+          "and a transient write with nothing to write is 0 as well");
+
+    // The CEILINGS are the daemon's, not the allocator's, and that split is
+    // deliberate: the bound has to be enforced where the untrusted number
+    // becomes a pointer, and enforcing it twice invites the two copies to
+    // drift. So the client can build a map it will be told off for — and being
+    // told off is a rejected cell with a reason, not a truncated map.
+    std::vector<ipc::WireWarpMarker> over((size_t)ipc::kMaxWarpMarkers + 1);
+    const u64 oref = c.poolWriteWarp(over.data(), (i64)over.size());
+    CHECK(oref != 0,
+          "a map one past kMaxWarpMarkers is still WRITTEN (%llu): the ceiling "
+          "lives on the daemon's side of the wire", (unsigned long long)oref);
+    if (oref) c.poolRelease(oref);
+
+    // FREE-AFTER-CONFIRM, all three refs, §11's step 9 run on the new kinds.
+    // The rule does not care what a block holds — it cares that the engine may
+    // still be reading it — and v11 added three new ways to forget to ask.
+    p.markLive(aref); p.markLive(wref); p.markLive(tref);
+    CHECK(p.stateOf(aref) == ipc::BlockLive && p.stateOf(wref) == ipc::BlockLive &&
+          p.stateOf(tref) == ipc::BlockLive,
+          "published: envelopes, map and grid are all Live");
+    p.markDisplaced(aref); c.poolRelease(aref);
+    p.markDisplaced(wref); c.poolRelease(wref);
+    p.markDisplaced(tref); c.poolRelease(tref);
+    CHECK(p.stateOf(aref) == ipc::BlockRetiring && p.stateOf(wref) == ipc::BlockRetiring &&
+          p.stateOf(tref) == ipc::BlockRetiring,
+          "all three are Retiring while the daemon has not answered (%s, %s, %s)",
+          ipc::poolStateName(p.stateOf(aref)), ipc::poolStateName(p.stateOf(wref)),
+          ipc::poolStateName(p.stateOf(tref)));
+    ipc::WireEvent e{};
+    e.type = ipc::EvBlockRetired;
+    e.ref = aref; c.observe(e);
+    e.ref = wref; c.observe(e);
+    e.ref = tref; c.observe(e);
+    CHECK(p.stateOf(aref) == ipc::BlockFree && p.stateOf(wref) == ipc::BlockFree &&
+          p.stateOf(tref) == ipc::BlockFree,
+          "and each is freed by its OWN echo, none by another's (%s, %s, %s)",
+          ipc::poolStateName(p.stateOf(aref)), ipc::poolStateName(p.stateOf(wref)),
+          ipc::poolStateName(p.stateOf(tref)));
+
+    note("the cell flow — one setClip marking all five refs Live and displacing "
+         "five old ones on the ack — needs an attached daemon; daemon_test owns it");
+
+    c.poolRelease(aref2);
+    c.closePool();
+    CHECK(!shmExistsPool(session), "the clip-blob pool is unlinked");
+    gShmNameAlt[0] = '\0';
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);   // survives fork() without duplicating output
@@ -1542,8 +1833,9 @@ int main() {
     testJournalRingCrossProcess();
     testTakeFiles();
     testDeviceStateBlob();
+    testClipBlobs();
 
-    banner("12. /dev/shm is clean");
+    banner("13. /dev/shm is clean");
     cleanupShm();
     const int leftover = countNxTaktShm();
     CHECK(leftover == 0, "no nxtakt region left in /dev/shm (found %d)", leftover);

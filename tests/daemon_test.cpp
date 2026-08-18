@@ -3561,6 +3561,527 @@ static void testJournalRing(ipc::EngineClient& c) {
 }
 
 // ---------------------------------------------------------------------------
+// 18. the clip's own payloads: envelopes, warp maps, transient grids (v11)
+// ---------------------------------------------------------------------------
+//
+// RtClip has five pointers. Until protocol v11 the wire could spell TWO of
+// them — `data` and `notes` — and the other three had no wire spelling at all,
+// which is not a gap in a table but a set of features that DID NOT EXIST on the
+// far side of the boundary. A clip with a volume envelope played at the user's
+// fader. A warped loop played at its flat tempo ratio. A grain snapped to
+// nothing. None of it looked broken: the GUI drew the envelope, drew the warp
+// line, drew the markers, and the daemon rendered a clip that had none of them.
+//
+// So each of the three gets an AUDIBLE proof here, against a control
+// publication that differs from it in exactly one field pair, because "the
+// blob crossed" is a claim about a memcpy and "the audio moved" is a claim
+// about the feature.
+//
+// Two things the daemon does that are worth stating before they are tested,
+// because both were surprises when this section was written:
+//
+//   * THE MAP IS NOT A POSITION. loopStart/loopEnd still fence the source
+//     region, and warpSrcAt(warpBeatAt(loopStart)) is loopStart by
+//     construction (the map is a bijection, so its inverse composed with it is
+//     the identity) — a launch therefore always begins reading exactly where it
+//     began before, however the markers are placed. What the map owns is the
+//     SLOPE: source frames per beat, everywhere, replacing the single
+//     tempo/clipBpm ratio. That is what this section measures, and measuring
+//     the start position instead would have measured nothing at all.
+//
+//   * THE COUNT BOUNDS RUN BEFORE THE EXTENTS. Every one of the three counts
+//     is a multiply operand for a byte extent, so buildClip bounds all three
+//     before poolValidate ever sees them (the F1 argument that capped
+//     `frames`). The refusal matrix below leans on it: an over-large count
+//     against a small blob comes back RejectBadAutomation and not
+//     RejectBadPoolRef, and the reason code is what says which check ran first.
+//
+// Warp::Repitch rather than Warp::Beats for the warp half, deliberately and
+// not for convenience: Beats forces the granular stretcher on for ANY marked
+// clip (engine.cpp, "a marked clip is always granular in Beats mode"), and a
+// two-grain overlap-add of two DC levels meters somewhere between them. Repitch
+// reads the map with a plain interpolating fetch, so the meter goes back to
+// being a measurement — the same reason every clip in this file is DC.
+
+// A lane that scales the whole track bus. TrackVol with the Direct transform
+// means "the point's value IS the gain" (the Fader transform would put it
+// through faderToGain first), so a DC 0.5 clip under a lane sitting at v
+// meters 0.5*v and the assertion below is arithmetic rather than liveness.
+// devSlot -1 says "an engine scalar, not a device parameter", which is the one
+// value outside 0..kMaxChainFx-1 that buildClip accepts.
+static ipc::WireAutoLane trackVolLane(i32 first, i32 count) {
+    ipc::WireAutoLane l{};
+    l.target  = (i32)AutoTarget::TrackVol;
+    l.index   = 0;
+    l.devSlot = -1;
+    l.xform   = (i32)AutoXform::Direct;
+    l.first   = first;
+    l.count   = count;
+    l.lo      = 0.f;
+    l.hi      = 1.f;
+    return l;
+}
+
+static ipc::WireAutoPoint autoPoint(f64 beat, f32 value) {
+    ipc::WireAutoPoint p{};
+    p.beat  = beat;
+    p.value = value;
+    return p;
+}
+
+static ipc::WireWarpMarker warpMarker(i64 srcFrame, f64 beat) {
+    ipc::WireWarpMarker m{};
+    m.srcFrame = srcFrame;
+    m.beat     = beat;
+    return m;
+}
+
+static void testClipPayloads(ipc::EngineClient& c) {
+    banner("18. clip envelopes, warp maps and transient grids cross, and SOUND");
+
+    resetMixer(c);
+    c.pushCommand(Cmd::StopAll);
+    // The warp arithmetic below is in BEATS per second, so the tempo is part of
+    // the measurement and not part of the scenery: 0.5 beats of map at 120 BPM
+    // is 250 ms of wall clock whatever the sample rate turns out to be.
+    c.pushCommand(Cmd::SetTempo, 0, 0, 120.0);
+    drainEvents(c);
+
+    // Tracks 8..12, which nothing else in this file touches: the sections
+    // before this one leave clips on 0-3 and 6 and arrangements on 0, 1 and 5,
+    // and launching anything restarts the transport under all of them.
+    const int kEnvT = 8, kWarpT = 9, kTrA = 10, kTrB = 11, kRefuseT = 12;
+
+    // The baseline every count below is measured against. liveBlocks() counts
+    // ALLOCATED blocks (alloc +1, free -1), so returning to it at the end is
+    // the whole of "leave the pool as you found it".
+    for (int i = 0; i < 40; ++i) { drainEvents(c); sleepMs(5); }
+    const u64 base = c.pool().liveBlocks();
+    note("pool baseline: %llu blocks live", (unsigned long long)base);
+
+    // Collects events for `ms`. A retirement that must NOT happen needs a
+    // window in which to happen, or the assertion is only about being early.
+    auto gather = [&](int ms, std::vector<ipc::WireEvent>& into) {
+        const u64 deadline = ipc::monotonicNs() + (u64)ms * 1000000ull;
+        do { drainEvents(c, &into); sleepMs(2); } while (ipc::monotonicNs() < deadline);
+    };
+    auto retiredIn = [](const std::vector<ipc::WireEvent>& v, u64 ref) {
+        for (const ipc::WireEvent& e : v)
+            if (e.type == ipc::EvBlockRetired && e.ref == ref) return true;
+        return false;
+    };
+
+    // =====================================================================
+    // (a) the envelope, audible
+    // =====================================================================
+
+    const i64 kFrames = 24000;                       // half a second at 48 kHz
+    const std::vector<f32> dc = makeDc(kFrames, 2, 0.5f);
+    const u64 sref = c.poolWrite(dc.data(), kFrames, 2, 48000.0, 0);
+    CHECK(sref != 0, "a DC 0.5 stereo block for the envelope clip, at %llu",
+          (unsigned long long)sref);
+    if (!sref) return;
+
+    // The control: the SAME clip, minus the three fields under test. Without it
+    // "the envelope makes it quiet" is indistinguishable from "the clip is
+    // quiet", which is the failure mode a feature that silently does nothing
+    // produces on its first day.
+    ipc::WireClip env = audioClip(sref, kFrames, 2);
+    CHECK(c.setClip(kEnvT, 0, env) && waitClipIdle(c, kEnvT, 0),
+          "publish it with NO envelope into [%d][0]", kEnvT);
+    CHECK(c.pushCommand(Cmd::LaunchClip, kEnvT, 0), "launch it");
+    const bool envPlaying = waitUntil([&] {
+        drainEvents(c);
+        return c.state().slotState[kEnvT].load() == (int)SlotState::Playing;
+    }, 3000);
+    CHECK(envPlaying, "slotState[%d] is Playing (state %d)", kEnvT,
+          c.state().slotState[kEnvT].load());
+    const f32 bare = settledPeak(c, kEnvT, 400);
+    CHECK(std::fabs(bare - 0.5f) < 0.02f,
+          "with no envelope the track meters the DC level: %.4f", (double)bare);
+
+    // Two points at the same value, spanning the clip's whole musical length:
+    // autoValueAt holds the first point's value before it and the last point's
+    // after it, so this lane is a CONSTANT 0.25 at every beat the voice can
+    // reach — which is what makes the meter an equality instead of a sample of
+    // a ramp taken at an unknown moment.
+    const ipc::WireAutoLane lane1 = trackVolLane(0, 2);
+    const ipc::WireAutoPoint quarter[2] = {autoPoint(0.0, 0.25f), autoPoint(4.0, 0.25f)};
+    const u64 autos1 = c.poolWriteClipAutos(&lane1, 1, quarter, 2);
+    CHECK(autos1 != 0, "poolWriteClipAutos 1 lane x 2 points -> offset %llu",
+          (unsigned long long)autos1);
+    CHECK(autos1 && c.pool().blockAt(autos1) &&
+          c.pool().blockAt(autos1)->kind == ipc::PoolKindAutomation,
+          "the block is tagged PoolKindAutomation, not samples");
+    if (!autos1) return;
+
+    env.autoRef        = autos1;
+    env.autoLaneCount  = 1;
+    env.autoPointCount = 2;
+    CHECK(c.setClip(kEnvT, 0, env) && waitClipIdle(c, kEnvT, 0),
+          "republish the SAME cell with the envelope attached");
+    CHECK(c.pool().stateOf(autos1) == ipc::BlockLive && c.pool().liveOf(autos1) == 1,
+          "the envelope blob is live in one cell (%s, live %u)",
+          ipc::poolStateName(c.pool().stateOf(autos1)), c.pool().liveOf(autos1));
+
+    // The payoff. 0.5 of DC through a bus the engine is scaling by an envelope
+    // this process wrote into shared memory: 0.125, and nothing else in the
+    // signal path can produce that number.
+    const f32 quartered = settledPeak(c, kEnvT, 400);
+    CHECK(std::fabs(quartered - 0.125f) < 0.02f,
+          "the envelope SCALES it: %.4f (0.5 DC x a 0.25 TrackVol lane = 0.125, "
+          "was %.4f bare)", (double)quartered, (double)bare);
+
+    // A NEW blob for the same cell. Two claims at once: the wire carries an
+    // EDIT of a clip that is sounding right now — the voice is not restarted,
+    // the cell is patched in place — and the displaced blob is RETIRED rather
+    // than leaked, which is §8's rule applied to the fourth kind of ref.
+    const ipc::WireAutoPoint half[2] = {autoPoint(0.0, 0.5f), autoPoint(4.0, 0.5f)};
+    const u64 autos2 = c.poolWriteClipAutos(&lane1, 1, half, 2);
+    CHECK(autos2 != 0 && autos2 != autos1, "a second envelope blob at %llu",
+          (unsigned long long)autos2);
+    const u64 blocksWithBoth = c.pool().liveBlocks();
+    env.autoRef = autos2;
+    CHECK(c.setClip(kEnvT, 0, env) && waitClipIdle(c, kEnvT, 0),
+          "republish with the second blob");
+    const f32 halved = settledPeak(c, kEnvT, 400);
+    CHECK(std::fabs(halved - 0.25f) < 0.02f,
+          "and the level MOVED with it: %.4f (0.5 x 0.5), so the wire carries "
+          "an edit and not just a load", (double)halved);
+
+    std::vector<ipc::WireEvent> evs;
+    const bool a1home = waitUntil([&] {
+        drainEvents(c, &evs);
+        return retiredIn(evs, autos1);
+    }, 4000);
+    CHECK(a1home, "the displaced envelope blob came home as EvBlockRetired (%llu)",
+          (unsigned long long)autos1);
+    CHECK(c.pool().stateOf(autos1) == ipc::BlockQuiescent,
+          "and is quiescent again (%s)", ipc::poolStateName(c.pool().stateOf(autos1)));
+    CHECK(c.poolRelease(autos1), "so the GUI may free it");
+    CHECK(c.pool().liveBlocks() == blocksWithBoth - 1,
+          "one block fewer than with both (%llu, was %llu)",
+          (unsigned long long)c.pool().liveBlocks(),
+          (unsigned long long)blocksWithBoth);
+
+    // =====================================================================
+    // (b) the warp map, audible
+    // =====================================================================
+    //
+    // A sample in two halves: the first 0.25, the second 0.5. The clip's loop
+    // region is the WHOLE sample in both publications, so the map cannot be
+    // accused of having moved a loop point — the only thing that changes is how
+    // fast the read head crosses the region, and therefore whether the loud
+    // half is inside the meter's window at all.
+    const i64 kWarpFrames = 96000;                   // two seconds at 48 kHz
+    std::vector<f32> halves = makeDc(kWarpFrames, 2, 0.25f);
+    for (i64 i = kWarpFrames / 2; i < kWarpFrames; ++i) {
+        halves[(size_t)i * 2 + 0] = 0.5f;
+        halves[(size_t)i * 2 + 1] = 0.5f;
+    }
+    const u64 wref = c.poolWrite(halves.data(), kWarpFrames, 2, 48000.0, 0);
+    CHECK(wref != 0, "a two-halves block (0.25 then 0.5) at %llu",
+          (unsigned long long)wref);
+    if (!wref) return;
+
+    ipc::WireClip wc = audioClip(wref, kWarpFrames, 2);
+    wc.warp    = (i32)Warp::Repitch;
+    // 1e5 BPM of "recorded material" at a 120 BPM transport is a flat rate of
+    // 0.0012 source frames per output frame: the head is PARKED at the top of
+    // the sample, not merely slow, so the control is a fact about the clip and
+    // not a race against the measurement window.
+    wc.clipBpm = 1.0e5;
+    CHECK(c.setClip(kWarpT, 0, wc) && waitClipIdle(c, kWarpT, 0),
+          "publish it with NO markers into [%d][0]", kWarpT);
+    CHECK(c.pushCommand(Cmd::LaunchClip, kWarpT, 0), "launch it");
+    const bool warpPlaying = waitUntil([&] {
+        drainEvents(c);
+        return c.state().slotState[kWarpT].load() == (int)SlotState::Playing;
+    }, 3000);
+    CHECK(warpPlaying, "slotState[%d] is Playing (state %d)", kWarpT,
+          c.state().slotState[kWarpT].load());
+    const f32 flat = settledPeak(c, kWarpT, 400);
+    CHECK(std::fabs(flat - 0.25f) < 0.02f,
+          "the flat rate leaves it in the QUIET half: %.4f", (double)flat);
+
+    // Two markers spanning the whole sample in half a beat. The slope is
+    // 192000 source frames per beat, which at 120 BPM sweeps the entire sample
+    // — both halves — every 250 ms, a period the meter window contains whole.
+    const ipc::WireWarpMarker fast[2] = {warpMarker(0, 0.0), warpMarker(kWarpFrames, 0.5)};
+    const u64 mref = c.poolWriteWarp(fast, 2);
+    CHECK(mref != 0, "poolWriteWarp 2 markers -> offset %llu", (unsigned long long)mref);
+    CHECK(mref && c.pool().blockAt(mref) &&
+          c.pool().blockAt(mref)->kind == ipc::PoolKindWarp,
+          "the block is tagged PoolKindWarp");
+    if (!mref) return;
+
+    wc.markersRef  = mref;
+    wc.markerCount = 2;
+    CHECK(c.setClip(kWarpT, 0, wc) && waitClipIdle(c, kWarpT, 0),
+          "republish the same cell with the map attached");
+    const f32 warped = settledPeak(c, kWarpT, 400);
+    CHECK(std::fabs(warped - 0.5f) < 0.02f,
+          "and the audio MOVED: %.4f (was %.4f) — the read head now crosses "
+          "into the loud half, because the map's SLOPE replaced the clip's "
+          "tempo ratio", (double)warped, (double)flat);
+
+    // The other direction, over the same two fields: a map whose slope is
+    // 19.2 frames per beat parks the head again. Without this the previous
+    // check is equally well explained by "a marked clip is loud".
+    const ipc::WireWarpMarker slow[2] = {warpMarker(0, 0.0), warpMarker(kWarpFrames, 5000.0)};
+    const u64 mref2 = c.poolWriteWarp(slow, 2);
+    CHECK(mref2 != 0 && mref2 != mref, "a second, nearly flat map at %llu",
+          (unsigned long long)mref2);
+    wc.markersRef = mref2;
+    CHECK(c.setClip(kWarpT, 0, wc) && waitClipIdle(c, kWarpT, 0),
+          "republish with the slow map");
+    const f32 reslowed = settledPeak(c, kWarpT, 400);
+    CHECK(std::fabs(reslowed - 0.25f) < 0.02f,
+          "and it is back in the quiet half: %.4f — the engine reads the MAP, "
+          "not the fact that there is one", (double)reslowed);
+
+    evs.clear();
+    const bool m1home = waitUntil([&] {
+        drainEvents(c, &evs);
+        return retiredIn(evs, mref);
+    }, 4000);
+    CHECK(m1home, "the displaced map came home as EvBlockRetired (%llu)",
+          (unsigned long long)mref);
+    CHECK(c.poolRelease(mref), "and the GUI may free it");
+
+    // =====================================================================
+    // (c) the transient grid is SHARED, and the cell scan is what knows it
+    // =====================================================================
+    //
+    // A grid belongs to the SAMPLE, not to the clip, and the client's cache
+    // deliberately names ONE block from every clip over that sample. So the
+    // five-field cell scan in considerRetire() is the only thing standing
+    // between "the user cleared one of two kick clips" and "the GUI freed the
+    // grid the other one is still snapping grains to". Two DIFFERENT samples
+    // and one shared grid, so that the first clear produces a retirement we can
+    // see — proving the machinery ran — while the grid stays put.
+    const std::vector<f32> dcA = makeDc(4800, 1, 0.3f);
+    const std::vector<f32> dcB = makeDc(4800, 1, 0.3f);
+    const u64 sA = c.poolWrite(dcA.data(), 4800, 1, 48000.0, 0);
+    const u64 sB = c.poolWrite(dcB.data(), 4800, 1, 48000.0, 0);
+    i64 onsets[8];
+    for (int i = 0; i < 8; ++i) onsets[i] = (i64)i * 600;
+    const u64 grid = c.poolWriteTransients(onsets, 8, 0xBEEFull);
+    CHECK(sA && sB && grid, "two samples (%llu, %llu) and ONE grid (%llu)",
+          (unsigned long long)sA, (unsigned long long)sB, (unsigned long long)grid);
+    CHECK(grid && c.pool().blockAt(grid) &&
+          c.pool().blockAt(grid)->kind == ipc::PoolKindTransients,
+          "the grid is tagged PoolKindTransients");
+    if (!sA || !sB || !grid) return;
+
+    ipc::WireClip ca = audioClip(sA, 4800, 1);
+    ca.transientsRef   = grid;
+    ca.transientCount  = 8;
+    ipc::WireClip cb = audioClip(sB, 4800, 1);
+    cb.transientsRef   = grid;
+    cb.transientCount  = 8;
+    CHECK(c.setClip(kTrA, 0, ca) && waitClipIdle(c, kTrA, 0),
+          "publish clip A into [%d][0]", kTrA);
+    CHECK(c.setClip(kTrB, 0, cb) && waitClipIdle(c, kTrB, 0),
+          "publish clip B into [%d][0], naming the same grid", kTrB);
+    CHECK(c.pool().stateOf(grid) == ipc::BlockLive && c.pool().liveOf(grid) == 2,
+          "the grid is live in TWO cells (%s, live %u)",
+          ipc::poolStateName(c.pool().stateOf(grid)), c.pool().liveOf(grid));
+
+    CHECK(c.clearClip(kTrA, 0) && waitClipIdle(c, kTrA, 0), "clear only cell A");
+    evs.clear();
+    gather(400, evs);                    // four times the retirement grace
+    CHECK(retiredIn(evs, sA),
+          "cell A's own sample came home (%llu), so the retirement machinery "
+          "did run for this clear", (unsigned long long)sA);
+    CHECK(!retiredIn(evs, grid),
+          "and the grid did NOT — no EvBlockRetired for %llu, because cell B "
+          "still names it", (unsigned long long)grid);
+    CHECK(c.pool().stateOf(grid) == ipc::BlockLive && c.pool().liveOf(grid) == 1,
+          "it is still Live with one cell left (%s, live %u)",
+          ipc::poolStateName(c.pool().stateOf(grid)), c.pool().liveOf(grid));
+    CHECK(!c.pool().free(grid), "and free() refuses it: %s", c.pool().error());
+
+    CHECK(c.clearClip(kTrB, 0) && waitClipIdle(c, kTrB, 0), "clear cell B too");
+    const bool gridHome = waitRetired(c, grid);
+    CHECK(gridHome, "NOW the grid retires (%s)",
+          ipc::poolStateName(c.pool().stateOf(grid)));
+    CHECK(waitRetired(c, sB), "and so does cell B's sample");
+    CHECK(c.poolRelease(sA) && c.poolRelease(sB) && c.poolRelease(grid),
+          "all three free");
+
+    // =====================================================================
+    // (d) the refusal matrix
+    // =====================================================================
+    //
+    // Every case is a cell a client can construct, and every one of them would
+    // otherwise hand the engine a count it multiplies, an index it trusts, or a
+    // map whose bisection assumes monotonicity. §11e's discipline throughout: a
+    // refusal must leave the pool exactly as it found it and the CELL exactly
+    // as it found it — which is checked here by listening to a clip that is
+    // still playing on the far side afterwards.
+    const std::vector<f32> keep = makeDc(kFrames, 2, 0.5f);
+    const u64 rsample = c.poolWrite(keep.data(), kFrames, 2, 48000.0, 0);
+    CHECK(rsample != 0, "a good block for the cell that must not change, at %llu",
+          (unsigned long long)rsample);
+    if (!rsample) return;
+    const ipc::WireClip good = audioClip(rsample, kFrames, 2);
+    CHECK(c.setClip(kRefuseT, 0, good) && waitClipIdle(c, kRefuseT, 0),
+          "publish it into [%d][0]", kRefuseT);
+    c.pushCommand(Cmd::LaunchClip, kRefuseT, 0);
+    const bool refPlaying = waitUntil([&] {
+        drainEvents(c);
+        return c.state().slotState[kRefuseT].load() == (int)SlotState::Playing;
+    }, 3000);
+    CHECK(refPlaying, "and launch it, so the cell can be heard as well as read");
+    const f32 before = settledPeak(c, kRefuseT, 300);
+
+    // The blobs the hostile cells point at. Each is well formed in itself: what
+    // is wrong in every case below is what the CELL says about it, which is the
+    // only half of the pair the daemon can check.
+    const ipc::WireAutoLane laneOk  = trackVolLane(0, 2);
+    const ipc::WireAutoLane laneWin = trackVolLane(0, 5);      // 0+5 > 2 points
+    const ipc::WireAutoPoint pts[2] = {autoPoint(0.0, 0.25f), autoPoint(4.0, 0.25f)};
+    const ipc::WireAutoPoint inf[2] = {
+        autoPoint(0.0, 0.25f),
+        autoPoint(4.0, std::numeric_limits<f32>::infinity())};
+    const u64 rAutos    = c.poolWriteClipAutos(&laneOk,  1, pts, 2);
+    const u64 rAutosWin = c.poolWriteClipAutos(&laneWin, 1, pts, 2);
+    const u64 rAutosInf = c.poolWriteClipAutos(&laneOk,  1, inf, 2);
+    const ipc::WireWarpMarker okMap[2]  = {warpMarker(0, 0.0), warpMarker(4800, 1.0)};
+    const ipc::WireWarpMarker badMap[2] = {warpMarker(4800, 0.0), warpMarker(1200, 1.0)};
+    const u64 rWarp    = c.poolWriteWarp(okMap, 2);
+    const u64 rWarpBad = c.poolWriteWarp(badMap, 2);
+    const std::vector<ipc::WireNote> notes = makeNotes(8, 60, 0.5, 0.25);
+    const u64 rNotes = c.poolWriteNotes(notes.data(), (i64)notes.size(), 0);
+    const u64 rTrans = c.poolWriteTransients(onsets, 8, 0);
+    CHECK(rAutos && rAutosWin && rAutosInf && rWarp && rWarpBad && rNotes && rTrans,
+          "seven well-formed blobs for the cells that lie about them");
+    if (!rAutos || !rAutosWin || !rAutosInf || !rWarp || !rWarpBad || !rNotes || !rTrans)
+        return;
+
+    struct Hostile { const char* what; ipc::WireClip clip; u32 want; };
+    std::vector<Hostile> hostile;
+    auto add = [&](const char* what, u32 want, ipc::WireClip cl) {
+        hostile.push_back(Hostile{what, cl, want});
+    };
+    {
+        ipc::WireClip h = good; h.autoRef = rAutos; h.autoLaneCount = 17; h.autoPointCount = 2;
+        add("17 envelope lanes, one past RtAutoSet's fixed width",
+            ipc::RejectBadAutomation, h);
+    }
+    {
+        ipc::WireClip h = good; h.autoRef = rAutos; h.autoLaneCount = 1; h.autoPointCount = 4097;
+        add("4097 envelope points (and the reason says the COUNT was bounded "
+            "before the extent was multiplied)", ipc::RejectBadAutomation, h);
+    }
+    {
+        ipc::WireClip h = good; h.autoRef = rAutosWin; h.autoLaneCount = 1; h.autoPointCount = 2;
+        add("a lane whose window (first 0, count 5) runs past the point array",
+            ipc::RejectBadAutomation, h);
+    }
+    {
+        ipc::WireClip h = good; h.autoRef = rAutosInf; h.autoLaneCount = 1; h.autoPointCount = 2;
+        add("an envelope point at +inf", ipc::RejectBadAutomation, h);
+    }
+    {
+        ipc::WireClip h = good; h.autoLaneCount = 1; h.autoPointCount = 2;   // autoRef 0
+        add("a lane count with no blob to hold the lanes", ipc::RejectBadAutomation, h);
+    }
+    {
+        ipc::WireClip h = good; h.autoRef = rAutos;                          // counts 0
+        add("an envelope blob with no counts, the same disagreement the other "
+            "way round", ipc::RejectBadAutomation, h);
+    }
+    {
+        ipc::WireClip h = good; h.markersRef = rWarp; h.markerCount = 1;
+        add("a one-marker warp map, which pins nothing", ipc::RejectBadClip, h);
+    }
+    {
+        ipc::WireClip h = good; h.markersRef = rWarpBad; h.markerCount = 2;
+        add("a two-marker map whose source frames go BACKWARDS",
+            ipc::RejectBadClip, h);
+    }
+    {
+        ipc::WireClip h = good; h.markersRef = rNotes; h.markerCount = 2;
+        add("markersRef naming a NOTES block", ipc::RejectBadPoolRef, h);
+    }
+    {
+        ipc::WireClip h = good; h.transientsRef = rTrans; h.transientCount = 64;
+        add("64 transients declared over a blob that holds 8",
+            ipc::RejectBadPoolRef, h);
+    }
+    {
+        ipc::WireClip h = good; h.transientCount = 8;                        // ref 0
+        add("a transient count with no grid to hold it", ipc::RejectBadClip, h);
+    }
+    {
+        ipc::WireClip h = good; h.markersRef = rWarp;                        // count 0
+        add("a warp blob with no marker count", ipc::RejectBadClip, h);
+    }
+
+    const u64 blocksBeforeRefusals = c.pool().liveBlocks();
+    int refused = 0;
+    for (const Hostile& h : hostile) {
+        u32 reason = ipc::RejectNone;
+        const bool ok = pushClipRefused(c, kRefuseT, 0, h.clip, reason) && reason == h.want;
+        if (ok) ++refused;
+        CHECK(ok, "%s -> %s (got %s)", h.what, ipc::rejectReasonName(h.want),
+              ipc::rejectReasonName(reason));
+    }
+    CHECK(refused == (int)hostile.size(), "all %d hostile payload cells refused",
+          (int)hostile.size());
+
+    CHECK(c.alive(), "the daemon survived every one of them");
+    CHECK(c.pool().liveBlocks() == blocksBeforeRefusals,
+          "no block was allocated or stranded by a refusal (%llu, was %llu)",
+          (unsigned long long)c.pool().liveBlocks(),
+          (unsigned long long)blocksBeforeRefusals);
+    // Not "the blobs are Quiescent" — writeCell marks every ref Live optimistically
+    // and onClipAck unmarks them again when the ack says refused, so a boundary
+    // that answered but leaked the mark would leave them Live for ever.
+    bool stranded = false;
+    for (u64 r : {rAutos, rAutosWin, rAutosInf, rWarp, rWarpBad, rNotes, rTrans})
+        if (c.pool().stateOf(r) != ipc::BlockQuiescent) stranded = true;
+    CHECK(!stranded, "and every refused blob is quiescent, not Live and not Retiring");
+    CHECK(c.clipShadow(kRefuseT, 0).sampleRef == rsample &&
+          c.clipShadow(kRefuseT, 0).autoRef == 0 &&
+          c.clipShadow(kRefuseT, 0).markersRef == 0 &&
+          c.clipShadow(kRefuseT, 0).transientsRef == 0,
+          "the cell is exactly what it was before the matrix ran");
+    const f32 after = settledPeak(c, kRefuseT, 400);
+    CHECK(std::fabs(after - before) < 0.02f,
+          "and it is still playing what it was playing: %.4f (was %.4f)",
+          (double)after, (double)before);
+
+    // =====================================================================
+    // (e) leave it as it was found
+    // =====================================================================
+    //
+    // Every section after this one shares the daemon and the pool, so a cell
+    // left published is a clip in somebody else's meter and a block left
+    // allocated is a leak this suite would then attribute to them.
+    CHECK(c.clearClip(kEnvT, 0)   && waitClipIdle(c, kEnvT, 0),   "clear the envelope cell");
+    CHECK(c.clearClip(kWarpT, 0)  && waitClipIdle(c, kWarpT, 0),  "clear the warp cell");
+    CHECK(c.clearClip(kRefuseT, 0)&& waitClipIdle(c, kRefuseT, 0),"clear the refusal cell");
+    c.pushCommand(Cmd::StopAll);
+
+    bool allHome = true;
+    for (u64 r : {sref, autos2, wref, mref2, rsample})
+        if (!waitRetired(c, r)) allHome = false;
+    CHECK(allHome, "every block this section published came home");
+    bool allFreed = true;
+    for (u64 r : {sref, autos2, wref, mref2, rsample,
+                  rAutos, rAutosWin, rAutosInf, rWarp, rWarpBad, rNotes, rTrans})
+        if (!c.poolRelease(r)) allFreed = false;
+    CHECK(allFreed, "and every one of them frees");
+    CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == base; }, 3000),
+          "the pool is back at its baseline (%llu, was %llu)",
+          (unsigned long long)c.pool().liveBlocks(), (unsigned long long)base);
+    drainEvents(c);
+}
+
+// ---------------------------------------------------------------------------
 // 16g. SIGKILL with an arrangement loaded, and republishArrangements()
 // ---------------------------------------------------------------------------
 //
@@ -4702,6 +5223,7 @@ int main(int argc, char** argv) {
         testArrangementRetirementOrder(client);
         testArrangementSharedBlocks(client);
         testJournalRing(client);
+        testClipPayloads(client);
         testRecording();
         testTakeWildCapacity(client);
         testTakeCancelRacesItsFinish();

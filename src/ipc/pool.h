@@ -129,7 +129,19 @@ inline constexpr u64 kPoolBlockMagic = 0x4C54435F424C4B31ull;  // "LTC_BLK1"
 //        entry above it: a v6 daemon handed one of these refuses it as "not a
 //        string", and a sampler that is drawn full and sounds empty is exactly
 //        the silent disagreement this layer exists to prevent.
-inline constexpr u32 kPoolVersion = 7;
+//   v8 — THE WHOLE CLIP (GUI-ON-DAEMON.md §17): PoolKindAutomation stops being
+//        reserved and starts carrying clip envelopes — the design AUTOMATION.md
+//        §8.2 wrote against pool v3, landing five versions later under its own
+//        reserved kind number — and two new kinds join it: PoolKindWarp (a
+//        clip's warp-marker map) and PoolKindTransients (a sample's onset
+//        grid). Until these existed three of RtClip's five pointers had no wire
+//        spelling at all, every audio clip under the default engine counted an
+//        amber refusal (the loader builds a transient grid for every sample),
+//        and a Beats-warped clip played without the data that shapes it. Same
+//        argument for a number as every entry above: a v7 daemon handed one of
+//        these refuses it by kind, which is correct and still not a
+//        disagreement two builds should have silently.
+inline constexpr u32 kPoolVersion = 8;
 
 // Every block — header and data — starts on a 64-byte line. Blocks are large
 // (a stereo bar of audio is hundreds of kilobytes) so the padding is noise,
@@ -169,9 +181,32 @@ enum : u32 {
     // docs/PROCESS-SPLIT.md §11.2.
     PoolKindString  = 3,
 
-    // RESERVED, not implemented here. AUTOMATION.md §8.2 names this number for
-    // clip envelopes crossing the boundary. It is declared so that a later wave
-    // finds its own number free rather than discovering that 8g took it.
+    // One clip's envelopes (AUTOMATION.md §8.2, GUI-ON-DAEMON.md §17), the
+    // RtAutoSet payload:
+    //
+    //   [WireAutoLane[autoLaneCount]][WireAutoPoint[autoPointCount]]
+    //
+    // The counts travel in the WireClip (autoLaneCount/autoPointCount), exactly
+    // as noteCount does — no header, because a header would be a second copy of
+    // two numbers the cell already states. WireAutoLane's explicit pad word
+    // makes its size a multiple of alignof(WireAutoPoint) (control.h asserts
+    // it), so the point array lands aligned for ANY lane count.
+    //
+    // HALF TRANSLATED, HALF REINTERPRETED, and the split is the v5 security
+    // rule applied with a scalpel. §8.2 planned to hand the engine
+    // (const RtAutoSet*)(poolBase + ref) — but RtAutoSet holds a `points`
+    // POINTER, and a pointer in a client-writable region is a pointer the
+    // client chose, a rule this file learned from the arrangement two versions
+    // after §8.2 was written. So the daemon BUILDS the RtAutoSet container on
+    // its own heap (lanes validated on the daemon's copy, exactly as
+    // buildTrackAutos does) and points it at the pool-resident POINT array,
+    // which is pointer-free POD the evaluator already treats as untrusted
+    // public memory (autoValueAt bounds every window against pointCount).
+    // Retirement follows from the split: the BLOB retires on the clip cell's
+    // generation exactly as notesRef does (§8.2's own prescription — the audio
+    // thread reads the points until the cell is displaced and drained), and the
+    // CONTAINER comes home in Ev::AutosRetired, which the daemon consumes as
+    // "free my build" precisely as it does Ev::ArrangementRetired.
     PoolKindAutomation = 4,
 
     // One track's arrangement lane (docs/ARRANGEMENT.md §9.2), or -- for the
@@ -247,6 +282,33 @@ enum : u32 {
     // contents come off RackControl::state(), a device's state off the generic
     // stateString() virtual — which is the whole reason both channels exist.
     PoolKindDeviceState = 9,
+
+    // One clip's warp-marker map: WireWarpMarker[], `frames` of them, each a
+    // {srcFrame, beat} pin (GUI-ON-DAEMON.md §17). REINTERPRETED, exactly as
+    // notes are, and legally for the same two reasons: WireWarpMarker mirrors
+    // lat::WarpMarker field for field (asserted where sample.h is visible —
+    // engine_handle.cpp — because this header may include only core/ and
+    // engine.h, and WarpMarker lives in sample.h), and it is pointer-free POD.
+    // The map's monotonicity invariant is checked at translate time as the last
+    // trusted gate; a client that rewrites its blob AFTER that check gets the
+    // defined-nonsense the evaluators promise — engine.cpp's warp section
+    // treats the array as untrusted public memory and bounds every index by
+    // markerCount — which is the same hazard class as rewriting sample data,
+    // not a new one. Retires on the clip cell's generation exactly as notesRef
+    // does, with Ev::WarpRetired as the same tighter proof Ev::NotesRetired is.
+    PoolKindWarp = 10,
+
+    // One SAMPLE's transient grid: i64[], `frames` of them, source-frame onset
+    // positions, strictly increasing (GUI-ON-DAEMON.md §17). REINTERPRETED,
+    // pointer-free like a note array — but its LIFETIME is sampleRef's, not
+    // notesRef's, because transients belong to the sample: built once at load,
+    // never rebuilt, shared by every clip over that sample (the client's
+    // address-keyed cache makes two such clips name ONE block, which is why
+    // the cell-scan half of the retirement proof matters here). The engine
+    // deliberately emits no retirement event for them (engine.h: the pointer is
+    // stable for the life of the session exactly as `data` is), so the block
+    // comes home on the drain proof alone — precisely as a sample block does.
+    PoolKindTransients = 11,
 };
 
 // The longest string the pool will carry. Not a buffer size — a policy: the
@@ -305,6 +367,8 @@ inline const char* poolKindName(u32 k) {
         case PoolKindRackState:   return "rack-state";
         case PoolKindSignatures:  return "signatures";
         case PoolKindDeviceState: return "device-state";
+        case PoolKindWarp:        return "warp-markers";
+        case PoolKindTransients:  return "transients";
         default:                  return "none";
     }
 }
@@ -342,6 +406,28 @@ static_assert(offsetof(WireNote, beat)  == offsetof(RtNote, beat));
 static_assert(offsetof(WireNote, len)   == offsetof(RtNote, len));
 static_assert(offsetof(WireNote, pitch) == offsetof(RtNote, pitch));
 static_assert(offsetof(WireNote, vel)   == offsetof(RtNote, vel));
+
+// ---------------------------------------------------------------------------
+// WireWarpMarker
+// ---------------------------------------------------------------------------
+//
+// The wire twin of lat::WarpMarker: one source frame pinned to one clip beat.
+// Like WireNote the mirror DOES license a cast — the struct is pointer-free
+// POD and the engine's evaluators treat the array as untrusted public memory —
+// so (const WarpMarker*)(poolBase + ref) is honest and a marker map costs
+// nothing at the boundary. The field-for-field static_asserts live in
+// src/ui/engine_handle.cpp rather than here, because WarpMarker is declared in
+// audio/sample.h and this header may include only core/ and audio/engine.h
+// (which names WarpMarker as an incomplete type). The daemon casts through
+// this mirror, whose shape those asserts pin to the engine's.
+struct WireWarpMarker {
+    i64 srcFrame;       // source position, engine-rate frames
+    f64 beat;           // clip-relative musical beat
+};
+
+static_assert(std::is_trivially_copyable_v<WireWarpMarker>);
+static_assert(sizeof(WireWarpMarker) == 16, "WireWarpMarker is protocol");
+static_assert(alignof(WireWarpMarker) == 8);
 
 // ---------------------------------------------------------------------------
 // WireSig
@@ -600,6 +686,9 @@ inline bool poolValidate(const u8* base, size_t payloadBytes, const PoolHeader* 
                 : wantKind == PoolKindRackState   ? "block does not hold a rack state"
                 : wantKind == PoolKindSignatures  ? "block does not hold a signature map"
                 : wantKind == PoolKindDeviceState ? "block does not hold a device state"
+                : wantKind == PoolKindAutomation  ? "block does not hold clip envelopes"
+                : wantKind == PoolKindWarp        ? "block does not hold warp markers"
+                : wantKind == PoolKindTransients  ? "block does not hold a transient grid"
                                                   : "block is of the wrong kind");
     if (needBytes > bytes)                   return no("block is smaller than the clip claims");
     // Hand the validated extent back so callers never re-read the mutable field

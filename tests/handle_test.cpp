@@ -534,6 +534,64 @@ static void testRecording(const char* baseSession) {
     ::setenv("NXTAKT_SESSION", baseSession, 1);
 }
 
+// ---------------------------------------------------------------------------
+// One OFFLINE render of an in-process engine  (used by the v11 payload section)
+// ---------------------------------------------------------------------------
+//
+// Deliberately not LocalDriver. That one renders against the wall clock, which
+// is exactly what the daemon's null driver does and exactly what makes a
+// frame-for-frame comparison across the boundary impossible. This renders block
+// after block with nothing else in the process, so what comes back is a
+// FUNCTION of the clip and of nothing else — which is what lets the same call,
+// made twice, be a bit-identity claim.
+//
+// THE ENGINE IS THE CALLER'S, and reused for every render in the section. The
+// four per-Engine side tables in engine.cpp (parked events, delay compensation,
+// automation holds, the arrangement cursor) are keyed by the engine's ADDRESS
+// and hold four slots between them, so a helper that built its own engine each
+// call would start evicting on the fifth — and one of the things it would evict
+// is the automation state leg (a) is about. prepare() resets tracks, clips,
+// meters and the beat; the leading Cmd::SetPlaying(0) normalises the one thing
+// it does not touch, the transport flag, so every call starts in the same place
+// whatever the previous one left behind.
+//
+// `frames` is rendered block-aligned into `outL`; the right channel is
+// scratch, because every clip here is mono and centred and the two are equal.
+static void renderLocal(lat::Engine& e, const lat::RtClip& cl, f64 tempo,
+                        i64 frames, std::vector<f32>& outL) {
+    const int block = 256;
+    e.prepare(48000.0, block);
+
+    auto push = [&](lat::Cmd t, i32 a, i32 b, f64 x) {
+        lat::Command c; c.type = t; c.a = a; c.b = b; c.x = x; e.pushCommand(c);
+    };
+    push(lat::Cmd::SetPlaying, 0, 0, 0.0);        // a known transport, whatever ran last
+    push(lat::Cmd::SetTempo,   0, 0, tempo);
+    push(lat::Cmd::SetQuantum, 0, 0, 0.0);        // 0 beats: a launch fires on the spot
+    push(lat::Cmd::TrackVol,   0, 0, 1.0);
+    push(lat::Cmd::MasterVol,  0, 0, 1.0);
+    lat::Command sc;
+    sc.type = lat::Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = cl;
+    e.pushCommand(sc);
+    push(lat::Cmd::SetPlaying, 1, 0, 0.0);
+    push(lat::Cmd::LaunchClip, 0, 0, 0.0);
+
+    outL.assign((size_t)frames, 0.f);
+    std::vector<f32> scratchR((size_t)block, 0.f);
+    for (i64 d = 0; d + block <= frames; d += block)
+        e.process(nullptr, nullptr, outL.data() + d, scratchR.data(), block);
+}
+
+// The peak of a rendered stretch, skipping the head of it. The skip is the
+// offline twin of peakOver()'s settle: the declick ramp is inside the first
+// milliseconds of every launch, and a peak taken across it would report the
+// ramp on a quiet clip and nothing at all on a loud one.
+static f32 peakFrom(const std::vector<f32>& v, size_t from) {
+    f32 p = 0.f;
+    for (size_t i = from; i < v.size(); ++i) p = std::fmax(p, std::fabs(v[i]));
+    return p;
+}
+
 static int countShm(const char* needle) {
     DIR* d = ::opendir("/dev/shm");
     if (!d) return -1;
@@ -1838,6 +1896,499 @@ int main() {
     }
     CHECK(backTo44, "and the engine is back in 4/4 (%d/%d)", es.posSigNum, es.posSigDen);
     eng.send(Cmd::Locate, 0, 0, 0.0);
+
+    // =====================================================================
+    // STEP 4f: THE THREE PAYLOADS THAT USED TO BE REFUSED (protocol v11)
+    // =====================================================================
+    //
+    // Until v11 the handle carried a clip's SAMPLE and its NOTES and nothing
+    // else: RtClip::autos, ::markers and ::transients had no WireClip field, so
+    // every clip that had one was consumed with a reason ("clip envelopes, warp
+    // markers and transients have no WireClip field") and crossed WITHOUT them.
+    // And because the loader builds a transient grid for every audio sample,
+    // that was not a corner: EVERY audio set in daemon mode counted a refusal
+    // per clip and played its envelopes, its warp and its beat-repeat wrong.
+    //
+    // So the first check below is the regression gate and the reason this
+    // section exists: a clip carrying all three is pushed and remoteRefusals()
+    // MUST NOT MOVE. If the amber refusal ever comes back, that is the check
+    // that goes red, before any of the audio ones do.
+    //
+    // The rest is the audio, three legs, each measured against the SAME RtClip
+    // rendered by an in-process engine. Every leg is a BOUND (|daemon - local|
+    // < 0.01) and not a comparison of frames, and the reason is structural
+    // rather than a tolerance somebody settled for:
+    //
+    //   * THE DAEMON'S FRAMES NEVER CROSS THE BOUNDARY. What comes back over
+    //     the wire is the snapshot — block-decayed meters and counters — so
+    //     there is no frame stream on this side of it to diff. (The recording
+    //     section is the exception and it is an exception on purpose: a take is
+    //     the one payload the engine hands back sample for sample.)
+    //   * AND THE TWO STREAMS ARE NOT ALIGNABLE ANYWAY. nxtaktd's null driver
+    //     renders against the WALL CLOCK: it computes how many blocks are due
+    //     from CLOCK_MONOTONIC and renders that many, so the number of blocks
+    //     between the launch and any given instant is a property of the machine
+    //     and of nothing else. There is no frame k on one side that is frame k
+    //     on the other.
+    //
+    // A PEAK survives both, because every clip here is DC by construction: its
+    // level is a property of the material and of the payload under test, not of
+    // where the render happened to start. Bit-identity IS claimed, once, where
+    // it is achievable — leg (a) rendered twice in-process and memcmp'd.
+    banner("step 4f: clip envelopes, warp markers and transients cross (v11)");
+    {
+        // Track 2, slot 2: track 0 carries the session clip step 6 relaunches
+        // and track 1 is where the sampler section parked its chain. The master
+        // meter is the one being read, so everything else has to be silent —
+        // hence the StopAll, and hence putting the session clip back at the end.
+        const int kTrk = 2, kSlot = 2;
+
+        const u64 refusals0 = eng.remoteRefusals();
+        const u64 blocks0   = eng.poolBlocksLive();
+
+        // 300 BPM, and the number is load-bearing rather than decorative. The
+        // engine re-musicalises the grain hop at every grain boundary as one
+        // sixteenth of the CURRENT tempo (engine.cpp, warpHop): at 300 BPM that
+        // is 2400 output frames, and leg (c) below needs a hop no larger than
+        // the 50 ms cap on the transient snap window (0.05 * 48000 = 2400) or
+        // no grid could move a grain origin far enough to be heard. See the leg
+        // itself for the arithmetic.
+        const f64 kTempo = 300.0;
+        CHECK(eng.send(Cmd::StopAll), "stop every session slot: the master meter "
+              "is about to be the measurement");
+        eng.send(Cmd::SetTempo, 0, 0, kTempo);
+        eng.send(Cmd::SetQuantum, 0);                    // launch on the spot
+        eng.send(Cmd::TrackVol, kTrk, 0, 1.0);
+        eng.send(Cmd::MasterVol, 0, 0, 1.0);
+        eng.send(Cmd::SetPlaying, 1);
+        for (int i = 0; i < 200 && std::fabs(es.tempo - kTempo) > 1e-6; ++i) {
+            eng.poll(es);
+            while (eng.popEvent(e)) {}
+            sleepMs(10);
+        }
+
+        auto localEngine = std::make_unique<Engine>();
+        std::vector<f32> localFrames;
+
+        // ONE event pump for the whole section, and it is not a convenience.
+        // The retirement events below are SYNTHESISED by the handle at push
+        // time, so they are in the queue the instant pushCommand() returns —
+        // and every wait, settle and meter poll in this section drains that
+        // queue. A leg that popped events itself would be racing the loop that
+        // was about to swallow the very event it is waiting for, which is
+        // precisely how a retirement test passes for the wrong reason.
+        void* sawAutosRetired = nullptr;
+        void* sawWarpRetired  = nullptr;
+        auto pump = [&]() {
+            eng.poll(es);
+            while (eng.popEvent(e)) {
+                if (e.type == Ev::AutosRetired) sawAutosRetired = e.p;
+                if (e.type == Ev::WarpRetired)  sawWarpRetired  = e.p;
+            }
+        };
+
+        // The daemon's meter, polled at 1 ms. TEN would be wrong and quietly so:
+        // the engine publishes the master meter once per audio block (5.33 ms at
+        // 48 kHz / 256) and decays it by 0.72 each time, so a 10 ms poll misses
+        // one publication in two and reads 0.72x the peak — which is 28% low,
+        // i.e. bigger than every bound below by a factor of thirty.
+        auto daemonPeak = [&](int settleMs, int windowMs) {
+            for (int i = 0; i < settleMs; ++i) { pump(); sleepMs(1); }
+            f32 pk = 0.f;
+            for (int i = 0; i < windowMs; ++i) {
+                pump();
+                pk = std::fmax(pk, es.masterMeterL);
+                sleepMs(1);
+            }
+            return pk;
+        };
+
+        // Publish into the cell, retrying through flow control exactly as
+        // App::flushPending() does — `false` from the handle means "try again
+        // next frame" and never "this cannot be carried" (§11.2).
+        auto publish = [&](const RtClip& cl) {
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = kTrk; sc.b = kSlot; sc.clip = cl;
+            bool ok = false;
+            for (int i = 0; i < 300 && !ok; ++i) {
+                ok = eng.pushCommand(sc);
+                if (!ok) { pump(); sleepMs(5); }
+            }
+            for (int i = 0; i < 40; ++i) { pump(); sleepMs(5); }
+            return ok;
+        };
+
+        // Stop, republish, relaunch. The stop is not tidiness: a voice holds
+        // &clips_[t][s] and keeps its own grain phase, so measuring a variant
+        // against a voice that started under the PREVIOUS one would measure a
+        // clip that changed underneath the read heads. Every leg starts a voice.
+        auto relaunch = [&](const RtClip& cl) {
+            eng.send(Cmd::StopTrack, kTrk);
+            for (int i = 0; i < 40; ++i) { pump(); sleepMs(5); }
+            const bool ok = publish(cl);
+            eng.send(Cmd::LaunchClip, kTrk, kSlot);
+            return ok;
+        };
+
+        // --- the material -------------------------------------------------
+        //
+        // GUI-heap buffers, alive for the whole section, exactly as App's
+        // decoded SampleBuffers are: the handle copies them into the pool and
+        // the daemon plays the copy. DC everywhere, because a peak has to mean
+        // "the payload changed the gain" and not "the window caught a crest".
+        const i64 kOneSec = 48000;
+        std::vector<f32> dcHalf((size_t)kOneSec, 0.5f);           // leg (a)
+
+        // leg (b): one second of 0.25 followed by one second of 0.5.
+        const i64 kTwoSec = 96000;
+        std::vector<f32> stepBuf((size_t)kTwoSec, 0.25f);
+        for (i64 i = kOneSec; i < kTwoSec; ++i) stepBuf[(size_t)i] = 0.5f;
+
+        // leg (c): 0.25 with a 480-frame 0.5 burst centred on every 4800th
+        // frame, and a transient 2400 frames before each burst. The arithmetic
+        // is derived in the leg.
+        std::vector<f32> burstBuf((size_t)kTwoSec, 0.25f);
+        std::vector<i64> grid;
+        for (i64 k = 1; k * 4800 < kTwoSec; ++k) {
+            const i64 p = k * 4800;
+            for (i64 i = p - 240; i < p + 240; ++i) burstBuf[(size_t)i] = 0.5f;
+            grid.push_back(p - 2400);
+        }
+
+        // Two clip envelopes and two warp maps, so the retirement leg has a
+        // DISPLACED pointer to name. envA is the one leg (a) measures.
+        RtAutoPoint ptsA[2], ptsB[2];
+        ptsA[0].beat = 0.0; ptsA[0].value = 0.25f;
+        ptsA[1].beat = 64.0; ptsA[1].value = 0.25f;      // held flat: a constant 0.25
+        ptsB[0].beat = 0.0; ptsB[0].value = 0.75f;
+        ptsB[1].beat = 64.0; ptsB[1].value = 0.75f;
+        auto makeSet = [](RtAutoSet& s, RtAutoPoint* p) {
+            s.points = p; s.pointCount = 2; s.laneCount = 1;
+            s.lanes[0].target  = (i32)AutoTarget::TrackVol;
+            s.lanes[0].xform   = (i32)AutoXform::Direct;   // the value IS the gain
+            s.lanes[0].devSlot = -1;                       // an engine scalar
+            s.lanes[0].index   = 0;
+            s.lanes[0].first   = 0;
+            s.lanes[0].count   = 2;
+            s.lanes[0].lo = 0.f; s.lanes[0].hi = 1.f;
+        };
+        RtAutoSet envA, envB;
+        makeSet(envA, ptsA);
+        makeSet(envB, ptsB);
+
+        WarpMarker mapA[2], mapB[2];
+        mapA[0].srcFrame = 0;       mapA[0].beat = 0.0;
+        mapA[1].srcFrame = kTwoSec; mapA[1].beat = 10.0;   // 96000 frames over 10 beats
+        mapB[0].srcFrame = 0;       mapB[0].beat = 0.0;
+        mapB[1].srcFrame = kTwoSec; mapB[1].beat = 20.0;
+
+        // --- 1. THE REGRESSION GATE: all three payloads, and NO REFUSAL -----
+        RtClip loaded;
+        loaded.data        = burstBuf.data();
+        loaded.frames      = kTwoSec;
+        loaded.channels    = 1;
+        loaded.loopStart   = 0;
+        loaded.loopEnd     = kTwoSec;
+        loaded.warp        = (int)Warp::Beats;
+        loaded.loop        = true;
+        loaded.quantumIdx  = 0;
+        loaded.clipBpm     = kTempo;
+        loaded.lengthBeats = 10.0;
+        loaded.gain        = 1.0f;
+        loaded.valid       = true;
+        loaded.autos       = &envA;
+        loaded.markers     = mapA;
+        loaded.markerCount = 2;
+        loaded.transients  = grid.data();
+        loaded.transientCount = (int)grid.size();
+
+        CHECK(publish(loaded),
+              "a clip carrying a sample, an envelope, a warp map AND a transient "
+              "grid is accepted by the handle");
+        CHECK(eng.remoteRefusals() == refusals0,
+              "AND NOTHING WAS REFUSED: %llu -> %llu. Before v11 this exact push "
+              "counted one — and since the loader builds a grid for every audio "
+              "sample, so did every clip of every audio set",
+              (unsigned long long)refusals0, (unsigned long long)eng.remoteRefusals());
+
+        // FOUR blocks for one clip, and naming them is what makes the count at
+        // the end of the section mean something: the sample, the transient grid,
+        // the envelope blob and the marker blob. Two of those four are the
+        // payloads that had no wire before v11.
+        const u64 blocks1 = eng.poolBlocksLive();
+        CHECK(blocks1 == blocks0 + 4,
+              "and it cost FOUR pool blocks — sample, grid, envelope, map: %llu "
+              "-> %llu", (unsigned long long)blocks0, (unsigned long long)blocks1);
+
+        eng.send(Cmd::LaunchClip, kTrk, kSlot);
+        bool cellLive = false;
+        for (int i = 0; i < 300 && !cellLive; ++i) {
+            pump();
+            cellLive = es.activeSlot[kTrk] == kSlot;
+            sleepMs(10);
+        }
+        CHECK(cellLive,
+              "and the DAEMON took the cell rather than answering RejectBadClip: "
+              "track %d reports slot %d active (%d)", kTrk, kSlot, es.activeSlot[kTrk]);
+
+        // --- 2. the retirement stand-in, for two more pointers --------------
+        //
+        // Nothing crossed: the envelope was COPIED into a pool blob and the map
+        // into another, so the engine never holds either GUI-heap object and can
+        // never hand one back. The handle has to, and App's free bookkeeping is
+        // the only reader — exactly the Ev::NotesRetired argument at the top of
+        // this file, twice more. (The transient grid deliberately has no event:
+        // it belongs to the SampleBuffer, not to the clip, and outlives every
+        // clip over it — engine.h says so and the daemon's retirement agrees.)
+        RtClip swapped = loaded;
+        swapped.autos   = &envB;
+        swapped.markers = mapB;
+        sawAutosRetired = sawWarpRetired = nullptr;
+        CHECK(publish(swapped), "replace it with a DIFFERENT envelope and a "
+              "DIFFERENT warp map");
+        for (int i = 0; i < 200 && !(sawAutosRetired && sawWarpRetired); ++i) {
+            pump();
+            sleepMs(5);
+        }
+        CHECK(sawAutosRetired == (void*)&envA,
+              "Ev::AutosRetired came home for the DISPLACED set (%p, wanted %p) — "
+              "the set was COPIED into a blob, so the engine never held it and "
+              "could never announce it",
+              sawAutosRetired, (void*)&envA);
+        CHECK(sawWarpRetired == (void*)mapA,
+              "Ev::WarpRetired came home for the DISPLACED map (%p, wanted %p)",
+              sawWarpRetired, (void*)mapA);
+
+        // --- 3a. THE ENVELOPE: one TrackVol lane, held at 0.25 --------------
+        //
+        // A DC 0.5 clip through a constant 0.25 lane is 0.125 on the master, and
+        // 0.5 without the lane. Warp::Off, so nothing but the envelope is in
+        // play: no rate, no grains, no map.
+        RtClip envClip;
+        envClip.data        = dcHalf.data();
+        envClip.frames      = kOneSec;
+        envClip.channels    = 1;
+        envClip.loopStart   = 0;
+        envClip.loopEnd     = kOneSec;
+        envClip.warp        = (int)Warp::Off;
+        envClip.loop        = true;
+        envClip.quantumIdx  = 0;
+        envClip.clipBpm     = kTempo;
+        envClip.lengthBeats = 5.0;
+        envClip.gain        = 1.0f;
+        envClip.valid       = true;
+        envClip.autos       = &envA;
+
+        relaunch(envClip);
+        const f32 envDaemon = daemonPeak(700, 1200);
+        renderLocal(*localEngine, envClip, kTempo, 48000, localFrames);
+        const f32 envLocal = peakFrom(localFrames, 4800);
+        CHECK(envDaemon > 0.10f && envDaemon < 0.15f,
+              "the daemon plays the clip envelope: master peak %.4f, and 0.5 DC "
+              "through a lane held at 0.25 is 0.125", (double)envDaemon);
+        CHECK(std::fabs(envDaemon - envLocal) < 0.01f,
+              "AND THE TWO AGREE: daemon %.4f vs in-process %.4f — the same "
+              "RtAutoSet, one of them through the pool",
+              (double)envDaemon, (double)envLocal);
+
+        RtClip envOff = envClip;
+        envOff.autos = nullptr;
+        relaunch(envOff);
+        const f32 envNone = daemonPeak(700, 1200);
+        CHECK(envNone > 0.4f && envNone > envDaemon * 3.f,
+              "and WITHOUT the envelope the same clip meters %.4f instead of "
+              "%.4f — the payload is audible, not merely carried",
+              (double)envNone, (double)envDaemon);
+
+        // --- 4. bit-identity, where bit-identity is achievable --------------
+        //
+        // Not across the boundary (see the section head) — here, twice, in this
+        // process. If the offline render were not a pure function of the clip,
+        // every "daemon vs in-process" number above would be a comparison
+        // against a moving reference and would mean nothing.
+        std::vector<f32> again;
+        renderLocal(*localEngine, envClip, kTempo, 48000, again);
+        CHECK(again.size() == localFrames.size() &&
+              std::memcmp(again.data(), localFrames.data(),
+                          localFrames.size() * sizeof(f32)) == 0,
+              "the in-process render is BIT-IDENTICAL run to run (%zu frames)",
+              localFrames.size());
+
+        // --- 3b. THE WARP MAP: the same clip, moved -------------------------
+        //
+        // The sample is a second of 0.25 followed by a second of 0.5, looped
+        // whole. WITHOUT markers the clip's own tempo is 200x the session's, so
+        // the flat rate is 0.005 and the read head crawls: after a minute it has
+        // not left the quiet half, and the grain heads (which read at natural
+        // speed from an origin that is still down there) have not either. WITH a
+        // two-marker map pinning the whole sample onto ten beats, the local rate
+        // is 1.0, the loop takes two seconds, and the loud half is played. Same
+        // buffer, same loop points, same everything else: the MAP moved the
+        // audio, and the meter says by how much.
+        //
+        // A marked clip is granular in Beats mode whatever its slope (engine.cpp
+        // is explicit about why: some segment will have slope one, and switching
+        // the stretcher on and off at that crossing would click). At slope 1 the
+        // grain advance equals the hop, so both read heads sit on the same frame
+        // and the overlap-add is transparent — which is why the marked variant
+        // measures the material's own 0.5 and not some window's fraction of it.
+        RtClip warpClip;
+        warpClip.data        = stepBuf.data();
+        warpClip.frames      = kTwoSec;
+        warpClip.channels    = 1;
+        warpClip.loopStart   = 0;
+        warpClip.loopEnd     = kTwoSec;
+        warpClip.warp        = (int)Warp::Beats;
+        warpClip.loop        = true;
+        warpClip.quantumIdx  = 0;
+        warpClip.clipBpm     = kTempo * 200.0;
+        warpClip.lengthBeats = 10.0;
+        warpClip.gain        = 1.0f;
+        warpClip.valid       = true;
+
+        relaunch(warpClip);
+        const f32 warpNone = daemonPeak(700, 1500);
+        CHECK(warpNone > 0.2f && warpNone < 0.3f,
+              "unmarked, the clip is stuck in its quiet half: %.4f (~0.25)",
+              (double)warpNone);
+
+        RtClip warpOn = warpClip;
+        warpOn.markers     = mapA;
+        warpOn.markerCount = 2;
+        relaunch(warpOn);
+        const f32 warpDaemon = daemonPeak(900, 2500);
+        renderLocal(*localEngine, warpOn, kTempo, 48000 * 4, localFrames);
+        const f32 warpLocal = peakFrom(localFrames, 4800);
+        CHECK(warpDaemon > 0.45f && warpDaemon > warpNone * 1.5f,
+              "THE MAP MOVED THE AUDIO: %.4f with the two markers, %.4f without "
+              "them, off the same buffer and the same loop window",
+              (double)warpDaemon, (double)warpNone);
+        CHECK(std::fabs(warpDaemon - warpLocal) < 0.01f,
+              "AND THE TWO AGREE: daemon %.4f vs in-process %.4f",
+              (double)warpDaemon, (double)warpLocal);
+
+        // --- 3c. THE TRANSIENT GRID: where the grains start -----------------
+        //
+        // Read from engine.cpp rather than guessed, because every number here is
+        // one of its:
+        //
+        //   * the grain hop is a sixteenth of the CURRENT tempo in OUTPUT
+        //     frames — 2400 at 300 BPM (warpHop);
+        //   * a clip whose tempo is half the session's is granular at rate 2, so
+        //     grain origins are 4800 SOURCE frames apart (adv = rate * hop);
+        //   * the ideal origin at each boundary is the voice's srcPos, i.e.
+        //     4800k, and the snap window is min(adv/2, 0.05 * sr) = min(2400,
+        //     2400) = 2400 — which at this tempo is a whole hop, and that is the
+        //     only reason a grid can do anything audible at all here;
+        //   * the two read heads run at natural speed and the crossfade is a
+        //     raised cosine over the hop, so a source frame `d` past its grain's
+        //     origin is played at weight w(d/hop) by the incoming head and a
+        //     frame a hop further on at 1 - w by the outgoing one. The weight is
+        //     therefore ZERO at each origin and ONE a hop past it.
+        //
+        // So a burst sitting exactly ON the ideal origins is windowed out, and a
+        // grid that pulls every origin back by 2400 puts those same bursts a
+        // full hop past an origin, at weight one. WITHOUT the grid the meter
+        // reads the 0.25 floor plus the shoulder of the window (~0.256); WITH
+        // it, the burst's own 0.5. The grid did not change one sample of the
+        // material — it changed where the grains BEGIN.
+        RtClip trClip;
+        trClip.data        = burstBuf.data();
+        trClip.frames      = kTwoSec;
+        trClip.channels    = 1;
+        trClip.loopStart   = 0;
+        trClip.loopEnd     = kTwoSec;
+        trClip.warp        = (int)Warp::Beats;
+        trClip.loop        = true;
+        trClip.quantumIdx  = 0;
+        trClip.clipBpm     = kTempo * 0.5;          // rate 2: granular, adv 4800
+        trClip.lengthBeats = 10.0;
+        trClip.gain        = 1.0f;
+        trClip.valid       = true;
+
+        relaunch(trClip);
+        const f32 trNone = daemonPeak(700, 1500);
+        CHECK(trNone > 0.2f && trNone < 0.32f,
+              "with no grid the grains open ON the bursts and window them out: "
+              "%.4f (the 0.25 floor, plus the shoulder of the raised cosine)",
+              (double)trNone);
+
+        RtClip trOn = trClip;
+        trOn.transients     = grid.data();
+        trOn.transientCount = (int)grid.size();
+        relaunch(trOn);
+        const f32 trDaemon = daemonPeak(700, 1500);
+        renderLocal(*localEngine, trOn, kTempo, 48000 * 3, localFrames);
+        const f32 trLocal = peakFrom(localFrames, 9600);
+        CHECK(trDaemon > 0.45f && trDaemon > trNone * 1.5f,
+              "THE GRID SNAPPED THE GRAINS INTO THE BURSTS: %.4f with %d "
+              "transients, %.4f without them, off the same %lld frames",
+              (double)trDaemon, (int)grid.size(), (double)trNone, (long long)kTwoSec);
+        CHECK(std::fabs(trDaemon - trLocal) < 0.01f,
+              "AND THE TWO AGREE: daemon %.4f vs in-process %.4f — grain "
+              "scheduling in another process, off a grid this one wrote",
+              (double)trDaemon, (double)trLocal);
+
+        // --- 5. nothing was refused over the whole of it -------------------
+        CHECK(eng.remoteRefusals() == refusals0,
+              "and over the whole section, with three payloads published nine "
+              "times, remoteRefusals() never moved (%llu)",
+              (unsigned long long)eng.remoteRefusals());
+
+        // --- 6. the displaced blocks come home ------------------------------
+        //
+        // This section published NINE clips into one cell, with four different
+        // envelope sets and four different warp maps between them. Every one of
+        // those displaced a blob, and a displaced blob is NOT freed when the
+        // handle drops its reference (pool.h: Live -> Retiring, never straight
+        // to free). It is freed when the daemon echoes the offset back, and the
+        // daemon only echoes once the displacing command has been through
+        // Engine::pushCommand AND the audio thread has run drainCommands()
+        // since — i.e. once no voice can reach the old bytes. So this is a WAIT
+        // and not a read: the count comes down when the proof arrives, not when
+        // the GUI decides it should.
+        //
+        // What it comes down TO is stated exactly rather than as an inequality,
+        // because an inequality here would pass against a leak of any size the
+        // slack allowed. Six: the three sample buffers this section decoded, the
+        // one transient grid, and ONE envelope and ONE map — the last of each,
+        // still cached against the cell. The samples and the grid are keyed by
+        // ADDRESS and are meant to outlive the cell exactly as App's
+        // SampleBuffer does; the other six blobs are gone.
+        const u64 blocksPeak = eng.poolBlocksLive();
+        Command clr;
+        clr.type = Cmd::ClearClip; clr.a = kTrk; clr.b = kSlot;
+        bool clearedCell = false;
+        for (int i = 0; i < 300 && !clearedCell; ++i) {
+            clearedCell = eng.pushCommand(clr);
+            if (!clearedCell) { pump(); sleepMs(5); }
+        }
+        CHECK(clearedCell, "the cell clears");
+        u64 blocksNow = eng.poolBlocksLive();
+        for (int i = 0; i < 600 && blocksNow != blocks0 + 6; ++i) {
+            pump();
+            sleepMs(10);
+            blocksNow = eng.poolBlocksLive();
+        }
+        CHECK(blocksNow == blocks0 + 6,
+              "and the pool holds exactly what this section still owns and not "
+              "one block more: %llu, from %llu at the start and %llu with the "
+              "cell still published — three samples, one grid, one envelope, "
+              "one map. The other six blobs went home on the daemon's echo",
+              (unsigned long long)blocksNow, (unsigned long long)blocks0,
+              (unsigned long long)blocksPeak);
+
+        // --- put the set back the way this section found it ----------------
+        eng.send(Cmd::SetTempo, 0, 0, 140.0);
+        eng.send(Cmd::LaunchClip, 0, 0);
+        for (int i = 0; i < 60; ++i) { pump(); sleepMs(10); }
+        const f32 restored = peakOver(eng, es, 120);
+        eng.send(Cmd::SetPlaying, 0);
+        eng.send(Cmd::Locate, 0, 0, 0.0);
+        CHECK(restored > 0.4f,
+              "the session clip is back on track 0 for the sections that follow: "
+              "%.4f", (double)restored);
+    }
 
     // =====================================================================
     // STEP 6: the link state, and a restart that puts the set back

@@ -33,6 +33,22 @@
 
 namespace lat {
 
+// The wire twins that could not be asserted where they are declared, pinned
+// here where both headers are visible (pool.h may include only core/ and
+// engine.h; WarpMarker and kMaxTransients live in sample.h). These are what
+// make the daemon's reinterpretation of a PoolKindWarp blob honest, and what
+// make kMaxWireTransients a protocol restatement of the detector's own cap
+// rather than a second number that can drift.
+static_assert(sizeof(ipc::WireWarpMarker) == sizeof(WarpMarker),
+              "WireWarpMarker must mirror WarpMarker");
+static_assert(alignof(ipc::WireWarpMarker) == alignof(WarpMarker));
+static_assert(offsetof(ipc::WireWarpMarker, srcFrame) == offsetof(WarpMarker, srcFrame));
+static_assert(offsetof(ipc::WireWarpMarker, beat)     == offsetof(WarpMarker, beat));
+static_assert(ipc::kMaxWireTransients == (i64)kMaxTransients,
+              "the wire bound and the detector's cap must be the same number");
+static_assert(ipc::kMaxClipAutoLanes == (i64)kMaxRtAutoLanes,
+              "the wire lane bound and RtAutoSet's width must be the same number");
+
 // ===========================================================================
 // RemoteEngine — the daemon path
 // ===========================================================================
@@ -310,6 +326,12 @@ struct RemoteEngine {
     struct Cached { u64 ref = 0; u64 finger = 0; };
     std::unordered_map<const void*, Cached> samples;
     std::unordered_map<const void*, Cached> notes;
+    // Transient grids share the SAMPLES' cache design for the samples' reason:
+    // SampleBuffer::transients is built once at load and never rebuilt, so the
+    // address is stable for the life of the session — and address keying is
+    // what makes two clips over one sample name ONE pool block, which is the
+    // grid's whole lifetime story (pool.h, PoolKindTransients).
+    std::unordered_map<const void*, Cached> trans;
 
     // AN ARRANGEMENT'S NOTES CANNOT USE THE ADDRESS CACHE, and the reason is a
     // difference between the two containers rather than a preference.
@@ -336,6 +358,22 @@ struct RemoteEngine {
     // Index kMaxTracks is the transport cell (addressed as track -1), the same
     // convention pubArr uses.
     std::vector<Cached> arrNotes[kMaxTracks + 1];
+
+    // ENVELOPES AND WARP MAPS ARE POSITIONAL EVERYWHERE, and that is the
+    // arrNotes lesson applied before the leak instead of after it. App builds a
+    // fresh RtAutoSet and a fresh WarpMarker[] for every publication of a clip
+    // (publishClip news them, dropAutos/delete[] frees them on refusal), so
+    // their addresses have exactly the arrangement-notes property: new every
+    // time, freed as soon as the retirement comes home, reused by the
+    // allocator. An address-keyed entry would be dead the moment it was
+    // written and would strand one pool block per publication. Keyed by the
+    // CELL for session clips and by lane-then-index for arrangement clips,
+    // with a FULL content fingerprint beside each (these are the edited-in-
+    // place payload class — the notes bug's stride lesson applies).
+    Cached cellAutos[kMaxTracks][kMaxScenes] = {};
+    Cached cellWarp [kMaxTracks][kMaxScenes] = {};
+    std::vector<Cached> arrClipAutos[kMaxTracks + 1];
+    std::vector<Cached> arrClipWarp [kMaxTracks + 1];
 
     // -- the retirement stand-in --------------------------------------------
     //
@@ -608,7 +646,7 @@ struct RemoteEngine {
     // this is the first time or if the content has changed underneath us.
     // 0 means the pool refused, which is reported once and then counted.
     u64 poolRefFor(std::unordered_map<const void*, Cached>& tbl, const void* p,
-                   size_t bytes, u64 finger, bool asNotes, i64 frames, int channels) {
+                   size_t bytes, u64 finger, u32 kind, i64 frames, int channels) {
         if (!p || !bytes) return 0;
         auto it = tbl.find(p);
         if (it != tbl.end()) {
@@ -619,8 +657,10 @@ struct RemoteEngine {
             cli.poolRelease(it->second.ref);
             tbl.erase(it);
         }
-        const u64 ref = asNotes
+        const u64 ref = kind == ipc::PoolKindNotes
             ? cli.poolWriteNotes((const ipc::WireNote*)p, frames)
+            : kind == ipc::PoolKindTransients
+            ? cli.poolWriteTransients((const i64*)p, frames)
             : cli.poolWrite((const f32*)p, frames, channels, rate, 0);
         if (!ref) {
             ++poolFull;
@@ -649,7 +689,7 @@ struct RemoteEngine {
         const size_t bytes = (size_t)rc.frames * (size_t)rc.channels * sizeof(f32);
         return poolRefFor(samples, rc.data, bytes,
                           fingerprint(rc.data, bytes, rc.frames, rc.channels, rate, 256),
-                          false, rc.frames, rc.channels);
+                          ipc::PoolKindSamples, rc.frames, rc.channels);
     }
 
     // NOTES: every byte, and the strided sample was a real bug here.
@@ -681,7 +721,99 @@ struct RemoteEngine {
         const size_t bytes = (size_t)rc.noteCount * sizeof(RtNote);
         return poolRefFor(notes, rc.notes, bytes,
                           fingerprint(rc.notes, bytes, rc.noteCount, 0, 0.0, 0),
-                          true, rc.noteCount, 0);
+                          ipc::PoolKindNotes, rc.noteCount, 0);
+    }
+
+    // TRANSIENTS: strided like the sample, for the sample's reason. The grid is
+    // immutable for the life of the allocation (built once in loadSample,
+    // never rebuilt — sample.h says so and the engine's no-retirement-event
+    // design depends on it), so the only question this fingerprint answers is
+    // "is this still the grid I sent", and 256 probes plus the count settle
+    // that. Address-keyed so every clip over one sample names ONE block.
+    u64 transientsRefFor(const RtClip& rc) {
+        if (!rc.transients || rc.transientCount <= 0) return 0;
+        const size_t bytes = (size_t)rc.transientCount * sizeof(i64);
+        return poolRefFor(trans, rc.transients, bytes,
+                          fingerprint(rc.transients, bytes, rc.transientCount, 0, 0.0, 256),
+                          ipc::PoolKindTransients, rc.transientCount, 0);
+    }
+
+    // One POSITIONAL cache slot refreshed against a fingerprint: the shared
+    // tail of the two encoders below, split out so the release-then-rewrite
+    // dance exists once. Returns the ref, or 0 with the pool-full accounting
+    // done.
+    template <typename WriteFn>
+    u64 refreshPositional(Cached& e, u64 finger, size_t bytes, WriteFn write) {
+        if (e.ref && e.finger == finger) return e.ref;
+        if (e.ref) { cli.poolRelease(e.ref); e.ref = 0; e.finger = 0; }
+        const u64 ref = write();
+        if (!ref) {
+            ++poolFull;
+            if (!loggedPoolFull) {
+                loggedPoolFull = true;
+                LOGE("the sample pool would not take %zu B of clip payload: %s "
+                     "[further attempts silent]", bytes, cli.error());
+            }
+            return 0;
+        }
+        e.ref    = ref;
+        e.finger = finger;
+        return ref;
+    }
+
+    // THE WARP MAP, hashed IN FULL: 16 B a marker, a few thousand markers at
+    // the outside, and the payload is edited by dragging — the exact class the
+    // notes bug lived in. WireWarpMarker mirrors WarpMarker (asserted at the
+    // top of this file), so the write is a cast and the daemon's read is the
+    // same bytes the engine would have seen in-process.
+    u64 warpRefFor(Cached& e, const WarpMarker* m, int n) {
+        const size_t bytes = (size_t)n * sizeof(WarpMarker);
+        const u64 finger = fingerprint(m, bytes, n, 0, 0.0, 0);
+        return refreshPositional(e, finger, bytes, [&] {
+            return cli.poolWriteWarp((const ipc::WireWarpMarker*)m, n);
+        });
+    }
+
+    // THE ENVELOPES, hashed IN FULL for the same reason — a dragged breakpoint
+    // edits the set in place. The lanes are converted RtAutoLane -> WireAutoLane
+    // on the stack (sixteen at most, by construction: RtAutoSet's array is
+    // fixed width); the points are the mirror cast notesRefFor's is.
+    u64 clipAutosRefFor(Cached& e, const RtAutoSet* set) {
+        const int laneCount  = set->laneCount;
+        const int pointCount = set->pointCount;
+        const size_t bytes = (size_t)ipc::clipAutosBytes(laneCount, pointCount);
+        u64 finger = fingerprint(set->lanes, (size_t)laneCount * sizeof(RtAutoLane),
+                                 laneCount, pointCount, 0.0, 0);
+        if (set->points && pointCount > 0)
+            finger = finger * 0x100000001B3ull ^
+                     fingerprint(set->points, (size_t)pointCount * sizeof(RtAutoPoint),
+                                 pointCount, 1, 0.0, 0);
+        return refreshPositional(e, finger, bytes, [&] {
+            ipc::WireAutoLane lanes[kMaxRtAutoLanes] = {};
+            for (int i = 0; i < laneCount; ++i) {
+                const RtAutoLane& l = set->lanes[i];
+                lanes[i].target  = l.target;
+                lanes[i].index   = l.index;
+                lanes[i].devSlot = l.devSlot;
+                lanes[i].xform   = l.xform;
+                lanes[i].first   = l.first;
+                lanes[i].count   = l.count;
+                lanes[i].lo      = l.lo;
+                lanes[i].hi      = l.hi;
+                lanes[i].flags   = l.flags;
+            }
+            return cli.poolWriteClipAutos(lanes, laneCount,
+                                          (const ipc::WireAutoPoint*)set->points,
+                                          pointCount);
+        });
+    }
+
+    // The positional slot for an arrangement clip's payload, grown on demand —
+    // laneNotesRef's little dance, shared by the two payloads that need it.
+    Cached& arrSlotEntry(std::vector<Cached>* table, int cell, int idx) {
+        std::vector<Cached>& v = table[cell];
+        if ((size_t)idx >= v.size()) v.resize((size_t)idx + 1);
+        return v[(size_t)idx];
     }
 
     // One RtClip, as the wire spells it: every scalar copied and the two
@@ -689,15 +821,42 @@ struct RemoteEngine {
     // the arrangement blob, which is what makes a clip that is in a scene AND on
     // the timeline name ONE pool block — written once, retired once. Two copies
     // of this conversion would be two chances for those to drift apart.
-    // `cell` >= 0 routes the NOTES through the arrangement's positional cache
-    // instead of the address one; -1 is the session-cell path. The samples go
-    // through the address cache either way, and correctly: RtClip::data points
-    // at the shared SampleBuffer on App's heap in both cases, never into the
-    // lane's allocation.
-    ipc::WireClip wireClipOf(const RtClip& rc, int cell = -1, int idx = -1) {
+    // `cell` >= 0 routes the NOTES, ENVELOPES and WARP MAP through the
+    // arrangement's positional caches; -1 is the session-cell path, which
+    // keys the same two payloads by (track, slot). The samples and the
+    // transient grid go through the address caches either way, and correctly:
+    // RtClip::data and ::transients point at the shared SampleBuffer on App's
+    // heap in both cases, never into the lane's allocation.
+    //
+    // A count is written ONLY beside a non-zero ref: a cell that declares a
+    // payload it does not carry is a shape violation the daemon refuses whole,
+    // and a pool-refused write must degrade to "the caller sees the miss"
+    // (the rc.X && !w.XRef checks both callers make), never to a lying cell.
+    ipc::WireClip wireClipOf(const RtClip& rc, int cell = -1, int idx = -1,
+                             int track = -1, int slot = -1) {
         ipc::WireClip w = ipc::defaultWireClip();
         w.sampleRef    = sampleRefFor(rc);
         w.notesRef     = cell >= 0 ? laneNotesRef(cell, idx, rc) : notesRefFor(rc);
+        if (rc.transients && rc.transientCount > 0) {
+            w.transientsRef = transientsRefFor(rc);
+            if (w.transientsRef) w.transientCount = rc.transientCount;
+        }
+        const bool hasSlot = cell >= 0 || (track >= 0 && slot >= 0);
+        if (rc.markers && rc.markerCount >= 2 && hasSlot) {
+            Cached& e = cell >= 0 ? arrSlotEntry(arrClipWarp, cell, idx)
+                                  : cellWarp[track][slot];
+            w.markersRef = warpRefFor(e, rc.markers, rc.markerCount);
+            if (w.markersRef) w.markerCount = rc.markerCount;
+        }
+        if (rc.autos && rc.autos->laneCount > 0 && hasSlot) {
+            Cached& e = cell >= 0 ? arrSlotEntry(arrClipAutos, cell, idx)
+                                  : cellAutos[track][slot];
+            w.autoRef = clipAutosRefFor(e, rc.autos);
+            if (w.autoRef) {
+                w.autoLaneCount  = rc.autos->laneCount;
+                w.autoPointCount = rc.autos->pointCount;
+            }
+        }
         w.frames       = rc.frames;
         w.loopStart    = rc.loopStart;
         w.loopEnd      = rc.loopEnd;
@@ -828,27 +987,46 @@ struct RemoteEngine {
         }
 
         const RtClip& rc = c.clip;
-        ipc::WireClip w = wireClipOf(rc);
+
+        // Bounds FIRST, refused whole rather than truncated — the arrangement's
+        // discipline, for the arrangement's reason: the daemon applies exactly
+        // these numbers (control.h, kMax*) and would answer RejectBadAutomation
+        // or RejectBadClip, so clamping here would only move the refusal
+        // somewhere it could not be attributed. These are hand-built-clip
+        // territory: App's own encoders cannot exceed them (the lane array is
+        // fixed at 16 and the detector caps at kMaxTransients).
+        if (rc.valid && rc.autos &&
+            (rc.autos->laneCount > (int)ipc::kMaxClipAutoLanes ||
+             rc.autos->pointCount > (int)ipc::kMaxClipAutoPoints ||
+             rc.autos->laneCount < 0 || rc.autos->pointCount < 0))
+            return refuse(Cmd::SetClip, "the clip's envelope is past the protocol's "
+                                        "bounds (16 lanes, 4096 points); the clip is "
+                                        "not published");
+        if (rc.valid && ((rc.markers && rc.markerCount > (int)ipc::kMaxWarpMarkers) ||
+                         (rc.transients && rc.transientCount > (int)ipc::kMaxWireTransients)))
+            return refuse(Cmd::SetClip, "the clip's warp map or transient grid is past "
+                                        "the protocol's bounds (8192); the clip is not "
+                                        "published");
+
+        ipc::WireClip w = wireClipOf(rc, -1, -1, t, s);
 
         // A clip whose bytes never reached the pool must not be published as a
         // valid one: the daemon would answer RejectBadPoolRef and the cell would
         // sit refused. Publish it as an EMPTY cell instead, which is a state the
-        // protocol has a name for, and let the pool-full log line say why.
-        if (rc.valid && ((rc.data && !w.sampleRef) || (rc.notes && !w.notesRef))) {
+        // protocol has a name for, and let the pool-full log line say why. From
+        // v11 the same rule covers all five payloads — a clip that HAS an
+        // envelope, a warp map or a transient grid must cross with it or not at
+        // all, because "crosses without them" is the amber refusal this wave
+        // exists to end, and a silent version of it would be strictly worse.
+        if (rc.valid && ((rc.data && !w.sampleRef) || (rc.notes && !w.notesRef) ||
+                         (rc.autos && rc.autos->laneCount > 0 && !w.autoRef) ||
+                         (rc.markers && rc.markerCount >= 2 && !w.markersRef) ||
+                         (rc.transients && rc.transientCount > 0 && !w.transientsRef))) {
             w = ipc::WireClip{};
             w.channels = 1; w.clipBpm = 120.0; w.lengthBeats = 4.0; w.gain = 1.0f;
             w.warp = (i32)Warp::Beats; w.quantumIdx = -1; w.prob = 1.0;
             w.followAction = (i32)Follow::None;
         }
-
-        // Three cross-process gaps this step does not close, and RtClip is where
-        // they show: `autos`, `markers` and `transients` have no WireClip field
-        // to travel in, so a clip with an envelope, a warp map or a transient
-        // grid plays without them. The daemon cannot be at fault for this — it
-        // is not expressible — so the GUI has to be the one that says so.
-        if (rc.valid && (rc.autos || rc.markers || rc.transients))
-            refuse(Cmd::SetClip, "clip envelopes, warp markers and transients have no "
-                                 "WireClip field; the clip crosses without them");
 
         if (!cli.setClip(t, s, w)) return false;     // busy cell or full ring: retry
 
@@ -893,10 +1071,12 @@ struct RemoteEngine {
     // is playing, and poolRelease on a Live block defers rather than frees, so
     // "after" is both correct and the only order that is obviously correct.
     void trimLaneNotes(int cell, size_t keep) {
-        std::vector<Cached>& v = arrNotes[cell];
-        for (size_t i = keep; i < v.size(); ++i)
-            if (v[i].ref) cli.poolRelease(v[i].ref);
-        if (v.size() > keep) v.resize(keep);
+        for (std::vector<Cached>* table : {arrNotes, arrClipAutos, arrClipWarp}) {
+            std::vector<Cached>& v = table[cell];
+            for (size_t i = keep; i < v.size(); ++i)
+                if (v[i].ref) cli.poolRelease(v[i].ref);
+            if (v.size() > keep) v.resize(keep);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -966,27 +1146,43 @@ struct RemoteEngine {
             w.clip      = s.clip;
         }
 
+        // The payload bounds, per clip, before anything is written — the same
+        // refused-whole discipline the item bounds above get, because the
+        // daemon would refuse the lane and the FIFO must not retry it forever.
+        for (int i = 0; i < ra->clipCount; ++i) {
+            const RtClip& rc = ra->clips[i];
+            if (!rc.valid) continue;
+            if ((rc.autos && (rc.autos->laneCount > (int)ipc::kMaxClipAutoLanes ||
+                              rc.autos->pointCount > (int)ipc::kMaxClipAutoPoints ||
+                              rc.autos->laneCount < 0 || rc.autos->pointCount < 0)) ||
+                (rc.markers && rc.markerCount > (int)ipc::kMaxWarpMarkers) ||
+                (rc.transients && rc.transientCount > (int)ipc::kMaxWireTransients))
+                return refuse(c.type, "an arrangement clip's payload is past the "
+                                      "protocol's bounds; the lane is not published");
+        }
+
         std::vector<ipc::WireClip> clips((size_t)ra->clipCount);
-        bool dropped = false, poolShort = false;
+        bool poolShort = false;
         for (int i = 0; i < ra->clipCount; ++i) {
             const RtClip& rc = ra->clips[i];
             ipc::WireClip& w = clips[(size_t)i];
             w = wireClipOf(rc, cell, i);
-            if (rc.valid && ((rc.data && !w.sampleRef) || (rc.notes && !w.notesRef)))
+            if (rc.valid && ((rc.data && !w.sampleRef) || (rc.notes && !w.notesRef) ||
+                             (rc.autos && rc.autos->laneCount > 0 && !w.autoRef) ||
+                             (rc.markers && rc.markerCount >= 2 && !w.markersRef) ||
+                             (rc.transients && rc.transientCount > 0 && !w.transientsRef)))
                 poolShort = true;
-            if (rc.valid && (rc.autos || rc.markers || rc.transients)) dropped = true;
         }
 
-        // A lane whose audio never reached the pool must not be published as if
-        // it had: the daemon would answer RejectBadArrangement, the whole lane
-        // would be refused, and App's FIFO would retry it for ever against a
-        // pool that is still full. Consumed and reported instead.
+        // A lane whose payload never reached the pool must not be published as
+        // if it had: the daemon would answer RejectBadArrangement, the whole
+        // lane would be refused, and App's FIFO would retry it for ever against
+        // a pool that is still full. Consumed and reported instead. (The
+        // "envelope, warp map or transients have no WireClip field" refusal
+        // that used to sit here is gone: v11 is the wire growing those fields.)
         if (poolShort)
-            return refuse(c.type, "the sample pool would not take this lane's audio; "
+            return refuse(c.type, "the sample pool would not take this lane's payload; "
                                   "the timeline is not published");
-        if (dropped)
-            refuse(c.type, "an arrangement clip's envelope, warp map or transients have "
-                           "no WireClip field; the lane crosses without them");
 
         ipc::WireArrHeader h{};
         h.noteCount = ra->noteCount;

@@ -2443,3 +2443,224 @@ non-zero track peak read by an independent `EngineClient` — and survives
 `kill -9` of that daemon with the link `Lost`, which is a state the banner
 draws.
 
+
+---
+
+## 17. The wire learns the whole clip — protocol v11
+
+Since the process split, `RtClip` has had five pointers and the wire has
+carried two. `sampleRef` and `notesRef` crossed in phase 2; `autos` (clip
+envelopes), `markers` (warp maps) and `transients` (onset grids) had **no
+WireClip field at all**, so `pushClipCell` counted an honest refusal per
+affected clip — and because `loadSample()` builds a transient grid for every
+audio file, that was **every set with audio in it**, under what §16 made the
+default engine. An amber "N refused" on a set that was otherwise carried
+perfectly, and Beats-warped clips playing without the data that shapes them:
+refused-and-visible, which was the right way to be wrong, and is no longer
+necessary.
+
+### 17.1 The wire: three refs, four counts, two new pool kinds
+
+```
+WireClip           += autoRef, markersRef, transientsRef (u64) and
+                      autoLaneCount, autoPointCount, markerCount,
+                      transientCount (i64, beside noteCount, and bounded like
+                      it: each is a multiply operand for a byte extent).
+                      120 B -> 176 B; the clip table and every section after
+                      it move; a v10 and a v11 binary refuse each other at
+                      attach(), which is the mechanism working.
+
+PoolKindAutomation [WireAutoLane[autoLaneCount]][WireAutoPoint[autoPointCount]]
+     (= 4, live)    — the design AUTOMATION.md §8.2/§8.3 reserved against v4,
+                      landing seven versions later under its own kind number
+                      and its own reject reason (RejectBadAutomation, also
+                      pre-reserved). No header: the counts travel in the cell
+                      exactly as noteCount does.
+
+PoolKindWarp = 10  WireWarpMarker[markerCount] — {i64 srcFrame; f64 beat},
+                      mirroring sample.h's WarpMarker (asserted where both
+                      headers are visible, engine_handle.cpp).
+
+PoolKindTransients WireClip-independent i64[transientCount]: the SAMPLE's
+     = 11             onset grid, shared by every clip over that sample.
+
+Bounds             kMaxClipAutoLanes 16 (== kMaxRtAutoLanes, the container's
+                      own fixed width), kMaxClipAutoPoints 4096 (§8.4's
+                      number), kMaxWarpMarkers 8192, kMaxWireTransients 8192
+                      (== sample.h's kMaxTransients, asserted). Past a bound
+                      the whole SetClip refuses — §8.4's rule: the automation
+                      is never silently stripped, and neither are the others.
+```
+
+`kProtocolVersion` 10 → 11, `kPoolVersion` 7 → 8. Both sides refuse a
+mismatched peer through the existing gates: the layout hash folds
+`sizeof(WireClip)` and the protocol version, `pool::kHash` folds the pool
+version, and `EngineClient::attach` still says "restart the engine" in words.
+
+### 17.2 Three payloads, three lifetime disciplines — each stated
+
+The §15.3 invariant sorts the three payloads cleanly, and the sort is the
+design:
+
+* **Transients — `sampleRef`'s discipline, exactly.** Pointer-free `i64[]`,
+  REINTERPRETED (`(const i64*)(poolBase + ref)`), and retired on the clip
+  cell's generation through the drain proof. The engine deliberately emits no
+  retirement event for them (engine.h: the pointer is stable for the life of
+  the session exactly as `data` is), so the drain proof is the only proof —
+  which is precisely sampleRef's situation. They are also the one payload that
+  is genuinely SHARED: the client's address-keyed cache makes every clip over
+  one sample name ONE block, so `considerRetire`'s scan across every cell's
+  five ref fields is what stands between "cleared one of three kick clips" and
+  "freed the grid the other two still play from".
+
+* **Warp markers — `notesRef`'s discipline, exactly.** Pointer-free POD
+  mirror, REINTERPRETED, retired on the cell's generation with the drain
+  proof, and with `Ev::WarpRetired` consumed by the daemon as the same tighter
+  confirmation `Ev::NotesRetired` already is. `warpMapValid()` — the gate
+  engine.h says the engine's supplier owes it — runs at translate time, the
+  last trusted point. A client that rewrites its blob after that check gets
+  what engine.cpp's warp section promises for untrusted public memory: a
+  defined point on a wrong map, every index bounded by `markerCount`, never a
+  wild read. That is the hazard class rewriting sample data already lives in.
+
+* **Clip envelopes — HALF TRANSLATED, HALF REINTERPRETED, and the split is
+  §8.2 corrected by a rule written after it.** §8.2 planned to hand the engine
+  `(const RtAutoSet*)(poolBase + autoRef)`. The arrangement wave (v5) later
+  established the rule that forbids it: **a pointer in a client-writable
+  region is a pointer the client chose**, and `RtAutoSet` holds `points`. So
+  the daemon BUILDS the container on its own heap — every number the engine
+  will trust beyond the window check frozen at translate time, TOCTOU-sound,
+  `buildTrackAutos`' discipline — and aims it at the pool-resident POINT
+  array, which is pointer-free POD that `autoValueAt()` already treats as
+  untrusted (the lane window is validated against `pointCount` at every call).
+  Retirement follows the split: the BLOB retires on the cell's generation
+  exactly as `notesRef` does — §8.2's own prescription, kept — and the
+  CONTAINER comes home in `Ev::AutosRetired`, which the daemon consumes as
+  "free my build" precisely as it consumes `Ev::ArrangementRetired`, with the
+  same confirmed-only rule and the same held-not-freed stuck log. An
+  arrangement clip's container needs no event of its own: it is reachable only
+  through the lane's clips, so it frees with the lane in layer 1.
+
+In §15.3's words: for the container path, nothing the audio thread can reach
+points into a pool block that is not still pinned by its cell; for the
+reinterpreted payloads, the audio thread does keep the pool pointer, and
+free-after-confirm is the proof — the same two arms, each on the payloads that
+actually need it.
+
+### 17.3 The near side: positional caches, and the arrNotes lesson pre-applied
+
+`wireClipOf()` now fills all five refs and is still the ONE encoder shared by
+the session table and the arrangement blob. The transient grid rides a new
+address-keyed cache beside `samples` — legal for the samples' reason (built
+once, never rebuilt, stable address; strided fingerprint) and load-bearing for
+the sharing above. Envelopes and warp maps are POSITIONAL everywhere — keyed
+by (track, slot) for session cells and lane-then-index for arrangement clips —
+because App news a fresh `RtAutoSet` and a fresh `WarpMarker[]` per
+publication, which is exactly the address-instability that made arrNotes
+positional; an address-keyed entry would strand one pool block per
+publication. Both are hashed IN FULL: these are the edited-in-place payload
+class, and the notes bug's stride lesson applies verbatim.
+
+A clip that HAS a payload must cross with it or not at all: a pool-refused
+write degrades to the published-as-empty-cell path (plus the pool-full log),
+never to a clip that silently plays without its envelope — a silent version of
+the refusal this wave ends would be strictly worse than the refusal.
+
+### 17.4 What was removed
+
+The two `refuse()` sites — `pushClipCell`'s "clip envelopes, warp markers and
+transients have no WireClip field; the clip crosses without them" and
+`pushArrangement`'s per-lane twin — are gone; the `refuse()` machinery stays
+for the commands that still need it (the chain family, unknown commands,
+payloads past protocol bounds). `buildClip`'s "three of RtClip's five pointers
+are not expressible" sentence is replaced by its inverse: all five are
+expressible, and every one leaves `buildClip` either null, derived from a
+validated offset, or built on the daemon's heap — never read from the peer as
+an address.
+
+### 17.5 Evidence
+
+`make -j` from clean, zero warnings, both binaries; full `make test` from
+clean binaries: **753 / 205 / 811 / 854 / 1030 / 256** (engine, ipc, daemon,
+internal_device, timesig_view, handle). ipc +45, daemon +73, handle +22; the
+suites this wave does not own are unmoved. Four demo renders `cmp`-identical
+to the baseline.
+
+**THE PARITY PROOF, at the seam** (`handle_test` step 4f, against a real
+spawned `nxtaktd`): one clip, three payload legs, each leg measured on the
+daemon's own meter at 1 ms polling AND rendered by a directly-driven
+in-process `lat::Engine` over the same `RtClip`. The daemon leg is a measured
+bound and not a `cmp`, for a structural reason worth stating once: **the
+daemon's rendered frames never cross the boundary — only block-decayed meters
+do — and its null driver renders against the wall clock, so the two frame
+streams are not alignable sample-for-sample.** The in-process leg IS bit-gated:
+rendered twice from scratch, the frames `memcmp` equal.
+
+| leg | without the payload | daemon with it | in-process with it |
+|---|---|---|---|
+| envelope (TrackVol, constant 0.25 over a DC 0.5 clip) | 0.5000 | **0.1250** | **0.1250** |
+| warp map (slope pinned onto the loud half of a split sample) | 0.2500 | **0.5000** | **0.5000** |
+| transient grid (grain origins snapped into a loud burst, 300 BPM) | quieter | **louder, equal both sides** | = daemon |
+
+Every `|daemon − inprocess|` gate is 0.01; the measured differences are zero
+to four decimal places. The warp leg also corrected this section's author: a
+two-marker map owns the SLOPE of beat→source, and the played head still
+launches at `loopStart` — the map moves *where the audio goes from there*,
+which is exactly what the audible leg measures. The transient leg runs at
+300 BPM deliberately: the engine re-musicalises the grain hop per grain as one
+sixteenth of the current tempo, and 300 BPM makes the hop (2400 frames) equal
+the 50 ms snap-window cap, so a grid can move a grain origin far enough to
+hear.
+
+`daemon_test` §18 adds, against a real daemon: the same three payloads audible
+through a bare `EngineClient` (envelope 0.5→0.125 and the EDIT 0.125→0.25;
+warp 0.25→0.5), the transient grid genuinely SHARED — one block named by two
+cells, clearing one cell does NOT bring it home, clearing both does — the
+displaced envelope blob coming home as `EvBlockRetired` on a republish, and a
+refusal matrix of eight: lane count 17, point count 4097, a lane window past
+the point array, a non-finite point, a one-marker map, a non-monotone map, a
+kind mismatch, an extent lie, and a count with no ref — each answered with its
+reason (`RejectBadAutomation` / `RejectBadClip` / `RejectBadPoolRef`), each
+leaving the cell unchanged and the blocks free.
+
+`ipc_test` §12 adds, in one process: the 176-byte cell, the four bounds, the
+blob arithmetic (including that an ODD lane count still lands the point array
+8-aligned), the kind discipline in every wrong-kind direction, and
+free-after-confirm on all three new refs.
+
+**THE ZERO-REFUSED PROOF, with the shipping GUI.** Headless gamescope, the
+DEFAULT engine (no `NXTAKT_ENGINE` in the environment), opening
+`/tmp/nxtakt-selftest/demo.lattice` — five tracks, every audio clip
+Beats-warped with a loader-built transient grid, i.e. exactly the set that
+used to count a refusal per clip. The app log contains no "cannot carry" and
+no refusal line; the status bar draws NO amber tag — `Ready ...
+daemon:JACK 48000 Hz / 256 fr` and nothing else (screenshots
+`wcl-out/wcl-01-demo-settled.png`, status-bar crop
+`wcl-out/wcl-02-statusbar-crop.png` in the session scratchpad).
+
+**Removal tests, run and watched go red.** Each fragment was deleted from a
+green tree, the affected suite rebuilt and run, and the fragment restored
+(harness: session scratchpad `wcl-removal.py`, log `wcl-removal.log`).
+
+| removed | red |
+|---|---|
+| `wireClipOf` drops `transientsRef` (client side) | handle x5 — the grid never crosses, daemon disagrees with in-process |
+| `wireClipOf` drops `markersRef` | handle x5 |
+| `wireClipOf` drops `autoRef` | handle x5 |
+| `buildClip` never installs `rc.autos` (daemon side) | daemon x2 — the envelope stops scaling, and the EDIT stops moving |
+| `buildClip` never installs `rc.markers` | daemon x1 — the audio stops moving |
+| `buildClip` never installs `rc.transients` | handle x2 — daemon 0.2562 vs in-process 0.5000: grain scheduling without the grid |
+| the lane-window bound (`first+count > pointCount`) | daemon x5 — a hostile window is ACCEPTED |
+| the `warpMapValid` gate | daemon x4 — a backwards map is ACCEPTED |
+| `installClip`'s three new `considerRetire` calls | daemon x11 — displaced blobs never come home |
+| the shared-block scan's three new fields | daemon x1 — the shared grid is echoed while another cell still names it |
+| `onClipAck`'s three new `markDisplaced` calls (client) | daemon x8 — the echo arrives and the block cannot free |
+
+One row moved suites while being written: deleting the daemon's
+`rc.transients` install stayed green under `daemon_test` — that suite proves
+the grid's *sharing and retirement* (ref fields in the shadow, which the
+deleted line does not touch) while the audible grain proof lives in
+`handle_test` step 4f — and went red there, with exactly the disagreement the
+parity leg exists to catch. That split is worth keeping in mind when adding
+payload rows later: the daemon suite owns the LIFETIME, the handle suite owns
+the SOUND.

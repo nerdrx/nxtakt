@@ -129,7 +129,27 @@ namespace lat::ipc {
 //        decoder so it could not have opened the file even if it had. A set with
 //        an instrument in it played the instrument in-process and nothing at all
 //        through the daemon.
-inline constexpr u32 kProtocolVersion = 10;
+//   v11 — THE WHOLE CLIP (GUI-ON-DAEMON.md §17). WireClip grows the three
+//        references RtClip always had and the wire never carried: `autoRef`
+//        (clip envelopes, PoolKindAutomation — the fields and bounds
+//        AUTOMATION.md §8.3 reserved against v4, landing seven versions
+//        later), `markersRef` (the warp-marker map, PoolKindWarp) and
+//        `transientsRef` (the sample's onset grid, PoolKindTransients), each
+//        with its count beside noteCount. sizeof(WireClip) goes 120 -> 176, so
+//        the clip table and every section after it move and the layout hash
+//        moves with them — a v10 and a v11 binary refuse each other at
+//        attach(), which is the mechanism working. RejectBadAutomation stops
+//        being reserved and is returned; pool version 7 -> 8 rides along
+//        (PoolKindAutomation implemented, PoolKindWarp/PoolKindTransients
+//        new).
+//
+//        Until this existed the GUI counted an honest refusal per affected
+//        clip — and because the loader computes a transient grid for every
+//        audio sample, that was EVERY set with audio in it, under what v10's
+//        flip made the DEFAULT engine: an amber "N refused" for a set that was
+//        otherwise carried perfectly, and Beats-warped clips playing without
+//        the envelopes, maps and grids that shape them.
+inline constexpr u32 kProtocolVersion = 11;
 
 // Daemon-generated wire events start here, well clear of lat::Ev. The event
 // ring carries a superset of Ev: the boundary itself has things to report
@@ -461,8 +481,12 @@ enum : u32 {
     RejectBadString      = 13, // the URI blob is not a terminated string
     RejectScanBusy       = 14, // the scan is running and the queue is full
 
-    // RESERVED for AUTOMATION.md §8.4, which names this number. Declared, never
-    // returned here, so that wave finds its number free.
+    // AUTOMATION.md §8.4 named this number while the design was still
+    // reserved; v11 makes it live. The clip's envelope payload is malformed —
+    // counts past kMaxClipAutoLanes/kMaxClipAutoPoints, a lane window outside
+    // the point array, a target/xform/devSlot out of range, or a non-finite
+    // clamp — and per §8.4 a malformed set REFUSES THE WHOLE SetClip; the
+    // daemon never silently strips the automation and plays the rest.
     RejectBadAutomation  = 15,
 
     // --- the arrangement (wave 8g) ------------------------------------------
@@ -612,11 +636,13 @@ static_assert(sizeof(WireCommand) == 32 && sizeof(WireEvent) == 32);
 static_assert(sizeof(WireMidi) == sizeof(MidiMsg), "WireMidi must mirror MidiMsg");
 
 // ---------------------------------------------------------------------------
-// WireClip — lat::RtClip with the two pointers replaced by pool offsets
+// WireClip — lat::RtClip with the five pointers replaced by pool offsets
 // ---------------------------------------------------------------------------
 //
 // Every scalar of RtClip, plus `sampleRef`/`notesRef` where `data` and `notes`
-// used to be. This is the whole of §2.4 and half of §2.5's problem, solved: the
+// used to be — and, from v11, `autoRef`/`markersRef`/`transientsRef` where
+// `autos`/`markers`/`transients` used to be nothing at all (GUI-ON-DAEMON.md
+// §17). This is the whole of §2.4 and half of §2.5's problem, solved: the
 // GUI names sample data by an offset into a region the daemon also maps, and
 // the daemon does the one addition that turns it back into a pointer.
 //
@@ -639,9 +665,20 @@ static_assert(sizeof(WireMidi) == sizeof(MidiMsg), "WireMidi must mirror MidiMsg
 struct WireClip {
     u64 sampleRef;      // pool offset of interleaved f32, 0 = none  <-- was const f32*
     u64 notesRef;       // pool offset of WireNote[], 0 = none       <-- was const RtNote*
+    // v11: the three pointers that used to have no wire spelling at all.
+    // Their counts sit beside noteCount below, i64 like it, because the count
+    // is a multiply operand for the blob's byte extent and the far side bounds
+    // it BEFORE multiplying (see buildClip in nxtaktd.cpp).
+    u64 autoRef;        // PoolKindAutomation blob, 0 = none          <-- was const RtAutoSet*
+    u64 markersRef;     // PoolKindWarp blob, 0 = none                <-- was const WarpMarker*
+    u64 transientsRef;  // PoolKindTransients blob, 0 = none          <-- was const i64*
     i64 frames;
     i64 loopStart, loopEnd;
     i64 noteCount;
+    i64 autoLaneCount;      // <= kMaxClipAutoLanes  (== kMaxRtAutoLanes)
+    i64 autoPointCount;     // <= kMaxClipAutoPoints, across all lanes
+    i64 markerCount;        // 0, or >= 2 (one marker pins nothing) and <= kMaxWarpMarkers
+    i64 transientCount;     // <= kMaxWireTransients (== sample.h's kMaxTransients)
     f64 clipBpm, lengthBeats, prob, followBeats;
     f32 gain;
     i32 channels;
@@ -656,8 +693,45 @@ struct WireClip {
 };
 
 static_assert(std::is_trivially_copyable_v<WireClip>);
-static_assert(sizeof(WireClip) == 120, "WireClip is part of the region layout");
+static_assert(sizeof(WireClip) == 176, "WireClip is part of the region layout");
 static_assert(alignof(WireClip) == 8);
+
+// The payload bounds, protocol from v11 on. Each count above is a multiply
+// operand for a byte extent and an index bound the engine will trust, so each
+// gets a ceiling here exactly as kMaxArr* got theirs — and a blob past one is
+// REFUSED whole, never truncated.
+//
+//   kMaxClipAutoLanes   == kMaxRtAutoLanes: RtAutoSet's lane array is fixed
+//                         width by value, so this is the container's own
+//                         capacity, not a policy. Asserted below.
+//   kMaxClipAutoPoints  AUTOMATION.md §2.1's number: 4096 breakpoints across
+//                         a clip's lanes is minutes of dense hand-drawn
+//                         automation on a payload that is *about* one or two
+//                         parameters.
+//   kMaxWarpMarkers     a marker is a transient somebody pinned to a beat, so
+//                         the transient cap is the natural ceiling for the map
+//                         derived from it.
+//   kMaxWireTransients  == kMaxTransients (audio/sample.h): the detector stops
+//                         adding at 8192, so a grid past that was not built by
+//                         this codebase. The equality is asserted in
+//                         engine_handle.cpp, where sample.h is visible —
+//                         this header may include only core/ and engine.h.
+inline constexpr i64 kMaxClipAutoLanes  = (i64)kMaxRtAutoLanes;
+inline constexpr i64 kMaxClipAutoPoints = 4096;
+inline constexpr i64 kMaxWarpMarkers    = 8192;
+inline constexpr i64 kMaxWireTransients = 8192;
+
+static_assert(kMaxClipAutoLanes == 16,
+              "RtAutoSet's fixed lane width is shipped protocol; a change to "
+              "kMaxRtAutoLanes must ride a version bump, not slip through here");
+
+// The envelope blob's byte extent: [WireAutoLane[lanes]][WireAutoPoint[points]],
+// counts bounded by the caller FIRST (the same deliberately-not-defensive
+// contract arrangementBytes states). WireAutoLane's trailing pad word makes its
+// size a multiple of alignof(WireAutoPoint) — asserted beside the struct — so
+// the point array lands aligned for any lane count, given the 64-aligned
+// offsets poolValidate guarantees.
+inline constexpr u64 clipAutosBytes(i64 laneCount, i64 pointCount);
 
 // Defaults that match RtClip's, so a client can send a half-filled cell and get
 // the engine's documented behaviour rather than a clip at 0 BPM.
@@ -835,6 +909,13 @@ static_assert(sizeof(WireArrItem) % alignof(WireClip) == 0,
 inline constexpr u64 trackAutosBytes(i64 laneCount, i64 pointCount) {
     return (u64)sizeof(WireAutoSetHeader) + (u64)laneCount * sizeof(WireAutoLane) +
            (u64)pointCount * sizeof(WireAutoPoint);
+}
+
+// Declared beside WireClip, defined here where the element types exist. The
+// CLIP blob has no header — the counts travel in the WireClip cell, exactly as
+// noteCount does — so this is trackAutosBytes minus the header term.
+inline constexpr u64 clipAutosBytes(i64 laneCount, i64 pointCount) {
+    return (u64)laneCount * sizeof(WireAutoLane) + (u64)pointCount * sizeof(WireAutoPoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,7 +1606,7 @@ using MidiRing    = ShmSpscRing<WireMidi, 1024>;
 // allocate-write-publish-retire lifecycle emphatically is not.
 using JournalRing = ShmSpscRing<WireJournal, 4096>;
 
-// The clip table. 32 x 32 x 120 B is 120 KiB — the same order as one ring, and
+// The clip table. 32 x 32 x 176 B is 176 KiB — the same order as one ring, and
 // preallocated for the same reason everything else here is: the engine cannot
 // wait for an allocation and a republish must not need one either.
 inline constexpr size_t kClipTableBytes = sizeof(WireClip) * kMaxTracks * kMaxScenes;

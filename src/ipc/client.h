@@ -459,6 +459,56 @@ public:
         return ref;
     }
 
+    // -- the clip's own payloads (v11, GUI-ON-DAEMON.md §17) -----------------
+
+    // [WireAutoLane[]][WireAutoPoint[]] — one clip's envelopes, the RtAutoSet
+    // payload. No header: the counts travel in the WireClip cell exactly as
+    // noteCount does, and the daemon computes the extent from the counts the
+    // cell declares (clipAutosBytes), never from the block's own fields.
+    u64 poolWriteClipAutos(const WireAutoLane* lanes, i64 laneCount,
+                           const WireAutoPoint* points, i64 pointCount) {
+        if (!pool_.valid()) return 0;
+        if (laneCount <= 0 || pointCount < 0) return 0;
+        const u64 bytes = clipAutosBytes(laneCount, pointCount);
+        const u64 ref = pool_.alloc((size_t)bytes, PoolKindAutomation, laneCount, 0, 0.0, 0);
+        if (!ref) { setErr("%s", pool_.error()); return 0; }
+        u8* p = pool_.data<u8>(ref);
+        if (!p) return 0;
+        std::memcpy(p, lanes, (size_t)laneCount * sizeof(WireAutoLane));
+        if (pointCount)
+            std::memcpy(p + (size_t)laneCount * sizeof(WireAutoLane),
+                        points, (size_t)pointCount * sizeof(WireAutoPoint));
+        return ref;
+    }
+
+    // WireWarpMarker[] — one clip's warp map. Flat, headerless, count in the
+    // cell; the daemon reinterprets it as the engine's WarpMarker[] exactly as
+    // a note blob becomes RtNote[].
+    u64 poolWriteWarp(const WireWarpMarker* markers, i64 count) {
+        if (!pool_.valid() || !markers || count <= 0) return 0;
+        const u64 ref = pool_.alloc((size_t)count * sizeof(WireWarpMarker),
+                                    PoolKindWarp, count, 0, 0.0, 0);
+        if (!ref) { setErr("%s", pool_.error()); return 0; }
+        u8* p = pool_.data<u8>(ref);
+        if (!p) return 0;
+        std::memcpy(p, markers, (size_t)count * sizeof(WireWarpMarker));
+        return ref;
+    }
+
+    // i64[] — one sample's transient grid. `key` is the same content key the
+    // sample block carries, because the grid shares the sample's identity and
+    // lifetime (built once at load, shared by every clip over that sample).
+    u64 poolWriteTransients(const i64* onsets, i64 count, u64 key = 0) {
+        if (!pool_.valid() || !onsets || count <= 0) return 0;
+        const u64 ref = pool_.alloc((size_t)count * sizeof(i64),
+                                    PoolKindTransients, count, 0, 0.0, key);
+        if (!ref) { setErr("%s", pool_.error()); return 0; }
+        u8* p = pool_.data<u8>(ref);
+        if (!p) return 0;
+        std::memcpy(p, onsets, (size_t)count * sizeof(i64));
+        return ref;
+    }
+
     // Publishes `blobRef` as track `track`'s lane; -1 is the transport cell and
     // 0 clears. Returns false — and changes nothing — for the same three
     // "try again next frame" reasons setClip() does: a previous publication for
@@ -1172,10 +1222,17 @@ private:
 
         WireClip c = in;
         c.generation = shadow_[i].generation + 1;
-        if (cmd == Cmd::ClearClip) { c.sampleRef = 0; c.notesRef = 0; c.valid = 0; }
+        if (cmd == Cmd::ClearClip) {
+            c.sampleRef = 0; c.notesRef = 0;
+            c.autoRef = 0; c.markersRef = 0; c.transientsRef = 0;
+            c.valid = 0;
+        }
 
-        if (c.sampleRef) pool_.markLive(c.sampleRef);
-        if (c.notesRef)  pool_.markLive(c.notesRef);
+        if (c.sampleRef)     pool_.markLive(c.sampleRef);
+        if (c.notesRef)      pool_.markLive(c.notesRef);
+        if (c.autoRef)       pool_.markLive(c.autoRef);
+        if (c.markersRef)    pool_.markLive(c.markersRef);
+        if (c.transientsRef) pool_.markLive(c.transientsRef);
 
         *map_.clip(track, slot) = c;
         pending_[i] = c;
@@ -1192,8 +1249,11 @@ private:
         if (e.flags & ClipAckRefused) {
             // The engine never saw it, so nothing was displaced and the blocks
             // we optimistically marked Live are not published after all.
-            if (pending_[i].sampleRef) pool_.unmarkLive(pending_[i].sampleRef);
-            if (pending_[i].notesRef)  pool_.unmarkLive(pending_[i].notesRef);
+            if (pending_[i].sampleRef)     pool_.unmarkLive(pending_[i].sampleRef);
+            if (pending_[i].notesRef)      pool_.unmarkLive(pending_[i].notesRef);
+            if (pending_[i].autoRef)       pool_.unmarkLive(pending_[i].autoRef);
+            if (pending_[i].markersRef)    pool_.unmarkLive(pending_[i].markersRef);
+            if (pending_[i].transientsRef) pool_.unmarkLive(pending_[i].transientsRef);
             shadow_[i].generation = pending_[i].generation;   // keep them monotonic
             pending_[i] = shadow_[i];
             return true;
@@ -1203,8 +1263,11 @@ private:
         // runs unconditionally on the old refs, including when the new clip
         // names the same block — markLive/markDisplaced are a counted pair, and
         // a repush that changes only the gain must not leave the count high.
-        if (shadow_[i].sampleRef) pool_.markDisplaced(shadow_[i].sampleRef);
-        if (shadow_[i].notesRef)  pool_.markDisplaced(shadow_[i].notesRef);
+        if (shadow_[i].sampleRef)     pool_.markDisplaced(shadow_[i].sampleRef);
+        if (shadow_[i].notesRef)      pool_.markDisplaced(shadow_[i].notesRef);
+        if (shadow_[i].autoRef)       pool_.markDisplaced(shadow_[i].autoRef);
+        if (shadow_[i].markersRef)    pool_.markDisplaced(shadow_[i].markersRef);
+        if (shadow_[i].transientsRef) pool_.markDisplaced(shadow_[i].transientsRef);
         shadow_[i] = pending_[i];
         return true;
     }
@@ -1396,8 +1459,11 @@ private:
     void rollbackPendingCells() {
         for (int i = 0; i < kCells; ++i) {
             if (pending_[i].generation == shadow_[i].generation) continue;
-            if (pending_[i].sampleRef) pool_.unmarkLive(pending_[i].sampleRef);
-            if (pending_[i].notesRef)  pool_.unmarkLive(pending_[i].notesRef);
+            if (pending_[i].sampleRef)     pool_.unmarkLive(pending_[i].sampleRef);
+            if (pending_[i].notesRef)      pool_.unmarkLive(pending_[i].notesRef);
+            if (pending_[i].autoRef)       pool_.unmarkLive(pending_[i].autoRef);
+            if (pending_[i].markersRef)    pool_.unmarkLive(pending_[i].markersRef);
+            if (pending_[i].transientsRef) pool_.unmarkLive(pending_[i].transientsRef);
             shadow_[i].generation = pending_[i].generation;
             pending_[i] = shadow_[i];
         }

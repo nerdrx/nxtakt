@@ -411,6 +411,17 @@ private:
         bool          pooled  = false;
         bool          isClear = false;
 
+        // The clip's envelope CONTAINER (v11, GUI-ON-DAEMON.md §17): an
+        // RtAutoSet built on the daemon's heap whose `points` aims at the
+        // pool-resident point array. Built here so that a refused translation,
+        // or a push the ring had no room for and later abandoned, frees it on
+        // the way out with no bookkeeping — the same argument `built` makes
+        // below. Ownership moves to clipAutosHeld_[track][slot] at commit().
+        // `arrClipAutos` is the same thing once per arrangement clip; those
+        // move into the lane's ArrBuilt and live and die with the lane.
+        std::unique_ptr<RtAutoSet>              clipAutos;
+        std::vector<std::unique_ptr<RtAutoSet>> arrClipAutos;
+
         // -- the arrangement (docs/ARRANGEMENT.md §9) ------------------------
         //
         // `built` is the block the ENGINE will hold: one allocation containing
@@ -462,6 +473,13 @@ private:
         std::unique_ptr<u8[]> mem;      // the single allocation
         const void*           p = nullptr;  // what was handed to pushCommand
         std::vector<PoolRef>  refs;     // pool blocks the RtClips point into
+        // v11: one envelope container per arrangement clip that has one,
+        // pointed at by that RtClip::autos inside `mem`. Reachable ONLY
+        // through the lane's clips, so they free with `mem` in layer 1 — the
+        // engine emits no per-clip AutosRetired for a lane swap, and needs
+        // none: a lane no voice is inside is a lane whose clips' envelopes no
+        // voice can reach.
+        std::vector<std::unique_ptr<RtAutoSet>> autos;
     };
 
     // A displaced lane, mid-retirement. TWO OWNERS, TWO LAYERS, ONE PROOF, and
@@ -486,11 +504,25 @@ private:
         std::unique_ptr<u8[]> mem;
         const void*           watch = nullptr;   // matched against Ev::*Retired
         std::vector<PoolRef>  refs;
+        std::vector<std::unique_ptr<RtAutoSet>> clipAutos;  // free with mem, layer 1
         i32   track     = 0;
         bool  autos     = false;
         u64   dueDrains = 0;
         u64   dueNs     = 0;
         bool  confirmed = false;
+    };
+
+    // One clip cell's displaced envelope container (v11), waiting for the
+    // engine's Ev::AutosRetired naming exactly `watch`. A struct of its own
+    // rather than a Retire: the thing being freed is daemon heap, not a pool
+    // block, so it neither echoes EvBlockRetired nor consults the drain
+    // counter — the event IS the proof, and it rides emitCritical, which
+    // cannot drop it.
+    struct ClipAutosRetire {
+        std::unique_ptr<RtAutoSet> mem;
+        const void*                watch = nullptr;
+        u64                        dueNs = 0;       // stuck logging only
+        bool                       confirmed = false;
     };
 
     // The signature map the engine holds, and one on its way out. ONE LAYER,
@@ -628,6 +660,7 @@ private:
             pumpRetirements();
             pumpChainRetirements();
             pumpSigRetirements();
+            pumpClipAutosRetirements();
             map_.hdr->heartbeat.fetch_add(1, std::memory_order_relaxed);
             timespec ts{0, 1000000};        // 1 ms
             ::nanosleep(&ts, nullptr);
@@ -806,7 +839,7 @@ private:
         if (st.arr) { installArrangement(st); return; }
         if (st.sig) { installSignatures(st); return; }
         if (!st.pooled) return;
-        installClip(st.cmd.a, st.cmd.b, st.cell);
+        installClip(st.cmd.a, st.cmd.b, st.cell, std::move(st.clipAutos));
         map_.hdr->clipsApplied.fetch_add(1, std::memory_order_relaxed);
         ipc::WireEvent e{};
         e.type  = ipc::EvClipAck;
@@ -942,8 +975,10 @@ private:
         out.cell     = c;
 
         RtClip rc{};
-        PoolRef sampleRef{}, notesRef{};
-        if (!buildClip(c, rc, reason, w.a, w.b, sampleRef, notesRef)) return false;
+        PoolRef sampleRef{}, notesRef{}, markersRef{}, transientsRef{};
+        if (!buildClip(c, rc, reason, w.a, w.b, sampleRef, notesRef,
+                       markersRef, transientsRef, out.clipAutos))
+            return false;
         out.cmd.clip = rc;
         return true;
     }
@@ -956,13 +991,23 @@ private:
     // amount of new code guarding a large amount of reviewed code, which is the
     // right ratio (ARRANGEMENT.md §9.3).
     //
-    // `t`/`s` are for the log line only. The two out-params report which pool
-    // blocks the resulting RtClip points into, so a caller that has to retire
-    // them later does not re-derive it from a peer-writable field.
+    // `t`/`s` are for the log line only. The four PoolRef out-params report
+    // which pool blocks the resulting RtClip points into, so a caller that has
+    // to retire them later does not re-derive it from a peer-writable field.
+    // `outAutos` is different in kind: it is the envelope CONTAINER this call
+    // built on the daemon's heap (see the automation section below), which the
+    // caller must keep alive for as long as the engine can reach the RtClip —
+    // and which frees itself if the caller drops it before the engine ever saw
+    // the clip.
     bool buildClip(const ipc::WireClip& c, RtClip& rc, u32& reason, int t, int s,
-                   PoolRef& outSample, PoolRef& outNotes) {
-        outSample = PoolRef{};
-        outNotes  = PoolRef{};
+                   PoolRef& outSample, PoolRef& outNotes,
+                   PoolRef& outMarkers, PoolRef& outTransients,
+                   std::unique_ptr<RtAutoSet>& outAutos) {
+        outSample     = PoolRef{};
+        outNotes      = PoolRef{};
+        outMarkers    = PoolRef{};
+        outTransients = PoolRef{};
+        outAutos.reset();
 
         const f64 scalars[] = {c.clipBpm, c.lengthBeats, c.prob, c.followBeats, (f64)c.gain};
         for (f64 v : scalars) if (!std::isfinite(v)) { reason = ipc::RejectNotFinite; return false; }
@@ -992,10 +1037,45 @@ private:
         // boundary check is the only place the class can be closed.
         if (!(c.clipBpm >= 1.0 && c.clipBpm <= 1.0e6))           { reason = ipc::RejectBadClip; return false; }
 
+        // v11: the three payload counts, bounded BEFORE they become multiply
+        // operands for the extents below — the same F1 argument that capped
+        // `frames`. Each ref must agree with its count about whether the
+        // payload exists at all: a ref with no count would validate a
+        // zero-byte read and hand the engine a pointer it believes is empty,
+        // and a count with no ref is a clip lying about what it carries.
+        // Envelope violations answer RejectBadAutomation (AUTOMATION.md §8.4:
+        // a malformed set refuses the WHOLE SetClip, it is never stripped);
+        // marker and transient shape violations are clip-shape violations and
+        // answer RejectBadClip like every other one.
+        if (c.autoLaneCount < 0 || c.autoLaneCount > ipc::kMaxClipAutoLanes ||
+            c.autoPointCount < 0 || c.autoPointCount > ipc::kMaxClipAutoPoints) {
+            reason = ipc::RejectBadAutomation;
+            return false;
+        }
+        if ((c.autoRef == 0) != (c.autoLaneCount == 0) ||
+            (!c.autoRef && c.autoPointCount != 0)) {
+            reason = ipc::RejectBadAutomation;
+            return false;
+        }
+        // 0 or >= 2: one marker pins nothing (sample.h's invariant, enforced
+        // here because the far side of the wire is where enforcement counts).
+        if (c.markerCount != 0 &&
+            (c.markerCount < 2 || c.markerCount > ipc::kMaxWarpMarkers)) {
+            reason = ipc::RejectBadClip;
+            return false;
+        }
+        if ((c.markersRef == 0) != (c.markerCount == 0)) { reason = ipc::RejectBadClip; return false; }
+        if (c.transientCount < 0 || c.transientCount > ipc::kMaxWireTransients) {
+            reason = ipc::RejectBadClip;
+            return false;
+        }
+        if ((c.transientsRef == 0) != (c.transientCount == 0)) { reason = ipc::RejectBadClip; return false; }
+
         // An invalid cell is a legal thing to publish — it is how a GUI parks
         // an empty slot — and it references nothing, so it skips the pool
         // entirely. Anything that *does* reference the pool needs one mapped.
-        if ((c.sampleRef || c.notesRef) && !pool_.valid()) {
+        if ((c.sampleRef || c.notesRef || c.autoRef || c.markersRef || c.transientsRef) &&
+            !pool_.valid()) {
             reason = ipc::RejectNoPool;
             return false;
         }
@@ -1040,6 +1120,129 @@ private:
             outNotes = PoolRef{c.notesRef, ipc::PoolKindNotes};
         }
 
+        // -- the warp map (v11) ---------------------------------------------
+        //
+        // REINTERPRETED, the notes discipline exactly: WireWarpMarker mirrors
+        // WarpMarker field for field (asserted in engine_handle.cpp, where
+        // sample.h is visible) and holds no pointers. warpMapValid() is the
+        // gate engine.h says the engine's supplier owes it — "the engine must
+        // never be handed a map this rejects" — run HERE because under the
+        // wire this is the last trusted point. It reads the live pool bytes,
+        // so a client that rewrites its blob AFTER this check can still break
+        // the invariant — and gets exactly what engine.cpp's warp section
+        // promises for untrusted public memory: a defined point on a wrong
+        // map, every index bounded by markerCount, never a wild read. That is
+        // the hazard class sample data already lives in, not a new one.
+        if (c.markersRef) {
+            const u64 need = (u64)c.markerCount * sizeof(ipc::WireWarpMarker);
+            const char* why = "";
+            if (!pool_.validate(c.markersRef, ipc::PoolKindWarp, need, &why)) {
+                logBadRef("warp markers", c.markersRef, t, s, why);
+                reason = ipc::RejectBadPoolRef;
+                return false;
+            }
+            const WarpMarker* m = (const WarpMarker*)pool_.at(c.markersRef);
+            if (!warpMapValid(m, (int)c.markerCount)) {
+                reason = ipc::RejectBadClip;
+                return false;
+            }
+            rc.markers     = m;
+            rc.markerCount = (int)c.markerCount;
+            outMarkers     = PoolRef{c.markersRef, ipc::PoolKindWarp};
+        }
+
+        // -- the transient grid (v11) ---------------------------------------
+        //
+        // REINTERPRETED like notes, retired like the SAMPLE: the grid belongs
+        // to the SampleBuffer, is immutable after load, and is shared by every
+        // clip over that sample — the client's cache deliberately names ONE
+        // block for all of them, so the cell-scan half of considerRetire() is
+        // what keeps it alive while any cell still needs it. No monotonicity
+        // gate, deliberately: the engine's warpGrainOrigin() bisects with every
+        // index bounded by transientCount, and an unsorted grid degrades grain
+        // snapping, not memory safety — the same public-memory promise the
+        // warp evaluators make.
+        if (c.transientsRef) {
+            const u64 need = (u64)c.transientCount * sizeof(i64);
+            const char* why = "";
+            if (!pool_.validate(c.transientsRef, ipc::PoolKindTransients, need, &why)) {
+                logBadRef("transients", c.transientsRef, t, s, why);
+                reason = ipc::RejectBadPoolRef;
+                return false;
+            }
+            rc.transients     = (const i64*)pool_.at(c.transientsRef);
+            rc.transientCount = (int)c.transientCount;
+            outTransients     = PoolRef{c.transientsRef, ipc::PoolKindTransients};
+        }
+
+        // -- the clip envelopes (v11) ---------------------------------------
+        //
+        // HALF TRANSLATED, HALF REINTERPRETED (pool.h, PoolKindAutomation).
+        // AUTOMATION.md §8.2 planned `(const RtAutoSet*)(poolBase + ref)`; the
+        // arrangement wave's rule — a pointer in a client-writable region is a
+        // pointer the client chose — was written two protocol versions after
+        // that plan and forbids it, because RtAutoSet holds `points`. So the
+        // CONTAINER is built here, on this heap, its lanes validated on the
+        // daemon's own copy (TOCTOU-sound: every number autoValueAt() will
+        // trust beyond the window check is frozen at this line), and only the
+        // pointer-free POINT ARRAY stays pool-resident, where autoValueAt()
+        // bounds every window against pointCount before reading. The point
+        // finiteness pass below reads the live blob — a client that rewrites
+        // it afterwards buys NaN audio, which is what rewriting sample data
+        // already buys, and nothing more.
+        if (c.autoRef) {
+            const u64 need = ipc::clipAutosBytes(c.autoLaneCount, c.autoPointCount);
+            const char* why = "";
+            if (!pool_.validate(c.autoRef, ipc::PoolKindAutomation, need, &why)) {
+                logBadRef("clip envelopes", c.autoRef, t, s, why);
+                reason = ipc::RejectBadPoolRef;
+                return false;
+            }
+            const u8* base = pool_.at(c.autoRef);
+            const ipc::WireAutoLane*  wl = (const ipc::WireAutoLane*)base;
+            const ipc::WireAutoPoint* wp = (const ipc::WireAutoPoint*)
+                (base + (size_t)c.autoLaneCount * sizeof(ipc::WireAutoLane));
+
+            auto set = std::make_unique<RtAutoSet>();
+            for (i64 i = 0; i < c.autoLaneCount; ++i) {
+                const ipc::WireAutoLane l = wl[i];       // snapshot, then judge
+                const bool bad =
+                    l.target < 0 || l.target > (i32)AutoTarget::DeviceParam ||
+                    l.xform  < 0 || l.xform  > (i32)AutoXform::Fader ||
+                    l.index  < 0 || l.index >= (i32)ipc::kMaxDevParams ||
+                    l.devSlot < -1 || l.devSlot >= kMaxChainFx ||
+                    !std::isfinite(l.lo) || !std::isfinite(l.hi) ||
+                    l.first < 0 || l.count < 0 ||
+                    (i64)l.first + (i64)l.count > c.autoPointCount;
+                if (bad) { reason = ipc::RejectBadAutomation; return false; }
+                RtAutoLane& r = set->lanes[i];
+                r.target  = l.target;
+                r.index   = l.index;
+                r.devSlot = l.devSlot;
+                r.xform   = l.xform;
+                r.first   = l.first;
+                r.count   = l.count;
+                r.lo      = l.lo;
+                r.hi      = l.hi;
+                r.flags   = l.flags;
+            }
+            for (i64 i = 0; i < c.autoPointCount; ++i) {
+                const ipc::WireAutoPoint p = wp[i];
+                if (!std::isfinite(p.beat) || !std::isfinite(p.value) || p.beat < 0.0) {
+                    reason = ipc::RejectBadAutomation;
+                    return false;
+                }
+            }
+            set->laneCount  = (int)c.autoLaneCount;
+            set->pointCount = (int)c.autoPointCount;
+            // WireAutoPoint mirrors RtAutoPoint (control.h asserts the offsets),
+            // and WireAutoLane's size is a multiple of alignof(WireAutoPoint),
+            // so on a 64-aligned blob this cast lands aligned for ANY lane count.
+            set->points = c.autoPointCount ? (const RtAutoPoint*)wp : nullptr;
+            rc.autos = set.get();
+            outAutos = std::move(set);
+        }
+
         rc.frames       = c.frames;
         rc.channels     = (int)c.channels;
         rc.loopStart    = c.loopStart;
@@ -1056,10 +1259,10 @@ private:
         rc.noteCount    = (int)c.noteCount;
         rc.isMidi       = c.isMidi != 0;
         rc.valid        = c.valid != 0;
-        // autos / markers / transients stay null, and there is no wire field
-        // that could set them: three of RtClip's five pointers are not
-        // expressible over this protocol at all, which is the cheapest possible
-        // way to be sure a client never chose one.
+        // All five of RtClip's pointers are now expressible (v11), and every
+        // one of them left this function either null or derived from a
+        // validated offset / built on this heap — never read from the peer as
+        // an address, which is the invariant this function exists to hold.
         return true;
     }
 
@@ -1262,9 +1465,11 @@ private:
         std::vector<PoolRef> refs;
         i64 notes = 0;
         for (size_t i = 0; i < wclips.size(); ++i) {
-            PoolRef s{}, n{};
+            PoolRef s{}, n{}, m{}, tr{};
+            std::unique_ptr<RtAutoSet> autos;
             u32 clipReason = ipc::RejectNone;
-            if (!buildClip(wclips[i], rclips[i], clipReason, track, (int)i, s, n)) {
+            if (!buildClip(wclips[i], rclips[i], clipReason, track, (int)i,
+                           s, n, m, tr, autos)) {
                 char msg[128];
                 std::snprintf(msg, sizeof msg, "clip %zu: %s", i,
                               ipc::rejectReasonName(clipReason));
@@ -1274,7 +1479,13 @@ private:
             if (notes > ipc::kMaxArrNotes)
                 return badArrangement("the lane's clips carry more than kMaxArrNotes notes",
                                       track, reason);
-            for (const PoolRef& p : {s, n}) {
+            // The container lives and dies with the lane (ArrBuilt::autos);
+            // the pool refs — including the envelope POINT blob the container
+            // aims into — join the lane's dedup list and retire with it.
+            if (autos) out.arrClipAutos.push_back(std::move(autos));
+            const PoolRef a{wclips[i].autoRef,
+                            wclips[i].autoRef ? (u32)ipc::PoolKindAutomation : 0u};
+            for (const PoolRef& p : {s, n, m, tr, a}) {
                 if (!p.ref) continue;
                 bool seen = false;
                 for (const PoolRef& q : refs) if (q.ref == p.ref) { seen = true; break; }
@@ -1440,15 +1651,17 @@ private:
             r.mem       = std::move(slot.mem);
             r.watch     = slot.p;
             r.refs      = std::move(slot.refs);
+            r.clipAutos = std::move(slot.autos);     // free with mem, layer 1
             r.track     = st.arrTrack;
             r.autos     = st.arrAutos;
             r.dueDrains = drainProof();              // read AFTER the push
             r.dueNs     = ipc::monotonicNs() + kRetireGraceNs;
             arrRetire_.push_back(std::move(r));
         }
-        slot.mem  = std::move(st.built);
-        slot.p    = st.cmd.p;
-        slot.refs = st.refs;
+        slot.mem   = std::move(st.built);
+        slot.p     = st.cmd.p;
+        slot.refs  = st.refs;
+        slot.autos = std::move(st.arrClipAutos);
         // A block that has just come back is not retiring, it is in use again —
         // the same cancellation installClip() makes, and for the same reason: an
         // event that says "you may free this" about a block that is in use is
@@ -1710,6 +1923,8 @@ private:
             // store that this relaxed store precedes in program order, so a
             // client that has popped the echo cannot fail to see the free.
             r.mem.reset();
+            r.clipAutos.clear();   // the lane's envelope containers are layer 1:
+                                   // reachable only through the clips inside mem
             r.watch = nullptr;
             map_.hdr->arrBuiltFreed.fetch_add(1, std::memory_order_relaxed);
 
@@ -3638,12 +3853,14 @@ private:
         std::vector<PoolRef> refs;
         const auto take = [&](ArrBuilt& b) {
             b.mem.reset();
+            b.autos.clear();
             b.p = nullptr;
             for (const PoolRef& p : b.refs) refs.push_back(p);
             b.refs.clear();
         };
         for (ArrRetire& r : arrRetire_) {
             r.mem.reset();
+            r.clipAutos.clear();
             r.watch = nullptr;
             for (const PoolRef& p : r.refs) refs.push_back(p);
             r.refs.clear();
@@ -3651,6 +3868,10 @@ private:
         arrRetire_.clear();
         for (ArrBuilt& b : arrHeld_)   take(b);
         for (ArrBuilt& b : autosHeld_) take(b);
+        // The clip cells' envelope containers are the same trivially-satisfied
+        // proof: the driver has stopped, so no voice can reach any of them.
+        for (auto& row : clipAutosHeld_) for (auto& held : row) held.reset();
+        clipAutosRetire_.clear();
         // Only now, with arrangementHolds() answering false for everything.
         for (const PoolRef& p : refs) considerRetire(p.ref, p.kind, -1, -1);
     }
@@ -3758,10 +3979,14 @@ private:
 
     // Records what the engine now holds for a cell and queues whatever that
     // displaced. Runs only from commit().
-    void installClip(int track, int slot, const ipc::WireClip& nc) {
+    void installClip(int track, int slot, const ipc::WireClip& nc,
+                     std::unique_ptr<RtAutoSet> autosBuilt) {
         ipc::WireClip& cur = shadow_[track][slot];
         const u64 oldSample = cur.sampleRef;
         const u64 oldNotes  = cur.notesRef;
+        const u64 oldAutos  = cur.autoRef;
+        const u64 oldWarp   = cur.markersRef;
+        const u64 oldTrans  = cur.transientsRef;
         cur = nc;
         // A block can come back: clear a slot and re-publish the same sample
         // into another one, and the retirement queued a moment ago is now
@@ -3769,10 +3994,34 @@ private:
         // echo for a block it has since marked live again — but an event that
         // says "you may free this" about a block that is in use is the kind of
         // thing that is true today and load-bearing tomorrow.
-        if (nc.sampleRef) cancelRetire(nc.sampleRef);
-        if (nc.notesRef)  cancelRetire(nc.notesRef);
-        if (oldSample) considerRetire(oldSample, ipc::PoolKindSamples, track, slot);
-        if (oldNotes)  considerRetire(oldNotes,  ipc::PoolKindNotes,   track, slot);
+        if (nc.sampleRef)     cancelRetire(nc.sampleRef);
+        if (nc.notesRef)      cancelRetire(nc.notesRef);
+        if (nc.autoRef)       cancelRetire(nc.autoRef);
+        if (nc.markersRef)    cancelRetire(nc.markersRef);
+        if (nc.transientsRef) cancelRetire(nc.transientsRef);
+        if (oldSample) considerRetire(oldSample, ipc::PoolKindSamples,    track, slot);
+        if (oldNotes)  considerRetire(oldNotes,  ipc::PoolKindNotes,      track, slot);
+        if (oldAutos)  considerRetire(oldAutos,  ipc::PoolKindAutomation, track, slot);
+        if (oldWarp)   considerRetire(oldWarp,   ipc::PoolKindWarp,       track, slot);
+        if (oldTrans)  considerRetire(oldTrans,  ipc::PoolKindTransients, track, slot);
+
+        // The displaced envelope CONTAINER (v11). Queued for its own proof —
+        // the Ev::AutosRetired the engine emits at the swap — and NOT freed on
+        // the drain counter, mirroring the arrangement's confirmed-only rule.
+        // No ordering knot with the blob echo above: by the time the drain
+        // proof passes, the audio thread has provably left the old RtClip, so
+        // neither the stale container nor the audio thread can dereference the
+        // blob the echo hands back; the container is unreachable memory
+        // awaiting its event, nothing more.
+        std::unique_ptr<RtAutoSet>& held = clipAutosHeld_[track][slot];
+        if (held) {
+            ClipAutosRetire r;
+            r.watch = held.get();
+            r.mem   = std::move(held);
+            r.dueNs = ipc::monotonicNs() + kRetireGraceNs;
+            clipAutosRetire_.push_back(std::move(r));
+        }
+        held = std::move(autosBuilt);
     }
 
     void cancelRetire(u64 ref) {
@@ -3785,9 +4034,19 @@ private:
 
     void considerRetire(u64 ref, u32 kind, int track, int slot) {
         // Still backing another slot? Then it is not retiring, it is shared.
+        // All five ref fields, because sharing is real for more than samples:
+        // a transient grid is deliberately ONE block for every clip over its
+        // sample (the client's cache guarantees it), so this scan is the only
+        // thing standing between "cleared one of three kick clips" and
+        // "freed the grid the other two still play from".
         for (int t = 0; t < kMaxTracks; ++t)
-            for (int s = 0; s < kMaxScenes; ++s)
-                if (shadow_[t][s].sampleRef == ref || shadow_[t][s].notesRef == ref) return;
+            for (int s = 0; s < kMaxScenes; ++s) {
+                const ipc::WireClip& sc = shadow_[t][s];
+                if (sc.sampleRef == ref || sc.notesRef == ref ||
+                    sc.autoRef == ref || sc.markersRef == ref ||
+                    sc.transientsRef == ref)
+                    return;
+            }
         // Still named by a built arrangement — one the engine holds, or one
         // that is retiring and has NOT been freed yet? Same answer, and §9.5
         // says so in as many words: a sample legitimately backs a session clip
@@ -3836,10 +4095,44 @@ private:
         const u64 off = pool_.offsetOf(p);
         if (!off) {
             map_.hdr->eventsDropped.fetch_add(1, std::memory_order_relaxed);
-            LOGW("Ev::NotesRetired carried %p, which is not inside the sample pool", p);
+            LOGW("a retirement event carried %p, which is not inside the sample pool", p);
             return;
         }
         for (Retire& r : retiring_) if (r.ref == off) { r.confirmed = true; return; }
+    }
+
+    // The engine handed back a clip cell's displaced envelope container.
+    // Matched by address against the queue installClip() filled; an address
+    // with no entry would mean the engine announced a container this daemon
+    // never built, which is worth a line, not a crash.
+    void confirmClipAutosRetire(const void* p) {
+        for (ClipAutosRetire& r : clipAutosRetire_)
+            if (r.watch == p) { r.confirmed = true; return; }
+        LOGW("Ev::AutosRetired carried %p, which no clip cell's build is waiting on", p);
+    }
+
+    void pumpClipAutosRetirements() {
+        if (clipAutosRetire_.empty()) return;
+        const u64 now = ipc::monotonicNs();
+        size_t keep = 0;
+        for (size_t i = 0; i < clipAutosRetire_.size(); ++i) {
+            ClipAutosRetire& r = clipAutosRetire_[i];
+            if (!r.confirmed) {
+                if (now >= r.dueNs + kArrStuckNs && !clipAutosStuckLogged_) {
+                    clipAutosStuckLogged_ = true;
+                    LOGW("a clip envelope container has waited over %llu ms for its "
+                         "Ev::AutosRetired and is being HELD, not freed — the safe "
+                         "half of the trade. [further ones silent]",
+                         (unsigned long long)(kArrStuckNs / 1000000ull));
+                }
+                if (keep != i) clipAutosRetire_[keep] = std::move(r);
+                ++keep;
+                continue;
+            }
+            r.mem.reset();          // the free; `keep` is not advanced
+            ++clipAutosFreed_;
+        }
+        clipAutosRetire_.resize(keep);
     }
 
     void pumpRetirements() {
@@ -3896,9 +4189,18 @@ private:
     //                     still run — between the pump and the audio thread of
     //                     one process, which is where it always belonged.
     //
-    // The remaining two stay unreachable, because the commands that would
-    // allocate their payloads are still refused. If their counter ever moves,
-    // something reached the engine that should not have.
+    //   Ev::WarpRetired   (v11) an offset in the pool exactly as NotesRetired
+    //                     is — the marker blob is reinterpreted, so the engine
+    //                     hands back the pool address — confirmed through the
+    //                     same confirmRetire().
+    //   Ev::AutosRetired  (v11) a container THIS daemon built (buildClip);
+    //                     consumed as "free my build", precisely as
+    //                     Ev::ArrangementRetired is.
+    //
+    // With those two consumed, every pointer-carrying event class the engine
+    // can emit is accounted for; anything reaching the drop path below carries
+    // an address nobody here can name, and its counter moving means something
+    // reached the engine that should not have.
     // BACKPRESSURE IS BY PARKING, NOT BY DROPPING, and it is the same rule
     // pumpCommands has had since phase 1 — "dropping would lose user intent
     // silently". It was not the rule here, and the difference was invisible
@@ -3941,6 +4243,14 @@ private:
             }
             if (ev.type == Ev::SigsRetired) {
                 confirmSigRetire(ev.p);
+                continue;
+            }
+            if (ev.type == Ev::WarpRetired) {       // a pool offset, like notes
+                confirmRetire(ev.p);
+                continue;
+            }
+            if (ev.type == Ev::AutosRetired) {      // a build of ours, like a lane
+                confirmClipAutosRetire(ev.p);
                 continue;
             }
             // The take's buffer coming home. CONSUMED, like every other event
@@ -4304,6 +4614,20 @@ private:
     std::vector<Retire>            retiring_;
     u64                            retiringDropped_    = 0;      // F7: overflow drops
     bool                           retiringDropLogged_ = false;
+
+    // -- the clip envelopes (v11) --------------------------------------------
+    //
+    // One built RtAutoSet per cell that has an envelope: the container half of
+    // PoolKindAutomation's split (pool.h). Held while the engine's cell points
+    // at it; a displaced one waits in clipAutosRetire_ for its Ev::AutosRetired
+    // — which the engine emits with emitCritical, so unlike the droppable event
+    // classes this confirmation cannot be lost, and the free needs no drain-
+    // counter fallback. The 10 s stuck log mirrors the arrangement's: held,
+    // not freed, is the safe half of the trade if the proof ever fails to come.
+    std::unique_ptr<RtAutoSet>     clipAutosHeld_[kMaxTracks][kMaxScenes];
+    std::vector<ClipAutosRetire>   clipAutosRetire_;
+    u64                            clipAutosFreed_      = 0;   // observability for tests
+    bool                           clipAutosStuckLogged_ = false;
 
     // -- the arrangement (wave 8g) -------------------------------------------
     //
