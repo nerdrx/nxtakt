@@ -54,6 +54,34 @@ enum class Pill {
     Ghost,       // no fill at rest; the glass arrives with the hover.
 };
 
+// ---------------------------------------------------------------------------
+// CURSOR BADGES
+//
+// A badge answers one question -- "what will a click do here?" -- and it is
+// drawn ONLY where the answer is not already obvious. A cursor shape says how
+// the pointer will behave (resize, grab, text); it cannot say that a click on
+// this particular nothing MAKES something. That gap is the whole reason this
+// exists: empty roll space and an empty timeline lane look identical to dead
+// space, and the double-click that fills them is invisible until it is found by
+// accident.
+//
+// THE RULE, and it is a restriction rather than a licence: a badge appears only
+// where the answer is not obvious. Not on buttons, not on faders, not on an
+// item you are already holding, not next to a resize cursor that has already
+// said what it is. Six answers, and every one of them names a verb the surface
+// under the pointer cannot otherwise say.
+//
+// It is positional, not temporal -- it is under the pointer or it is not -- so
+// there is nothing here for reduced motion to freeze, and no state to hold.
+enum class Badge {
+    None,       //  the answer is obvious, or there is no answer. Draws nothing.
+    Add,        //  + : a click (or a double-click) MAKES something here
+    Draw,       //  pen : a click writes a value into this lane
+    Split,      //  blade : a double-click cuts what is under the pointer
+    Delete,     //  x : removal is the primary verb on this thing
+    Duplicate,  //  + over a copy : this drag is leaving a copy behind
+};
+
 struct Ui {
     Renderer* r = nullptr;
     Input* in = nullptr;
@@ -65,8 +93,29 @@ struct Ui {
     u64  hot = 0, active = 0;
     u64  hotNext = 0;
     Cursor cursor = Cursor::Arrow;
+    // What a click under the pointer would DO, this frame. Set by whatever is
+    // under the pointer; drawn once at the end of the frame by drawBadge(),
+    // beside the cursor the same code path resolves.
+    Badge badge = Badge::None;
     f32  dragAccum = 0.f;
     f64  dragStart = 0.0;
+
+    // GRAB TOLERANCE, in DEVICE pixels, for the NEXT setHot() only.
+    //
+    // A widget in an immediate-mode UI draws and hit-tests from one rect, so a
+    // control that is 12 px tall because that is what the row has room for is
+    // also 12 px tall to aim at -- under the 16 px floor, and there is no
+    // second rect to widen. This is that second rect: setHot() tests the rect
+    // grown by `hitPad` on every side and then clears it, so the pixels a
+    // widget DRAWS never move and only the pixels it can be caught by grow.
+    //
+    // Consumed and cleared by the first setHot() after it is set, and cleared
+    // again at frame boundaries, so it can never leak into an unrelated widget.
+    // Keep it at or under 3 px: past that, neighbours start stealing each
+    // other's hover and the aim gets worse rather than better.
+    f32  hitPad = 0.f;
+    // Fluent form, for the call sites: `ui.grab(3.f * s).squareToggle(...)`.
+    Ui&  grab(f32 devicePx) { hitPad = devicePx; return *this; }
 
     // Inline text editing.
     u64  editId = 0;
@@ -103,16 +152,26 @@ struct Ui {
     int  textJobN = 0;
     bool deferText = false;
 
-    void beginFrame() { hotNext = 0; cursor = Cursor::Arrow; tip.clear(); }
+    void beginFrame() { hotNext = 0; cursor = Cursor::Arrow; badge = Badge::None; tip.clear(); hitPad = 0.f; }
     // flushText() first, as a backstop: a view that opens a deferral window and
     // returns before closing it would otherwise lose its labels for the frame.
     // It is a no-op when nothing is queued, which is every frame that plays by
     // the rules.
-    void endFrame()   { flushText(); hot = hotNext; if (!in->down[0] && active && active != editId) active = 0; }
+    void endFrame()   { flushText(); hitPad = 0.f; hot = hotNext;
+                        if (!in->down[0] && active && active != editId) active = 0; }
 
     bool hovered(const Rect& b) const { return b.contains(in->mx, in->my); }
+    // The clip test is against the UNPADDED rect's clip, not the padded one:
+    // the pad is aim slack around a control, never a licence to be caught
+    // outside the panel that owns it.
     bool setHot(u64 id, const Rect& b) {
-        if (hovered(b) && r->currentClip().contains(in->mx, in->my)) { hotNext = id; return true; }
+        const f32 pad = hitPad;
+        hitPad = 0.f;
+        const Rect h = pad > 0.f ? b.inset(-pad) : b;
+        if (h.contains(in->mx, in->my) && r->currentClip().contains(in->mx, in->my)) {
+            hotNext = id;
+            return true;
+        }
         return false;
     }
     bool isHot(u64 id) const { return hot == id; }
@@ -286,6 +345,22 @@ struct Ui {
     // under it anyway.
     bool trough(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, const Col& fill,
                 f32 dim = 1.f);
+
+    // The frame's badge, drawn beside the pointer. ONE call site, and it is the
+    // same one that consumes `cursor` (App::draw, beside win_.setCursor) --
+    // badge and cursor are two halves of the same answer and must not be able
+    // to come from two different places in the frame.
+    //
+    // A ~12 px glyph offset SOUTH-EAST of the hotspot, so it sits in the arrow's
+    // shadow and never over the pixel that is about to be clicked, on a 1 px
+    // dark backing plate at radiusXs so it survives a bright waveform under it.
+    // The glyph is GEOMETRY, not a character: the atlas has no "+" at this size
+    // that would land on whole pixels, and this file already draws play
+    // triangles and stop squares the same way.
+    //
+    // `f` is taken for the signature's sake and for a future badge that has to
+    // say a word; nothing drawn today needs it.
+    void drawBadge(Renderer& rr, Font& f) const;
 
     // --- drawing helpers --------------------------------------------------
     void meterV(const Rect& b, f32 lvl, f32 peak);   // vertical peak meter

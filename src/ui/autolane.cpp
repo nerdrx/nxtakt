@@ -527,6 +527,26 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
     if (hot && drag_ == Drag::None)
         hover_ = pointAt(pts, ta, va, beatBase, in.mx, in.my, kPtGrab * s) >= 0;
 
+    // THE BADGE. An automation lane is the surface in this program with the
+    // largest gap between what it looks like and what it does: it looks like a
+    // read-out of a curve, and a single click on it WRITES a breakpoint. The
+    // pen says so over empty lane; over a point there is a handle to grab and a
+    // Grab cursor already saying it, so no badge is drawn there.
+    //
+    // The badge is set here rather than reported like the cursor because,
+    // unlike the cursor, it has no ordering to lose: an outer drag that owns
+    // the mouse overwrites it on the same frame from further down the caller's
+    // own block, and a lane that is not hot never sets it at all.
+    if (hot && drag_ == Drag::None && !dim && !hover_) {
+        ui.badge = Badge::Draw;
+        if (ui.tip.empty())
+            ui.tip = pts.empty()
+                         ? "click to draw a breakpoint; Shift+drag rubber-bands"
+                         : "click to add a breakpoint, drag one to move it, "
+                           "right-click to remove it; Alt frees the beat, Ctrl "
+                           "freezes it";
+    }
+
     return changed;
 }
 

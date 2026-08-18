@@ -9,6 +9,7 @@
 // this file rather than by three hundred call sites.
 #include "widgets.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 
 namespace lat {
@@ -79,10 +80,28 @@ constexpr f32 kKnobA0 = -225.f * kDeg;
 constexpr f32 kKnobA1 = 45.f * kDeg;
 constexpr f32 kKnobTop = -90.f * kDeg;
 
-// Pixels of vertical travel that cover a knob's full range.
+// LOGICAL pixels of vertical travel that cover a knob's full range. Logical
+// and not device: a knob on a 1.25x screen is 25% bigger, and a sweep measured
+// in raw device pixels would make the same physical hand movement cover 20%
+// less of the same control. Every caller multiplies by the renderer's DPI.
 constexpr f32 kKnobTravel = 150.f;
 
-inline f32 fineScale(const Input* in) { return in->shift() ? 0.25f : 1.f; }
+// --- the two fine-drag rates, declared together so the divergence is a
+// decision rather than an accident (see the interaction pass's §4 table).
+//
+// kFineSweep is for a control with a BOUNDED sweep -- a knob, a fader, a
+// trough. Its coarse rate is "the whole range in kKnobTravel px", so a quarter
+// rate spends 600 logical px on the range: still one screen, still one gesture.
+//
+// kFineNumber is for dragNumber, whose coarse rate is a caller-supplied
+// units-per-pixel and is usually already the useful step (0.1 BPM/px, 1 ms/px).
+// A quarter of that lands on a quarter of a BPM, which is not a fine tempo; a
+// tenth is. The numbers differ because what they are a tenth OF differs by
+// orders of magnitude, and one shared constant would make one of the two wrong.
+constexpr f32 kFineSweep  = 0.25f;
+constexpr f32 kFineNumber = 0.1f;
+
+inline f32 fineScale(const Input* in) { return in->shift() ? kFineSweep : 1.f; }
 
 inline f32 norm01(f32 v, f32 lo, f32 hi) {
     return (hi - lo) > 1e-9f ? clampv((v - lo) / (hi - lo), 0.f, 1.f) : 0.f;
@@ -119,6 +138,34 @@ nx::Grad liquidOf(const Col& c) {
     return {{{c.mix(Col(1.f, 1.f, 1.f, c.a), 0.34f), 0.00f},
              {c,                                     0.55f},
              {c.scale(0.55f),                        1.00f}}, 3, 147.f};
+}
+
+// ---------------------------------------------------------------------------
+// NXTAKT_DEBUG_PROBE -- the read-only half of the headless drive
+//
+// Nothing inside gamescope can look at a fader and say what it reads. A gesture
+// driven by xdotool is only a check if the model can be read back afterwards,
+// and the value a fader carries lives in whatever view owns it -- in five
+// different translation units, several of which this pass does not own.
+//
+// So the probe sits under the WIDGETS instead: every widget in the program that
+// writes a continuous value writes it through one of the five functions below,
+// and each of them says so here. One line per change, the widget's own id, the
+// old value and the new one. It reads nothing it was not already handed, it
+// writes nothing, and with the variable unset it costs one already-cached bool
+// per changed value and nothing at all on a frame where nothing moved.
+//
+// Deliberately not a per-frame dump: a drag reports every frame it moves on,
+// which is what makes "this gesture moved this control and no other" a thing
+// the log can be grepped for.
+bool probeOn() {
+    static const bool on = std::getenv("NXTAKT_DEBUG_PROBE") != nullptr;
+    return on;
+}
+void probeValue(const char* kind, u64 id, f64 from, f64 to) {
+    if (!probeOn()) return;
+    LOGI("NXTAKT_DEBUG_PROBE: %s id=%016llx %.6f -> %.6f", kind,
+         (unsigned long long)id, from, to);
 }
 
 } // namespace
@@ -469,6 +516,93 @@ void Ui::stopSquare(const Rect& b, const Col& c) {
     r->rect({std::round(b.cx() - s * 0.5f), std::round(b.cy() - s * 0.5f), s, s}, c);
 }
 
+// ---------------------------------------------------------------------------
+// The cursor badge
+//
+// Six glyphs, all geometry. Each is drawn inside a square `g` that is the
+// backing plate inset by a couple of pixels, so every one of them is the same
+// visual weight whatever it says -- a "+" that outsized an "x" beside it would
+// read as the more important verb rather than as a different one.
+//
+// The plate is placed south-east of the hotspot and clamped into the viewport,
+// which is the one case where it moves: a badge that ran off the bottom-right
+// corner of the window would be a badge nobody ever saw, and the corner is
+// exactly where a hand ends up when it is reaching for the last lane.
+// ---------------------------------------------------------------------------
+void Ui::drawBadge(Renderer& rr, Font& f) const {
+    (void)f;
+    if (badge == Badge::None || !in) return;
+    const f32 dpi = std::max(1.f, rr.dpiScale());
+    const f32 side = std::round(13.f * dpi);
+    // South-east of the arrow's own bounding box (about 12x19 device px at 1x),
+    // so the plate clears the cursor bitmap instead of hiding under it.
+    f32 px = std::round(in->mx + 11.f * dpi);
+    f32 py = std::round(in->my + 13.f * dpi);
+    const Rect vp = rr.currentClip();
+    px = clampv(px, vp.x, std::max(vp.x, vp.right() - side));
+    py = clampv(py, vp.y, std::max(vp.y, vp.bottom() - side));
+    const Rect plate{px, py, side, side};
+
+    const f32 one = std::max(1.f, std::round(dpi));
+    // A dark plate rather than a glass one: this thing lands over waveforms,
+    // over clip colours and over the star field, and the only backing that
+    // works on all three is opaque shadow.
+    rr.roundRect(plate, nx::radiusXs * dpi, nx::bgTop.alpha(0.88f));
+    rr.roundRectOutline(plate, nx::radiusXs * dpi, one, nx::line.alpha(0.9f));
+
+    const Rect g = plate.inset(std::round(3.f * dpi));
+    const Col ink = nx::text;
+    const f32 cx = std::round(g.cx()), cy = std::round(g.cy());
+
+    switch (badge) {
+    case Badge::Add:
+    case Badge::Duplicate: {
+        // Duplicate is Add with the copy it is about to leave behind drawn
+        // under it: the verb is the same ("one more of these"), and the second
+        // outline is what says where the extra one comes from.
+        if (badge == Badge::Duplicate)
+            rr.roundRectOutline({g.x, g.y, g.w * 0.62f, g.h * 0.62f}, 0.f, one,
+                                ink.alpha(0.45f));
+        const f32 arm = std::round(g.w * (badge == Badge::Duplicate ? 0.30f : 0.42f));
+        const f32 ox  = badge == Badge::Duplicate ? std::round(g.w * 0.16f) : 0.f;
+        rr.rect({cx + ox - arm, cy - one * 0.5f + ox, arm * 2.f, one}, ink);
+        rr.rect({cx + ox - one * 0.5f, cy + ox - arm, one, arm * 2.f}, ink);
+        break;
+    }
+    case Badge::Draw: {
+        // A pen: the shaft along the SW-NE diagonal with a nib triangle at the
+        // low end. Two quads and a triangle, and at 13 px it is the silhouette
+        // that reads rather than the detail.
+        const f32 x0 = g.x + one, y0 = g.bottom() - one;
+        const f32 x1 = g.right() - one, y1 = g.y + one;
+        rr.line(x0 + g.w * 0.28f, y0 - g.h * 0.28f, x1, y1, one * 1.6f, ink);
+        rr.triangle(x0, y0, x0 + g.w * 0.36f, y0 - g.h * 0.16f,
+                    x0 + g.w * 0.16f, y0 - g.h * 0.36f, ink);
+        break;
+    }
+    case Badge::Split: {
+        // The cut, and the two pieces it leaves: a full-height rule down the
+        // middle with a wedge falling away on either side of it.
+        rr.rect({cx - one * 0.5f, g.y, one, g.h}, ink);
+        const f32 w = std::round(g.w * 0.30f), h = std::round(g.h * 0.26f);
+        rr.triangle(cx - one * 1.5f, cy - h, cx - one * 1.5f, cy + h,
+                    cx - one * 1.5f - w, cy, ink.alpha(0.8f));
+        rr.triangle(cx + one * 1.5f, cy - h, cx + one * 1.5f, cy + h,
+                    cx + one * 1.5f + w, cy, ink.alpha(0.8f));
+        break;
+    }
+    case Badge::Delete: {
+        // An x, in --danger: this is the one badge whose verb cannot be undone
+        // by doing it again, and §1 spends red on exactly that.
+        const f32 a = std::round(g.w * 0.36f);
+        rr.line(cx - a, cy - a, cx + a, cy + a, one * 1.4f, nx::danger);
+        rr.line(cx - a, cy + a, cx + a, cy - a, one * 1.4f, nx::danger);
+        break;
+    }
+    case Badge::None: break;
+    }
+}
+
 void Ui::meterV(const Rect& b, f32 lvl, f32 peak) {
     if (!r || b.w <= 0.f || b.h <= 0.f) return;
     r->rect(b, pal::appBg);
@@ -654,9 +788,10 @@ bool Ui::knob(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, f32 def, const char
         // Up is more. Accumulate in pixels so a fine-drag modifier can be
         // toggled mid-gesture without the value jumping.
         dragAccum += -in->dy * fineScale(in);
-        const f32 nv = (f32)dragStart + (dragAccum / kKnobTravel) * (hi - lo);
+        const f32 travel = kKnobTravel * std::max(1.f, r->dpiScale());
+        const f32 nv = (f32)dragStart + (dragAccum / travel) * (hi - lo);
         const f32 cl = clampv(nv, lo, hi);
-        if (cl != *v) { *v = cl; changed = true; }
+        if (cl != *v) { probeValue("knob", id, *v, cl); *v = cl; changed = true; }
     }
     if (in->released[0] && active == id) active = 0;
 
@@ -760,7 +895,7 @@ bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
         }
         if (active == id && in->dy != 0.f) {
             dragAccum += -in->dy * fineScale(in);          // up is more
-            f32 t = clampv((f32)dragStart + dragAccum / kKnobTravel, 0.f, 1.f);
+            f32 t = clampv((f32)dragStart + dragAccum / (kKnobTravel * dpi), 0.f, 1.f);
             // The detent CATCHES. A bipolar depth is a control whose most
             // useful value is exactly zero, and hitting zero on a 150px sweep
             // by hand is a coin toss; the drag accumulator keeps counting
@@ -771,7 +906,7 @@ bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
                 if (std::fabs(t - tc) < 0.02f) t = tc;
             }
             const f32 nv = knobV(st, t);
-            if (nv != *v) { *v = nv; changed = true; }
+            if (nv != *v) { probeValue("knobNx", id, *v, nv); *v = nv; changed = true; }
         }
         if (in->released[0] && active == id) active = 0;
     }
@@ -853,7 +988,7 @@ bool Ui::trough(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, const Col& fill, 
     bool changed = false;
     const auto write = [&](f32 nv) {
         nv = clampv(nv, std::min(lo, hi), std::max(lo, hi));
-        if (nv != *v) { *v = nv; changed = true; }
+        if (nv != *v) { probeValue("trough", id, *v, nv); *v = nv; changed = true; }
     };
 
     if (in->pressed[0] && hotNow) {
@@ -914,7 +1049,7 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
         if (!h.contains(in->mx, in->my)) {
             // Clicking the track jumps the handle under the cursor.
             const f32 nv = clampv(1.f - (in->my - b.y - handleH * 0.5f) / travel, 0.f, 1.f);
-            if (nv != *t) { *t = nv; changed = true; }
+            if (nv != *t) { probeValue("vFader", id, *t, nv); *t = nv; changed = true; }
         }
         dragStart = (f64)*t;
     }
@@ -927,7 +1062,7 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
     if (active == id && in->dy != 0.f) {
         dragAccum += -in->dy * fineScale(in);
         const f32 nv = clampv((f32)dragStart + dragAccum / travel, 0.f, 1.f);
-        if (nv != *t) { *t = nv; changed = true; }
+        if (nv != *t) { probeValue("vFader", id, *t, nv); *t = nv; changed = true; }
     }
     if (in->released[0] && active == id) active = 0;
 
@@ -973,13 +1108,13 @@ bool Ui::dragNumber(u64 id, const Rect& b, f64* v, f64 lo, f64 hi, f64 perPixel,
         dragStart = *v;
     }
     if (active == id && in->dy != 0.f) {
-        dragAccum += -in->dy * (in->shift() ? 0.1f : 1.f);   // drag up = increase
+        dragAccum += -in->dy * (in->shift() ? kFineNumber : 1.f);   // drag up = increase
         f64 nv = dragStart + (f64)dragAccum * perPixel;
         // Snap before clamping, so the endpoints of the range stay reachable
         // even when they are not multiples of the step.
         if (step > 0.0) nv = std::floor(nv / step + 0.5) * step;
         nv = clampv(nv, lo, hi);
-        if (nv != *v) { *v = nv; changed = true; }
+        if (nv != *v) { probeValue("dragNumber", id, *v, nv); *v = nv; changed = true; }
     }
     if (in->released[0] && active == id) active = 0;
 

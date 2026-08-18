@@ -29,9 +29,34 @@ inline constexpr f32 kArrRulerH    = 20.f;
 inline constexpr f32 kArrAutoLaneH = 44.f;
 inline constexpr f32 kArrMinLaneH  = 26.f;
 inline constexpr f32 kArrMaxLaneH  = 320.f;
-// The grab band on an item's edges, and on a lane's bottom edge.
-inline constexpr f32 kArrEdgeGrab  = 5.f;
+// The grab bands, in logical px, and the floors they answer to.
+//
+// A DRAG ZONE HAS TO BE EIGHT PIXELS. That is the measured floor: under it, an
+// edge is hit by aiming rather than by pointing, and every miss on an item edge
+// is a MOVE -- the loudest possible wrong answer, because it takes the material
+// somewhere else instead of doing nothing. kArrEdgeGrab was 5, which is 5 device
+// px at 1.0 and 6.1 at 1.25, and it failed at both.
+//
+// kArrEdgeSlop is the other half of the same fix: the zone reaches OUTSIDE the
+// item by this much, so an edge is catchable from the gap beside it. An item is
+// a rectangle with nothing to its left but empty lane, and the pixels just
+// outside its edge are pixels a hand aiming at that edge lands on.
+inline constexpr f32 kArrEdgeGrab  = 8.f;
+inline constexpr f32 kArrEdgeSlop  = 3.f;
 inline constexpr f32 kArrLaneGrab  = 4.f;
+// The fade corner's band: how far in from an item's edge, and how far down from
+// its top, the fade handle reaches. Capped at kArrFadeShare of the item's width
+// so that the two corners of a SHORT item cannot overlap -- at 14 px flat, an
+// item narrower than 28 logical px had its fade-out corner entirely inside its
+// fade-in corner, and one of the two was unreachable at any zoom.
+inline constexpr f32 kArrFadeGrab  = 14.f;
+inline constexpr f32 kArrFadeBandH = 13.f;
+inline constexpr f32 kArrFadeShare = 0.4f;
+// The loop brace's ends. The brace is DRAWN as two 1.5 px uprights and, until
+// this pass, was grabbable by neither: a press anywhere on the ruler started a
+// fresh brace from that point, so the only way to move one end was to redraw
+// the whole thing. This is the zone those uprights always looked like they had.
+inline constexpr f32 kArrLoopGrab  = 5.f;
 // Default zoom: one bar is 64 logical px, which fits about 25 bars in a
 // 1600 px window and is the scale an arrangement is usually looked at.
 inline constexpr f32 kArrZoomDefault = 16.f;

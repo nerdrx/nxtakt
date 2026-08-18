@@ -307,7 +307,13 @@ void App::frame() {
     drawDragGhost();
 
     ui_.endFrame();
+    // The cursor and its badge are two halves of one answer -- "what is under
+    // the pointer, and what will a click do to it" -- so they leave the frame
+    // from one place. The badge is drawn AFTER endFrame and before end(), which
+    // makes it the last thing in the frame and therefore the only thing that
+    // cannot be painted over.
     win_.setCursor(ui_.cursor);
+    ui_.drawBadge(rend_, fSmall_);
     rend_.end();
     (void)full;
 }

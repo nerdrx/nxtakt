@@ -13,9 +13,24 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace lat {
 namespace {
+
+// ---------------------------------------------------------------------------
+// NXTAKT_DEBUG_PROBE -- the roll's half of the headless drive
+//
+// The same read-back the arrangement has, for the two things only the roll
+// owns: the notes (beat, pitch, length, velocity, chance, range) and the
+// breakpoints of whichever envelope the lane is showing. Printed on a frame
+// that already reported a change, so a drive script can tie a line to a
+// gesture; one cached bool when the variable is unset.
+// ---------------------------------------------------------------------------
+bool probeOn() {
+    static const bool on = std::getenv("NXTAKT_DEBUG_PROBE") != nullptr;
+    return on;
+}
 
 // ---------------------------------------------------------------------------
 // constants (logical px unless noted; multiply by the DPI scale)
@@ -32,6 +47,20 @@ constexpr f32 kLaneH      = 54.f;
 constexpr f32 kRowH       = 12.f;
 constexpr int kCentrePitch  = 60;   // C4, the middle of the default C3..C5 view
 constexpr f64 kMaxLoopBeats = 64.0; // ceiling for Ctrl+U, 16 bars in 4/4
+// The note's right-hand RESIZE band, and the share of a short note it may take.
+// It was a flat 4 logical px -- 4.0 device px at scale 1.0, half the 8 px floor
+// -- and every miss on it is a MOVE, which is the loudest possible wrong answer
+// because it takes the note somewhere else instead of doing nothing. 8, capped
+// at a third of the note so a 1/32 at low zoom is still mostly grabbable to
+// move. There is no left-edge resize in this roll and this pass does not add
+// one: a note's start is what a move sets, and two edges on a 12 px row would
+// leave a body too small to grab.
+constexpr f32 kNoteEdgeGrab  = 8.f;
+constexpr f32 kNoteEdgeShare = 0.35f;
+// How far from a stem's x the lane will pick it up. 6 gave a 12 logical px
+// band; 8 gives 16, which is the floor. It is a nearest-match, so a wider band
+// never picks the wrong stem -- it only stops picking NONE.
+constexpr f32 kStemGrab = 8.f;
 // The undo labels the caller reads back off lastEdit().
 constexpr const char* kEditNote = "note edit";
 constexpr const char* kEditAuto = "automation edit";
@@ -1020,7 +1049,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             preview_.push((int)nt.pitch);          // clicking a note plays it
             f32 x0 = 0.f, x1 = 0.f;
             noteSpanX(nt, ta, minNoteW, x0, x1);
-            const f32 edge = std::min(4.f * s, (x1 - x0) * 0.35f);
+            const f32 edge = std::min(kNoteEdgeGrab * s, (x1 - x0) * kNoteEdgeShare);
             dragNote_ = hit;
             dragY_ = in.my;
             dragPitch_ = (int)nt.pitch;
@@ -1071,7 +1100,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // Nearest stem within a few pixels; ties go to the later note, matching
         // the draw order.
         int best = -1;
-        f32 bestD = 6.f * s;
+        f32 bestD = kStemGrab * s;
         for (size_t i = 0; i < clip.notes.size(); ++i) {
             const f32 d = std::fabs(in.mx - beatToX(ta, clip.notes[i].beat));
             if (d <= bestD) { bestD = d; best = (int)i; }
@@ -1122,9 +1151,15 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // offered even with no scale set -- it falls back to ALL and the tooltip
         // says why, which is more discoverable than a control that is not there.
         int fm = (int)fold_;
+        // Both of the ruler's controls are ruler.h - 4 = 12 logical px tall,
+        // which is under the 16 px floor at every scale and cannot grow: the
+        // ruler is 16 px and they are already nearly all of it. They get the
+        // 3 px of aim on every side instead, into the ruler's own margin and
+        // the grid line under it -- neither of which is a target.
+        ui.grab(3.f * s);
         if (ui.selector(uiId(21, 0), foldBox, &fm, kFoldModeNames, kFoldModeCount))
             fold_ = (FoldMode)clampv(fm, 0, kFoldModeCount - 1);
-        if (ui.hovered(foldBox))
+        if (ui.hovered(foldBox.inset(-3.f * s)))
             ui.tip = fold_ == FoldMode::Key
                          ? (key.active() ? "showing only the rows in " + key.label()
                                          : std::string("fold to key - the set has no scale set, "
@@ -1133,6 +1168,10 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
                                                                   "clip uses")
                                                     : std::string("showing every pitch"));
         // Whole beats only: a loop length between beats is a tempo problem.
+        if (ui.hovered(lenBox.inset(-3.f * s)) && ui.tip.empty())
+            ui.tip = "drag up or down to set the clip's loop length in beats; "
+                     "Shift drags finer";
+        ui.grab(3.f * s);
         if (ui.dragNumber(uiId(22, 0), lenBox, &clip.lengthBeats, 1.0, 512.0, 0.06, "%.0f beats",
                           Align::Right, nullptr, 1.0)) {
             changed = true;
@@ -1406,9 +1445,55 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             const NoteModel& nt = clip.notes[(size_t)hover];
             const f32 x0 = beatToX(ta, nt.beat);
             const f32 x1 = std::max(beatToX(ta, nt.beat + nt.len), x0 + minNoteW);
-            ui.cursor = (in.mx >= x1 - std::min(4.f * s, (x1 - x0) * 0.35f)) ? Cursor::ResizeH
-                                                                            : Cursor::Grab;
+            ui.cursor = (in.mx >= x1 - std::min(kNoteEdgeGrab * s,
+                                                (x1 - x0) * kNoteEdgeShare))
+                            ? Cursor::ResizeH
+                            : Cursor::Grab;
         }
+    }
+
+    // --- the badge ---------------------------------------------------------
+    // Same block, same order, and after the cursor for the same reason: the two
+    // are one answer and a lane hover must not outrank a grid drag.
+    //
+    // The rule is what keeps this from being clutter. Three places in this
+    // editor cannot say what a click does, and they are exactly the three that
+    // look like read-outs: EMPTY grid (a click writes a note), the PER-NOTE
+    // lane (a click sets a velocity on the selected notes, from a strip that
+    // looks like a bar chart of them), and an ENVELOPE lane (AutoLaneView says
+    // that one itself). A note under the pointer gets nothing -- there is a
+    // block there and a Grab cursor over it -- and neither does a drag in
+    // flight, which has already answered the question by happening.
+    if (drag_ == Drag::None && !lane_.dragging()) {
+        if (hotGrid && midiClip &&
+            noteAt(clip.notes, rows, ta, pa, in.mx, in.my, minNoteW) < 0) {
+            ui.badge = Badge::Add;
+            if (ui.tip.empty())
+                ui.tip = "click to write a note here; Shift+drag rubber-bands a "
+                         "selection";
+        } else if (hotLane && !env && midiClip) {
+            ui.badge = Badge::Draw;
+            if (ui.tip.empty())
+                ui.tip = std::string("drag a stem to set ") +
+                         kNoteLaneNames[(int)noteLane] +
+                         " on every selected note";
+        }
+    }
+    if (probeOn() && changed) {
+        LOGI("NXTAKT_DEBUG_PROBE: roll uid=%llu notes=%zu len=%.4f lane=%d sel=%d/%d",
+             (unsigned long long)clip.uid, clip.notes.size(), clip.lengthBeats,
+             laneSel_, sel_.count(), sel_.primary);
+        for (size_t i = 0; i < clip.notes.size(); ++i) {
+            const NoteModel& n = clip.notes[i];
+            LOGI("NXTAKT_DEBUG_PROBE: note i=%zu beat=%.4f pitch=%d len=%.4f vel=%d "
+                 "velTo=%d chance=%d%s",
+                 i, n.beat, (int)n.pitch, n.len, (int)n.vel, (int)n.velTo,
+                 (int)n.chance, sel_.has((int)i) ? " SEL" : "");
+        }
+        if (const AutoLane* e = shownLane(clip))
+            for (size_t p = 0; p < e->points.size(); ++p)
+                LOGI("NXTAKT_DEBUG_PROBE: rollauto p=%zu beat=%.4f val=%.5f",
+                     p, e->points[p].beat, (double)e->points[p].value);
     }
     return changed;
 }

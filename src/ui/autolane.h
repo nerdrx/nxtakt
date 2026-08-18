@@ -67,8 +67,17 @@ inline f32 dpiOf(const Ui& ui) {
 
 // A breakpoint is a 5 px square, grabbed from a little further out so it can be
 // picked up without the cursor having to land exactly on it.
+//
+// kPtGrab is a Chebyshev RADIUS, so the target it describes is 2*kPtGrab on a
+// side: 7 gave a 14x14 logical square, which is 14.0 device px at scale 1.0 and
+// under the 16 px floor for a thing that is clicked. 8 puts it exactly on the
+// floor at 1.0 and comfortably over at 1.25, and costs nothing anywhere else:
+// pointAt() takes the NEAREST point, so overlapping radii still resolve to one
+// answer, and the only thing a wider radius takes away is the ability to add a
+// new point one pixel from an existing one -- which was never a gesture, it was
+// a mistake waiting to be made.
 inline constexpr f32 kPtSize = 5.f;
-inline constexpr f32 kPtGrab = 7.f;
+inline constexpr f32 kPtGrab = 8.f;
 // One arrow press of value, as a fraction of the target's range: coarse enough
 // to see, fine enough to trim a fade with.
 inline constexpr f32 kValueNudge = 1.f / 64.f;

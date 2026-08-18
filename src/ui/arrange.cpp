@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace lat {
 namespace {
@@ -81,6 +82,50 @@ bool srcFraction(const ClipModel& src, f64 clipBeat, f64& outU) {
 // not hand the counter over, which every path below then treats as "unstamped"
 // and leaves for the caller's assignUids.
 u64 newUid(ArrangeContext& ctx) { return ctx.nextUid ? (*ctx.nextUid)++ : 0; }
+
+// ---------------------------------------------------------------------------
+// NXTAKT_DEBUG_PROBE -- the arrangement's half of the headless drive
+//
+// One line per lane that changed, listing every item's uid, start, length and
+// fades, plus the loop and the selection. A gesture driven from outside the
+// window is only a CHECK if the model can be read back and compared afterwards,
+// and this is the read-back for everything ArrangeView owns.
+//
+// Read-only and additive: it takes the context by const reference, it is
+// printed only on a frame that already reported a change, and with the variable
+// unset it is one cached bool. It is deliberately not a per-frame dump -- what
+// a drive script needs is "this gesture moved these values", which means the
+// line has to be tied to the change and not to the clock.
+// ---------------------------------------------------------------------------
+bool probeOn() {
+    static const bool on = std::getenv("NXTAKT_DEBUG_PROBE") != nullptr;
+    return on;
+}
+
+void probeArrange(const ArrangeContext& ctx, u32 changed, int selTrack, u64 selItem) {
+    if (!probeOn() || !changed) return;
+    LOGI("NXTAKT_DEBUG_PROBE: arr changed=0x%02x sel=%d/%llu loop=%.4f..%.4f %s",
+         changed, selTrack, (unsigned long long)selItem,
+         ctx.loopStart ? *ctx.loopStart : -1.0, ctx.loopEnd ? *ctx.loopEnd : -1.0,
+         (ctx.loopOn && *ctx.loopOn) ? "on" : "off");
+    for (size_t i = 0; i < ctx.lanes.size(); ++i) {
+        const std::vector<ArrangeClip>* v = ctx.lanes[i].items;
+        if (!v) continue;
+        for (size_t k = 0; k < v->size(); ++k) {
+            const ArrangeClip& c = (*v)[k];
+            LOGI("NXTAKT_DEBUG_PROBE: arr t=%zu i=%zu uid=%llu start=%.4f len=%.4f "
+                 "off=%.4f fin=%.4f fout=%.4f",
+                 i, k, (unsigned long long)c.uid, c.start, c.length, c.offset,
+                 c.fadeIn, c.fadeOut);
+        }
+        const std::vector<AutoLane>* a = ctx.lanes[i].autos;
+        if (!a) continue;
+        for (size_t j = 0; j < a->size(); ++j)
+            for (size_t p = 0; p < (*a)[j].points.size(); ++p)
+                LOGI("NXTAKT_DEBUG_PROBE: arrauto t=%zu l=%zu p=%zu beat=%.4f val=%.5f",
+                     i, j, p, (*a)[j].points[p].beat, (double)(*a)[j].points[p].value);
+    }
+}
 
 } // namespace
 
@@ -235,7 +280,29 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     contentBeats = std::max(contentBeats, ctx.playhead + kArrTailBeats);
 
     // --- wheel -------------------------------------------------------------
-    const bool overBody = (lanes.contains(in.mx, in.my) || heads.contains(in.mx, in.my) ||
+    //
+    // ONE NOTCH, ONE ANSWER. The header column scrolls the lane stack on a
+    // plain wheel; the chooser row inside it holds a `selector`, and a selector
+    // spends the wheel on stepping its option. Both used to fire on the same
+    // notch -- the automation target advanced AND the stack scrolled under it --
+    // because this block runs before the header is drawn and neither knew about
+    // the other. The chooser row's geometry is already known here (the layout
+    // pass above ran first), so the wheel simply declines it.
+    //
+    // The pre-wheel scroll offset is the right one to test against: it is where
+    // the row was when the notch arrived, which is what the hand was aiming at.
+    const f32 preTopY = lanes.y - scrollY_;
+    bool overChooser = false;
+    if (heads.contains(in.mx, in.my)) {
+        for (size_t i = 0; i < rows.size(); ++i) {
+            if (rows[i].autos <= 0) continue;
+            const f32 y0 = preTopY + rows[i].autoY +
+                           (f32)(rows[i].autos - 1) * kArrAutoLaneH * s;
+            if (in.my >= y0 && in.my < y0 + kArrAutoLaneH * s) { overChooser = true; break; }
+        }
+    }
+    const bool overBody = (lanes.contains(in.mx, in.my) ||
+                           (heads.contains(in.mx, in.my) && !overChooser) ||
                            ruler.contains(in.mx, in.my)) &&
                           rr.currentClip().contains(in.mx, in.my);
     f32 pxPerBeat = zoom_ * s;
@@ -300,11 +367,37 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     ui.setHot(rulerId, ruler);
     const bool hotRuler = ui.isHot(rulerId);
 
+    // THE BRACE'S ENDS, which until this pass had a zone of exactly zero px.
+    // The brace draws two 1.5 px uprights that look like handles and were not:
+    // every press on this ruler started a fresh brace from the press point, so
+    // adjusting one end meant redrawing both and the two uprights were pure
+    // decoration. -1 for neither end, 0 for the start, 1 for the end.
+    //
+    // Grabbing an end is expressed as the SAME Drag::Loop with the anchor put
+    // on the other end and loopMoved_ pre-set: the brace already exists, so
+    // there is no "was this a locate or a drag" question left to answer, and
+    // the whole drag body below is reused rather than duplicated.
+    int braceEnd = -1;
+    if (hotRuler && drag_ == Drag::None && ctx.loopStart && ctx.loopEnd &&
+        *ctx.loopEnd > *ctx.loopStart) {
+        const f32 g = kArrLoopGrab * s;
+        const f32 bx0 = beatToX(ta, *ctx.loopStart), bx1 = beatToX(ta, *ctx.loopEnd);
+        const f32 d0 = std::fabs(in.mx - bx0), d1 = std::fabs(in.mx - bx1);
+        // Nearest wins, so a brace dragged down to a couple of pixels wide
+        // still hands each half of itself to the end it is nearer.
+        if (d0 <= g || d1 <= g) braceEnd = (d0 <= d1) ? 0 : 1;
+    }
+
     if (in.pressed[0] && hotRuler && drag_ == Drag::None) {
         drag_ = Drag::Loop;
         gesture_ = rulerId;
-        loopAnchor_ = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
-        loopMoved_ = false;
+        if (braceEnd >= 0) {
+            loopAnchor_ = braceEnd == 0 ? *ctx.loopEnd : *ctx.loopStart;
+            loopMoved_ = true;
+        } else {
+            loopAnchor_ = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+            loopMoved_ = false;
+        }
         moved_ = true;              // the brace is not an edit to any lane
         ui.active = rulerId;
     }
@@ -662,7 +755,11 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         const Rect tri{hb.x + 6.f * s, hb.y + 3.f * s, 12.f * s, 12.f * s};
         const bool open = L.expanded && *L.expanded;
         const u64 triId = uiId(24, 1, (int)i);
-        const bool hotTri = ui.setHot(triId, tri) && ui.isHot(triId);
+        // 12x12 logical is 12.0 device px at scale 1.0, under the 16 px floor
+        // for a thing that is CLICKED rather than dragged. The triangle is a
+        // drawn shape and the drawing may not move, so the aim grows instead:
+        // 18x18 to hit, 12x12 to look at.
+        const bool hotTri = ui.grab(3.f * s).setHot(triId, tri) && ui.isHot(triId);
         const Col tc = hotTri ? nx::text : nx::muted;
         if (open) rr.triangle(tri.x + 1.f * s, tri.cy() - 2.5f * s,
                               tri.x + 11.f * s, tri.cy() - 2.5f * s,
@@ -692,7 +789,10 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         if (L.overridden) {
             const Rect ov{hb.x + 6.f * s, hb.y + 18.f * s, 58.f * s, 11.f * s};
             const u64 ovId = uiId(24, 2, (int)i);
-            const bool hotOv = ui.setHot(ovId, ov) && ui.isHot(ovId);
+            // 11 logical px tall, which is 11.0 device px at 1.0. Same fix as
+            // the triangle: the chip keeps its drawn height and gains 3 px of
+            // aim on every side.
+            const bool hotOv = ui.grab(3.f * s).setHot(ovId, ov) && ui.isHot(ovId);
             // Amber, and §1 means it: this is "attention", the one state on a
             // track header that is not what the arrangement asked for. A pill,
             // because it is a chip and chips are pills (§5).
@@ -720,6 +820,10 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         const bool hotGrip = ui.setHot(gripId, grip) && ui.isHot(gripId);
         if (hotGrip && drag_ == Drag::None) {
             ui.cursor = Cursor::ResizeV;
+            // 8 logical px tall, which is exactly the drag floor at scale 1.0
+            // and 9.8 at 1.25. It passes, and it is invisible -- nothing is
+            // drawn on this seam -- so it gets the word instead of the pixels.
+            ui.tip = "drag to set this track's lane height";
             if (in.pressed[0] && L.height) {
                 drag_ = Drag::LaneH;
                 gesture_ = gripId;
@@ -755,6 +859,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 const Rect onR{ab.right() - 20.f * s, ab.y + 4.f * s, 14.f * s, 12.f * s};
                 const u64 onId = uiId(26, (int)i, (int)j);
                 bool on = al.enabled;
+                // 14x12 logical; the short side fails the 16 px floor at both
+                // scales. Three pixels of aim on every side makes it 20x18.
+                ui.grab(3.f * s);
                 if (ui.squareToggle(onId, onR, "", &on, nx::violet)) {
                     al.enabled = on;
                     changed |= Changed::Autos;
@@ -765,10 +872,24 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 // the same reason the playhead is: it is the live one.
                 rr.circle(onR.cx(), onR.cy(), 3.f * s,
                           al.enabled ? nx::cyan : nx::muted.alpha(0.45f));
-                if (ui.hovered(onR)) ui.tip = al.address;
+                // THE TOGGLE'S OWN RECT, and the reason it needs one. The row
+                // below deletes the lane on a right-click over ANY of itself --
+                // including this toggle, which sits inside it. Right-clicking a
+                // switch to see what its other button does is a normal thing to
+                // try, and it destroyed the lane. The toggle now excludes
+                // itself from that, with the same 3 px of slack it is hit with
+                // so the exclusion and the target are the same shape.
+                const Rect onHit = onR.inset(-3.f * s);
+                const bool overOn = ui.hovered(onHit);
+                if (overOn) ui.tip = al.address + (al.enabled ? "  (on)" : "  (off)");
                 // Removing a lane is the same right-click that removes anything
                 // else in this program.
-                if (ui.hovered(ab) && in.pressed[2]) {
+                if (ui.hovered(ab) && !overOn) {
+                    ui.badge = Badge::Delete;
+                    if (ui.tip.empty())
+                        ui.tip = "right-click to remove this automation lane";
+                }
+                if (ui.hovered(ab) && !overOn && in.pressed[2]) {
                     L.autos->erase(L.autos->begin() + (long)j);
                     if (j < laneViews_[i].size())
                         laneViews_[i].erase(laneViews_[i].begin() + (long)j);
@@ -796,12 +917,19 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     int& tsel = targetSel_[i];
                     tsel = clampv(tsel, 0, (int)names.size() - 1);
                     const Rect selR{cb.x + 6.f * s, cb.y + 5.f * s, cb.w - 34.f * s, 14.f * s};
+                    // 14 logical px tall, under the floor at both scales; the
+                    // chooser row has 44 px of height above and below to lend.
+                    ui.grab(3.f * s);
                     ui.selector(uiId(24, 5, (int)i), selR, &tsel, names.data(), (int)names.size());
-                    if (ui.hovered(selR))
+                    if (ui.hovered(selR.inset(-3.f * s)))
                         ui.tip = L.targets->entries[(size_t)tsel].group + " " +
                                  L.targets->entries[(size_t)tsel].label + "  " +
-                                 L.targets->entries[(size_t)tsel].address;
+                                 L.targets->entries[(size_t)tsel].address +
+                                 "  --  click cycles, right-click steps back";
                     const Rect addR{selR.right() + 4.f * s, selR.y, 20.f * s, selR.h};
+                    if (ui.hovered(addR.inset(-3.f * s)) && ui.tip.empty())
+                        ui.tip = "add an automation lane for the chosen target";
+                    ui.grab(3.f * s);
                     if (ui.button(uiId(24, 6, (int)i), addR, "+") &&
                         (int)L.autos->size() < kMaxArrLanes) {
                         const std::string& addr = L.targets->entries[(size_t)tsel].address;
@@ -832,26 +960,63 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // --- item interaction --------------------------------------------------
     // What is under the cursor, and where inside it. One answer, used by the
     // press, the cursor shape and the fade grabs alike, so they cannot disagree.
+    // THE FIVE ZONES, and the three things that were wrong with them.
+    //
+    // 1. The trim band was kArrEdgeGrab = 5 logical px: 5.0 device px at scale
+    //    1.0 and 6.1 at 1.25, both under the 8 px floor. It is 8 now.
+    // 2. The zones stopped dead at the item's own edge, so the pixels a hand
+    //    aiming at that edge actually lands on -- the ones just outside it --
+    //    hit empty lane and deselected. The search rect is widened by
+    //    kArrEdgeSlop and the trim zones reach into it.
+    // 3. The fade corners were a flat 14 logical px wide each. On an item
+    //    narrower than 28 logical px they overlapped and the else-if chain gave
+    //    the whole overlap to FADE-IN, which left FADE-OUT unreachable at any
+    //    zoom on any item under 28 px -- a zone of size zero. Both are now
+    //    capped at kArrFadeShare of the item, so the two can never meet.
+    //
+    // The PRIORITY is unchanged where it was already right (a fade corner
+    // outranks the trim band it sits over, because the corner is the smaller,
+    // more specific target and the trim band is still 11 px tall underneath
+    // it), and the slop belongs to trim rather than to fade for the same
+    // reason: outside the item there is no fade to grab.
     int hitTrack = -1, hitIdx = -1;
     enum class Zone { Body, Left, Right, FadeIn, FadeOut } hitZone = Zone::Body;
+    const f32 slop = kArrEdgeSlop * s;
     if (hotLanes && drag_ == Drag::None) {
         const int t = trackAtY(in.my);
         if (t >= 0 && t < (int)ctx.lanes.size() && ctx.lanes[(size_t)t].items &&
             in.my < topY + rows[(size_t)t].y + rows[(size_t)t].h) {
             const std::vector<ArrangeClip>& v = *ctx.lanes[(size_t)t].items;
-            for (size_t k = v.size(); k-- > 0;) {
-                const f32 x0 = beatToX(ta, v[k].start), x1 = beatToX(ta, v[k].end());
-                if (in.mx < x0 || in.mx >= x1) continue;
-                hitTrack = t;
-                hitIdx = (int)k;
-                const f32 e = std::min(kArrEdgeGrab * s, (x1 - x0) * 0.3f);
-                const f32 topBand = topY + rows[(size_t)t].y + 13.f * s;
-                if (in.my < topBand && in.mx < x0 + 14.f * s)        hitZone = Zone::FadeIn;
-                else if (in.my < topBand && in.mx > x1 - 14.f * s)   hitZone = Zone::FadeOut;
-                else if (in.mx < x0 + e)                             hitZone = Zone::Left;
-                else if (in.mx > x1 - e)                             hitZone = Zone::Right;
-                else                                                 hitZone = Zone::Body;
-                break;
+            // TWO PASSES, and the order is the whole point. The first asks
+            // "which item is the pointer IN", the second "which edge is it
+            // NEAR". A one-pass search with the slop folded in would let an
+            // item steal the three pixels before its butted-up neighbour's
+            // right edge -- turning a right-trim into a left-trim of the wrong
+            // item, which is the exact class of bug this pass exists to remove.
+            for (int pass = 0; pass < 2 && hitIdx < 0; ++pass) {
+                const f32 sl = pass == 0 ? 0.f : slop;
+                for (size_t k = v.size(); k-- > 0;) {
+                    const f32 x0 = beatToX(ta, v[k].start), x1 = beatToX(ta, v[k].end());
+                    if (in.mx < x0 - sl || in.mx >= x1 + sl) continue;
+                    hitTrack = t;
+                    hitIdx = (int)k;
+                    break;
+                }
+            }
+            if (hitIdx >= 0) {
+                const ArrangeClip& h = v[(size_t)hitIdx];
+                const f32 x0 = beatToX(ta, h.start), x1 = beatToX(ta, h.end());
+                const f32 w = std::max(1.f, x1 - x0);
+                const f32 e = std::max(std::min(kArrEdgeGrab * s, w * 0.3f), 1.f);
+                const f32 fw = std::min(kArrFadeGrab * s, w * kArrFadeShare);
+                const f32 topBand = topY + rows[(size_t)t].y + kArrFadeBandH * s;
+                if (in.mx < x0 || in.mx >= x1)
+                    hitZone = in.mx < x0 ? Zone::Left : Zone::Right;   // the slop
+                else if (in.my < topBand && in.mx < x0 + fw)        hitZone = Zone::FadeIn;
+                else if (in.my < topBand && in.mx > x1 - fw)        hitZone = Zone::FadeOut;
+                else if (in.mx < x0 + e)                            hitZone = Zone::Left;
+                else if (in.mx > x1 - e)                            hitZone = Zone::Right;
+                else                                                hitZone = Zone::Body;
             }
         }
     }
@@ -1066,16 +1231,57 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // --- the cursor --------------------------------------------------------
     if (drag_ == Drag::TrimL || drag_ == Drag::TrimR)      ui.cursor = Cursor::ResizeH;
     else if (drag_ == Drag::Move)                          ui.cursor = Cursor::Grab;
+    else if (drag_ == Drag::Loop)                          ui.cursor = Cursor::ResizeH;
     else if (drag_ == Drag::LaneH)                         ui.cursor = Cursor::ResizeV;
-    else if (hotRuler && drag_ == Drag::None)              ui.cursor = Cursor::Hand;
+    else if (hotRuler && drag_ == Drag::None) {
+        ui.cursor = braceEnd >= 0 ? Cursor::ResizeH : Cursor::Hand;
+        if (braceEnd >= 0)
+            ui.tip = "drag this end of the loop brace; drag anywhere else on the "
+                     "ruler to set a new one, right-click for a signature change";
+        else if (ui.tip.empty())
+            ui.tip = "click to locate, drag to set the loop brace, right-click to "
+                     "add or remove a signature change at this bar";
+    }
     else if (hitIdx >= 0) {
         ui.cursor = (hitZone == Zone::Left || hitZone == Zone::Right) ? Cursor::ResizeH
                     : (hitZone == Zone::FadeIn || hitZone == Zone::FadeOut) ? Cursor::ResizeH
                                                                             : Cursor::Grab;
+        // THE BADGE: what a click does that the cursor cannot say. A Grab
+        // cursor over an item's body says "you can move this"; it cannot say
+        // that a DOUBLE-click cuts it at the pointer, which is the one verb on
+        // this surface with no other way in. The trim and fade corners get no
+        // badge -- a resize cursor over an edge is not ambiguous.
+        if (hitZone == Zone::Body) {
+            ui.badge = Badge::Split;
+            if (ui.tip.empty())
+                ui.tip = "drag to move, Ctrl+drag to leave a copy, double-click to "
+                         "split here, right-click to delete";
+        } else if (hitZone == Zone::FadeIn || hitZone == Zone::FadeOut) {
+            if (ui.tip.empty()) ui.tip = "drag the top corner to set the fade";
+        } else if (ui.tip.empty()) {
+            // A resize cursor says "an edge"; it does not say WHICH edit. A head
+            // trim moves the material with the edge and a tail trim does not,
+            // and that is the difference between the two halves of an item.
+            ui.tip = hitZone == Zone::Left
+                         ? "drag to trim the start; the material moves with it"
+                         : "drag to trim the end";
+        }
+    } else if (hotLanes && drag_ == Drag::None && trackAtY(in.my) >= 0) {
+        // EMPTY TIMELINE LANE -- the exact gap this pass was sent after. An
+        // empty lane is indistinguishable from dead space, and the double-click
+        // that puts a one-bar note block on it is invisible until it is found
+        // by accident. The badge is what makes it findable.
+        ui.badge = Badge::Add;
+        if (ui.tip.empty()) ui.tip = "double-click to write a one-bar note block here";
     }
+    // A Ctrl+drag is making a copy, and the moment the modifier goes down is
+    // the moment that stops being a plain move. The badge is the only feedback
+    // there is until the button comes up.
+    if (drag_ == Drag::Move && in.ctrl()) ui.badge = Badge::Duplicate;
 
     ctx.selTrack = selTrack_;
     ctx.selItem  = selItem_;
+    probeArrange(ctx, changed, selTrack_, selItem_);
     return changed;
 }
 
