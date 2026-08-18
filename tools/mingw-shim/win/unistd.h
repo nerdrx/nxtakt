@@ -34,6 +34,14 @@ long sysconf(int name);
 pid_t fork(void);
 int   kill(pid_t pid, int sig);
 
+// src/ipc/take.h names the per-user take directory with getuid() (glibc
+// declares it here as well as in <pwd.h>, and take.h includes only this
+// header) and durability-flushes a finished take with fsync(). getuid's
+// definition already lives in win_posix.cpp for <pwd.h>; fsync maps to
+// _commit(), the real CRT-fd flush.
+uid_t getuid(void);
+int   fsync(int fd);
+
 #ifdef __cplusplus
 }
 #endif

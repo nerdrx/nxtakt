@@ -24,8 +24,16 @@ static void usage() {
         "Environment:\n"
         "  NXTAKT_BACKEND=wayland|x11    force a window backend\n"
         "  NXTAKT_AUDIO=jack|alsa        force an audio backend\n"
-        "  NXTAKT_ENGINE=daemon|local    daemon (default) runs the engine as nxtaktd;\n"
-        "                                local keeps it in-process\n"
+#ifdef _WIN32
+        "  NXTAKT_ENGINE=local|daemon    local (the default on the Windows port)\n"
+        "                                keeps the engine in-process; a daemon\n"
+        "                                does not exist here yet (docs/PORTING.md)\n"
+#else
+        "  NXTAKT_ENGINE=daemon          the engine runs as nxtaktd — the only\n"
+        "                                mode; =local was retired and now warns,\n"
+        "                                then opens the daemon (GUI-ON-DAEMON.md\n"
+        "                                §18)\n"
+#endif
         "  NXTAKT_SCALE=1.5              override UI scale\n"
         "  (the pre-rename LATTICE_* spellings are still read; NXTAKT_* wins)\n"
         "\n"

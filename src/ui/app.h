@@ -6,10 +6,11 @@
 #pragma once
 #include "session.h"
 // Where the engine is, and what it looked like this frame. App holds no Engine,
-// no AudioBackend and no MidiInput of its own any more: EngineHandle owns all
-// three (or, from step 2, an ipc::EngineClient instead), and everything that
+// no AudioBackend and no MidiInput of its own any more: EngineHandle owns the
+// ipc::EngineClient and the MIDI reader (and, on the Windows port only, the
+// in-process engine §18 deleted from the Linux build), and everything that
 // used to be an engine_.<atomic>.load() during a draw reads es_ instead.
-// docs/GUI-ON-DAEMON.md §2.
+// docs/GUI-ON-DAEMON.md §2, §18.
 #include "engine_handle.h"
 #include "engine_state.h"
 // Remote control (the append-only block at the end of class App). Both are
@@ -186,10 +187,11 @@ private:
     Ui       ui_{};
     Font     fSmall_, fBody_, fBold_, fBig_;
 
-    // The engine, wherever it is. Owns the Engine, the audio backend and the
-    // MIDI reader on the local path; owns an ipc::EngineClient on the daemon
-    // path when that lands. Nothing outside this member and the six functions
-    // that command it knows which.
+    // The engine, wherever it is: an ipc::EngineClient onto nxtaktd, plus the
+    // MIDI reader whose thread feeds it — since GUI-ON-DAEMON.md §18 that is
+    // the only engine this link can hold on Linux (the Windows port's
+    // in-process arm survives inside the handle, behind _WIN32). Nothing
+    // outside this member and the six functions that command it knows which.
     EngineHandle eng_;
     // What the engine looked like at the top of this frame. THE ONLY THING the
     // draw code may read about engine state — see engine_state.h for why one
@@ -198,7 +200,8 @@ private:
     // §5 step 4's sessionSyncing_, derived rather than stored because it IS
     // the pending count (§12.7 item 4): devices the daemon has been asked for
     // whose EvDeviceAdded/Failed has not arrived. While true, a chain on
-    // screen is not yet the chain that sounds. Always false in local mode.
+    // screen is not yet the chain that sounds. Always false without a daemon
+    // (instantiation is synchronous on the Windows port's in-process arm).
     bool sessionSyncing() const { return es_.devicesPending != 0; }
 
     // =======================================================================
@@ -1259,8 +1262,9 @@ public:
     // consumer that only drains while armed would arrive at its first take with
     // the ring already full and every entry of that take refused.
     //
-    // Through the HANDLE, which pops the engine's ring or ipc::JournalRing by
-    // mode. An earlier comment here reasoned there was "no reason to mirror
+    // Through the HANDLE, which pops ipc::JournalRing (or, on the Windows
+    // arm's in-process engine, that engine's own ring). An earlier comment
+    // here reasoned there was "no reason to mirror
     // popJournal() through the handle" and that in daemon mode "the journal
     // comes off ipc::JournalRing instead" -- describing a consumer that was
     // never written. The daemon forwarded every entry into a ring nobody read,

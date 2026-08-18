@@ -10,19 +10,27 @@
 // hot path entirely, and what is left is a handful of calls a frame where a
 // branch on a member that never changes after init() predicts perfectly.
 //
-// TWO BACKINGS, AS OF STEPS 2 AND 3
-// ---------------------------------
-//   local    an Engine, an audio backend and the ALSA MIDI reader, all in this
-//            process. What step 1 shipped. NXTAKT_ENGINE=local (or the doc's
-//            older spelling, inproc) selects it.
+// ONE BACKING ON LINUX, AS OF §8(3)'s COLLECT (GUI-ON-DAEMON.md §18)
+// ------------------------------------------------------------------
 //   daemon   an ipc::EngineClient talking to nxtaktd over the control region,
 //            with the GUI's samples living in an ipc::SamplePool it owns.
-//            THE DEFAULT since §8 step 2's flip (GUI-ON-DAEMON.md §16);
-//            NXTAKT_ENGINE=daemon (or LATTICE_ENGINE=daemon) names it
-//            explicitly, which changes the failure policy — see open().
+//            The default since §8 step 2's flip (§16), and since §18 the ONLY
+//            engine this class can open on Linux: the in-process path that
+//            step 1 shipped left the App link one release after the flip, on
+//            the flip's own schedule. NXTAKT_ENGINE=local (and the doc's
+//            older spelling, inproc) survives as a LOUD warning that takes
+//            the daemon anyway — see open().
 //
-// `local()` answers null in daemon mode and that is the load-bearing test: no
-// caller may assume there is an in-process Engine to reach.
+// The one exception is the WINDOWS PORT, where the carve-out is structural
+// and not policy: src/ipc compiles there via failing stubs (PORTING.md) —
+// shm_open/fork cannot succeed — so a daemon is unreachable and the
+// in-process engine (an Engine, an audio backend, the MIDI reader, all in
+// this process) stays compiled and stays the default, behind _WIN32. Every
+// local-path member and dispatch arm below exists only under that macro.
+//
+// `local()` answers null ALWAYS on Linux — that used to be the load-bearing
+// test of daemon mode and is now a constant: no caller may assume there is an
+// in-process Engine to reach, and on Linux there never is one.
 //
 // WHAT DAEMON MODE CARRIES, AND WHAT IT DOES NOT
 // ----------------------------------------------
@@ -56,14 +64,16 @@
 // commands, which are refused permanently and by design (a client has no
 // RtChains to name).
 //
-// Threading: GUI thread only, like everything in src/ui. The Engine it owns in
-// local mode is the one the audio thread runs; the ring pushes here are the
-// producer side of the SPSC contract in core/ring.h. In daemon mode the same
-// contract holds against the shared-memory rings, with this thread as the sole
-// producer of commands and of MIDI.
+// Threading: GUI thread only, like everything in src/ui. The SPSC contract in
+// core/ring.h holds against the shared-memory rings, with this thread as the
+// sole producer of commands and of MIDI (plus the reader thread, under the
+// mutex below). On the Windows arm the Engine it owns is the one the audio
+// thread runs, and the ring pushes here are that contract's producer side.
 #pragma once
 #include "engine_state.h"
-#include "../audio/backend.h"
+#ifdef _WIN32
+#include "../audio/backend.h"   // AudioBackend: the in-process arm's, Windows-only
+#endif
 #include "../audio/engine.h"
 #include "../audio/midi_in.h"
 #include "../plugin/host.h"      // PluginDesc, and PluginInstance as an identity
@@ -118,13 +128,17 @@ public:
 
     // --- lifecycle ---------------------------------------------------------
 
-    // Opens the engine this run is configured for. THE DEFAULT IS THE DAEMON
-    // (§8 step 2's flip; policy in GUI-ON-DAEMON.md §16): unset, `daemon` and
-    // `remote` all give the remote path, `NXTAKT_ENGINE=local` (or the doc's
-    // older `inproc`) gives the in-process one, and an unrecognised value is
-    // warned about and takes the default. `NXTAKT_SESSION` names the session;
-    // it defaults to "default". On the Windows port the default stays local:
-    // src/ipc is failing stubs there (PORTING.md) and a daemon cannot exist.
+    // Opens the engine this run is configured for. ON LINUX THE DAEMON IS THE
+    // ENGINE (§8 step 2's flip in GUI-ON-DAEMON.md §16; §8(3)'s deletion in
+    // §18): unset, `daemon` and `remote` all open the remote path, and
+    // `NXTAKT_ENGINE=local` (or the doc's older `inproc`) no longer selects
+    // anything — it is warned about LOUDLY and takes the daemon, exactly like
+    // an unrecognised value, because a spelling that used to mean an engine
+    // must not quietly come to mean no engine. `NXTAKT_SESSION` names the
+    // session; it defaults to "default". On the Windows port the in-process
+    // engine survives and stays the default: src/ipc is failing stubs there
+    // (PORTING.md) and a daemon cannot exist, so `=local` still works and an
+    // explicit `=daemon` still gets to try, fail, and say so.
     //
     // `driver` is "jack", "alsa" or null for auto, i.e. NXTAKT_AUDIO. In daemon
     // mode it is forwarded to a daemon we spawn and ignored for one we merely
@@ -144,38 +158,51 @@ public:
     // cycle for an internal header is ceremony. New code says open().
     bool openLocal(const char* driver) { return open(driver); }
 
-    // The two halves open() dispatches between, exposed for callers that
-    // genuinely mean one of them (and for tests).
-    bool openLocalEngine(const char* driver);
+    // The daemon half of open()'s dispatch, exposed for callers that genuinely
+    // mean it (and for tests).
     bool openDaemon(const char* session, const char* driver);
+#ifdef _WIN32
+    // The in-process half. Windows-only since §18's collect: on Linux the
+    // symbol does not exist, so a caller that wants it back has to come
+    // through this header and read why it left.
+    bool openLocalEngine(const char* driver);
+#endif
 
-    // Joins everything that touches the engine from another thread, in the one
-    // order that is safe: the MIDI reader first (it is a producer on the
-    // engine's ring, so it has to be gone before anything starts tearing the
-    // engine down), then the audio backend (whose stop() joins the audio
-    // thread). Once this returns, nothing can be inside process() and nothing
-    // can be following a published chain or writing into a capture buffer —
-    // which is what lets App::shutdown() free them without their handshakes.
+    // Joins the MIDI reader (it pushes over the wire from its own thread, so
+    // it has to be gone before the client detaches), then closes the daemon
+    // link. What happens to the daemon is a policy question, answered per §6:
+    // a daemon we SPAWNED is stopped with us, a daemon we merely attached to
+    // is left running. Parent-of-record, the same rule every
+    // editor/language-server pair uses.
     //
-    // In daemon mode the ordering collapses (the GUI lends the engine nothing
-    // it owns) and the question becomes a policy one, answered per §6: a daemon
-    // we SPAWNED is stopped with us, a daemon we merely attached to is left
-    // running. Parent-of-record, the same rule every editor/language-server
-    // pair uses.
-    //
-    // The Engine itself outlives this call: App frees chains and note arrays
-    // after it, and a couple of them are still reachable through local().
+    // On the Windows port's in-process arm the old ordering still holds and
+    // still matters: the MIDI reader first (a producer on the engine's ring),
+    // then the audio backend (whose stop() joins the audio thread), so that
+    // nothing can be inside process() when App::shutdown() frees what the
+    // engine was borrowing. The Engine itself outlives this call there: a
+    // couple of App's frees are still reachable through local().
     void close();
 
+#ifdef _WIN32
     bool localOpen() const { return engine_ != nullptr; }
+#else
+    // Constant since §18: there is no in-process engine to be open on Linux.
+    bool localOpen() const { return false; }
+#endif
     bool remoteOpen() const { return remote_ != nullptr; }
 
-    // The in-process Engine, or **null in daemon mode**. Deliberately narrow:
-    // everything a view needs is in EngineState, and everything a command needs
-    // is below. What is left is the two places that genuinely hand an Engine to
-    // somebody else — the record journal's pump and the headless hooks — and
-    // they are named at their call sites. Every one of them must cope with null.
+    // The in-process Engine — **null in daemon mode, and null ALWAYS on
+    // Linux** (§18). Deliberately narrow even where it exists: everything a
+    // view needs is in EngineState, and everything a command needs is below.
+    // The offline Engines that survive §18 — tools/render, gen_demo, the
+    // headless hook's private engine behind App::pumpJournal(Engine&) — are
+    // constructed directly and never come through here. Every caller must
+    // cope with null, which on Linux the compiler now proves.
+#ifdef _WIN32
     Engine* local() { return engine_.get(); }
+#else
+    Engine* local() { return nullptr; }
+#endif
 
     // The record journal, both modes: local pops the engine's own ring, remote
     // pops ipc::JournalRing (the daemon's pump forwards every entry, and the
@@ -456,35 +483,38 @@ public:
     i64 publishedNotes(int track, int slot, RtNote* out, i64 max) const;
 
 private:
-    // Heap, not by value. Engine is ~2.3 MB of scratch buffers — it was already
-    // a member of App and therefore already wherever App lives, but a pointer
-    // is what lets local() answer "there is no in-process engine", and it takes
-    // the GUI's largest object off whatever stack App sits on.
+#ifdef _WIN32
+    // The in-process engine, Windows-only since §18 (the port's src/ipc is
+    // failing stubs, so this is the only engine that can exist there). Heap,
+    // not by value: Engine is ~2.3 MB of scratch buffers, and a pointer is
+    // what lets local() answer "there is no in-process engine".
     std::unique_ptr<Engine> engine_;
     std::unique_ptr<AudioBackend> audio_;
-    // Started after the backend and stopped before it: the reader thread pushes
-    // into the engine's ring (local) or over the wire (daemon) from its own
-    // thread. Which of the two is decided by the sink openLocalEngine() /
-    // openDaemon() hands it.
+#endif
+    // The MIDI reader survives §18 on both platforms — it is the daemon
+    // path's hardware input. Its thread pushes over the wire through the sink
+    // openDaemon() hands it (on the Windows arm, into the in-process engine's
+    // ring via openLocalEngine()'s).
     MidiInput midi_;
     // Guards the DAEMON path's single MIDI ring against its two producers: this
     // thread (the computer keyboard, note previews) and the ALSA reader thread.
     // lat::Ring is documented single-producer and neither of these is realtime,
     // so a mutex is the whole fix — docs/GUI-ON-DAEMON.md §1.3, option 3. It
     // also covers restartEngine(), which unmaps the ring the reader is pushing
-    // into. Unused on the local path, where the engine keeps a ring per
-    // producer.
+    // into. Unused on the Windows in-process arm, where the engine keeps a
+    // ring per producer.
     mutable std::mutex midiMx_;
 
-    // Null unless openDaemon() succeeded. Exactly one of engine_ and remote_ is
-    // ever set; both null is §8's degraded mode and is a supported state.
+    // Null unless openDaemon() succeeded. Null with nothing else open is §8's
+    // degraded mode and is a supported state (on the Windows arm, "nothing
+    // else" includes engine_; the two are never both set).
     std::unique_ptr<RemoteEngine> remote_;
 
     // What open() recorded on the daemon path, so restartEngine() can retry a
     // spawn that failed at startup (§16). wantDaemon_ distinguishes "asked for
     // a daemon and got nothing" — where Restart should try again — from a
-    // handle that never asked (unopened, or local mode), where it must keep
-    // answering false.
+    // handle that never asked (unopened, or the Windows arm's local mode),
+    // where it must keep answering false.
     bool wantDaemon_ = false;
     std::string session_, driver_;
 };

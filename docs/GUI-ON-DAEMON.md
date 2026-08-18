@@ -701,7 +701,9 @@ default and the daemon path advertises itself as preview.
 
 **Transitional, not forever — with one exception.** *Step 2's flip is taken —
 §16 records the policy, the failure matrix and the reasoning; point (4) below
-is the failure mode of the DEFAULT now, not only of an explicit `=daemon`.*
+is the failure mode of the DEFAULT now, not only of an explicit `=daemon`.
+Point (3) is taken too — §18 records the deletion, what survives it, and the
+Windows carve-out.*
 
 Keeping both paths alive indefinitely costs more than it looks. It is not one
 `if`: it is two representations of a clip (`SampleRef` vs `poolRef`), two of a
@@ -2389,7 +2391,7 @@ would be the dishonesty §4.4 is about.
 | unset, then Restart clicked | binary appears later | daemon, via `restartEngine()` from Detached | Live again | "the banner's Restart recovers a failed startup" |
 | `daemon` | yes | daemon | Live | top of `main()` |
 | `daemon` | no | no engine (§8, unchanged) | Detached | "no silent local fallback when … asked for by name" |
-| `local` / `inproc` | — | in-process engine | Live | "=local opens the in-process engine" |
+| `local` / `inproc` | — | in-process engine *(row superseded by §18: warned, the daemon opens)* | Live | "=local opens the in-process engine" *(now "=local no longer opens an in-process engine")* |
 | `sideways` (typo) | yes | warned, then the default: daemon | Live | "warned, and the default … is what opens" |
 
 **Red proof for the flip line.** The flip reverted by file copy — one line,
@@ -2428,6 +2430,7 @@ The flip itself is complete and tested. Around it, in shipping order:
 * **§8(3)'s deletion** of the in-process path from `App` is *not* this
   release: the flip soaks first, `local` stays a supported spelling, and the
   degraded-mode policy above is what makes that deletion safe to take later.
+  *(Taken one release later, as scheduled — §18.)*
 * §14.8's and §15.8's undrawn counters (`takesFailed`, `takesLost`,
   `deviceStatesRefused`) and `tools/render.cpp`'s non-rack state line
   (§15.8(1)) are unchanged by the flip and still owed.
@@ -2664,3 +2667,128 @@ deleted line does not touch) while the audible grain proof lives in
 parity leg exists to catch. That split is worth keeping in mind when adding
 payload rows later: the daemon suite owns the LIFETIME, the handle suite owns
 the SOUND.
+
+
+---
+
+## 18. The collect — §8(3) executed: the App link drops its second engine
+
+*(The mission that scheduled this step named it "§17"; the wire-parity work of
+v0.8.0 took that number first, so the collect is §18. Same step, one section
+later.)*
+
+§8(3) said: one release after the flip, **delete the in-process path from
+`App`**. The flip shipped in v0.7.x (§16), the wire has been complete since
+v0.8.0 (§17: clips cross whole — nothing the in-process engine could express
+that the daemon cannot), and it has soaked a release. The schedule came due;
+this section records the deletion, exactly so nobody rediscovers a survivor
+as a gap or a deletion as an accident.
+
+### 18.1 What was deleted (Linux)
+
+From `EngineHandle` (`src/ui/engine_handle.{h,cpp}`):
+
+* **`openLocalEngine()`** — the constructor of the in-process trio. On Linux
+  the symbol no longer exists.
+* **`engine_` and `audio_`** — the `unique_ptr<Engine>` and
+  `unique_ptr<AudioBackend>` members.
+* **`local()`'s non-null path and `localOpen()`'s true path** — both are
+  compile-time constants (`nullptr`/`false`) on Linux now. Every dead
+  `engine_ ? … :` dispatch arm in `pushCommand` / `pushMidi` / `popEvent` /
+  `popJournal` / `journalDropped` / `sampleRate` / `poll` / `close` /
+  `driverName` / `driverSampleRate` / `driverBufferSize` / `link` /
+  `restartEngine` went with them — deleted, not left unreachable, per the
+  project's own rule that a wrong comment (and an unreachable arm) is worse
+  than none.
+* **The `NXTAKT_ENGINE=local` / `inproc` selection.** The spellings survive
+  ONE way: `open()` warns loudly — naming this section — and opens the
+  daemon. A spelling that used to mean an engine must not quietly come to
+  mean a different one (that was §16's rule for typos) and must not quietly
+  come to mean *no* engine (which is what silently ignoring it would do to
+  every script and muscle memory that still says `=local`). This is the
+  escape hatch's obituary: there is no environment variable that selects an
+  in-process engine on Linux any more, and the failure story that made the
+  hatch safe to remove is §16's — the engine-free Detached mode plus the
+  banner's Restart.
+* From the chrome: the status-bar diagnostics' "Engine: in-process
+  (NXTAKT_ENGINE=local)" branch (Linux), and `main.cpp`'s usage line for the
+  variable.
+* From the links: `src/audio/backend.cpp` left `build/handle_test`'s recipe —
+  its only consumer through the seam was `openLocalEngine()`'s
+  `createBackend()`.
+
+The GUI binary shrinks by one page (stripped: 2 094 752 → 2 090 656 B). Why
+not more, honestly: the `Makefile` sweeps `src/` into the GUI link, and both
+`engine.cpp` and `backend.cpp` legitimately remain — see 18.2 — so the only
+text that left the binary is the handle's own local arms.
+
+### 18.2 What survives, deliberately — not gaps
+
+* **`class Engine` itself.** Obviously: the daemon IS an Engine host
+  (`nxtaktd` links `engine.cpp` and runs one). Deleting the App *link* never
+  meant deleting the engine.
+* **`tools/render.cpp` and `tools/gen_demo.cpp`** construct an `Engine`
+  directly — offline tools, not the App link, §8(3) named them from the
+  start. Untouched; the four demo-render `cmp`s stay bit-identical, which is
+  also this wave's proof of the fact.
+* **`App::pumpJournal(Engine&)`** remains: the headless hook drives it with
+  its *private offline* engine (the hook is not the link, and its engine
+  never plays audio for a user). One body (`pumpJournalFrom`) still serves
+  both it and the wire path, so the hook cannot verify a path the app does
+  not take.
+* **`app_chrome.cpp`'s headless/debug hooks** that construct a bare `Engine`
+  (`chromeDebugInit`'s specimen engine) — same category as the tools.
+  `debugSignatureCheck` still takes `eng_.local()`: permanently null on
+  Linux, where its read-back half logs "no in-process engine to check
+  against" and its republish/retirement half still runs; live on the Windows
+  arm.
+* **`src/audio/backend.cpp` in the GUI link** — not for audio: `main.cpp`
+  calls `alsaInstallLogHandler()` from it (plugins open ALSA devices whatever
+  the engine mode, and their stderr chatter still needs routing).
+* **`MidiInput midi_` in the handle** — it is the DAEMON path's hardware
+  input (§13: the reader thread forwards over the wire through a sink).
+  Only its local sink arm (`midi_.start(*engine_)`) is Windows-only now.
+* **`handle_test`'s in-process reference take** — rebuilt on a bare
+  `lat::Engine` plus the suite's own block clock (`RefEngineHandle` +
+  `LocalDriver`), because the quantization proof needs a reference
+  *measurement* and the ENGINE is the code being compared, not the handle.
+
+### 18.3 The Windows carve-out is structural
+
+PORTING.md: on `_WIN32`, `src/ipc` compiles via failing stubs —
+`shm_open`/`fork` cannot succeed — so a daemon is structurally unreachable
+and the in-process engine is the only way the port makes sound. Everything
+18.1 deleted therefore stays COMPILED on Windows, behind the same `_WIN32`
+that already selected local-by-default there (§16's carve-out paragraph):
+the members, `openLocalEngine()`, the dispatch arms, the chrome branch and
+the usage line all live inside `#ifdef _WIN32`. `make -f Makefile.mingw gui`
+(the MSYS2-sysroot GUI build) is the gate that keeps that arm honest; the
+windows-cross CI job keeps the engine suite green under wine. When the port
+grows a real `src/ipc` (CreateFileMapping + named mutexes, per
+Makefile.mingw's note), this carve-out is the list of what to delete next —
+it is §8(3) again, one platform later.
+
+### 18.4 The selection matrix after the collect
+
+§16.2's table, with the two rows that changed:
+
+| `NXTAKT_ENGINE` | result on Linux | tested by |
+|---|---|---|
+| `local` | **warned, the daemon opens** | "=local no longer opens an in-process engine" |
+| `inproc` | same | "=inproc … gets the same warning and the same daemon" |
+
+Every other row is unchanged and still pinned by `handle_test`'s closing
+section. **Red proof:** the pre-§18 `engine_handle.{h,cpp}` restored by file
+copy over a green tree and `handle_test` rebuilt: exactly those two rows go
+red — *"NXTAKT_ENGINE=local no longer opens an in-process engine … (remote
+0, local 0x…)"* — the in-process engine opening where the daemon should.
+Restored, all green (254).
+
+`handle_test` 256 → 254, every moved number stated: six rows died with the
+code they pinned (the in-process backing block: openLocalEngine opens, local
+is Live, nothing pending locally, the locally-empty catalog, restart answers
+false there; plus the reference take's "counters read 0 locally"), three
+rows re-pin the portable halves on the engine-free handle (local() constant
+null, the take ledger's zeros, nothing pending), the reference take gained
+its bare-Engine row, and the matrix gained the two rows above plus the
+daemons-stopped check.

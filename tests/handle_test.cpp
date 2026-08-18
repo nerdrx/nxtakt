@@ -210,6 +210,27 @@ private:
     std::atomic<bool> run_{false};
 };
 
+// What the reference take drives since GUI-ON-DAEMON.md §18 removed the
+// handle's in-process arm: a bare lat::Engine constructed DIRECTLY, the way
+// tools/render.cpp, gen_demo and the headless hook do. The measurement is
+// unchanged — the ENGINE is the same code, which is the reference's whole
+// point — only the way the harness reaches it moved, from
+// EngineHandle::openLocalEngine() (deleted on Linux, §18) to the class §18
+// deliberately kept.
+struct RefEngineHandle {
+    lat::Engine& e;
+    bool pushCommand(const lat::Command& c) { return e.pushCommand(c); }
+    bool popEvent(lat::Event& ev) { return e.popEvent(ev); }
+    bool send(lat::Cmd t, i32 a = 0, i32 b = 0, f64 x = 0.0) {
+        lat::Command c;
+        c.type = t; c.a = a; c.b = b; c.x = x;
+        return e.pushCommand(c);
+    }
+    // runTake polls once per spin; a bare engine has no per-frame housekeeping
+    // and the loop reads only events, so this is deliberately a no-op.
+    void poll(lat::EngineState&) {}
+};
+
 // App::startRecording / stopRecording / finishRecording, with App taken out.
 // Returns the frames (or notes) the finish event reported, -1 if nothing came
 // home inside the timeout, and -2 if the take was never armed.
@@ -217,7 +238,10 @@ private:
 // The buffer is the CALLER's, exactly as App's is, and the assertion that
 // matters most is inside: the event that comes home carries the caller's own
 // pointer. Anything else would be a take handed back for somebody else's buffer.
-static i64 runTake(lat::EngineHandle& eng, lat::EngineState& es, int track, int slot,
+// Templated over the two things a take can be run against: the EngineHandle
+// (the daemon path) and RefEngineHandle (the §18 reference above).
+template <class H>
+static i64 runTake(H& eng, lat::EngineState& es, int track, int slot,
                    bool midi, void* buf, i64 cap, int holdMs, f64* startBeatOut = nullptr) {
     lat::Command c;
     c.type = midi ? lat::Cmd::RecordMidiSlot : lat::Cmd::RecordSlot;
@@ -281,11 +305,19 @@ static void testRecording(const char* baseSession) {
     i64 refFrames = -1;
     f64 refStart  = -1.0;
     {
-        lat::EngineHandle loc;
+        // A DIRECT Engine since §18 (see RefEngineHandle): the handle's
+        // openLocalEngine() is gone from the Linux build, and the reference
+        // never needed the handle — it needs the engine. Heap, not stack:
+        // Engine is ~2.3 MB of scratch buffers.
+        auto refEng = std::make_unique<lat::Engine>();
+        refEng->prepare(48000.0, 256);
+        CHECK(refEng->sampleRate() == 48000.0,
+              "a bare in-process Engine, prepared for the reference take "
+              "(the class survives §18; the App-link path to it did not)");
+        RefEngineHandle loc{*refEng};
         lat::EngineState les;
-        CHECK(loc.openLocalEngine("null"), "an in-process engine, for the reference take");
         LocalDriver drv;
-        if (loc.local()) drv.start(*loc.local(), 48000.0, 256);
+        drv.start(*refEng, 48000.0, 256);
         loc.send(lat::Cmd::SetTempo, 0, 0, 120.0);
         loc.send(lat::Cmd::SetQuantum, 4);              // 1 Bar
         loc.send(lat::Cmd::SetPlaying, 1);
@@ -298,10 +330,10 @@ static void testRecording(const char* baseSession) {
         CHECK(refFrames > 0 && b == 0 && s == 0,
               "contiguous, channels the right way round (%d breaks, %d swapped)", b, s);
         drv.stop();
-        loc.close();
-        CHECK(loc.takesReturned() == 0 && loc.takesLost() == 0,
-              "and the take counters read 0 locally, because none of those states "
-              "exists in-process");
+        // The old row here — "the take counters read 0 locally" — pinned the
+        // handle's LOCAL arm answering zeros. That arm is what §18 deleted, so
+        // the row moved to the degraded-backing block below, where the same
+        // accessors still have a no-remote path to answer 0 from.
     }
 
     // --- the same take, through the daemon ----------------------------------
@@ -2537,9 +2569,17 @@ int main() {
     testRecording(session);
 
     // =====================================================================
-    // The other two backings, so the new accessors are not daemon-only
+    // The OTHER backing, so the accessors are not daemon-only. Until §18 this
+    // section also exercised the in-process backing (openLocalEngine(), local
+    // mode Live, the locally-empty catalog, restartEngine() answering false
+    // there): those rows died WITH the code they pinned — the handle's local
+    // arm no longer exists on Linux, so there is no in-process backing left
+    // for a unit row to open, and handle_test does not build on the one
+    // platform (_WIN32) where the arm survives. What was portable about them
+    // — the ledger and catalog accessors answering their honest zeros with no
+    // remote — is pinned on the engine-free handle below instead.
     // =====================================================================
-    banner("the local and the degraded backings");
+    banner("the degraded backing");
     {
         // §8's exception: a handle that opened NOTHING is a supported state,
         // not an error. The GUI still loads, edits and saves; every send() is a
@@ -2555,27 +2595,16 @@ int main() {
         CHECK(none.remoteDevice(nullptr) == nullptr && none.catalog().empty() &&
               !none.restartEngine(),
               "with no devices, no catalog and nothing to restart");
-    }
-    {
-        // "null" matches neither backend name, so createBackend() returns
-        // nothing and openLocalEngine() prepares the engine silent — which is
-        // the whole of what this needs: an in-process Engine to be Live about.
-        EngineHandle loc;
-        EngineState les;
-        CHECK(loc.openLocalEngine("null"), "openLocalEngine() opened an in-process engine");
-        loc.poll(les);
-        CHECK(loc.local() != nullptr && loc.link() == EngineLink::Live &&
-              les.link == EngineLink::Live,
-              "local mode is Live: an in-process engine cannot be stale (it is "
-              "this process) and cannot be lost (it dies with us)");
-        CHECK(les.devicesPending == 0 && loc.devicesPending() == 0,
-              "nothing is ever pending locally — instantiation is synchronous there");
-        CHECK(loc.catalog().empty() && !loc.catalogReady() && !loc.requestScan(),
-              "and the catalog is empty on purpose: App's own PluginRegistry IS "
-              "the local engine's registry, so a second copy would be two things "
-              "to keep in step for no gain");
-        CHECK(!loc.restartEngine(), "restartEngine() is a daemon-only idea");
-        loc.close();
+        CHECK(none.local() == nullptr && !none.localOpen(),
+              "and no in-process engine to reach: on Linux local() is a "
+              "constant null since §18, whatever was or was not opened");
+        CHECK(none.takesReturned() == 0 && none.takesEmpty() == 0 &&
+              none.takesFailed() == 0 && none.takesLost() == 0,
+              "the take ledger reads 0 with no remote (moved here from the "
+              "in-process reference when §18 deleted the local arm those "
+              "zeros used to come from)");
+        CHECK(none.devicesPending() == 0 && nes.devicesPending == 0,
+              "and nothing is ever pending without a daemon");
     }
 
     // =====================================================================
@@ -2674,19 +2703,38 @@ int main() {
         exp.close();
         ::setenv("NXTAKT_DAEMON", "build/nxtaktd", 1);
 
-        // --- explicit =local (and the doc's =inproc) -> in-process ---------
+        // --- explicit =local (and the doc's =inproc) -> warned, the daemon -
+        // §8(3), collected (§18): the in-process path left the App link one
+        // release after the flip, so the spelling that used to select it now
+        // WARNS LOUDLY and opens the daemon — the engine that exists — rather
+        // than quietly meaning "no engine" to every script and muscle memory
+        // that still says =local. This is the deletion's red-proof row:
+        // restore the pre-§18 engine_handle by file copy and it goes red with
+        // an in-process engine where the daemon should be.
+        char lsess[64];
+        std::snprintf(lsess, sizeof lsess, "htest-local-%d", (int)::getpid());
         ::setenv("NXTAKT_ENGINE", "local", 1);
+        ::setenv("NXTAKT_SESSION", lsess, 1);
         EngineHandle l1;
-        CHECK(l1.open("null") && l1.localOpen() && l1.local() != nullptr &&
-              !l1.remoteOpen(),
-              "NXTAKT_ENGINE=local opens the in-process engine");
-        CHECK(l1.link() == EngineLink::Live, "which is Live");
+        CHECK(l1.open("null") && l1.remoteOpen() && !l1.localOpen() &&
+              l1.local() == nullptr,
+              "NXTAKT_ENGINE=local no longer opens an in-process engine: "
+              "warned, and the daemon opens (remote %d, local %p)",
+              (int)l1.remoteOpen(), (void*)l1.local());
+        CHECK(l1.link() != EngineLink::Detached,
+              "with a real engine behind it, not the engine-free mode");
         l1.close();
+        sleepMs(400);
         ::setenv("NXTAKT_ENGINE", "inproc", 1);
         EngineHandle l2;
-        CHECK(l2.open("null") && l2.localOpen() && !l2.remoteOpen(),
-              "and =inproc, the ship plan's older spelling, still means the same");
+        CHECK(l2.open("null") && l2.remoteOpen() && !l2.localOpen(),
+              "and =inproc, the ship plan's older spelling, gets the same "
+              "warning and the same daemon");
         l2.close();
+        sleepMs(400);
+        CHECK(countShm(lsess) == 0,
+              "both spawned daemons were stopped with their handles "
+              "(%d regions left)", countShm(lsess));
 
         // --- an unrecognised value -> warned, then the default -------------
         // A typo'd mode must not quietly select a DIFFERENT engine than the

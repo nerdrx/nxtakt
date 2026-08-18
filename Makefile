@@ -317,8 +317,12 @@ build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
 # build/ipc_test three red CI runs to locate; the note above $(IPC_H) is the
 # other half of the same lesson. Recording added src/ipc/take.h to that list and
 # engine_handle.h/engine_state.h to this one.
+# src/audio/backend.cpp left this link with GUI-ON-DAEMON.md §18: its one
+# consumer through the seam was openLocalEngine()'s createBackend(), and that
+# arm is Windows-only now. The suite's reference take drives a bare Engine
+# with its own block clock (LocalDriver) and never wanted a real device.
 build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp \
-                   src/audio/backend.cpp src/audio/midi_in.cpp src/core/common.cpp \
+                   src/audio/midi_in.cpp src/core/common.cpp \
                    src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
                    src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA) \
                    $(IPC_H) src/ui/engine_handle.h src/ui/engine_state.h \
@@ -327,7 +331,7 @@ build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engi
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 $(WARN) -I. -Ivendor/clap/include \
 	  $(shell pkg-config --cflags lilv-0 alsa) $(filter %.cpp,$^) -o $@ \
-	  $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -lm
+	  $(shell pkg-config --libs alsa lilv-0) -ldl -lrt -lpthread -lm
 
 # Full headless check: engine unit tests, then a real render that must not be
 # silent, then a plugin scan.

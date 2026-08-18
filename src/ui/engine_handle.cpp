@@ -1,9 +1,14 @@
-// EngineHandle: both paths. See engine_handle.h for the shape and
-// docs/GUI-ON-DAEMON.md §2 for why it is a concrete class rather than an
-// interface.
+// EngineHandle: the daemon path, which on Linux is the only path since
+// GUI-ON-DAEMON.md §18 collected §8(3). See engine_handle.h for the shape,
+// §2 for why it is a concrete class rather than an interface, and the
+// header's preamble for the Windows carve-out: the in-process arm survives
+// there, behind _WIN32, because src/ipc is failing stubs on the port
+// (PORTING.md) and a daemon cannot exist. Every #ifdef _WIN32 below is that
+// one carve-out.
 //
-// The file is in three parts: the local path (unchanged from step 1), the
-// RemoteEngine that step 2 and step 3 add, and the dispatch between them.
+// The file is in two parts: the RemoteEngine that steps 2 and 3 added, and
+// the EngineHandle dispatch onto it (with the Windows arm's local dispatch
+// beside it, compiled out on Linux).
 #include "engine_handle.h"
 #include "../ipc/client.h"
 // SampleBuffer as a COMPLETE type. The Makefile's note on build/handle_test says
@@ -2378,12 +2383,13 @@ EngineHandle::EngineHandle()  = default;
 EngineHandle::~EngineHandle() = default;
 
 bool EngineHandle::open(const char* driver) {
-    // THE DEFAULT IS THE DAEMON — §8 step 2's flip, policy in §16. `local`
-    // (and the doc's older spelling `inproc`) selects the in-process engine
-    // explicitly; `daemon`/`remote` keep working and now merely name the
-    // default. An unrecognised value is a typo and takes the default LOUDLY,
-    // because a misspelled "daemon" quietly landing on a different engine is
-    // exactly the dishonesty §4.4 is about.
+    // THE DAEMON IS THE ENGINE — §8 step 2's flip (§16), and since §18 the
+    // in-process path is gone from this build on Linux, so there is nothing
+    // else to dispatch to. `daemon`/`remote` keep working as explicit names
+    // for it. `local` (and the doc's older spelling `inproc`) is warned about
+    // LOUDLY and takes the daemon: a spelling that used to select an engine
+    // must not quietly come to mean a different one — or no engine — which is
+    // the same §4.4 honesty rule an unrecognised value gets.
     const char* which = env("ENGINE");
     bool explicitDaemon = false, explicitLocal = false;
     if (which && *which) {
@@ -2393,17 +2399,27 @@ bool EngineHandle::open(const char* driver) {
             explicitLocal = true;
         else
             LOGW("NXTAKT_ENGINE='%s' is not a mode this build knows "
-                 "(daemon, local; remote and inproc are their older spellings): "
+                 "(daemon; remote is its older spelling): "
                  "taking the default, which is the daemon", which);
     }
 #ifdef _WIN32
     // PORTING.md: on the Windows port src/ipc compiles via failing stubs —
     // shm_open/fork cannot succeed — so a daemon is structurally unreachable
-    // and the flip does not apply. The in-process engine stays the default
-    // there; an explicit =daemon still gets to try, fail, and say so.
+    // and neither the flip nor §18's deletion applies. The in-process engine
+    // stays compiled and stays the default there; an explicit =daemon still
+    // gets to try, fail, and say so.
     if (!explicitDaemon) explicitLocal = true;
-#endif
     if (explicitLocal) return openLocalEngine(driver);
+#else
+    // §18: the spelling survives one release as a loud redirect, so muscle
+    // memory and scripts land on the engine that exists rather than silently
+    // on none.
+    if (explicitLocal)
+        LOGW("NXTAKT_ENGINE='%s': the in-process engine was removed from the "
+             "Linux GUI (GUI-ON-DAEMON.md §18) — opening the daemon, which is "
+             "the only engine this build links. The offline tools (render, "
+             "gen_demo) still run their own in-process Engine.", which);
+#endif
 
     const char* sess = env("SESSION");
     // Remembered so a later restartEngine() from Detached can retry with the
@@ -2424,10 +2440,9 @@ bool EngineHandle::open(const char* driver) {
     //     "a second engine under a live one", §4.4's worst available outcome.
     //     The two failures cannot be told apart from here, so neither may
     //     fall back.
-    //   * §8(3) deletes the in-process path from App one release after the
-    //     flip. A default that falls back to a local engine is a policy with
-    //     nowhere to fall the release after this one; the engine-free mode is
-    //     the failure behaviour that survives it.
+    //   * §8(3)'s deletion has HAPPENED (§18): there is no in-process path in
+    //     this build to fall back to. The engine-free mode is the failure
+    //     behaviour that §16 designed to survive exactly this release.
     //
     // The GUI opens anyway, loads the project, edits and saves — every send()
     // a no-op — the link is Detached, which the banner draws with a Restart
@@ -2438,11 +2453,14 @@ bool EngineHandle::open(const char* driver) {
     else
         LOGE("the audio engine (nxtaktd, expected at %s) could not be attached "
              "or started: running with NO engine — the set can still be edited "
-             "and saved. Restart engine retries; NXTAKT_ENGINE=local selects "
-             "the in-process engine instead", daemonPath().c_str());
+             "and saved. Restart engine retries", daemonPath().c_str());
     return true;
 }
 
+#ifdef _WIN32
+// The Windows port's whole engine (see the header's carve-out note): the
+// daemon cannot exist there, so what §18 deleted from the Linux build is
+// still the only way that platform makes sound.
 bool EngineHandle::openLocalEngine(const char* driver) {
     engine_ = std::unique_ptr<Engine>(new (std::nothrow) Engine());
     if (!engine_) { LOGE("could not allocate the engine"); return false; }
@@ -2450,7 +2468,7 @@ bool EngineHandle::openLocalEngine(const char* driver) {
     audio_ = createBackend(*engine_, driver);
     if (!audio_) {
         // Not an error. A set can be edited, saved and looked at with no audio
-        // device at all, and refusing to start would make a broken ALSA
+        // device at all, and refusing to start would make a broken audio
         // configuration on somebody else's machine fatal.
         LOGW("no audio backend available - running silent");
         engine_->prepare(48000.0, 1024);
@@ -2464,6 +2482,7 @@ bool EngineHandle::openLocalEngine(const char* driver) {
     else                       LOGW("no MIDI input - continuing without it");
     return true;
 }
+#endif
 
 bool EngineHandle::openDaemon(const char* session, const char* driver) {
     auto r = std::unique_ptr<RemoteEngine>(new (std::nothrow) RemoteEngine());
@@ -2502,17 +2521,18 @@ bool EngineHandle::openDaemon(const char* session, const char* driver) {
 }
 
 void EngineHandle::close() {
-    // Order matters, and it is the order App::shutdown() used to spell out
-    // inline. The MIDI reader goes first: it pushes into the engine's ring from
-    // its own thread, so it has to be joined before anything else starts
-    // tearing the engine down, or a push could land in a ring nobody owns any
-    // more. Stopping the backend then joins the audio thread.
+    // The MIDI reader goes first: it pushes over the wire (or, on the Windows
+    // arm, into the engine's ring) from its own thread, so it has to be
+    // joined before anything starts tearing its destination down.
     midi_.stop();
+#ifdef _WIN32
+    // Stopping the backend joins the audio thread. engine_ is deliberately
+    // NOT released here: App frees the chains, note arrays and capture
+    // buffers the engine was borrowing *after* this returns, and one of the
+    // debug hooks still reaches it through local(). It dies with the handle,
+    // which dies with App.
     if (audio_) { audio_->stop(); audio_.reset(); }
-    // engine_ is deliberately NOT released here: App frees the chains, note
-    // arrays and capture buffers the engine was borrowing *after* this returns,
-    // and one of the debug hooks still reaches it through local(). It dies with
-    // the handle, which dies with App.
+#endif
     if (remote_) { remote_->close(); remote_.reset(); }
 }
 
@@ -2528,13 +2548,13 @@ void EngineHandle::close() {
 //   256 frames — so a slot could be drawn Playing with activeSlot == -1. After
 //   this they are one copy taken microseconds apart.
 //
-//   LOCALLY it does NOT make the copy itself atomic against Engine::publish().
-//   There is nothing to gate on: publish() bumps no generation counter, and
-//   blocksRendered is incremented at the TOP of process() while publish() runs
-//   at the bottom, so a reader that saw the same blocksRendered either side of
-//   its copy could still have straddled the publish for that block. engine.h is
-//   frozen, so adding one is not on the table — and the remaining window is the
-//   duration of this function.
+//   On the Windows arm's in-process engine it does NOT make the copy itself
+//   atomic against Engine::publish(). There is nothing to gate on: publish()
+//   bumps no generation counter, and blocksRendered is incremented at the TOP
+//   of process() while publish() runs at the bottom, so a reader that saw the
+//   same blocksRendered either side of its copy could still have straddled
+//   the publish for that block. engine.h is frozen, so adding one is not on
+//   the table — and the remaining window is the duration of this function.
 //
 //   REMOTELY it closes completely, and that is what step 2 bought: SharedState
 //   is a seqlock as of shm v5 (odd while the daemon's mirror is writing), so the
@@ -2628,6 +2648,7 @@ void EngineHandle::poll(EngineState& out) {
         return;
     }
 
+#ifdef _WIN32
     const Engine* e = engine_.get();
     if (!e) { out = EngineState{}; return; }        // detached: a stopped transport
 
@@ -2676,6 +2697,11 @@ void EngineHandle::poll(EngineState& out) {
     out.link           = EngineLink::Live;
     out.linkSilentMs   = 0;
     out.devicesPending = 0;
+#else
+    // No remote and no local arm to fall through to (§18): the handle is
+    // detached, which the zeroed snapshot spells as a stopped transport.
+    out = EngineState{};
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -2690,7 +2716,10 @@ bool EngineHandle::send(Cmd t, i32 a, i32 b, f64 x) {
 
 bool EngineHandle::pushCommand(const Command& c) {
     if (remote_) return remote_->push(c);
-    return engine_ ? engine_->pushCommand(c) : false;
+#ifdef _WIN32
+    if (engine_) return engine_->pushCommand(c);
+#endif
+    return false;
 }
 
 bool EngineHandle::pushMidi(const MidiMsg& m) {
@@ -2700,14 +2729,20 @@ bool EngineHandle::pushMidi(const MidiMsg& m) {
         std::lock_guard<std::mutex> lk(midiMx_);
         return remote_->cli.pushMidi(m.status, m.d1, m.d2, m.frame);
     }
+#ifdef _WIN32
     // Locally the engine keeps a ring per producer, so this needs no lock: the
     // reader thread is on pushMidi() and this is pushMidiFromGui().
-    return engine_ ? engine_->pushMidiFromGui(m) : false;
+    if (engine_) return engine_->pushMidiFromGui(m);
+#endif
+    return false;
 }
 
 bool EngineHandle::popEvent(Event& e) {
     if (remote_) return remote_->pop(e);
-    return engine_ ? engine_->popEvent(e) : false;
+#ifdef _WIN32
+    if (engine_) return engine_->popEvent(e);
+#endif
+    return false;
 }
 
 f64 EngineHandle::sampleRate() const {
@@ -2717,7 +2752,10 @@ f64 EngineHandle::sampleRate() const {
         const f64 r = remote_->cli.sampleRate();
         return (r >= 8000.0 && r <= 384000.0) ? r : remote_->rate;
     }
-    return engine_ ? engine_->sampleRate() : 48000.0;
+#ifdef _WIN32
+    if (engine_) return engine_->sampleRate();
+#endif
+    return 48000.0;
 }
 
 bool EngineHandle::popJournal(ArrJournal& j) {
@@ -2731,7 +2769,10 @@ bool EngineHandle::popJournal(ArrJournal& j) {
         j.beat  = w.beat;
         return true;
     }
-    return engine_ && engine_->popJournal(j);
+#ifdef _WIN32
+    if (engine_) return engine_->popJournal(j);
+#endif
+    return false;
 }
 
 u32 EngineHandle::journalDropped() const {
@@ -2743,7 +2784,10 @@ u32 EngineHandle::journalDropped() const {
         const u64 sum = (u64)remote_->cli.engineJournalDropped() + remote_->cli.journalDropped();
         return sum > 0xffffffffull ? 0xffffffffu : (u32)sum;
     }
-    return engine_ ? engine_->journalDropped.load(std::memory_order_relaxed) : 0u;
+#ifdef _WIN32
+    if (engine_) return engine_->journalDropped.load(std::memory_order_relaxed);
+#endif
+    return 0u;
 }
 
 // ---------------------------------------------------------------------------
@@ -2752,15 +2796,24 @@ u32 EngineHandle::journalDropped() const {
 
 const char* EngineHandle::driverName() const {
     if (remote_) return remote_->driverName;
-    return audio_ ? audio_->name() : nullptr;
+#ifdef _WIN32
+    if (audio_) return audio_->name();
+#endif
+    return nullptr;
 }
 f64 EngineHandle::driverSampleRate() const {
     if (remote_) return sampleRate();
-    return audio_ ? audio_->sampleRate() : 0.0;
+#ifdef _WIN32
+    if (audio_) return audio_->sampleRate();
+#endif
+    return 0.0;
 }
 int EngineHandle::driverBufferSize() const {
     if (remote_) return (int)remote_->cli.blockSize();
-    return audio_ ? audio_->bufferSize() : 0;
+#ifdef _WIN32
+    if (audio_) return audio_->bufferSize();
+#endif
+    return 0;
 }
 // All three answer "no" in daemon mode rather than lying about the GUI's own
 // (unstarted) MidiInput. The status bar draws exactly that, which is the
@@ -2850,7 +2903,10 @@ bool EngineHandle::requestScan() {
 
 EngineLink EngineHandle::link() const {
     if (remote_) return remote_->linkState();
-    return engine_ ? EngineLink::Live : EngineLink::Detached;
+#ifdef _WIN32
+    if (engine_) return EngineLink::Live;
+#endif
+    return EngineLink::Detached;
 }
 
 i32 EngineHandle::enginePid() const {
@@ -2865,8 +2921,12 @@ bool EngineHandle::restartEngine() {
         // is retried with the configuration open() recorded. No lock: the
         // reader thread this mutex guards against does not exist yet, because
         // openDaemon() only starts it on success. A handle that never asked
-        // for a daemon (unopened, or local mode) still answers false.
-        if (!wantDaemon_ || engine_) return false;
+        // for a daemon (unopened, or the Windows arm's local mode) still
+        // answers false.
+        if (!wantDaemon_) return false;
+#ifdef _WIN32
+        if (engine_) return false;
+#endif
         return openDaemon(session_.empty() ? nullptr : session_.c_str(),
                           driver_.empty()  ? nullptr : driver_.c_str());
     }

@@ -97,6 +97,10 @@ long sysconf(int name) {
     }
 }
 
+// ---- <unistd.h>: the take writer's flush -----------------------------------
+// _commit() flushes a CRT fd's buffers to the device — the honest fsync.
+int fsync(int fd) { return _commit(fd); }
+
 // ---- <pwd.h> ---------------------------------------------------------------
 uid_t getuid(void) { return 0; }
 

@@ -162,9 +162,11 @@ static void ctlSeam(Renderer& r, f32 x, const Rect& bar, f32 dpi) {
 // through sigMapValid, not a re-read of what we sent.
 //
 // Deferred by a few dozen frames because the command has to be drained by the
-// audio thread first; runs once. Reaching `local()` in a draw is the one thing
-// engine_handle.h sanctions it for -- "the record journal's pump and the
-// headless hooks" -- and this is the second of those.
+// audio thread first; runs once. The read-back needs an IN-PROCESS engine to
+// load atomics from, which since §18's collect exists only on the Windows
+// arm: on Linux `local()` is permanently null, the republish/retirement half
+// below still runs, and the read-back half logs its honest "no in-process
+// engine to check against" line instead.
 static void debugSignatureCheck(Engine* eng, Session& s) {
     static int frames = -1;
     static int wasNum = 0, wasDen = 0;
@@ -2017,8 +2019,13 @@ void App::drawStatusBar(const Rect& r) {
             if (eng_.remoteOpen())
                 n = snprintf(t, sizeof t, "Engine: nxtaktd, pid %d",
                              eng_.enginePid());
+#ifdef _WIN32
+            // The port's in-process arm (§18's carve-out): on Linux
+            // localOpen() is a constant false and this branch was deleted
+            // with the engine it described.
             else if (eng_.localOpen())
-                n = snprintf(t, sizeof t, "Engine: in-process (NXTAKT_ENGINE=local)");
+                n = snprintf(t, sizeof t, "Engine: in-process");
+#endif
             else
                 n = snprintf(t, sizeof t, "Engine: none - the set is editable, "
                                           "nothing sounds");
