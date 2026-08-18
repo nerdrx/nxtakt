@@ -197,9 +197,15 @@ struct Ui {
     // as "Auto" or "Off" rather than as a quantity. `step`, when > 0, snaps the
     // value to a multiple of itself, which also keeps such a field landing on
     // an exact 0 instead of drifting past it.
+    // `def`, when finite, is what a double-click resets to -- the same verb
+    // every knob and fader already answers, and dragNumber was the one
+    // continuous control without it (filed by the usability pass). NAN, the
+    // default, means "no reset", so all existing call sites keep their exact
+    // behaviour until a caller states a default worth resetting to.
     bool dragNumber(u64 id, const Rect& b, f64* v, f64 lo, f64 hi, f64 perPixel,
                     const char* fmt, Align align = Align::Center,
-                    const char* zeroLabel = nullptr, f64 step = 0.0);
+                    const char* zeroLabel = nullptr, f64 step = 0.0,
+                    f64 def = NAN);
     // Click cycles through `options`; right-click steps backwards.
     bool selector(u64 id, const Rect& b, int* idx, const char* const* options, int count);
     // Editable text. Returns true when the value was committed.

@@ -306,7 +306,8 @@ void App::drawControlBar(const Rect& r) {
     // The number is edited through a copy, so the session still holds the old
     // tempo here and a plain undoPoint is enough; the drag coalesces on the
     // widget's id.
-    if (ui_.dragNumber(uiId(1, 1), tempoR, &bpm, 20.0, 999.0, 0.15, "%.2f")) {
+    if (ui_.dragNumber(uiId(1, 1), tempoR, &bpm, 20.0, 999.0, 0.15, "%.2f",
+                        Align::Center, nullptr, 0.0, /*def=*/120.0)) {
         undoPoint("tempo");
         setTempo(bpm);
     }
@@ -662,7 +663,8 @@ void App::drawControlBar(const Rect& r) {
         f64 vel = (f64)kbd_.velocity();
         Rect vr{rx - 34 * s, cy, 34 * s, h};
         ctlWell(rend_, vr, s);
-        if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f")) {
+        if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f",
+                           Align::Center, nullptr, 0.0, /*def=*/100.0)) {
             kbd_.setVelocity((int)std::lround(vel));
             char buf[64];
             snprintf(buf, sizeof buf, "Keyboard velocity %d", kbd_.velocity());

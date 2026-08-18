@@ -256,7 +256,8 @@ void App::drawArrangeClipDetail(const Rect& r) {
         label("GAIN", row);
         f64 db = gainToDb(m.gain);
         Rect dn{row.x + lblW, row.y, 70 * s, row.h};
-        if (ui_.dragNumber(uiId(27, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB")) {
+        if (ui_.dragNumber(uiId(27, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
+                           Align::Center, nullptr, 0.0, /*def=*/0.0)) {
             undoPoint("clip gain");
             m.gain = dbToGain((f32)db);
             placed = true;
@@ -553,7 +554,8 @@ void App::drawClipDetail(const Rect& r) {
         label("GAIN", row);
         f64 db = gainToDb(m.gain);
         Rect dn{row.x + lblW, row.y, 70 * s, row.h};
-        if (ui_.dragNumber(uiId(8, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB")) {
+        if (ui_.dragNumber(uiId(8, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
+                           Align::Center, nullptr, 0.0, /*def=*/0.0)) {
             undoPoint("clip gain");
             m.gain = dbToGain((f32)db);
             send(Cmd::ClipGain, selTrack_, selSlot_, m.gain);
@@ -584,7 +586,8 @@ void App::drawClipDetail(const Rect& r) {
 
         f64 pct = m.prob * 100.0;
         Rect pr{row.x + lblW, row.y, 48 * s, row.h};
-        if (ui_.dragNumber(uiId(13, 0), pr, &pct, 0.0, 100.0, 0.4, "%.0f%%")) {
+        if (ui_.dragNumber(uiId(13, 0), pr, &pct, 0.0, 100.0, 0.4, "%.0f%%",
+                           Align::Center, nullptr, 0.0, /*def=*/100.0)) {
             undoPoint("launch probability");
             m.prob = clampv(pct * 0.01, 0.0, 1.0);
             pushClip(selTrack_, selSlot_);
@@ -688,7 +691,8 @@ void App::drawClipDetail(const Rect& r) {
             // the part of a performance's timing that makes it one.
             f64 amt = (f64)roll_->quantStrength() * 100.0;
             Rect ar{gr.right() + 6 * s, row.y, 48 * s, row.h};
-            if (ui_.dragNumber(uiId(25, 1), ar, &amt, 0.0, 100.0, 0.4, "%.0f%%"))
+            if (ui_.dragNumber(uiId(25, 1), ar, &amt, 0.0, 100.0, 0.4, "%.0f%%",
+                               Align::Center, nullptr, 0.0, /*def=*/0.0))
                 roll_->setQuantStrength((f32)(amt * 0.01));
 
             Rect qb{ar.right() + 6 * s, row.y, 44 * s, row.h};

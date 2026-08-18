@@ -1459,8 +1459,10 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     Rect mapR{maxR.right() + 3 * s, minR.y, right.right() - maxR.right() - 3 * s, mh};
     const char* nf = info.isInt ? "%.0f" : "%.2f";
     const f64 per = (f64)(phi - plo) / 160.0;
-    if (ui_.dragNumber(uiId(13, 9, 0), minR, &rackMin_, plo, phi, per, nf)) rackRangeHeld_ = true;
-    if (ui_.dragNumber(uiId(13, 9, 1), maxR, &rackMax_, plo, phi, per, nf)) rackRangeHeld_ = true;
+    if (ui_.dragNumber(uiId(13, 9, 0), minR, &rackMin_, plo, phi, per, nf,
+                       Align::Center, nullptr, 0.0, /*def=*/plo)) rackRangeHeld_ = true;
+    if (ui_.dragNumber(uiId(13, 9, 1), maxR, &rackMax_, plo, phi, per, nf,
+                       Align::Center, nullptr, 0.0, /*def=*/phi)) rackRangeHeld_ = true;
     if (ui_.hovered(minR)) ui_.tip = "Value at macro 0, in the target's own units";
     if (ui_.hovered(maxR))
         ui_.tip = "Value at macro 1 - set it BELOW the other end to invert the macro";

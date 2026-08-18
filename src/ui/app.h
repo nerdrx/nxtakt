@@ -494,6 +494,11 @@ private:
     bool running_ = true;
     DragState drag_{};
     f32  gridScrollX_ = 0.f;
+    // Vertical scene scroll, shared by the clip grid AND the scene column so
+    // their rows can never disagree about which scene a y lands in. Plain
+    // wheel drives it (the grid was the one scrollable surface that ignored
+    // the wheel -- filed by the usability pass); Shift stays horizontal.
+    f32  gridScrollY_ = 0.f;
     f32  browserW_ = 210.f;
     // Tall enough for three rows of device knobs under the tab header.
     f32  detailH_ = 200.f;

@@ -1096,7 +1096,8 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
 // ---------------------------------------------------------------------------
 
 bool Ui::dragNumber(u64 id, const Rect& b, f64* v, f64 lo, f64 hi, f64 perPixel,
-                    const char* fmt, Align align, const char* zeroLabel, f64 step) {
+                    const char* fmt, Align align, const char* zeroLabel, f64 step,
+                    f64 def) {
     if (!v || !r) return false;
     setHot(id, b);
     const bool hotNow = isHot(id);
@@ -1105,6 +1106,12 @@ bool Ui::dragNumber(u64 id, const Rect& b, f64* v, f64 lo, f64 hi, f64 perPixel,
     if (in->pressed[0] && hotNow) {
         active = id;
         dragAccum = 0.f;
+        dragStart = *v;
+    }
+    if (in->dblClick && hotNow && std::isfinite(def)) {
+        const f64 nv = clampv(def, lo, hi);
+        if (nv != *v) { probeValue("dragNumber", id, *v, nv); *v = nv; changed = true; }
+        active = 0;                      // the double-click's press must not also start a drag
         dragStart = *v;
     }
     if (active == id && in->dy != 0.f) {

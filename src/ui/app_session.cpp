@@ -367,6 +367,19 @@ void App::drawSessionView(const Rect& r) {
         gridScrollX_ = clampv(gridScrollX_ - in.wheel * 60.f * s, 0.f, maxScroll);
     gridScrollX_ = clampv(gridScrollX_, 0.f, maxScroll);
 
+    // Vertical: plain wheel scrolls the scene rows, matching both editors.
+    // The reachable height is the grid's own (heads and mixer are fixed), and
+    // the scene column shares the offset so the rows cannot skew.
+    {
+        const f32 rowsH   = (f32)ses_.scenes.size() * lay::slotH * s;
+        const f32 gridH   = r.h - (lay::trackHeadH + lay::mixerH) * s;
+        const f32 maxY    = std::max(0.f, rowsH - gridH);
+        const bool overRows = (tracksCol.contains(in.mx, in.my) || sceneCol.contains(in.mx, in.my));
+        if (overRows && in.wheel != 0.f && !in.shift() && !in.ctrl())
+            gridScrollY_ -= in.wheel * lay::slotH * 3.f * s;
+        gridScrollY_ = clampv(gridScrollY_, 0.f, maxY);
+    }
+
     rend_.pushClip(tracksCol);
     drawTrackHeaders(tracksCol, gridScrollX_);
     drawClipGrid(tracksCol, gridScrollX_);
@@ -445,11 +458,16 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
 void App::drawClipGrid(const Rect& r, f32 scrollX) {
     const f32 s = win_.dpiScale();
     const f32 slotH = lay::slotH * s;
-    const f32 top = r.y + lay::trackHeadH * s;
+    // The clip boundary is FIXED at the header line; only the rows' origin
+    // carries the scroll. Folding the offset into one variable let scrolled
+    // rows paint over the track headers -- the clip rect and the row origin
+    // are different quantities that merely used to coincide at scroll 0.
+    const f32 clipTop = r.y + lay::trackHeadH * s;
+    const f32 top = clipTop - gridScrollY_;
     const f32 mixerTop = r.bottom() - lay::mixerH * s;
     const int ns = (int)ses_.scenes.size();
 
-    Rect grid{r.x, top, r.w, mixerTop - top};
+    Rect grid{r.x, clipTop, r.w, mixerTop - clipTop};
     rend_.pushClip(grid);
     // The working surface recesses: one quad behind the whole grid, and the §3
     // field goes on showing through it.
@@ -698,7 +716,8 @@ void App::drawSceneColumn(const Rect& r) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
     const f32 slotH = lay::slotH * s;
-    const f32 top = r.y + lay::trackHeadH * s;
+    const f32 clipTop = r.y + lay::trackHeadH * s;
+    const f32 top = clipTop - gridScrollY_;
     const int ns = (int)ses_.scenes.size();
 
     // Chrome: a card-tier surface, its glass faked from the fill (§4 -- there
@@ -712,9 +731,11 @@ void App::drawSceneColumn(const Rect& r) {
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
     const f32 rad = kCellRadius * s;
+    rend_.pushClip({r.x, clipTop, r.w, r.bottom() - lay::mixerH * s - clipTop});
     for (int si = 0; si < ns; ++si) {
         Rect cell{r.x + 2 * s, top + si * slotH, r.w - 4 * s, slotH - lay::gutter * s};
-        if (cell.bottom() > r.bottom() - lay::mixerH * s) break;
+        if (cell.bottom() < clipTop) continue;   // scrolled above the viewport
+        if (cell.y > r.bottom() - lay::mixerH * s) break;
         const u64 id = uiId(5, si);
         const bool hot = ui_.setHot(id, cell) && ui_.isHot(id);
         const bool sel = si == selSlot_;
@@ -785,6 +806,7 @@ void App::drawSceneColumn(const Rect& r) {
     if (add.bottom() <= r.bottom() - lay::mixerH * s) {
         if (ui_.button(uiId(5, 901), add, "+ SCENE")) { undoPoint("add scene"); addScene(); }
     }
+    rend_.popClip();   // the scene rows' clip, opened before the loop
 }
 
 void App::drawMixer(const Rect& r, f32 scrollX) {
