@@ -186,6 +186,13 @@ void App::addDevice(int owner, const PluginDesc& d) {
 
     // instantiate() already calls prepare() on the instance (see the tail of
     // instantiateLV2/instantiateCLAP), so a non-null return is ready to run.
+    //
+    // §12.7(1)'s caveat, still true in this wave: the browser may list the
+    // DAEMON's catalog, but the model's instance is built HERE by the local
+    // registry -- so a row only the daemon can see would be listed and then
+    // fail on this line. Both processes scan the same machine, so that is the
+    // divergence the catalog exists to make visible rather than a new failure;
+    // it disappears when DeviceModel::inst does (§5 step 4).
     std::unique_ptr<PluginInstance> inst =
         registry_.instantiate(d, eng_.sampleRate(), kMaxBlock);
     if (!inst) {
@@ -511,11 +518,14 @@ RackControl* App::openRack() {
 void App::ensurePluginScan() {
     // Daemon mode first: the list that matters is what the ENGINE's process can
     // instantiate, and the daemon scans on its own machine-time. requestScan()
-    // is idempotent; the browser draws a spinner off scanRunning() and swaps to
-    // the catalog when it lands. The local registry still scans below as the
-    // fallback -- and because addDevice() still instantiates locally, so a
-    // local instance must exist for anything the user actually adds.
-    if (!eng_.local() && !eng_.catalogReady()) eng_.requestScan();
+    // is idempotent -- and once the daemon reports ScanDone it is also the call
+    // that reads the catalog out of the control region, so it is asked every
+    // frame until catalogReady() answers yes. The browser draws its scanning
+    // state off scanRunning() and swaps to the catalog when it lands. The local
+    // registry still scans below as the fallback -- and because addDevice()
+    // still instantiates locally, so a local instance must exist for anything
+    // the user actually adds.
+    if (eng_.remoteOpen() && !eng_.catalogReady()) eng_.requestScan();
     if (registryScanned_) return;
     // lilv walks every bundle on the system and a CLAP scan dlopens each
     // binary, which costs the better part of a second. Deferring it to the
@@ -561,13 +571,24 @@ void App::drawPluginBrowser(const Rect& r) {
     // registry found. The two are the same machine today, but the catalog is
     // the honest source: a plugin only one side can see is exactly the
     // divergence the catalog exists to make visible.
+    const bool fromCatalog = eng_.remoteOpen() && eng_.catalogReady();
+    const bool scanning    = eng_.remoteOpen() && !fromCatalog && eng_.scanRunning();
+    const u32  catalogCut  = fromCatalog ? eng_.catalogTruncated() : 0;
     const std::vector<PluginDesc>& all =
-        (!eng_.local() && eng_.catalogReady()) ? eng_.catalog() : registry_.plugins();
+        fromCatalog ? eng_.catalog() : registry_.plugins();
 
     // --- header: the §5 chip language, 10px uppercase over wide tracking ----
     Rect head{r.x + nx::sp1 * s, r.y + 4 * s, r.w - nx::sp1 * 2.f * s, 12 * s};
     ui_.microIn(fSmall_, head, "BROWSER", nx::muted, Align::Left, 0);
-    {
+    if (scanning) {
+        // The daemon is still walking its bundles, so the rows below are this
+        // process's own scan standing in. Quiet, not a banner: the list is
+        // usable meanwhile and swaps to the catalog the frame it lands.
+        ui_.microIn(fSmall_, head, "scanning...", nx::muted.alpha(0.8f), Align::Right, 0);
+        if (ui_.hovered(head))
+            ui_.tip = "The engine is scanning its plugins - showing this "
+                      "process's own scan until the catalog arrives";
+    } else {
         char cnt[24];
         snprintf(cnt, sizeof cnt, "%zu", all.size());
         ui_.microIn(fSmall_, head, cnt, nx::muted.alpha(0.6f), Align::Right, 0);
@@ -596,6 +617,10 @@ void App::drawPluginBrowser(const Rect& r) {
 
     const f32 rowH = 17 * s;
     Rect listR{r.x, filter.bottom() + 6 * s, r.w, r.bottom() - filter.bottom() - 6 * s};
+    // A truncated catalog MUST be drawn (engine_handle.h): the list yields one
+    // row's height and the footer under it says how many the wire could not
+    // carry. Amber -- attention, not damage; a silently short list is the lie.
+    if (catalogCut) listR.h -= 13 * s;
     rend_.hairlineH(r.x + nx::sp1 * s, r.right() - nx::sp1 * s, listR.y - 3 * s);
     rend_.pushClip(listR);
 
@@ -700,6 +725,16 @@ void App::drawPluginBrowser(const Rect& r) {
                      sel || hot ? nx::text : nx::muted, Align::Left, 0);
     }
     rend_.popClip();
+
+    if (catalogCut) {
+        char cut[64];
+        snprintf(cut, sizeof cut, "...and %u more this build cannot list", catalogCut);
+        Rect cutR{r.x + nx::sp1 * s, listR.bottom() + 1 * s, r.w - nx::sp1 * 2.f * s, 11 * s};
+        microFit(ui_, fSmall_, cutR, cut, pal::meterAmber.alpha(0.9f), Align::Left, 0);
+        if (ui_.hovered(cutR))
+            ui_.tip = "The engine found more plugins than the catalog table "
+                      "can carry - the rest are loadable but not listable";
+    }
 }
 
 void App::drawDeviceStrip(const Rect& r) {
@@ -756,14 +791,43 @@ void App::drawDeviceStrip(const Rect& r) {
         ? "A rack is open - a double-click adds the plugin inside it"
         : "Double-click a plugin to add it to this chain";
     const f32 hintW = fSmall_.measure(hint) + 16 * s;
+    // deviceStatesRefused() non-zero is an instrument that is drawn loaded --
+    // sample name on the card and all -- and plays NOTHING: the daemon refused
+    // the state blob that carries what its parameters cannot say. Surfaced
+    // here because this tab is where that instrument is being looked at, in
+    // the amber counter shape the status bar gives the other refusal families
+    // (the filed app_chrome diff adds it to that aggregate too). Zero, and
+    // local mode, draw nothing at all: quiet at rest.
+    u64 statesRefused = eng_.remoteOpen() ? eng_.deviceStatesRefused() : 0;
+    // Headless verification hook in the NXTAKT_DEBUG_* family (debugSeedRack's
+    // pattern): a real state refusal needs the daemon to reject a pool blob,
+    // which nothing inside gamescope can provoke on cue, so
+    // NXTAKT_DEBUG_STATEREFUSED=<n> forces the tag visible for a screenshot.
+    // Inert without the variable.
+    if (const char* f = env("DEBUG_STATEREFUSED")) statesRefused = (u64)atoll(f);
+    char stTag[44] = "";
+    if (statesRefused > 0)
+        snprintf(stTag, sizeof stTag, "%llu state updates refused",
+                 (unsigned long long)statesRefused);
+    const f32 stW = stTag[0] ? fSmall_.measure(stTag) + 14 * s : 0.f;
     const std::string owner = ownerName(devOwner_);
     const Rect nameR{head.x + 10 * s, head.y,
-                     std::max(40 * s, std::min(220 * s, head.w - hintW - 18 * s)), head.h};
+                     std::max(40 * s, std::min(220 * s, head.w - hintW - stW - 18 * s)), head.h};
     rend_.textIn(fBold_, nameR, owner.c_str(), nx::text, Align::Left, 0);
     if (ui_.hovered(nameR) && textTruncated(fBold_, owner.c_str(), nameR.w))
         ui_.tip = owner;
     rend_.textIn(fSmall_, head, hint,
-                 rackOpenUid_ ? nx::violetSoft : nx::muted.alpha(0.7f), Align::Right, 8 * s);
+                 rackOpenUid_ ? nx::violetSoft : nx::muted.alpha(0.7f), Align::Right,
+                 8 * s + stW);
+    if (stTag[0]) {
+        rend_.textIn(fSmall_, head, stTag, pal::meterAmber, Align::Right, 8 * s);
+        const f32 tw = fSmall_.measure(stTag);
+        Rect tagR{head.right() - 8 * s - tw, head.y, tw, head.h};
+        if (ui_.setHot(uiId(31, 2699), tagR) && ui_.isHot(uiId(31, 2699)))
+            ui_.tip = "The engine refused a device's state - an instrument may "
+                      "be drawn loaded and play nothing. The log says which "
+                      "device and why.";
+    }
 
     Rect area{r.x, head.bottom(), r.w, r.bottom() - head.bottom()};
     rend_.pushClip(area);
@@ -1049,15 +1113,23 @@ void App::drawDeviceStrip(const Rect& r) {
         // The card's title is a micro-label (§5): 10px, uppercase, wide
         // tracking. A device name is an identity, not a sentence.
         Rect nameR{title.x + 10 * s, title.y, (hasPanel ? kr.x : br.x) - title.x - 12 * s, title.h};
-        // A device the DAEMON refused or has not confirmed is not an ordinary
-        // silent device, and drawing it as one was the §12.7(3) debt: the
-        // card sat in the strip looking healthy while the engine ran nothing.
-        // Amber name = attention; hover says the daemon's own reason.
+        // What the ENGINE made of this slot -- §12.7(3). A device the daemon
+        // refused, or has not confirmed yet, is not an ordinary device that
+        // happens to be silent, and drawing it as one was the lie: the card
+        // sat in the strip looking healthy while the engine ran nothing.
+        // rd is null in local mode, where the instance in this process IS the
+        // engine's; null in daemon mode means the add has not even landed in
+        // the mirror yet, which is the same not-confirmed-yet truth as !live.
         const RemoteDevice* rd = eng_.remoteDevice(d.inst.get());
-        const bool refused = rd && !rd->error.empty();
+        const bool remote  = eng_.remoteOpen();
+        const bool refused = remote && rd && rd->failed;     // EvDeviceFailed; rd->error says why
+        const bool loading = remote && !refused && (!rd || !rd->live);
+        const u32  parCut  = (remote && rd && rd->live) ? rd->paramsTruncated : 0;
+        // Amber name = attention (refused); a loading name sits quieter than
+        // its neighbours -- §5's disabled rule, because it is not sounding yet.
         microFit(ui_, fSmall_, nameR, d.desc.name.c_str(),
                  refused ? pal::meterAmber.alpha(dim)
-                         : (sel ? nx::text : nx::muted).alpha(dim),
+                         : (sel ? nx::text : nx::muted).alpha(loading ? 0.6f * dim : dim),
                  Align::Left, 0);
         if (refused && ui_.setHot(uiId(31, (int)i + 900), nameR) && ui_.isHot(uiId(31, (int)i + 900)))
             ui_.tip = "Engine refused this device: " + rd->error;
@@ -1090,6 +1162,34 @@ void App::drawDeviceStrip(const Rect& r) {
             } else {
                 rend_.textIn(fSmall_, fileR, "no sample",
                              nx::muted.alpha(0.6f * dim), Align::Left, 0);
+            }
+        }
+
+        // The engine's word on the slot, said ON the card, in the band the
+        // sampler's file chip already reserves (stacked under it when both
+        // exist). One quiet line: the daemon's own reason for a refusal in
+        // amber, or "loading..." while the add is still in flight. At rest --
+        // local mode, or a device that is live and whole -- the band does not
+        // exist at all.
+        const bool stateBand = refused || loading;
+        if (stateBand) {
+            Rect stR{title.x + 10 * s, title.bottom() + s + (smp ? chipH + s : 0.f),
+                     box.w - 20 * s, chipH};
+            const u64 sid = uiId(31, (int)i + 2700);
+            if (refused) {
+                microFit(ui_, fSmall_, stR,
+                         rd->error.empty() ? "engine refused this device"
+                                           : rd->error.c_str(),
+                         pal::meterAmber.alpha(dim), Align::Left, 0);
+                if (ui_.setHot(sid, stR) && ui_.isHot(sid))
+                    ui_.tip = "Engine refused this device: " +
+                              (rd->error.empty() ? std::string("the log says why")
+                                                 : rd->error);
+            } else {
+                rend_.textIn(fSmall_, stR, "loading...",
+                             nx::muted.alpha(0.6f * dim), Align::Left, 0);
+                if (ui_.setHot(sid, stR) && ui_.isHot(sid))
+                    ui_.tip = "Waiting for the engine to confirm this device";
             }
         }
 
@@ -1126,9 +1226,11 @@ void App::drawDeviceStrip(const Rect& r) {
         }
         if (hotBox && in.pressed[0]) { selDevice_ = (int)i; paramScroll_ = 0.f; }
 
-        // Sampler cards carry the file chip between title and knobs; the body
-        // yields the band so the chip is not stamped over the first knob row.
-        const f32 bodyTop = title.bottom() + 2 * s + (smp ? chipH + s : 0.f);
+        // Sampler cards carry the file chip between title and knobs, and a
+        // loading or refused card carries the engine-state band; the body
+        // yields to both so neither is stamped over the first knob row.
+        const f32 bodyTop = title.bottom() + 2 * s + (smp ? chipH + s : 0.f)
+                          + (stateBand ? chipH + s : 0.f);
         Rect body{box.x + 4 * s, bodyTop, box.w - 8 * s,
                   box.bottom() - bodyTop - 4 * s};
         if (!d.inst) {
@@ -1146,14 +1248,21 @@ void App::drawDeviceStrip(const Rect& r) {
         if (!sel) {
             // Unselected devices stay compact; only one chain slot is edited at
             // a time, like Live collapsing the devices you are not touching.
+            // A device the wire could not carry whole says so even collapsed:
+            // the params line goes amber and counts what is out of reach.
             char buf[64];
-            snprintf(buf, sizeof buf, "%d params", d.inst->paramCount());
+            if (parCut)
+                snprintf(buf, sizeof buf, "%d params - %u out of reach",
+                         d.inst->paramCount(), parCut);
+            else
+                snprintf(buf, sizeof buf, "%d params", d.inst->paramCount());
             if (!d.desc.vendor.empty())
                 rend_.textIn(fSmall_, {body.x, body.y + 2 * s, body.w, 12 * s},
                              d.desc.vendor.c_str(), nx::muted.alpha(0.7f * dim),
                              Align::Left, 0);
             rend_.textIn(fSmall_, {body.x, body.y + 15 * s, body.w, 12 * s}, buf,
-                         nx::muted.alpha(0.7f * dim), Align::Left, 0);
+                         parCut ? pal::meterAmber.alpha(0.8f * dim)
+                                : nx::muted.alpha(0.7f * dim), Align::Left, 0);
             panel();
             continue;
         }
@@ -1165,7 +1274,9 @@ void App::drawDeviceStrip(const Rect& r) {
         // panel, so a device with nine or fewer controls never has to scroll.
         const f32 cw = body.w / (f32)cols, chh = 43 * s;
         const int rows = (n + cols - 1) / cols;
-        const f32 pMax = std::max(0.f, rows * chh - body.h);
+        // A truncated device's grid ends with §1.6's sentence, so the scroll
+        // range grows by the line that carries it.
+        const f32 pMax = std::max(0.f, rows * chh + (parCut ? 13 * s : 0.f) - body.h);
         if (ui_.hovered(body) && in.wheel != 0.f) {
             paramScroll_ -= in.wheel * chh * 0.5f;
             wheelUsed = true;
@@ -1273,6 +1384,25 @@ void App::drawDeviceStrip(const Rect& r) {
             // violet is identity, and these eight knobs are the rack's face.
             rend_.textIn(fSmall_, lbl, info.name.c_str(),
                          (isRack ? nx::violetSoft : nx::muted).alpha(dim), Align::Center, 0);
+        }
+        if (parCut) {
+            // §1.6's sentence, drawn where the unreachable region begins: the
+            // wire mirrors ipc::kMaxDevParams controls and this device has
+            // more. The knobs past the cut are the LAST parCut of the grid --
+            // they still edit the local instance, but in daemon mode the
+            // engine cannot hear them move, and a grid that drew them like
+            // their neighbours would be the same lie as a silently short list.
+            char cut[80];
+            snprintf(cut, sizeof cut,
+                     "...and %u more controls this build cannot reach", parCut);
+            const Rect cutR{body.x, body.y - paramScroll_ + rows * chh,
+                            body.w, 12 * s};
+            rend_.textIn(fSmall_, cutR, cut, pal::meterAmber.alpha(0.9f),
+                         Align::Center, 0);
+            // The sentence is wider than a 150px card, so textIn cuts it --
+            // §11: anything truncated says itself in full on hover.
+            if (ui_.hovered(cutR) && rend_.currentClip().contains(in.mx, in.my))
+                ui_.tip = cut;
         }
         rend_.popClip();
         panel();
@@ -1457,7 +1587,14 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // pick a plugin, two ways to land it.
     if (y + rowH <= left.bottom()) {
         Rect addR{left.x, y, left.w, rowH};
-        const std::vector<PluginDesc>& all = registry_.plugins();
+        // The SAME list the browser draws -- the daemon's catalog when it is
+        // ready -- because pluginSel_ is an index into whatever the browser
+        // showed. Resolving it against the local registry while the browser
+        // lists the catalog would land a different plugin than the row the
+        // user picked.
+        const std::vector<PluginDesc>& all =
+            (eng_.remoteOpen() && eng_.catalogReady()) ? eng_.catalog()
+                                                       : registry_.plugins();
         const bool have = pluginSel_ >= 0 && pluginSel_ < (int)all.size();
         const bool full = n >= kRackMaxDevices;
         char label[80];
