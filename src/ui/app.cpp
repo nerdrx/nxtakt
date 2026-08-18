@@ -303,9 +303,15 @@ void App::frame() {
     Rect full{0, 0, W, H};
     Rect bar = {0, 0, W, lay::controlBarH * s};
     Rect status = {0, H - lay::statusH * s, W, lay::statusH * s};
-    Rect body = {0, bar.bottom(), W, status.y - bar.bottom()};
+    // The engine-link banner (docs/GUI-ON-DAEMON.md §6, §12.7 item 2): a row
+    // of its own under the control bar, zero-height while the link is Live.
+    // The body SHRINKS to make room rather than being covered, because §8's
+    // Detached mode is a working mode, not a moment.
+    Rect banner = {0, bar.bottom(), W, std::round(engineBannerH() * s)};
+    Rect body = {0, banner.bottom(), W, status.y - banner.bottom()};
 
     drawControlBar(bar);
+    if (banner.h > 0.f) drawEngineBanner(banner);
 
     // UN-GATED (docs/ARRANGEMENT.md §7.6, answer #10). In Arrangement view the
     // CLIP tab shows the selected item's own `src` and edits it IN PLACE, which

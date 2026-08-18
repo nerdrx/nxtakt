@@ -87,6 +87,16 @@ private:
     void drawDeviceStrip(const Rect& r);
     void drawArrangementView(const Rect& r);
     void drawStatusBar(const Rect& r);
+    // The engine-link banner (docs/GUI-ON-DAEMON.md §6, §12.7 item 2): one
+    // full-width line under the control bar, drawn only when
+    // engineLinkBanner(es_.link) has something to say. engineBannerH() is its
+    // LOGICAL height for layout -- zero while the link is Live, so a healthy
+    // frame reserves nothing. The intended call site is App::frame()'s layout,
+    // between the control bar and the body; until app.cpp takes it there,
+    // drawStatusBar() carries a self-retiring fallback call (see the note at
+    // its end).
+    void drawEngineBanner(const Rect& r);
+    f32  engineBannerH() const;
     void drawDragGhost();
 
     // --- clip helpers ---
@@ -184,6 +194,11 @@ private:
     // draw code may read about engine state — see engine_state.h for why one
     // sample per frame is not a convenience but a correctness fix.
     EngineState  es_;
+    // §5 step 4's sessionSyncing_, derived rather than stored because it IS
+    // the pending count (§12.7 item 4): devices the daemon has been asked for
+    // whose EvDeviceAdded/Failed has not arrived. While true, a chain on
+    // screen is not yet the chain that sounds. Always false in local mode.
+    bool sessionSyncing() const { return es_.devicesPending != 0; }
 
     // =======================================================================
     // ENGINE FLOW CONTROL — deferred publication
@@ -885,6 +900,11 @@ private:
 
     // per-frame UI feedback
     std::string status_;
+    // drawEngineBanner()'s once-a-frame latch: reset by drawControlBar (drawn
+    // unconditionally, first), set by drawEngineBanner itself. It is what lets
+    // drawStatusBar's fallback call site retire automatically the moment
+    // App::frame() starts drawing the banner in layout.
+    bool bannerDrawn_ = false;
     f32  peakHoldT_[kMaxTracks]{};
     f32  peakHoldR_[kMaxReturns]{};
     f32  peakHoldM_[2]{};

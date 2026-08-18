@@ -61,7 +61,7 @@ enum class EngineLink : u32 {
 inline const char* engineLinkBanner(EngineLink l) {
     switch (l) {
         case EngineLink::Detached: return "No audio engine. The set can still be edited and saved.";
-        case EngineLink::Starting: return "Starting the audio engine…";
+        case EngineLink::Starting: return "Starting the audio engine...";
         case EngineLink::Live:     return nullptr;
         case EngineLink::Stale:    return "The audio engine is not responding.";
         case EngineLink::Lost:     return "The audio engine stopped. Your set is intact.";

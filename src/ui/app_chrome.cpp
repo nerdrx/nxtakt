@@ -208,6 +208,10 @@ static void debugSignatureCheck(Engine* eng, Session& s) {
 
 void App::drawControlBar(const Rect& r) {
     const f32 s = win_.dpiScale();
+    // The engine banner's once-a-frame latch, reset here because this bar is
+    // the one thing drawn unconditionally and FIRST on every frame -- the same
+    // reason the two sync calls below ride it. See drawEngineBanner().
+    bannerDrawn_ = false;
     // Remote control's per-frame tick. It rides the control bar because the
     // control bar is drawn unconditionally, first, on every frame — see the
     // report for why the drain does not live in App::frame().
@@ -588,32 +592,13 @@ void App::drawControlBar(const Rect& r) {
         x += posR.w + sep;
     }
 
-    // --- the engine link, when it is news (§6) -------------------------------
-    // Silence about a dead engine is the one thing this bar may never do. The
-    // banner text is policy from engine_state.h -- the view adds no wording of
-    // its own -- and the Restart button appears exactly when the table says
-    // acting is legitimate. Amber, not red: attention, not danger (the set is
-    // intact, and the copy says so).
-    if (const char* bn = engineLinkBanner(es_.link)) {
-        const f32 bw = fBody_.measure(bn) + nx::sp2 * s;
-        Rect bnR{x, cy, bw, h};
-        ui_.drawTextIn(fBody_, bnR, bn, nx::amber, Align::Left);
-        f32 bx = bnR.right() + gap;
-        if (engineLinkOffersRestart(es_.link)) {
-            Rect rb{bx, cy, 64 * s, h};
-            if (ui_.button(uiId(1, 40), rb, "RESTART", false, pal::accent)) {
-                status_ = eng_.restartEngine() ? "Engine restarted"
-                                               : "Engine restart failed - see the log";
-                // The engine came back empty; everything the model knows goes
-                // across again, exactly as after a load. restartEngine() only
-                // returns true with a live attach, so success IS the gate.
-                if (eng_.link() == EngineLink::Live) {
-                    pushAll();
-                    publishArrangementAll();
-                }
-            }
-        }
-    }
+    // The engine link used to be announced HERE, as amber text squeezed into
+    // whatever room the readout left -- which at 1100px wide was text drawn
+    // under the tab pill, and at any width was a dead engine announced in the
+    // one place §12.7 says it should not be: inside a bar full of controls,
+    // where prose reads as another control. It is a full-width line of its own
+    // now -- drawEngineBanner(), §12.7 item 2 -- drawn under this bar and
+    // spending its space on nothing else.
 
     // --- right side: CPU + view switch ---
     f32 rx = r.right() - pad;
@@ -1723,6 +1708,134 @@ void App::arrangeCommitAutos(ArrangeContext& ctx, u32 changed) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The engine-link banner (§6, §12.7 item 2)
+//
+// One full-width line under the control bar, and the whole of the policy is in
+// engine_state.h: engineLinkBanner() says what, engineLinkOffersRestart() says
+// whether acting is legitimate, and this function decides nothing -- it picks
+// an ink and a place. Live returns null and DRAWS NOTHING, which is the half
+// of "impossible to miss without being hysterical" that matters most: a banner
+// that is ever present when nothing is wrong trains the eye to skip it.
+//
+// The ink is the state's tense, per §1's roles: Starting and Stopping are
+// transitions that finish on their own -- a thing HAPPENING, cyan -- while
+// Detached, Stale and Lost sit until someone acts -- attention, amber. Never
+// danger: the copy itself says the set is intact, and a red banner over an
+// intact set is the hysteria this line exists to avoid.
+// ---------------------------------------------------------------------------
+
+// engineLinkBanner's Starting text ends in a real U+2026 ellipsis, and the
+// glyph atlas is ASCII 32..126 (gfx/font.h) -- drawn raw it renders as three
+// invisible bytes, the same hole the status bar's separators once fell into.
+// Folded at the point of display because engine_state.h is not this wave's
+// file; the one-word diff making the string plain ASCII is filed.
+static void bannerAsciiFold(const char* in, char* out, size_t cap) {
+    size_t o = 0;
+    for (const unsigned char* p = (const unsigned char*)in; *p && o + 4 < cap;) {
+        if (p[0] == 0xE2 && p[1] == 0x80 && p[2] == 0xA6) {         // U+2026
+            out[o++] = '.'; out[o++] = '.'; out[o++] = '.';
+            p += 3;
+        } else if (*p >= 32 && *p < 127) {
+            out[o++] = (char)*p++;
+        } else {
+            ++p;                     // anything else outside the atlas: dropped
+        }
+    }
+    out[o] = 0;
+}
+
+// The banner's height for layout, in LOGICAL pixels (the caller multiplies by
+// dpiScale exactly as it does for lay::controlBarH). Zero while the link is
+// Live -- so a healthy frame reserves nothing, shifts nothing, and is
+// pixel-identical to one built before this function existed.
+f32 App::engineBannerH() const {
+    return engineLinkBanner(es_.link) ? 24.f : 0.f;    // 3 units of §11's grid
+}
+
+void App::drawEngineBanner(const Rect& r) {
+    // The latch drawStatusBar's fallback checks. Set FIRST, unconditionally:
+    // being called at all -- from either call site -- is what consumes the
+    // frame's one banner.
+    bannerDrawn_ = true;
+    const char* bn = engineLinkBanner(es_.link);
+    if (!bn || r.w <= 0.f || r.h <= 0.f) return;
+    const f32 s = win_.dpiScale();
+
+    const bool busy = es_.link == EngineLink::Starting ||
+                      es_.link == EngineLink::Stopping;
+    const Col ink = busy ? nx::live : nx::attention;
+
+    // Chrome, so it wears the Bar tier's fill -- over an OPAQUE base first,
+    // because glass is translucent by construction and this strip can be
+    // drawn over the body (the fallback call site): a banner with the track
+    // headers ghosting through it is exactly "hard to read", and over the
+    // bare field the base simply reads as the field. Then a wash of the
+    // state's own hue, faint enough to stay glass (§1: if it is visible from
+    // across the room, halve it) -- the wash is what makes the strip read as
+    // a BANNER at a glance rather than as a second toolbar; the hairline
+    // closes it below in the same ink so the whole line carries one colour.
+    rend_.rect(r, nx::bgTop);
+    rend_.gradRect(r, 0.f, nx::glassBar, 0.9f);
+    rend_.rect(r, ink.alpha(busy ? 0.05f : 0.08f));
+    rend_.hairlineH(r.x, r.right(), r.bottom() - 1 * s,
+                    ink.alpha(nx::hairlinePeak), 1 * s);
+
+    const f32 pad = nx::sp2 * s;
+    f32 x = r.x + pad;
+
+    // The state dot. It pulses -- via the same ctlPulse01 the LEARN chip
+    // breathes with, frozen under reduced motion -- only while a transition is
+    // running, because "in progress" is the one thing here that is genuinely
+    // happening; the amber states hold still, exactly as they do.
+    {
+        const f32 d = 6 * s;
+        const f32 a = busy ? 0.45f + 0.55f * ctlPulse01() : 1.f;
+        rend_.roundRect({x, std::round(r.cy() - d * 0.5f), d, d}, d * 0.5f,
+                        ink.alpha(a));
+        x += d + nx::sp1 * s;
+    }
+
+    // The message: engine_state.h's words, with one addition the snapshot
+    // carries for exactly this line -- §6's table distinguishes "not
+    // responding" from "not responding, and it has been five seconds", which
+    // is a JACK restart versus something to act on.
+    char folded[128];
+    bannerAsciiFold(bn, folded, sizeof folded);
+    char msg[160];
+    if (es_.link == EngineLink::Stale && es_.linkSilentMs >= 1000)
+        snprintf(msg, sizeof msg, "%s  Silent for %u s.", folded,
+                 es_.linkSilentMs / 1000u);
+    else
+        snprintf(msg, sizeof msg, "%s", folded);
+
+    // The button first (it anchors the right edge and the text yields to it --
+    // prose survives an ellipsis, a button does not survive being covered).
+    // Violet primary, not amber: the banner states a condition, the button IS
+    // the action, and actions are the brand's colour (§1: a thing you set).
+    f32 textRight = r.right() - pad;
+    if (engineLinkOffersRestart(es_.link)) {
+        const f32 bw = 76 * s, bh = 18 * s;
+        Rect rb{r.right() - pad - bw, std::round(r.cy() - bh * 0.5f), bw, bh};
+        if (ui_.button(uiId(1, 40), rb, "RESTART", true, pal::accent)) {
+            status_ = eng_.restartEngine() ? "Engine restarted"
+                                           : "Engine restart failed - see the log";
+            // The engine came back empty; everything the model knows goes
+            // across again, exactly as after a load. restartEngine() only
+            // returns true with a live attach, so success IS the gate.
+            if (eng_.link() == EngineLink::Live) {
+                pushAll();
+                publishArrangementAll();
+            }
+        }
+        if (ui_.isHot(uiId(1, 40)))
+            ui_.tip = "Restart the audio engine and republish the set";
+        textRight = rb.x - nx::sp1 * s;
+    }
+
+    rend_.textIn(fBody_, {x, r.y, textRight - x, r.h}, msg, ink, Align::Left);
+}
+
 // A UTILITY STRIP, NOT A HERO SURFACE. It gets the Bar tier's fill at half
 // strength and nothing else: no lit edge, no glow, no elevation, no animation.
 // §1's restraint is mostly about what you leave out, and the honest reading of
@@ -1767,14 +1880,6 @@ void App::drawStatusBar(const Rect& r) {
     const int pdc = es_.latencyFrames;
     if (pdc > 0) snprintf(pdcTag, sizeof pdcTag, "  -  PDC %d", pdc);
 
-    // Devices the daemon has been asked for and has not confirmed. Zero in
-    // local mode by construction, so the tag only ever appears when it means
-    // something: the strip may be drawing a device the engine is not running
-    // yet, and this is the one honest word about it.
-    char syncTag[28] = "";
-    if (es_.devicesPending > 0)
-        snprintf(syncTag, sizeof syncTag, "  -  syncing %u", es_.devicesPending);
-
     // Refusals the daemon has answered with. Each non-zero is a specific
     // audible lie somewhere on screen -- a timeline drawn but not playing, a
     // 7/8 ruler over a 4/4 engine -- and until now the counters were readable
@@ -1791,34 +1896,72 @@ void App::drawStatusBar(const Rect& r) {
     // happened and was not kept, which is the most expensive kind of loss
     // this program can have. takesEmpty is deliberately NOT counted -- an
     // empty take is a musician changing their mind, not a failure.
+    // deviceStatesRefused and racksRefused join it too: each is an instrument
+    // or a rack drawn loaded that plays nothing (engine_handle.h §15 / v7),
+    // counted in neither remoteRefusals nor any other member of the sum.
     const u64 refusals = eng_.remoteRefusals()
                        + eng_.arrangementsRefused()
                        + eng_.signaturesRefused()
+                       + eng_.deviceStatesRefused()
+                       + eng_.racksRefused()
                        + eng_.takesFailed()
                        + eng_.takesLost();
     if (refusals > 0)
         snprintf(refuseTag, sizeof refuseTag, "%s%llu refused", kSep,
                  (unsigned long long)refusals);
 
+    // §12.7 item 4: devices the daemon has been asked for whose answer has not
+    // arrived -- sessionSyncing(), which IS es_.devicesPending != 0, and the
+    // whole of §5 step 4's "progress line in the status bar". Zero in local
+    // mode by construction, so the tag only ever appears when it means
+    // something: a chain on screen is not yet the chain that sounds, and this
+    // is the one honest word about it. (The PDC beside it already reads the
+    // DAEMON's latency figure: step 0 put latencyFrames in the snapshot, which
+    // is why nothing here walks eng_.remoteDevice().)
+    char syncTag[32] = "";
+    if (sessionSyncing())
+        snprintf(syncTag, sizeof syncTag, "%ssyncing %u", kSep, es_.devicesPending);
+    // NXTAKT_DEBUG_PROBE: the tag's transitions, logged, because the window in
+    // which devicesPending is non-zero is a handful of frames on a fast
+    // machine and a screenshot cannot be relied on to land inside it. The log
+    // line sits exactly where the tag draws, so "the log said 12 -> 0" IS "the
+    // tag was drawn and retired itself".
+    if (env("DEBUG_PROBE")) {
+        static u32 lastPending = 0;
+        if (es_.devicesPending != lastPending) {
+            LOGI("PROBE: devicesPending %u -> %u", lastPending, es_.devicesPending);
+            lastPending = es_.devicesPending;
+        }
+    }
+
     char buf[224];
-    snprintf(buf, sizeof buf, "%s%s%s %.0f Hz / %d fr%s%s%s%s%.0f fps  -  %d draws",
+    snprintf(buf, sizeof buf, "%s%s%s %.0f Hz / %d fr%s%s%s%.0f fps  -  %d draws",
              win_.backendName(), kSep,
              eng_.driverName() ? eng_.driverName() : "silent",
              eng_.driverSampleRate(),
              eng_.driverBufferSize(),
              pdcTag,
-             syncTag,
              midiTag,
              kSep,
              fps_, rend_.drawCalls());
     rend_.textIn(fSmall_, r, buf, kIdleInk, Align::Right, nx::sp1 * s);
-    // The refusal tag is its own draw so it can be amber -- attention, not
-    // damage -- instead of vanishing into the faint utility text beside it.
-    const f32 diagW = fSmall_.measure(buf) +
-                      (refuseTag[0] ? fSmall_.measure(refuseTag) : 0.f);
-    if (refuseTag[0])
-        rend_.textIn(fSmall_, {r.x, r.y, r.w - fSmall_.measure(buf) - 12 * s, r.h},
+    // The coloured tags are their own draws so each can carry its role's ink
+    // instead of vanishing into the faint utility text beside them: refusals in
+    // amber (attention, not damage), the sync count in cyan (§1: a thing
+    // HAPPENING -- the daemon is building the chain right now, and the tag
+    // retires itself the moment the last answer lands). They accumulate
+    // leftwards from the diagnostics in that order.
+    f32 diagW = fSmall_.measure(buf);
+    if (refuseTag[0]) {
+        rend_.textIn(fSmall_, {r.x, r.y, r.w - diagW - 12 * s, r.h},
                      refuseTag + kSepLen, pal::meterAmber, Align::Right, nx::sp1 * s);
+        diagW += fSmall_.measure(refuseTag);
+    }
+    if (syncTag[0]) {
+        rend_.textIn(fSmall_, {r.x, r.y, r.w - diagW - 12 * s, r.h},
+                     syncTag + kSepLen, nx::live, Align::Right, nx::sp1 * s);
+        diagW += fSmall_.measure(syncTag);
+    }
 
     // The message goes down LAST and inside the room the diagnostics left, not
     // over the whole bar. Both halves used to be drawn against the full rect,
@@ -1831,6 +1974,24 @@ void App::drawStatusBar(const Rect& r) {
     const f32 msgW = std::max(0.f, r.w - diagW - nx::sp3 * s);
     rend_.textIn(fSmall_, {r.x, r.y, msgW, r.h}, tip ? ui_.tip.c_str() : status_.c_str(),
                  tip ? pal::textDim : kIdleInk, Align::Left, nx::sp1 * s);
+
+    // THE ENGINE BANNER'S FALLBACK CALL SITE (§12.7 item 2). Its real one is
+    // App::frame()'s layout -- a row between the control bar and the body, with
+    // the body SHRUNK to make room, because in Detached mode (§8) a user may
+    // edit under the banner for a whole session and a strip that covers the
+    // track headers all that time is a bug. That is app.cpp, which this wave
+    // does not own; the diff is filed. Until it lands, the banner draws from
+    // HERE -- the status bar is the last chrome in the frame, so the strip
+    // overlays the body's top row, and because Ui::setHot is last-drawn-wins,
+    // its Restart button takes the pointer over anything beneath it.
+    //
+    // Self-retiring, not permanent: drawEngineBanner latches bannerDrawn_, so
+    // the frame app.cpp starts calling it in layout, this call stops firing
+    // and the overlay is gone without a second edit here.
+    if (!bannerDrawn_ && engineBannerH() > 0.f) {
+        const f32 bh = std::round(engineBannerH() * s);
+        drawEngineBanner({r.x, std::round(lay::controlBarH * s), r.w, bh});
+    }
 }
 
 
