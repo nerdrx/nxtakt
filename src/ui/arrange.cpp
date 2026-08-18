@@ -33,22 +33,21 @@ constexpr const char* kEditAuto  = "automation edit";
 constexpr const char* kEditLayout = "lane height";
 constexpr const char* kEditMarkerMove = "move marker";
 
-// WIDGET IDS IN THIS FILE. Everything here hashes under uiId kind 24 (plus 25
-// and 26 for the automation lanes), and the markers take three FRESH SUB-IDS
-// inside it rather than a kind of their own:
+// WIDGET IDS IN THIS FILE. Everything here hashes under UiArrange (plus
+// UiArrangeLane and UiArrangeLaneHead for the automation lanes), and the
+// markers take three FRESH SUB-IDS inside it rather than a kind of their own:
 //
-//     (24, 9)            the marker band's hot rect
-//     (24, 10, <uid>)    a flag's drag gesture
-//     (24, 11, <uid>)    a flag's inline rename field
+//     (UiArrange, 9)            the marker band's hot rect
+//     (UiArrange, 10, <uid>)    a flag's drag gesture
+//     (UiArrange, 11, <uid>)    a flag's inline rename field
 //
-// A named UiKind would have been the tidier answer and is not available here:
-// the enum lives in app_internal.h, and this file is on the view seam that
-// arrange.h's header comment exists to keep clean -- pulling App's private
-// header into the editor to name a constant would undo the separation for a
-// cosmetic gain. Sub-ids are additive and RENUMBER NOTHING. The collision this
-// paragraph used to reserve around is gone: app_detail.cpp's key row moved off
-// raw 24/25 onto named kinds (UiDetailKeyRow/UiDetailNotes, app_internal.h),
-// so kinds 24-26 now belong to this file alone.
+// These used to be raw 24/25/26 with a paragraph here explaining why a named
+// UiKind was not available: the registry lived in app_internal.h, App's
+// private glue, which this file is on the wrong side of the view seam to
+// include. The registry now lives in widgets.h beside uiId itself, so the
+// tidier answer that paragraph asked for is simply taken. Sub-ids are additive
+// and RENUMBER NOTHING. The old 24/25 collision with app_detail.cpp is gone
+// (UiDetailKeyRow/UiDetailNotes); these three kinds belong to this file alone.
 
 // How far past the last thing on the timeline the view may scroll. A view that
 // stopped dead at the last item would give nowhere to drop the next one.
@@ -410,7 +409,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // The clip lanes claim their hot rect HERE, before the automation lanes are
     // drawn: setHot is last-writer-wins, so an expanded lane's own rect has to
     // be claimed after this one or it could never be hot.
-    const u64 lanesId = uiId(24, 7);
+    const u64 lanesId = uiId(UiArrange, 7);
     ui.setHot(lanesId, lanes);
     const bool hotLanes = ui.isHot(lanesId);
     if (lanes.contains(in.mx, in.my)) cursorBeat_ = std::max(0.0, xToBeat(ta, in.mx));
@@ -445,7 +444,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // locate click, the signature right-click -- therefore stops at the seam and
     // cannot be triggered from the marker band, which is the disambiguation
     // kArrMarkerH's note describes.
-    const u64 rulerId = uiId(24, 0);
+    const u64 rulerId = uiId(UiArrange, 0);
     ui.setHot(rulerId, bruler);
     const bool hotRuler = ui.isHot(rulerId);
 
@@ -553,7 +552,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         }
     }
 
-    const u64 bandId = uiId(24, 9);
+    const u64 bandId = uiId(UiArrange, 9);
     ui.setHot(bandId, mband);
     const bool hotBand = ui.isHot(bandId);
 
@@ -597,7 +596,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 markerReq_.kind = MarkerReq::Kind::Jump;
                 markerReq_.uid  = f.uid;
                 drag_       = Drag::Marker;
-                gesture_    = uiId(24, 10, (int)(u32)f.uid);
+                gesture_    = uiId(UiArrange, 10, (int)(u32)f.uid);
                 dragMarker_ = f.uid;
                 markerOrig_ = (*markers_)[f.i].beat;
                 markerGrab_ = (f64)xToBeat(ta, in.mx) - markerOrig_;
@@ -715,7 +714,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 // even when the flag it replaces is four pixels of "A".
                 const Rect fr{f.box.x, mband.y + 1.f * s,
                               std::max(f.box.w, 104.f * s), mband.h - 3.f * s};
-                const u64 fid = uiId(24, 11, (int)(u32)m.uid);
+                const u64 fid = uiId(UiArrange, 11, (int)(u32)m.uid);
                 if (ui.textField(fid, fr, &renameBuf_, nx::panel2, nx::text,
                                  Align::Left, true)) {
                     markerReq_.kind = MarkerReq::Kind::Rename;
@@ -975,7 +974,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             rr.pushClip(lr.intersect(lanes));
             drawTimeGrid(rr, ta, lr, s, ctx.sig, kArrMinGridPx * s);
             AutoLaneView& v = views[j];
-            v.setId(uiId(25, (int)i, (int)j));
+            v.setId(uiId(UiArrangeLane, (int)i, (int)j));
             v.prune((int)al.points.size());
             // beatBase 0: an arrangement lane's points are ALREADY absolute
             // timeline beats (session.h, TrackModel::arrangeAutos), which is the
@@ -1017,7 +1016,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // everywhere it appears.
         const Rect tri{hb.x + 6.f * s, hb.y + 3.f * s, 12.f * s, 12.f * s};
         const bool open = L.expanded && *L.expanded;
-        const u64 triId = uiId(24, 1, (int)i);
+        const u64 triId = uiId(UiArrange, 1, (int)i);
         // 12x12 logical is 12.0 device px at scale 1.0, under the 16 px floor
         // for a thing that is CLICKED rather than dragged. The triangle is a
         // drawn shape and the drawing may not move, so the aim grows instead:
@@ -1051,7 +1050,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // is the Back to Arrangement gesture for that track.
         if (L.overridden) {
             const Rect ov{hb.x + 6.f * s, hb.y + 18.f * s, 58.f * s, 11.f * s};
-            const u64 ovId = uiId(24, 2, (int)i);
+            const u64 ovId = uiId(UiArrange, 2, (int)i);
             // 11 logical px tall, which is 11.0 device px at 1.0. Same fix as
             // the triangle: the chip keeps its drawn height and gains 3 px of
             // aim on every side.
@@ -1079,7 +1078,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // either wasted space or an unreadable lane (§7.4).
         const Rect grip{hb.x, hb.bottom() + row.autoH - kArrLaneGrab * s,
                         hb.w, kArrLaneGrab * 2.f * s};
-        const u64 gripId = uiId(24, 3, (int)i);
+        const u64 gripId = uiId(UiArrange, 3, (int)i);
         const bool hotGrip = ui.setHot(gripId, grip) && ui.isHot(gripId);
         if (hotGrip && drag_ == Drag::None) {
             ui.cursor = Cursor::ResizeV;
@@ -1120,7 +1119,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                               Align::Left, 0);
                 }
                 const Rect onR{ab.right() - 20.f * s, ab.y + 4.f * s, 14.f * s, 12.f * s};
-                const u64 onId = uiId(26, (int)i, (int)j);
+                const u64 onId = uiId(UiArrangeLaneHead, (int)i, (int)j);
                 bool on = al.enabled;
                 // 14x12 logical; the short side fails the 16 px floor at both
                 // scales. Three pixels of aim on every side makes it 20x18.
@@ -1183,7 +1182,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     // 14 logical px tall, under the floor at both scales; the
                     // chooser row has 44 px of height above and below to lend.
                     ui.grab(3.f * s);
-                    ui.selector(uiId(24, 5, (int)i), selR, &tsel, names.data(), (int)names.size());
+                    ui.selector(uiId(UiArrange, 5, (int)i), selR, &tsel, names.data(), (int)names.size());
                     if (ui.hovered(selR.inset(-3.f * s)))
                         ui.tip = L.targets->entries[(size_t)tsel].group + " " +
                                  L.targets->entries[(size_t)tsel].label + "  " +
@@ -1193,7 +1192,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     if (ui.hovered(addR.inset(-3.f * s)) && ui.tip.empty())
                         ui.tip = "add an automation lane for the chosen target";
                     ui.grab(3.f * s);
-                    if (ui.button(uiId(24, 6, (int)i), addR, "+") &&
+                    if (ui.button(uiId(UiArrange, 6, (int)i), addR, "+") &&
                         (int)L.autos->size() < kMaxArrLanes) {
                         const std::string& addr = L.targets->entries[(size_t)tsel].address;
                         int found = -1;
@@ -1304,7 +1303,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                         : hitZone == Zone::FadeIn  ? Drag::FadeIn
                         : hitZone == Zone::FadeOut ? Drag::FadeOut
                                                    : Drag::Move;
-                gesture_ = uiId(24, 8, hitTrack);
+                gesture_ = uiId(UiArrange, 8, hitTrack);
                 dragTrack_ = hitTrack;
                 dragUid_ = it.uid;
                 grabBeat_ = xToBeat(ta, in.mx) - it.start;

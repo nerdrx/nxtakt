@@ -171,7 +171,7 @@ public:
 
 private:
     IndexSel sel_;               // breakpoints of the vector last drawn
-    u64  id_ = uiId(20, 1);
+    u64  id_ = uiId(UiRollSurface, 1);
     // Point / Band are deliberately the same two shapes the note grid's drags
     // have, and for the same reason: the lane's verbs are the grid's verbs.
     enum class Drag { None, Point, Band } drag_ = Drag::None;

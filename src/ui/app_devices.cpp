@@ -823,7 +823,7 @@ void App::drawDeviceStrip(const Rect& r) {
         rend_.textIn(fSmall_, head, stTag, pal::meterAmber, Align::Right, 8 * s);
         const f32 tw = fSmall_.measure(stTag);
         Rect tagR{head.right() - 8 * s - tw, head.y, tw, head.h};
-        if (ui_.setHot(uiId(31, 2699), tagR) && ui_.isHot(uiId(31, 2699)))
+        if (ui_.setHot(uiId(UiDeviceTip, 2699), tagR) && ui_.isHot(uiId(UiDeviceTip, 2699)))
             ui_.tip = "The engine refused a device's state - an instrument may "
                       "be drawn loaded and play nothing. The log says which "
                       "device and why.";
@@ -860,10 +860,10 @@ void App::drawDeviceStrip(const Rect& r) {
     // simply scrolls, like everything else here.
     const f32 specW = lay::spectraPanelW * s;
     // The Sampler's editor opens the same way and is cut to the same 200px
-    // dock. The number is its six column widths plus five gaps plus two pads
-    // (app_sampler.cpp's kColW) -- a third of it is the waveform, which is the
-    // one control on it that gets wider the more room it is given.
-    const f32 smpW = 1116 * s;
+    // dock. Its width is its own columns added up (lay::samplerPanelW) -- a
+    // third of it is the waveform, which is the one control on it that gets
+    // wider the more room it is given.
+    const f32 smpW = lay::samplerPanelW * s;
     // A rack that is open puts its inside into the strip, immediately after the
     // box it belongs to. Resolved before the layout because it widens it.
     RackControl* openRc = openRack();
@@ -1131,7 +1131,7 @@ void App::drawDeviceStrip(const Rect& r) {
                  refused ? pal::meterAmber.alpha(dim)
                          : (sel ? nx::text : nx::muted).alpha(loading ? 0.6f * dim : dim),
                  Align::Left, 0);
-        if (refused && ui_.setHot(uiId(31, (int)i + 900), nameR) && ui_.isHot(uiId(31, (int)i + 900)))
+        if (refused && ui_.setHot(uiId(UiDeviceTip, (int)i + 900), nameR) && ui_.isHot(uiId(UiDeviceTip, (int)i + 900)))
             ui_.tip = "Engine refused this device: " + rd->error;
 
         // The sampler names its file. Cyan basename = a live data readout,
@@ -1156,8 +1156,8 @@ void App::drawDeviceStrip(const Rect& r) {
                                         : fp.substr(fp.rfind('/') + 1);
                 rend_.textIn(fSmall_, fileR, base.c_str(),
                              nx::live.alpha(0.8f * dim), Align::Left, 0);
-                if (ui_.setHot(uiId(31, (int)i + 1800), fileR) &&
-                    ui_.isHot(uiId(31, (int)i + 1800)) && !fp.empty())
+                if (ui_.setHot(uiId(UiDeviceTip, (int)i + 1800), fileR) &&
+                    ui_.isHot(uiId(UiDeviceTip, (int)i + 1800)) && !fp.empty())
                     ui_.tip = fp;
             } else {
                 rend_.textIn(fSmall_, fileR, "no sample",
@@ -1175,7 +1175,7 @@ void App::drawDeviceStrip(const Rect& r) {
         if (stateBand) {
             Rect stR{title.x + 10 * s, title.bottom() + s + (smp ? chipH + s : 0.f),
                      box.w - 20 * s, chipH};
-            const u64 sid = uiId(31, (int)i + 2700);
+            const u64 sid = uiId(UiDeviceTip, (int)i + 2700);
             if (refused) {
                 microFit(ui_, fSmall_, stR,
                          rd->error.empty() ? "engine refused this device"
@@ -1449,7 +1449,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
                 title.h - 8 * s}, tc);
 
     Rect closeR{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
-    if (ui_.button(uiId(13, 0, 0), closeR, "")) { rackOpenUid_ = 0; rackPath_.clear(); }
+    if (ui_.button(uiId(UiRackPanel, 0, 0), closeR, "")) { rackOpenUid_ = 0; rackPath_.clear(); }
     {
         const f32 k = 3.f * s;
         rend_.line(closeR.cx() - k, closeR.cy() - k, closeR.cx() + k, closeR.cy() + k, 1.2f * s, nx::muted);
@@ -1457,7 +1457,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     }
     Rect backR{closeR.x - 20 * s, title.y + 2 * s, 18 * s, 12 * s};
     if (!rackPath_.empty()) {
-        if (ui_.button(uiId(13, 0, 1), backR, "<")) { rackPath_.pop_back(); rackSel_ = -1; }
+        if (ui_.button(uiId(UiRackPanel, 0, 1), backR, "<")) { rackPath_.pop_back(); rackSel_ = -1; }
         if (ui_.hovered(backR)) ui_.tip = "Back to the rack that contains this one";
     }
     // The breadcrumb is the whole of "where am I": a rack in a rack in a rack
@@ -1490,7 +1490,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         if (row.bottom() > left.bottom()) break;
 
         const bool sel = i == rackSel_;
-        const u64 rid = uiId(13, 1, i);
+        const u64 rid = uiId(UiRackPanel, 1, i);
         const bool hot = ui_.setHot(rid, row) && ui_.isHot(rid);
         // Well rows with the specimen's hover treatment: nothing at rest, the
         // glass chip under the pointer, a violet marker on the selected one.
@@ -1542,7 +1542,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             rend_.line(b.cx() + k, b.cy() - k * d * 0.6f, b.cx(), b.cy() + k * d * 0.6f, 1.1f * s, c);
         };
         const bool canUp = i > 0, canDn = i + 1 < n;
-        if (ui_.segButton(uiId(13, 2, i), up, false, nx::violet) && canUp) {
+        if (ui_.segButton(uiId(UiRackPanel, 2, i), up, false, nx::violet) && canUp) {
             undoPoint("move device in rack");
             rc.moveDevice(i, i - 1);
             rackChainEdited();
@@ -1550,7 +1550,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             return;                          // the list changed under us
         }
         chevron(up, true, canUp);
-        if (ui_.segButton(uiId(13, 3, i), dn, false, nx::violet) && canDn) {
+        if (ui_.segButton(uiId(UiRackPanel, 3, i), dn, false, nx::violet) && canDn) {
             undoPoint("move device in rack");
             rc.moveDevice(i, i + 1);
             rackChainEdited();
@@ -1558,7 +1558,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             return;
         }
         chevron(dn, false, canDn);
-        if (ui_.segButton(uiId(13, 4, i), xr, false, nx::danger)) {
+        if (ui_.segButton(uiId(UiRackPanel, 4, i), xr, false, nx::danger)) {
             undoPoint("remove device from rack");
             rc.removeDevice(i);
             rackChainEdited();
@@ -1601,7 +1601,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         if (full)       snprintf(label, sizeof label, "Rack is full");
         else if (have)  snprintf(label, sizeof label, "+ %s", all[pluginSel_].name.c_str());
         else            snprintf(label, sizeof label, "+ Pick a plugin on the left");
-        if (ui_.button(uiId(13, 5, 0), addR, label, false, nx::violet) && have && !full) {
+        if (ui_.button(uiId(UiRackPanel, 5, 0), addR, label, false, nx::violet) && have && !full) {
             undoPoint("add device to rack");
             if (rc.addDevice(all[pluginSel_])) {
                 rackChainEdited();
@@ -1638,7 +1638,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             char lbl[8];
             snprintf(lbl, sizeof lbl, "M%d", m + 1);
             // The macros are the rack's identity, so the selected one is violet.
-            if (ui_.segButton(uiId(13, 6, m), b, m == rackMacro_, nx::violet)) {
+            if (ui_.segButton(uiId(UiRackPanel, 6, m), b, m == rackMacro_, nx::violet)) {
                 rackMacro_ = m;
                 rackListScroll_ = 0.f;
             }
@@ -1678,7 +1678,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     Rect devR{right.x, ry, right.w, mh};
     Rect parR{right.x, ry + mh + 2 * s, right.w, mh};
     const int wasDev = rackTgtDev_, wasPar = rackTgtParam_;
-    ui_.selector(uiId(13, 7, 0), devR, &rackTgtDev_, devPtrs.data(), (int)devPtrs.size());
+    ui_.selector(uiId(UiRackPanel, 7, 0), devR, &rackTgtDev_, devPtrs.data(), (int)devPtrs.size());
     if (rackTgtDev_ != wasDev) { rackTgtParam_ = 0; rackRangeHeld_ = false; }
     if (ui_.hovered(devR)) ui_.tip = "The device this macro drives (right-click steps back)";
 
@@ -1695,7 +1695,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     parNames.reserve((size_t)pc2);
     for (int i = 0; i < pc2; ++i) parNames.push_back(tgt->paramInfo(i).name);
     for (const std::string& p : parNames) parPtrs.push_back(p.c_str());
-    ui_.selector(uiId(13, 8, 0), parR, &rackTgtParam_, parPtrs.data(), (int)parPtrs.size());
+    ui_.selector(uiId(UiRackPanel, 8, 0), parR, &rackTgtParam_, parPtrs.data(), (int)parPtrs.size());
     if (rackTgtParam_ != wasPar || rackTgtDev_ != wasDev) rackRangeHeld_ = false;
     if (ui_.hovered(parR)) ui_.tip = "The parameter this macro drives";
 
@@ -1714,15 +1714,15 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     Rect mapR{maxR.right() + 3 * s, minR.y, right.right() - maxR.right() - 3 * s, mh};
     const char* nf = info.isInt ? "%.0f" : "%.2f";
     const f64 per = (f64)(phi - plo) / 160.0;
-    if (ui_.dragNumber(uiId(13, 9, 0), minR, &rackMin_, plo, phi, per, nf,
+    if (ui_.dragNumber(uiId(UiRackPanel, 9, 0), minR, &rackMin_, plo, phi, per, nf,
                        Align::Center, nullptr, 0.0, /*def=*/plo)) rackRangeHeld_ = true;
-    if (ui_.dragNumber(uiId(13, 9, 1), maxR, &rackMax_, plo, phi, per, nf,
+    if (ui_.dragNumber(uiId(UiRackPanel, 9, 1), maxR, &rackMax_, plo, phi, per, nf,
                        Align::Center, nullptr, 0.0, /*def=*/phi)) rackRangeHeld_ = true;
     if (ui_.hovered(minR)) ui_.tip = "Value at macro 0, in the target's own units";
     if (ui_.hovered(maxR))
         ui_.tip = "Value at macro 1 - set it BELOW the other end to invert the macro";
 
-    if (ui_.button(uiId(13, 10, 0), mapR, "MAP", false, nx::violet)) {
+    if (ui_.button(uiId(UiRackPanel, 10, 0), mapR, "MAP", false, nx::violet)) {
         undoPoint("map macro");
         RackMapping m;
         m.macro  = rackMacro_;
@@ -1768,7 +1768,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     snprintf(cap, sizeof cap, "MACRO %d DRIVES %d", rackMacro_ + 1, shown);
     microFit(ui_, fSmall_, {list.x, list.y, list.w - 52 * s, 11 * s}, cap,
              nx::muted, Align::Left, 0);
-    if (shown > 0 && ui_.button(uiId(13, 11, 0), clr, "CLEAR")) {
+    if (shown > 0 && ui_.button(uiId(UiRackPanel, 11, 0), clr, "CLEAR")) {
         undoPoint("clear macro");
         rc.clearMacro(rackMacro_);
         status_ = "Macro cleared";
@@ -1803,7 +1803,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
                  (f64)m.min, m.min > m.max ? "\\" : "/", (f64)m.max);
         rend_.textIn(fSmall_, {row.x, row.y, row.w - 14 * s, row.h}, line,
                      m.min > m.max ? nx::violetSoft : nx::muted, Align::Left, 0);
-        if (ui_.button(uiId(13, 12, i), xr, "")) {
+        if (ui_.button(uiId(UiRackPanel, 12, i), xr, "")) {
             undoPoint("unmap macro");
             rc.removeMapping(i);
             rend_.popClip();

@@ -585,7 +585,7 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
 
     laneSel_ = clampv(laneSel_, 0, (int)ptrs.size() - 1);
     int shown = laneSel_;
-    if (ui.selector(uiId(23, 0), r0, &shown, ptrs.data(), (int)ptrs.size())) {
+    if (ui.selector(uiId(UiRollLaneRow, 0), r0, &shown, ptrs.data(), (int)ptrs.size())) {
         laneSel_ = shown;
         // The point indices belong to the lane that was on show, so switching
         // lanes drops them rather than carrying a stale set across.
@@ -621,7 +621,7 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
         tnames.reserve(targets.entries.size());
         for (const AutoTargets::Entry& e : targets.entries) tnames.push_back(e.label.c_str());
         targetSel_ = clampv(targetSel_, 0, (int)tnames.size() - 1);
-        ui.selector(uiId(23, 1), tgtR, &targetSel_, tnames.data(), (int)tnames.size());
+        ui.selector(uiId(UiRollLaneRow, 1), tgtR, &targetSel_, tnames.data(), (int)tnames.size());
         const AutoTargets::Entry& sel = targets.entries[(size_t)targetSel_];
         if (sel.automated)
             rr.circle(tgtR.right() - 3.5f * s, tgtR.y + 3.5f * s, 1.8f * s, nx::violetSoft);
@@ -634,7 +634,7 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
     // "+" ellipsises, and the dot is the same control the device strip already
     // uses for bypass — a lit plate means the thing is doing something.
     const Rect onR{addR.right() + 2.f * s, r2.y, r2.right() - addR.right() - 2.f * s, r2.h};
-    if (!targets.entries.empty() && ui.button(uiId(23, 2), addR, "+")) {
+    if (!targets.entries.empty() && ui.button(uiId(UiRollLaneRow, 2), addR, "+")) {
         const std::string& addr = targets.entries[(size_t)targetSel_].address;
         int found = -1;
         for (size_t i = 0; i < clip.envelopes.size(); ++i)
@@ -657,7 +657,7 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
     if (AutoLane* env = shownLane(clip)) {
         AutoLane& l = *env;
         bool on = l.enabled;
-        if (ui.squareToggle(uiId(23, 3), onR, "", &on, nx::violet)) {
+        if (ui.squareToggle(uiId(UiRollLaneRow, 3), onR, "", &on, nx::violet)) {
             l.enabled = on;
             changed = true;
             lastEdit_ = kEditAuto;
@@ -797,7 +797,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         zoom_ = clampv((f32)(grid.w / lenBeats) / s, kPxPerBeatMin, kPxPerBeatMax);
     f32 pxPerBeat = zoom_ * s;
 
-    const u64 gridId = uiId(20, 0), laneId = uiId(20, 1);
+    const u64 gridId = uiId(UiRollSurface, 0), laneId = uiId(UiRollSurface, 1);
     const bool overBody = (grid.contains(in.mx, in.my) || lane.contains(in.mx, in.my) ||
                            keys.contains(in.mx, in.my)) &&
                           rr.currentClip().contains(in.mx, in.my);
@@ -1157,7 +1157,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // 3 px of aim on every side instead, into the ruler's own margin and
         // the grid line under it -- neither of which is a target.
         ui.grab(3.f * s);
-        if (ui.selector(uiId(21, 0), foldBox, &fm, kFoldModeNames, kFoldModeCount))
+        if (ui.selector(uiId(UiRollFold, 0), foldBox, &fm, kFoldModeNames, kFoldModeCount))
             fold_ = (FoldMode)clampv(fm, 0, kFoldModeCount - 1);
         if (ui.hovered(foldBox.inset(-3.f * s)))
             ui.tip = fold_ == FoldMode::Key
@@ -1172,7 +1172,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             ui.tip = "drag up or down to set the clip's loop length in beats; "
                      "Shift drags finer";
         ui.grab(3.f * s);
-        if (ui.dragNumber(uiId(22, 0), lenBox, &clip.lengthBeats, 1.0, 512.0, 0.06, "%.0f beats",
+        if (ui.dragNumber(uiId(UiRollLength, 0), lenBox, &clip.lengthBeats, 1.0, 512.0, 0.06, "%.0f beats",
                           Align::Right, nullptr, 1.0)) {
             changed = true;
             lastEdit_ = kEditNote;

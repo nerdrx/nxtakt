@@ -25,6 +25,77 @@ inline u64 uiId(int kind, int a = 0, int b = 0) {
     return h ? h : 1;
 }
 
+// Every uiId kind in the app. Adding a widget family means adding a line
+// HERE — the ids are hashed, so a duplicate kind is silent misbehaviour and
+// not a compile error. This replaces the old "listed at its call site"
+// convention, which could not survive the call sites landing in eight files.
+//
+// The registry lives HERE, beside the hash it feeds, and not in app_internal.h
+// where it first landed: kinds are spent by the standalone editors (pianoroll,
+// arrange, autolane) as well as by the app_*.cpp shell, and App's private
+// header is exactly the thing those files exist to not include.
+//
+// THE NUMBERS ARE WRITTEN OUT, and the list is not dense. That is deliberate:
+// the registry caught up with a tree that already had widget families in it,
+// and each kept the number it was born with. Renumbering one to close a gap
+// would change every widget id in its file for no gain — a kind is a hash
+// input and nothing else. It is never saved, never displayed and never
+// compared across builds, so the only property it has to have is that no two
+// families share one.
+enum UiKind : int {
+    UiControlBar = 1, UiFileBrowser, UiTrackHead, UiClipGrid, UiSceneCol,
+    UiMixer, UiMasterStrip, UiClipDetail, UiDetailTab, UiPluginBrowser,
+    UiDeviceStrip, UiParamKnob, UiReturnStrip, UiUnused14, UiArrowGesture,
+    UiTempo = 16,
+    // The piano roll (pianoroll.cpp; the lane id doubles as AutoLaneView's
+    // default in autolane.h): the note grid and automation lane surfaces, the
+    // ruler's fold selector and loop-length field, and the lane bar's chooser /
+    // target / add / enable row.
+    UiRollSurface = 20,
+    UiRollFold    = 21,
+    UiRollLength  = 22,
+    UiRollLaneRow = 23,
+    // The arrangement (arrange.cpp): the timeline surface — ruler, lanes, clip
+    // grips and drag gestures — plus one kind for the expanded automation
+    // lanes and one for their headers' enable toggles.
+    UiArrange         = 24,
+    UiArrangeLane     = 25,
+    UiArrangeLaneHead = 26,
+    // The clip panel's placement fields (app_detail.cpp): start / length /
+    // offset / fades / gain / loop.
+    UiDetailPlacement = 27,
+    // Hover-tooltip hotspots on the device strip (app_devices.cpp): the
+    // refused-state tag, refused device names, sampler file chips.
+    UiDeviceTip = 31,
+    // Spectra's editor (app_spectra.cpp). Three families, at the numbers they
+    // were born with: the panel's own chrome (close button, the steppers'
+    // arrows, the filter and LFO segments, the preset arrows), one per knob
+    // keyed on the contract's parameter id, and the two Position troughs.
+    UiSpectraPanel  = 40,
+    UiSpectraKnob   = 41,
+    UiSpectraPos    = 42,
+    // The clip-detail footer rows (app_detail.cpp). These lived at raw 24/25,
+    // which arrange.cpp also hashes under -- uiId(24,0) was BOTH the arrange
+    // ruler and the KEY row's root selector, live in the same frame whenever
+    // the detail panel is open over the arrangement. Fresh kinds, named so the
+    // clash cannot come back by literal.
+    UiDetailKeyRow  = 43,
+    UiDetailNotes   = 44,
+    // The clip panel's LAUNCH row (app_detail.cpp) and the rack panel
+    // (app_devices.cpp). Both had helped themselves to raw 13, which is
+    // UiReturnStrip: uiId(13, 0) was the launch-probability field, return
+    // strip A's body AND the rack's close button at once. Same clash as
+    // 24/25's, same cure: fresh kinds, named.
+    UiDetailLaunch = 45,
+    UiRackPanel    = 46,
+    // The sampler's editor (app_sampler.cpp), in Spectra's shape and at the
+    // numbers it was born with: panel chrome (close, segment clusters, the
+    // preset arrows), one per knob, and the waveform region's handles.
+    UiSamplerPanel = 50,
+    UiSamplerKnob  = 51,
+    UiSamplerWave  = 52,
+};
+
 // ---------------------------------------------------------------------------
 // §6  Motion, in an immediate-mode UI
 //

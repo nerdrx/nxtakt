@@ -976,7 +976,7 @@ void App::drawReturnStrips(const Rect& r) {
 
         // Claimed first so the fader and the name field can take hot back --
         // the same last-setHot-wins trick the device boxes use.
-        const u64 id = uiId(13, i, 0);
+        const u64 id = uiId(UiReturnStrip, i, 0);
         const bool hot = ui_.setHot(id, col) && ui_.isHot(id);
         if (sel) rend_.rect(col, nx::violet.alpha(0.04f));
 
@@ -993,7 +993,7 @@ void App::drawReturnStrips(const Rect& r) {
         // blank until the bus is named. A DISPLAY choice, deliberately: writing
         // a letter into the model would make every set on disk carry four
         // return blocks it has no reason to (see project.cpp's `interesting`).
-        const u64 nameId = uiId(13, i, 1);
+        const u64 nameId = uiId(UiReturnStrip, i, 1);
         std::string shown = (rt.name == kReturnPlaceholder) ? std::string() : rt.name;
         if (ui_.textField(nameId, {head.x + 13 * s, head.y, head.w - 15 * s, head.h},
                           &shown, Col(0, 0, 0, 0), sel ? nx::text : nx::muted, Align::Left)) {
@@ -1022,7 +1022,7 @@ void App::drawReturnStrips(const Rect& r) {
                    nx::radiusXs * s);
 
         const f32 wasFader = rt.fader;
-        if (ui_.vFader(uiId(13, i, 2), fader, &rt.fader)) {
+        if (ui_.vFader(uiId(UiReturnStrip, i, 2), fader, &rt.fader)) {
             undoPointWith("return volume", rt.fader, wasFader);
             send(Cmd::ReturnVol, i, 0, faderToGain(rt.fader));
         }

@@ -268,7 +268,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 title.h - 8 * s}, tc);
 
     Rect closeR{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
-    if (ui_.button(uiId(50, 0, 0), closeR, "")) {
+    if (ui_.button(uiId(UiSamplerPanel, 0, 0), closeR, "")) {
         samplerOpenUid_ = 0;
         samplerForced_ = false;
         samplerWave_.reset();                    // stop holding the device's buffer
@@ -305,7 +305,8 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // Spectra: detailH_ has no splitter, so the panel gets a 155px box. The
     // hero takes a third of the width and the twenty controls take the rest, in
     // five sections whose rows line up across all of them.
-    Rect body{box.x + 6 * s, title.bottom() + 3 * s, box.w - 12 * s,
+    Rect body{box.x + lay::samplerPad * s, title.bottom() + 3 * s,
+              box.w - lay::samplerPad * 2.f * s,
               box.bottom() - title.bottom() - 9 * s};
     if (body.w < 48 * s || body.h < 48 * s) return;
 
@@ -318,20 +319,20 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     rowH = clampv(rowH, 34 * s, 62 * s);
     const f32 lblH = 11 * s;                   // the knob's own name
 
-    // Six sections, six columns. The sum plus five 8px gaps plus the two 6px
-    // pads is kSamplerPanelW in app_devices.cpp -- if one of these changes, so
-    // does that, and the panel would otherwise draw past its own card.
-    static const f32 kColW[6] = {360, 138, 138, 138, 152, 138};
-    const f32 colGap = 8 * s;
-    f32 colX[6];
+    // Six sections, six columns — lay::samplerColW, which is also what the
+    // device strip reserves the panel's width from.
+    constexpr int   kCols  = lay::samplerCols;
+    const     f32*  kColW  = lay::samplerColW;
+    const     f32   colGap = lay::samplerColGap * s;
+    f32 colX[kCols];
     {
         f32 x = body.x;
-        for (int i = 0; i < 6; ++i) { colX[i] = x; x += kColW[i] * s + colGap; }
+        for (int i = 0; i < kCols; ++i) { colX[i] = x; x += kColW[i] * s + colGap; }
     }
     const auto col = [&](int i) { return Rect{colX[i], body.y, kColW[i] * s, body.h}; };
     // Seams. §11: no solid dividers anywhere -- a hairline that fades at both
     // ends is the only legal one in the system.
-    for (int i = 1; i < 6; ++i)
+    for (int i = 1; i < kCols; ++i)
         rend_.hairlineV(colX[i] - colGap * 0.5f, body.y + 2 * s, body.bottom() - 2 * s);
 
     // --- the parameter access layer ----------------------------------------
@@ -381,7 +382,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             }
         }
         f32 v = has(id) ? inst->getParam(id) : st.def;
-        const u64 wid = uiId(51, id, uidKey);
+        const u64 wid = uiId(UiSamplerKnob, id, uidKey);
         const Rect kr{cell.x, cell.y, cell.w, cell.h - lblH};
         if (ui_.knobNx(wid, kr, &v, st)) commit(id, v, wid, label);
         microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, label,
@@ -410,7 +411,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const Rect seg{r0.x + segW * (f32)k, r0.y, segW, r0.h};
             if (k) rend_.hairlineV(seg.x, r0.y + 2 * s, r0.bottom() - 2 * s);
             const bool on = k == cur;
-            const u64 wid = uiId(50, 40 + id * 2 + k, uidKey);
+            const u64 wid = uiId(UiSamplerPanel, 40 + id * 2 + k, uidKey);
             if (ui_.segButton(wid, seg, on, nx::violet) && has(id))
                 commit(id, (f32)k, wid, what);
             microFit(ui_, fSmall_, ui_.lastRect, k ? onName : offName,
@@ -555,9 +556,9 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const f32 sx = xOf(st0), ex = xOf(en0);
             const Rect startHit{sx - hw, well.y, hw * 2.f, well.h};
             const Rect endHit  {ex - hw, well.y, hw * 2.f, well.h};
-            const u64 idStart = uiId(52, 1, uidKey);
-            const u64 idEnd   = uiId(52, 2, uidKey);
-            const u64 idBody  = uiId(52, 3, uidKey);
+            const u64 idStart = uiId(UiSamplerWave, 1, uidKey);
+            const u64 idEnd   = uiId(UiSamplerWave, 2, uidKey);
+            const u64 idBody  = uiId(UiSamplerWave, 3, uidKey);
 
             // The body, first and therefore lowest: a drag here slides the whole
             // region without changing its length. It claims only what the two
@@ -859,9 +860,9 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 rend_.line(b.cx() - k * d * 0.6f, b.cy() + k,
                            b.cx() + k * d * 0.6f, b.cy(), 1.1f * s, nx::muted);
             };
-            if (ui_.segButton(uiId(50, 60, uidKey), lb, false, nx::violet)) load(-1);
+            if (ui_.segButton(uiId(UiSamplerPanel, 60, uidKey), lb, false, nx::violet)) load(-1);
             chev(lb, true);
-            if (ui_.segButton(uiId(50, 61, uidKey), rb, false, nx::violet)) load(+1);
+            if (ui_.segButton(uiId(UiSamplerPanel, 61, uidKey), rb, false, nx::violet)) load(+1);
             chev(rb, false);
             microFit(ui_, fSmall_, {lb.right(), pr.y, rb.x - lb.right(), pr.h},
                      presetNameOf(*inst, samplerPreset_), nx::text, Align::Center, 2 * s);

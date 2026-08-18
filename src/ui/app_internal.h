@@ -56,47 +56,25 @@ inline constexpr f32 spectraPanelW = [] {
     for (int i = 0; i < spectraCols; ++i) w += spectraColW[i] + (i ? spectraColGap : 0.f);
     return w;
 }();
+
+// THE SAMPLER'S PANEL, same arrangement for the same reason: app_sampler.cpp
+// cuts the panel into these six columns, app_devices.cpp reserves the width
+// they come to, and the width is derived so there is nothing to keep in step.
+inline constexpr int samplerCols = 6;
+inline constexpr f32 samplerColW[samplerCols] = {360, 138, 138, 138, 152, 138};
+inline constexpr f32 samplerColGap = 8.f;
+inline constexpr f32 samplerPad    = 6.f;    // the card's own left / right inset
+inline constexpr f32 samplerPanelW = [] {
+    f32 w = samplerPad * 2.f;
+    for (int i = 0; i < samplerCols; ++i) w += samplerColW[i] + (i ? samplerColGap : 0.f);
+    return w;
+}();
 }
 
-// Every uiId kind in the app. Adding a widget family means adding a line
-// HERE — the ids are hashed, so a duplicate kind is silent misbehaviour and
-// not a compile error. This replaces the old "listed at its call site"
-// convention, which could not survive the call sites landing in eight files.
-//
-// THE NUMBERS ARE WRITTEN OUT, and the list is not dense. That is deliberate:
-// the registry is catching up with a tree that already had widget families in
-// it, and several of them were given raw numbers at their call sites before
-// this enum existed. Renumbering one to close a gap would change every widget
-// id in its file for no gain — a kind is a hash input and nothing else. It is
-// never saved, never displayed and never compared across builds, so the only
-// property it has to have is that no two families share one.
-//
-// STILL RAW, and filed rather than folded here: 20 (autolane.h, pianoroll.cpp),
-// 21–23 (pianoroll.cpp), 24–26 (arrange.cpp), 24, 25, 27 (app_detail.cpp), 31
-// (app_devices.cpp). Folding them is a mechanical edit at each call site in a
-// file this wave does not own. Note while passing that 24 and 25 appear in TWO
-// files, which is exactly the silent misbehaviour this enum exists to make
-// impossible — see the note filed against it.
-enum UiKind : int {
-    UiControlBar = 1, UiFileBrowser, UiTrackHead, UiClipGrid, UiSceneCol,
-    UiMixer, UiMasterStrip, UiClipDetail, UiDetailTab, UiPluginBrowser,
-    UiDeviceStrip, UiParamKnob, UiReturnStrip, UiUnused14, UiArrowGesture,
-    UiTempo = 16,
-    // Spectra's editor (app_spectra.cpp). Three families, at the numbers they
-    // were born with: the panel's own chrome (close button, the steppers'
-    // arrows, the filter and LFO segments, the preset arrows), one per knob
-    // keyed on the contract's parameter id, and the two Position troughs.
-    UiSpectraPanel  = 40,
-    UiSpectraKnob   = 41,
-    UiSpectraPos    = 42,
-    // The clip-detail footer rows (app_detail.cpp). These lived at raw 24/25,
-    // which arrange.cpp also hashes under -- uiId(24,0) was BOTH the arrange
-    // ruler and the KEY row's root selector, live in the same frame whenever
-    // the detail panel is open over the arrangement. Fresh kinds, named so the
-    // clash cannot come back by literal.
-    UiDetailKeyRow  = 43,
-    UiDetailNotes   = 44,
-};
+// The UiKind registry — every uiId kind in the app — lives in widgets.h,
+// beside the hash it feeds. It moved out of this header because kinds are
+// spent by the standalone editors (pianoroll, arrange, autolane) too, and
+// they exist to not include App's private glue.
 
 // The return buses, as the UI says them. Letters for the strips and the send
 // knobs; the undo labels are spelled out because that is what the status bar

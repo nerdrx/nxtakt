@@ -239,7 +239,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
         label(lbl, row);
         f64 tmp = *v;
         Rect dn{row.x + lblW, row.y, 90 * s, row.h};
-        if (ui_.dragNumber(uiId(27, id), dn, &tmp, lo, hi, 0.02, fmt)) {
+        if (ui_.dragNumber(uiId(UiDetailPlacement, id), dn, &tmp, lo, hi, 0.02, fmt)) {
             undoPoint("clip placement");
             *v = tmp;
             placed = true;
@@ -256,14 +256,14 @@ void App::drawArrangeClipDetail(const Rect& r) {
         label("GAIN", row);
         f64 db = gainToDb(m.gain);
         Rect dn{row.x + lblW, row.y, 70 * s, row.h};
-        if (ui_.dragNumber(uiId(27, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
+        if (ui_.dragNumber(uiId(UiDetailPlacement, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
                            Align::Center, nullptr, 0.0, /*def=*/0.0)) {
             undoPoint("clip gain");
             m.gain = dbToGain((f32)db);
             placed = true;
         }
         Rect lp{dn.right() + 6 * s, row.y, 52 * s, row.h};
-        if (ui_.button(uiId(27, 6), lp, "LOOP", m.loop, nx::violet)) {
+        if (ui_.button(uiId(UiDetailPlacement, 6), lp, "LOOP", m.loop, nx::violet)) {
             undoPoint("clip loop");
             m.loop = !m.loop;
             placed = true;
@@ -586,7 +586,7 @@ void App::drawClipDetail(const Rect& r) {
 
         f64 pct = m.prob * 100.0;
         Rect pr{row.x + lblW, row.y, 48 * s, row.h};
-        if (ui_.dragNumber(uiId(13, 0), pr, &pct, 0.0, 100.0, 0.4, "%.0f%%",
+        if (ui_.dragNumber(uiId(UiDetailLaunch, 0), pr, &pct, 0.0, 100.0, 0.4, "%.0f%%",
                            Align::Center, nullptr, 0.0, /*def=*/100.0)) {
             undoPoint("launch probability");
             m.prob = clampv(pct * 0.01, 0.0, 1.0);
@@ -595,7 +595,7 @@ void App::drawClipDetail(const Rect& r) {
 
         int fa = (int)m.followAction;
         Rect fr{pr.right() + 6 * s, row.y, 58 * s, row.h};
-        if (ui_.selector(uiId(13, 1), fr, &fa, kFollowNames, kFollowCount)) {
+        if (ui_.selector(uiId(UiDetailLaunch, 1), fr, &fa, kFollowNames, kFollowCount)) {
             undoPoint("follow action");
             m.followAction = (Follow)clampv(fa, 0, kFollowCount - 1);
             pushClip(selTrack_, selSlot_);
@@ -606,7 +606,7 @@ void App::drawClipDetail(const Rect& r) {
         // a tempo problem, not a musical choice.
         f64 fb = m.followBeats;
         Rect br{fr.right() + 6 * s, row.y, 52 * s, row.h};
-        if (ui_.dragNumber(uiId(13, 2), br, &fb, 0.0, 128.0, 0.06, "%.0f bt",
+        if (ui_.dragNumber(uiId(UiDetailLaunch, 2), br, &fb, 0.0, 128.0, 0.06, "%.0f bt",
                            Align::Center, "Auto", 1.0)) {
             undoPoint("follow length");
             m.followBeats = fb;
