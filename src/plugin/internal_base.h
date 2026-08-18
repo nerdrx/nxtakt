@@ -272,5 +272,93 @@ protected:
     int        maxBlock_ = kMaxBlock;
 };
 
+// ---------------------------------------------------------------------------
+// SPECTRA'S WAVETABLES, SO THE EDITOR CAN DRAW THE ONES THAT ARE SOUNDING
+//
+// The set is eight tables of thirty-two frames, generated once per process and
+// immutable for the life of it (src/plugin/spectra.cpp says how, and why it is
+// never freed). Until this existed the editor drew a hand-written approximation
+// of the same shapes and labelled it "illustration", because the only way
+// across the PluginInstance boundary is paramCount / paramInfo / getParam and
+// there is no sample port on it.
+//
+// This is the way across, and it is deliberately the smallest one that works:
+//
+//   * A CONST POINTER TO SHARED IMMUTABLE MEMORY. Reading it cannot change
+//     anything the audio thread sees, because there is nothing here to change:
+//     the set is written once, before it is published, and never again. No
+//     lock, no copy, no refcount, no lifetime question -- the set outlives
+//     every instance and the process both.
+//   * GUI THREAD. The editor calls it while drawing; the publication below
+//     happens in prepare(), which the contract puts on the same thread. It is
+//     not realtime-hostile either way (a load of one pointer), but the audio
+//     thread has no reason to call it and does not.
+//   * NOT ON THE PLUGIN CONTRACT. host.h describes any plugin in any format;
+//     this describes one instrument that happens to live in this tree. Putting
+//     a "publish your wavetable" virtual on PluginInstance would make every LV2
+//     and CLAP device in the program answer a question only this one is asked.
+//   * NULL BEFORE ANY SPECTRA HAS PREPARED. The tables are built by the first
+//     prepare() in the process, so a set with no Spectra in it never builds
+//     them and this returns null forever. A caller that cannot draw without
+//     them has to say so -- see app_spectra.cpp, which keeps its illustration
+//     for exactly this case and relabels itself when it falls back to it.
+// ---------------------------------------------------------------------------
+
+// One morphed frame at mip level 0, as a position between two stored frames.
+// This is the DSP's own frame interpolation (spRead in spectra.cpp: linear
+// across frames) with the phase and mip axes left off, because a display reads
+// whole frames at their stored length and has no pitch to pick a mip for.
+struct SpectraFrameView {
+    const f32* a = nullptr;      // the frame below the position, `len` floats
+    const f32* b = nullptr;      // the frame above it
+    f32        blend = 0.f;      // 0 = all a, 1 = all b
+    int        len = 0;          // samples in each, mip 0
+
+    bool valid() const { return a && b && len > 0; }
+    f32  at(int i) const { return a[i] + (b[i] - a[i]) * blend; }
+};
+
+// The set itself, as a view rather than as the class that owns it: four ints
+// and a pointer into memory somebody else will never free. Copying one is free
+// and copies nothing that matters.
+struct SpectraTableSet {
+    const f32* data = nullptr;   // tables * frames * stride floats
+    int tables = 0;              // 8
+    int frames = 0;              // 32
+    int len    = 0;              // samples in a mip-0 frame (2048)
+    int stride = 0;              // floats per frame across the whole mip chain
+
+    // Mip 0 of one stored frame. `len` floats, one cycle, peak-normalised by
+    // the generator -- every frame in the set is scaled so its widest mip
+    // reaches exactly 1, which is why a display can draw these without a
+    // normalising pass of its own.
+    const f32* frame(int t, int f) const {
+        return data + ((size_t)t * (size_t)frames + (size_t)f) * (size_t)stride;
+    }
+
+    // The frame pair a Position lands between, and how far between them it is.
+    // The clamping is the oscillator's, line for line, so what the editor draws
+    // is what the voice reads: the last frame is approached rather than
+    // stepped onto, because the pair is (f0, f0+1) and f0 stops at frames-2.
+    SpectraFrameView morph(int t, f32 pos) const {
+        SpectraFrameView v;
+        if (!data || tables <= 0 || frames <= 0 || len <= 0) return v;
+        t = t < 0 ? 0 : (t >= tables ? tables - 1 : t);
+        const f32 fp = clampv(pos, 0.f, 1.f) * (f32)(frames - 1);
+        int f0 = (int)fp;
+        if (f0 > frames - 2) f0 = frames - 2;
+        if (f0 < 0) f0 = 0;
+        const int f1 = f0 + 1 < frames ? f0 + 1 : f0;
+        v.a     = frame(t, f0);
+        v.b     = frame(t, f1);
+        v.blend = fp - (f32)f0;
+        v.len   = len;
+        return v;
+    }
+};
+
+// Null until the first Spectra in the process has prepare()d. See above.
+const SpectraTableSet* spectraTables();
+
 } // namespace detail
 } // namespace lat

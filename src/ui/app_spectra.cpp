@@ -7,6 +7,16 @@
 // two people, and the frozen table is the only thing that could keep them
 // agreeing without one waiting for the other.
 //
+// ONE EXCEPTION, and it is a narrow one: the hero display reads the real
+// wavetables through detail::spectraTables() (declared in
+// src/plugin/internal_base.h, never in spectra.cpp). That is a const view of
+// shared immutable memory and four integers of geometry -- no parameter id, no
+// range, no name, nothing the frozen table has an opinion about. The panel
+// still cannot see how a table is generated and still does not want to; what it
+// gained is the ability to draw the frames instead of a drawing of them. The
+// display falls back to its old illustration when the accessor returns null,
+// which is every process that has never instantiated a Spectra.
+//
 // ---------------------------------------------------------------------------
 // THE JUDGMENT, for this file (docs/DESIGN.md §4)
 //
@@ -52,6 +62,7 @@
 #include "app.h"
 #include "app_internal.h"
 #include "../gfx/gl.h"
+#include "../plugin/internal_base.h"    // detail::spectraTables() -- see above
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -122,23 +133,30 @@ void microFit(Ui& ui, const Font& f, const Rect& b, const char* s, const Col& c,
 }
 
 // ---------------------------------------------------------------------------
-// THE DISPLAYED WAVEFORM IS AN ILLUSTRATION, NOT A TAP
+// THE DISPLAYED WAVEFORM IS THE REAL ONE -- EXCEPT WHEN IT SAYS OTHERWISE
 //
-// Say it plainly, because a picture of a waveform in a synth implies it came
-// from the synth. It did not. The real tables are 32 frames x 2048 samples
-// generated inside the plugin at prepare(), they live on the far side of the
-// PluginInstance boundary, and that boundary has exactly three ways through it
-// -- paramCount, paramInfo, getParam. There is no sample port, and inventing
-// one for a picture would be a realtime obligation taken on for decoration.
+// It used to be an illustration, and the comment that stood here said so at
+// length: the tables lived on the far side of the PluginInstance boundary,
+// that boundary had exactly three ways through it (paramCount, paramInfo,
+// getParam), and what was drawn was the same FAMILY of shapes regenerated on
+// this side from the same two numbers the DSP morphs with.
 //
-// So what is drawn is the SAME FAMILY of shapes, generated here from the same
-// two numbers the DSP morphs with: the table index and the Position value. It
-// tells the truth about what Position does -- which shape you are between, and
-// which way it is heading -- and it is honestly wrong about the exact spectrum,
-// because the plugin's tables are band-limited per octave and these are not.
+// The plugin now publishes the set. detail::spectraTables() is a const pointer
+// to the eight tables the voices are reading -- 32 frames of 2048 samples each,
+// generated once per process and immutable -- and the hero display morphs
+// between the same frame pair, at the same blend, at mip 0. What is on screen
+// is the floats, not a drawing of them: band-limited where the real table is
+// band-limited, and wrong about nothing.
 //
-// If the plugin ever grows a way to publish its current frame, this function is
-// the one thing to delete.
+// WHAT SURVIVES OF THE OLD PATH, and why it is not deleted. The accessor is
+// null until some Spectra in the process has prepare()d, which is never in a
+// set that contains none -- and the panel can be opened on a non-Spectra by the
+// debug hook, in a program that has therefore built no tables at all. The
+// generator below is what is drawn then, and the label in the corner of the
+// well changes from "wavetable" to "illustration - no table set" so the two
+// states can never be confused for each other. It is the SAME family of shapes
+// as before, honestly wrong about the exact spectrum in the same way, and it is
+// now reached in one state instead of all of them.
 // ---------------------------------------------------------------------------
 inline f32 fracf(f32 x) { return x - std::floor(x); }
 
@@ -197,19 +215,69 @@ f32 specimenSample(int table, f32 pos, f32 x) {
     }
 }
 
-// One frame, sampled and normalised to fit the well. Normalising is honest
-// here: what the display is about is SHAPE, and an un-normalised PWM frame at
-// 0.95 is a hairline against the top of the box.
-void buildFrame(std::vector<f32>& out, int n, int table, f32 pos) {
-    out.resize((size_t)n);
-    f32 peak = 1e-6f;
-    for (int i = 0; i < n; ++i) {
-        const f32 v = specimenSample(table, pos, (f32)i / (f32)n);
-        out[(size_t)i] = v;
-        peak = std::max(peak, std::fabs(v));
+// ---------------------------------------------------------------------------
+// PEAK-PRESERVING DECIMATION
+//
+// A frame is 2048 samples and the well is a hundred-odd pixels wide, so twenty
+// samples have to become one column. STRIDING them -- keeping every twentieth
+// and dropping the rest -- is the obviously wrong answer, and wrong in a way
+// that is worse than blurry: a wavetable's character lives in its extremes, so
+// a saw loses its edge, the Digital table loses the steps that are its whole
+// point, and any frame whose top harmonic beats against the stride grows a
+// moire pattern that is nowhere in the audio. The display would be showing
+// something the instrument does not contain, which is the exact failure this
+// whole change was made to end.
+//
+// So each column reduces its own span to the two samples that matter, the
+// smallest and the largest, and emits BOTH -- in the order they occur, at the
+// position they occur at. Keeping the order and the position is what makes the
+// result a waveform and not an envelope: the polyline still runs left to right
+// through time and a ramp still draws as a ramp, it simply cannot miss a peak
+// on the way past. Cost is one pass over 2048 floats per trace, twice a frame.
+//
+// Output is (u, y) pairs, u in 0..1 across one cycle. The last pair closes the
+// cycle at u = 1 with the first sample again, which is not decoration: a frame
+// IS periodic, and a trace that stopped one sample short would leave a notch
+// against the right-hand edge of the well.
+// ---------------------------------------------------------------------------
+template <class Sample>
+void decimateFrame(std::vector<f32>& out, int cols, int n, const Sample& sample) {
+    out.clear();
+    if (cols < 1 || n < 1) return;
+    out.reserve((size_t)cols * 4 + 2);
+    for (int c = 0; c < cols; ++c) {
+        const int i0 = (int)((long long)c * n / cols);
+        int i1 = (int)((long long)(c + 1) * n / cols);
+        if (i1 <= i0) i1 = i0 + 1;
+        if (i1 > n) i1 = n;
+        int lo = i0, hi = i0;
+        f32 vlo = sample(i0), vhi = vlo;
+        for (int i = i0 + 1; i < i1; ++i) {
+            const f32 v = sample(i);
+            if (v < vlo) { vlo = v; lo = i; }
+            if (v > vhi) { vhi = v; hi = i; }
+        }
+        const bool loFirst = lo <= hi;
+        const int  ia = loFirst ? lo  : hi;
+        const int  ib = loFirst ? hi  : lo;
+        const f32  ya = loFirst ? vlo : vhi;
+        const f32  yb = loFirst ? vhi : vlo;
+        out.push_back((f32)ia / (f32)n); out.push_back(ya);
+        out.push_back((f32)ib / (f32)n); out.push_back(yb);
     }
+    out.push_back(1.f); out.push_back(sample(0));
+}
+
+// Scale a decimated trace to unit peak. Only the ILLUSTRATION needs this --
+// the real frames arrive unit-peak from the generator, which normalises every
+// one of them to its own widest mip. Applying it after decimation is exact
+// rather than approximate: decimation keeps the extremes, so the peak of what
+// is left is the peak of what there was.
+void normaliseTrace(std::vector<f32>& pts) {
+    f32 peak = 1e-6f;
+    for (size_t i = 1; i < pts.size(); i += 2) peak = std::max(peak, std::fabs(pts[i]));
     const f32 k = 1.f / peak;
-    for (f32& v : out) v *= k;
+    for (size_t i = 1; i < pts.size(); i += 2) pts[i] *= k;
 }
 
 // The ADSR curve, drawn from the four values and honest to the exponential
@@ -292,7 +360,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 title.h - 8 * s}, tc);
 
     Rect closeR{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
-    if (ui_.button(uiId(40, 0, 0), closeR, "")) {
+    if (ui_.button(uiId(UiSpectraPanel, 0, 0), closeR, "")) {
         spectraOpenUid_ = 0;
         spectraForced_ = false;
     }
@@ -332,7 +400,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // header / selector / two knob rows, and the whole thing lands inside the
     // strip's width with the file browser closed (Ctrl+B). Wider than the strip
     // it simply scrolls, like every other device box beside it.
-    Rect body{box.x + 6 * s, title.bottom() + 3 * s, box.w - 12 * s,
+    Rect body{box.x + lay::spectraPad * s, title.bottom() + 3 * s,
+              box.w - lay::spectraPad * 2.f * s,
               box.bottom() - title.bottom() - 9 * s};
     if (body.w < 48 * s || body.h < 48 * s) return;
 
@@ -345,20 +414,20 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     rowH = clampv(rowH, 34 * s, 62 * s);
     const f32 lblH = 11 * s;                   // the knob's own name
 
-    // Seven sections, seven columns. The sum plus six 8px gaps plus the two 6px
-    // pads is kSpectraPanelW in app_devices.cpp -- if one of these changes, so
-    // does that, and the panel would otherwise draw past its own card.
-    static const f32 kColW[7] = {144, 138, 138, 138, 204, 138, 152};
-    const f32 colGap = 8 * s;
-    f32 colX[7];
+    // Seven sections, seven columns — lay::spectraColW, which is also what the
+    // device strip reserves the panel's width from.
+    constexpr int   kCols  = lay::spectraCols;
+    const     f32*  kColW  = lay::spectraColW;
+    const     f32   colGap = lay::spectraColGap * s;
+    f32 colX[kCols];
     {
         f32 x = body.x;
-        for (int i = 0; i < 7; ++i) { colX[i] = x; x += kColW[i] * s + colGap; }
+        for (int i = 0; i < kCols; ++i) { colX[i] = x; x += kColW[i] * s + colGap; }
     }
     const auto col = [&](int i) { return Rect{colX[i], body.y, kColW[i] * s, body.h}; };
     // Seams. §11: no solid dividers anywhere -- a hairline that fades at both
     // ends is the only legal one in the system.
-    for (int i = 1; i < 7; ++i)
+    for (int i = 1; i < kCols; ++i)
         rend_.hairlineV(colX[i] - colGap * 0.5f, body.y + 2 * s, body.bottom() - 2 * s);
 
     // --- the parameter access layer ---------------------------------------
@@ -408,7 +477,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             }
         }
         f32 v = has(id) ? inst->getParam(id) : st.def;
-        const u64 wid = uiId(41, id, uidKey);
+        const u64 wid = uiId(UiSpectraKnob, id, uidKey);
         const Rect kr{cell.x, cell.y, cell.w, cell.h - lblH};
         if (ui_.knobNx(wid, kr, &v, st)) commit(id, v, wid, label);
         microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, label,
@@ -442,7 +511,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const auto step = [&](int d) {
             if (!live) return;
             const int n = ((idx + d) % count + count) % count;
-            const u64 wid = uiId(40, 30 + id, uidKey);
+            const u64 wid = uiId(UiSpectraPanel, 30 + id, uidKey);
             commit(id, (f32)n, wid, names == kTables ? "Table" : "Sync");
         };
         // Chevrons drawn rather than lettered: at twelve pixels the body font
@@ -455,9 +524,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             rend_.line(b.cx() - k * d * 0.6f, b.cy() + k, b.cx() + k * d * 0.6f, b.cy(),
                        1.1f * s, c);
         };
-        if (ui_.segButton(uiId(40, 31 + id, uidKey), lb, false, nx::violet)) step(-1);
+        if (ui_.segButton(uiId(UiSpectraPanel, 31 + id, uidKey), lb, false, nx::violet)) step(-1);
         chev(lb, true);
-        if (ui_.segButton(uiId(40, 32 + id, uidKey), rb, false, nx::violet)) step(+1);
+        if (ui_.segButton(uiId(UiSpectraPanel, 32 + id, uidKey), rb, false, nx::violet)) step(+1);
         chev(rb, false);
         const Rect nameR{lb.right(), r0.y, rb.x - lb.right(), r0.h};
         microFit(ui_, fSmall_, nameR, live ? names[idx] : absentText,
@@ -505,15 +574,40 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             rend_.hairlineH(dispR.x + 4 * s, dispR.right() - 4 * s, std::round(dispR.cy()));
 
             const Rect plot = dispR.insetXY(6 * s, 7 * s);
-            const int n = clampv((int)(plot.w / std::max(1.f, 1.4f * s)), 24, 512);
+            const int cols = clampv((int)(plot.w / std::max(1.f, 1.4f * s)), 24, 512);
+            // THE TABLES THEMSELVES, or null in a process that has never made a
+            // Spectra. Resolved once for the whole display so the two traces
+            // and the label below cannot disagree about which one they are.
+            const detail::SpectraTableSet* tset = detail::spectraTables();
+            // The illustration is sampled at the real frame length, so the two
+            // paths decimate identically and only the source differs.
+            constexpr int kIllusN = 2048;
+
             // B first, so A's trace reads on top of it: A is the one that is
             // always sounding.
             const auto trace = [&](int table, f32 pos, const Col& c0, f32 th) {
-                buildFrame(spectraWave_, n, table, pos);
-                f32 px = plot.x, py = plot.cy() - spectraWave_[0] * plot.h * 0.46f;
-                for (int i = 1; i < n; ++i) {
-                    const f32 qx = plot.x + plot.w * ((f32)i / (f32)(n - 1));
-                    const f32 qy = plot.cy() - spectraWave_[(size_t)i] * plot.h * 0.46f;
+                if (tset) {
+                    // The real frame pair, morphed at the same blend the voice
+                    // morphs at, at mip 0 -- the widest level, which is what a
+                    // display wants: it is the frame before any octave has been
+                    // taken off it for a note that has not been played yet.
+                    const detail::SpectraFrameView fv = tset->morph(table, pos);
+                    if (!fv.valid()) return;
+                    decimateFrame(spectraWave_, cols, fv.len,
+                                  [&](int i) { return fv.at(i); });
+                } else {
+                    decimateFrame(spectraWave_, cols, kIllusN, [&](int i) {
+                        return specimenSample(table, pos, (f32)i / (f32)kIllusN);
+                    });
+                    normaliseTrace(spectraWave_);
+                }
+                const size_t np = spectraWave_.size() / 2;
+                if (np < 2) return;
+                f32 px = plot.x + plot.w * spectraWave_[0];
+                f32 py = plot.cy() - spectraWave_[1] * plot.h * 0.46f;
+                for (size_t k = 1; k < np; ++k) {
+                    const f32 qx = plot.x + plot.w * spectraWave_[k * 2];
+                    const f32 qy = plot.cy() - spectraWave_[k * 2 + 1] * plot.h * 0.46f;
                     rend_.line(px, py, qx, qy, th, c0);
                     px = qx; py = qy;
                 }
@@ -532,10 +626,33 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             if (has(pBTable) && bLevel > 1e-4f)
                 ui_.microIn(fSmall_, {dispR.x + 16 * s, dispR.y + 1 * s, 40 * s, 10 * s},
                             "B", nx::violetSoft.alpha(0.9f), Align::Left, 0);
-            // And the honesty label. It is an illustration of Position, not a
-            // tap of the audio path, and the panel says so where it is drawn.
-            ui_.microIn(fSmall_, {dispR.x, dispR.bottom() - 11 * s, dispR.w - 6 * s, 10 * s},
-                        "illustration", nx::muted.alpha(0.35f), Align::Right, 0);
+            // And the label, which is where this display keeps its honesty.
+            // With the tables in hand there is nothing left to disclaim, so it
+            // says something useful instead: WHERE ON THE FRAME AXIS the morph
+            // is. Position reads 0.00 to 1.00 and the axis is 32 frames long,
+            // and this panel is the only place those two facts meet.
+            //
+            // Without them it goes back to the disclaimer. The corner has room
+            // for about twenty characters and the whole sentence is longer than
+            // that, so the label carries the WORD and the tooltip carries the
+            // sentence -- and the two states cannot be confused for each other
+            // either way, because a frame number and the word "illustration"
+            // are not two spellings of the same thing.
+            char wlabel[48];
+            if (tset)
+                snprintf(wlabel, sizeof wlabel, "frame %.1f / %d",
+                         (double)(posA * (f32)(tset->frames - 1)), tset->frames);
+            else
+                snprintf(wlabel, sizeof wlabel, "illustration only");
+            microFit(ui_, fSmall_,
+                     {dispR.x, dispR.bottom() - 11 * s, dispR.w - 6 * s, 10 * s},
+                     wlabel, nx::muted.alpha(0.35f), Align::Right, 0);
+            if (ui_.hovered(dispR))
+                ui_.tip = tset
+                    ? "The wavetable frames themselves, morphed between the two "
+                      "Position falls between - the same read the voices make"
+                    : "No wavetable set in this process, so this is a drawing of "
+                      "the same family of shapes and not the tables";
         }
 
         // The two Position troughs. THE control, per the contract, so it gets a
@@ -552,7 +669,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 return;
             }
             f32 v = clampv(inst->getParam(id), 0.f, 1.f);
-            const u64 wid = uiId(42, id, uidKey);
+            const u64 wid = uiId(UiSpectraPos, id, uidKey);
             if (ui_.trough(wid, tr, &v, 0.f, 1.f, nx::cyan, dim))
                 commit(id, v, wid, "Position");
             char buf[24];
@@ -616,7 +733,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const Rect seg{ftR.x + segW * (f32)k, ftR.y, segW, ftR.h};
             if (k) rend_.hairlineV(seg.x, ftR.y + 2 * s, ftR.bottom() - 2 * s);
             const bool on = k == ftype;
-            const u64 wid = uiId(40, 40 + k, uidKey);
+            const u64 wid = uiId(UiSpectraPanel, 40 + k, uidKey);
             if (ui_.segButton(wid, seg, on, nx::violet) && has(pFType))
                 commit(pFType, (f32)k, wid, "Filter Type");
             ui_.microIn(fSmall_, ui_.lastRect, kFilterType[k],
@@ -723,7 +840,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const Rect seg{shR.x + sw * (f32)k, shR.y, sw, shR.h};
             if (k) rend_.hairlineV(seg.x, shR.y + 2 * s, shR.bottom() - 2 * s);
             const bool on = k == shape;
-            const u64 wid = uiId(40, 50 + k, uidKey);
+            const u64 wid = uiId(UiSpectraPanel, 50 + k, uidKey);
             if (ui_.segButton(wid, seg, on, nx::violet) && has(pLfoShape))
                 commit(pLfoShape, (f32)k, wid, "LFO Shape");
             const Rect g = ui_.lastRect;
@@ -838,9 +955,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 rend_.line(b.cx() - k * d * 0.6f, b.cy() + k,
                            b.cx() + k * d * 0.6f, b.cy(), 1.1f * s, nx::muted);
             };
-            if (ui_.segButton(uiId(40, 60, uidKey), lb, false, nx::violet)) load(-1);
+            if (ui_.segButton(uiId(UiSpectraPanel, 60, uidKey), lb, false, nx::violet)) load(-1);
             chev(lb, true);
-            if (ui_.segButton(uiId(40, 61, uidKey), rb, false, nx::violet)) load(+1);
+            if (ui_.segButton(uiId(UiSpectraPanel, 61, uidKey), rb, false, nx::violet)) load(+1);
             chev(rb, false);
             microFit(ui_, fSmall_, {lb.right(), pr.y, rb.x - lb.right(), pr.h},
                      presetNameOf(*inst, spectraPreset_), nx::text, Align::Center);

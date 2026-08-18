@@ -637,18 +637,18 @@ void App::drawClipDetail(const Rect& r) {
 
         int root = clScaleRoot(ses_.scale.root);
         Rect rr_{row.x + lblW, row.y, 34 * s, row.h};
-        if (ui_.selector(uiId(24, 0), rr_, &root, rootNames, 12)) {
+        if (ui_.selector(uiId(UiDetailKeyRow, 0), rr_, &root, rootNames, 12)) {
             undoPoint("key");
             ses_.scale.root = clScaleRoot(root);
         }
         int mode = clScaleMode(ses_.scale.mode);
         Rect sr{rr_.right() + 6 * s, row.y, 90 * s, row.h};
-        if (ui_.selector(uiId(24, 1), sr, &mode, scaleNames, kScaleCount)) {
+        if (ui_.selector(uiId(UiDetailKeyRow, 1), sr, &mode, scaleNames, kScaleCount)) {
             undoPoint("scale");
             ses_.scale.mode = clScaleMode(mode);
         }
         Rect nr{sr.right() + 6 * s, row.y, 44 * s, row.h};
-        if (ui_.button(uiId(24, 2), nr, "SNAP", ses_.scale.snap, nx::violet)) {
+        if (ui_.button(uiId(UiDetailKeyRow, 2), nr, "SNAP", ses_.scale.snap, nx::violet)) {
             undoPoint("scale snap");
             ses_.scale.snap = !ses_.scale.snap;
         }
@@ -684,19 +684,19 @@ void App::drawClipDetail(const Rect& r) {
             for (int i = 0; i < kGridCount; ++i)
                 if (std::fabs(gridBeats[i] - roll_->quantGrid()) < 1e-9) { gi = i; break; }
             Rect gr{row.x + lblW, row.y, 52 * s, row.h};
-            if (ui_.selector(uiId(25, 0), gr, &gi, gridNames, kGridCount))
+            if (ui_.selector(uiId(UiDetailNotes, 0), gr, &gi, gridNames, kGridCount))
                 roll_->setQuantGrid(gridBeats[clampv(gi, 0, kGridCount - 1)]);
 
             // Strength. Live's "Amount": 100% snaps hard, anything less keeps
             // the part of a performance's timing that makes it one.
             f64 amt = (f64)roll_->quantStrength() * 100.0;
             Rect ar{gr.right() + 6 * s, row.y, 48 * s, row.h};
-            if (ui_.dragNumber(uiId(25, 1), ar, &amt, 0.0, 100.0, 0.4, "%.0f%%",
+            if (ui_.dragNumber(uiId(UiDetailNotes, 1), ar, &amt, 0.0, 100.0, 0.4, "%.0f%%",
                                Align::Center, nullptr, 0.0, /*def=*/0.0))
                 roll_->setQuantStrength((f32)(amt * 0.01));
 
             Rect qb{ar.right() + 6 * s, row.y, 44 * s, row.h};
-            if (ui_.button(uiId(25, 2), qb, "APPLY")) {
+            if (ui_.button(uiId(UiDetailNotes, 2), qb, "APPLY")) {
                 const ClipModel was = m;
                 if (roll_->quantizeSelected(m)) {
                     undoPointWith("quantize", m, was);
@@ -720,7 +720,7 @@ void App::drawClipDetail(const Rect& r) {
             ui_.segCluster({dn.x, dn.y, up.right() - dn.x, dn.h});
             rend_.hairlineV(up.x, dn.y + 3 * s, dn.bottom() - 3 * s);
 
-            if (ui_.button(uiId(25, 3), lg, "LEGATO")) {
+            if (ui_.button(uiId(UiDetailNotes, 3), lg, "LEGATO")) {
                 const ClipModel was = m;
                 if (roll_->legatoSelected(m)) {
                     undoPointWith("legato", m, was);
@@ -729,7 +729,7 @@ void App::drawClipDetail(const Rect& r) {
             }
             if (ui_.hovered(lg))
                 ui_.tip = "Stretch each note to where the next one begins";
-            if (ui_.button(uiId(25, 4), dp, "DUP")) {
+            if (ui_.button(uiId(UiDetailNotes, 4), dp, "DUP")) {
                 const ClipModel was = m;
                 if (roll_->duplicateSelected(m)) {
                     undoPointWith("duplicate notes", m, was);
@@ -741,7 +741,7 @@ void App::drawClipDetail(const Rect& r) {
                           "the whole loop instead)";
             // Transpose by a semitone each way. An octave is Shift+Up/Down on the
             // keyboard already, so the buttons cover what the keyboard does not.
-            if (ui_.segButton(uiId(25, 5), dn, false, nx::violet)) {
+            if (ui_.segButton(uiId(UiDetailNotes, 5), dn, false, nx::violet)) {
                 const ClipModel was = m;
                 if (roll_->transposeSelected(m, -1)) {
                     undoPointWith("transpose", m, was);
@@ -749,7 +749,7 @@ void App::drawClipDetail(const Rect& r) {
                 }
             }
             ui_.microIn(fSmall_, ui_.lastRect, "-", nx::muted, Align::Center);
-            if (ui_.segButton(uiId(25, 6), up, false, nx::violet)) {
+            if (ui_.segButton(uiId(UiDetailNotes, 6), up, false, nx::violet)) {
                 const ClipModel was = m;
                 if (roll_->transposeSelected(m, 1)) {
                     undoPointWith("transpose", m, was);

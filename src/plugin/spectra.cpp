@@ -66,6 +66,13 @@
 // Interpolation is linear in all three axes, as the contract says: two samples
 // per frame, two frames per mip, two mips.
 //
+// THE EDITOR DRAWS THESE, and the bottom of this file is how. spectraTables()
+// (declared in internal_base.h) hands out a const view of the set once the
+// first prepare() has built it, so the panel's hero display is a read of the
+// same floats the voices read rather than a picture of the same idea. It adds
+// no lock, no copy and no mutation: the set was already immutable and already
+// shared, and the accessor only says where it is.
+//
 // ---------------------------------------------------------------------------
 // DETERMINISM, which is a gate and not an aspiration
 //
@@ -113,6 +120,7 @@ namespace lat { namespace detail { /* see internal_devices.cpp */ } }
 #include "internal_base.h"
 #include "internal_dsp.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -415,6 +423,54 @@ const SpectraTables& spTables() {
 }
 
 // ---------------------------------------------------------------------------
+// The set as the EDITOR sees it -- see the declaration in internal_base.h for
+// what this is, what it is not, and why it is not on the plugin contract.
+//
+// Two statics and one store, and each of the three is chosen rather than
+// reached for:
+//
+//   * spView() is a function-local static, so the view is built exactly once
+//     however many instances prepare() at once, by the same rule that makes
+//     spTables() itself safe. It holds the geometry the anonymous namespace
+//     above owns (kSpFrames, kSpLen[0], kSpStride) so that the header does not
+//     have to, and so that a change to the mip layout cannot leave a second
+//     copy of those numbers behind in src/ui.
+//
+//   * RELEASE / ACQUIRE, and not the relaxed spelling the parameter array uses.
+//     That is not inconsistency, it is the difference between the two things:
+//     a parameter store publishes a VALUE, which is atomic on its own, and this
+//     store publishes ten megabytes of TABLE written before it. Release on the
+//     store and acquire on the load are what carry those writes to a reader on
+//     another thread; relaxed would let it see the pointer and stale memory
+//     behind it. Both compile to the plain load and store on x86-64 and to one
+//     cheap barrier on aarch64, so the cost of being right here is nil.
+//
+//   * Publication is IDEMPOTENT and adds no mutation to anything the audio
+//     thread reads. The tables themselves are untouched by all of this: they
+//     are built once, by the same call that was already there, and this only
+//     hands out their address.
+// ---------------------------------------------------------------------------
+
+std::atomic<const SpectraTableSet*> gSpPublished{nullptr};
+
+const SpectraTableSet& spView() {
+    static const SpectraTableSet v = [] {
+        SpectraTableSet s;
+        s.data   = spTables().d.data();
+        s.tables = kSpTables;
+        s.frames = kSpFrames;
+        s.len    = kSpLen[0];
+        s.stride = kSpStride;
+        return s;
+    }();
+    return v;
+}
+
+// GUI thread, from prepare(). Called once per instance and cheap after the
+// first: a compare, and a store of a pointer that is already what is there.
+void spPublish() { gSpPublished.store(&spView(), std::memory_order_release); }
+
+// ---------------------------------------------------------------------------
 // Small realtime helpers
 // ---------------------------------------------------------------------------
 
@@ -693,8 +749,12 @@ public:
         maxBlock_ = maxBlock > 0 ? maxBlock : kMaxBlock;
 
         // GUI thread. The one allocation in the device, and only the first
-        // instance in the process pays for it.
+        // instance in the process pays for it. The second line publishes the
+        // same set for the editor to draw; it allocates nothing and mutates
+        // nothing, and it is here rather than in the constructor because the
+        // set does not exist until this line has run.
         tbl_ = &spTables();
+        spPublish();
 
         for (Voice& v : voices_) v = Voice{};
         nPend_    = 0;
@@ -1442,6 +1502,17 @@ PluginDesc spectraDesc() {
 }
 
 } // namespace
+
+// The one symbol this file exports, and the only thing outside src/plugin that
+// knows Spectra's tables exist. Declared in internal_base.h; everything it
+// returns is const and shared, so there is nothing here to synchronise beyond
+// the acquire that pairs with spPublish()'s release.
+//
+// Null before the first prepare() in the process, and non-null forever after.
+const SpectraTableSet* spectraTables() {
+    return gSpPublished.load(std::memory_order_acquire);
+}
+
 } // namespace detail
 } // namespace lat
 

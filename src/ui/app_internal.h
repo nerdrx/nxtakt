@@ -36,17 +36,66 @@ inline constexpr f32 returnW     = 54.f;
 // still shows twice the scenes a default set has.
 inline constexpr f32 mixerH      = 186.f;
 inline constexpr f32 gutter      = 1.f;
+
+// SPECTRA'S PANEL, which is two files' business and therefore neither file's
+// to keep privately. app_spectra.cpp cuts the panel into these seven columns;
+// app_devices.cpp has to reserve the width they come to BEFORE the panel is
+// drawn, because the device strip works out its scroll extent first.
+//
+// It used to be two numbers — this array in app_spectra.cpp and a literal 1112
+// in app_devices.cpp — with a comment on each pointing at the other and asking
+// to be kept in step. The width is now DERIVED from the columns, so there is
+// one number, nothing to keep in step, and nothing left for those comments to
+// say. Change a column and the strip reserves the right space by construction.
+inline constexpr int spectraCols = 7;
+inline constexpr f32 spectraColW[spectraCols] = {144, 138, 138, 138, 204, 138, 152};
+inline constexpr f32 spectraColGap = 8.f;
+inline constexpr f32 spectraPad    = 6.f;    // the card's own left / right inset
+inline constexpr f32 spectraPanelW = [] {
+    f32 w = spectraPad * 2.f;
+    for (int i = 0; i < spectraCols; ++i) w += spectraColW[i] + (i ? spectraColGap : 0.f);
+    return w;
+}();
 }
 
 // Every uiId kind in the app. Adding a widget family means adding a line
 // HERE — the ids are hashed, so a duplicate kind is silent misbehaviour and
 // not a compile error. This replaces the old "listed at its call site"
 // convention, which could not survive the call sites landing in eight files.
+//
+// THE NUMBERS ARE WRITTEN OUT, and the list is not dense. That is deliberate:
+// the registry is catching up with a tree that already had widget families in
+// it, and several of them were given raw numbers at their call sites before
+// this enum existed. Renumbering one to close a gap would change every widget
+// id in its file for no gain — a kind is a hash input and nothing else. It is
+// never saved, never displayed and never compared across builds, so the only
+// property it has to have is that no two families share one.
+//
+// STILL RAW, and filed rather than folded here: 20 (autolane.h, pianoroll.cpp),
+// 21–23 (pianoroll.cpp), 24–26 (arrange.cpp), 24, 25, 27 (app_detail.cpp), 31
+// (app_devices.cpp). Folding them is a mechanical edit at each call site in a
+// file this wave does not own. Note while passing that 24 and 25 appear in TWO
+// files, which is exactly the silent misbehaviour this enum exists to make
+// impossible — see the note filed against it.
 enum UiKind : int {
     UiControlBar = 1, UiFileBrowser, UiTrackHead, UiClipGrid, UiSceneCol,
     UiMixer, UiMasterStrip, UiClipDetail, UiDetailTab, UiPluginBrowser,
     UiDeviceStrip, UiParamKnob, UiReturnStrip, UiUnused14, UiArrowGesture,
-    UiTempo, UiKindCount
+    UiTempo = 16,
+    // Spectra's editor (app_spectra.cpp). Three families, at the numbers they
+    // were born with: the panel's own chrome (close button, the steppers'
+    // arrows, the filter and LFO segments, the preset arrows), one per knob
+    // keyed on the contract's parameter id, and the two Position troughs.
+    UiSpectraPanel  = 40,
+    UiSpectraKnob   = 41,
+    UiSpectraPos    = 42,
+    // The clip-detail footer rows (app_detail.cpp). These lived at raw 24/25,
+    // which arrange.cpp also hashes under -- uiId(24,0) was BOTH the arrange
+    // ruler and the KEY row's root selector, live in the same frame whenever
+    // the detail panel is open over the arrangement. Fresh kinds, named so the
+    // clash cannot come back by literal.
+    UiDetailKeyRow  = 43,
+    UiDetailNotes   = 44,
 };
 
 // The return buses, as the UI says them. Letters for the strips and the send
@@ -62,9 +111,9 @@ inline const char* const kReturnPlaceholder = "Return";
 
 // The undo gesture the auto-repeating arrow keys hold while a note is being
 // nudged. Widget gestures are identified by the widget's own id, so this only
-// has to avoid colliding with one: every uiId `kind` in use is listed at its
-// call site, and 15 is not one of them.
-inline const u64 kArrowGesture = uiId(15, 0);
+// has to avoid colliding with one — which is what UiArrowGesture above is: a
+// kind reserved for this and drawn by nothing.
+inline const u64 kArrowGesture = uiId(UiArrowGesture, 0);
 
 inline f64 nowSeconds() {
     using namespace std::chrono;
