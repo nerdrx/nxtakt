@@ -322,6 +322,16 @@ static void testNothingMovesInTime() {
     s.loopStart = 8.0;
     s.loopEnd   = 16.0;
     s.loopOn    = true;
+    // MARKERS ARE THE THIRD THING ON THIS LIST, and they are on it for exactly
+    // the reason the item and the brace are: a locator names a POSITION, a
+    // position is a beat, and re-barring a piece may change which bar a flag is
+    // drawn over but must never change where it points. A marker map in bars
+    // would have been the easy mistake -- signature changes are in bars, and
+    // markers are shaped like them everywhere else in session.h.
+    s.addMarker(0.0,   "Intro");
+    s.addMarker(8.0,   "Verse");
+    s.addMarker(13.25, "off the grid");
+    s.addMarker(32.0,  "Outro");
 
     std::vector<f64> beforeStart, beforeEnd;
     for (const ArrangeClip& c : s.tracks[0].arrange) {
@@ -329,6 +339,11 @@ static void testNothingMovesInTime() {
         beforeEnd.push_back(c.end());
     }
     const f64 loopA = s.loopStart, loopB = s.loopEnd;
+    std::vector<f64> markerBefore, markerBarBefore;
+    for (const Marker& m : s.markers) {
+        markerBefore.push_back(m.beat);
+        markerBarBefore.push_back(s.barOfBeat(m.beat));
+    }
     // Where each item DISPLAYS, before.
     std::vector<f64> barBefore;
     for (const ArrangeClip& c : s.tracks[0].arrange) barBefore.push_back(s.barOfBeat(c.start));
@@ -358,6 +373,71 @@ static void testNothingMovesInTime() {
     // still beat 8.
     check(std::fabs(s.beatOfBar(s.barOfBeat(8.0)) - 8.0) < 1e-9,
           "beat 8 round-trips through the new map");
+
+    // The markers, the same two ways round.
+    bool mkMoved = false, mkRenumbered = false;
+    for (size_t i = 0; i < s.markers.size(); ++i) {
+        if (std::fabs(s.markers[i].beat - markerBefore[i]) > 0.0) mkMoved = true;
+        if (std::fabs(s.barOfBeat(s.markers[i].beat) - markerBarBefore[i]) > 1e-9)
+            mkRenumbered = true;
+    }
+    check(!mkMoved, "a signature change moves no marker in time");
+    check(mkRenumbered, "...but the bars the flags are DRAWN over did change");
+    check(s.markers.size() == 4, "the re-bar dropped no marker");
+}
+
+// ---------------------------------------------------------------------------
+// 5b. the marker band's own arithmetic
+//
+// The two things about a marker that the RULER depends on and that nothing else
+// in this file would catch: the list it draws is sorted and unique (two flags on
+// one beat is one unreachable flag), and the beat a flag is drawn at is the beat
+// the axis and the engine both agree on.
+// ---------------------------------------------------------------------------
+
+static void testMarkers() {
+    Session s;
+    s.setSignature(0, 4, 4);
+    s.setSignature(4, 7, 8);
+
+    // Built out of order and with a duplicate, exactly as a hand-edited file
+    // could hand them over.
+    s.markers.push_back(Marker{1, 32.0, "late", 0});
+    s.markers.push_back(Marker{2, 8.0,  "early", 0});
+    s.markers.push_back(Marker{3, 32.0, "same beat", 0});
+    s.normalizeMarkers();
+    check(s.markers.size() == 2, "two markers on one beat become one");
+    check(s.markers[0].beat == 8.0 && s.markers[1].name == "same beat",
+          "sorted by beat, and the duplicate resolves last-wins");
+
+    // A flag is drawn at beatToX(marker.beat), and the ruler's bar lines come
+    // out of the same axis -- so "the flag sits on the bar line" is a statement
+    // about the SIGNATURE MAP and not about the drawing code. Beat 16 in this
+    // map is a bar line; the flag placed there converts back to it exactly.
+    const f64 barOf16 = s.barOfBeat(16.0);
+    check(std::fabs(barOf16 - std::floor(barOf16 + 0.5)) < 1e-9,
+          "beat 16 is a bar line in the 4/4 -> 7/8 map");
+    s.addMarker(16.0, "on the line");
+    const Marker* m = s.markerAtBeat(16.0);
+    check(m != nullptr, "markerAtBeat finds it");
+    check(m && std::fabs(s.beatOfBar(s.barOfBeat(m->beat)) - m->beat) < 1e-9,
+          "a flag on a bar line converts back to its own beat");
+
+    // A marker past the last signature change still lands where the map says.
+    s.addMarker(100.0, "far");
+    const Marker* far = s.markerAtBeat(100.0);
+    check(far && std::fabs(s.beatOfBar(s.barOfBeat(far->beat)) - far->beat) < 1e-9,
+          "a flag past the last change round-trips too");
+
+    // The normalizer is idempotent, which is what makes calling it from the
+    // parser, from every edit and from the writer safe.
+    const std::vector<Marker> once = normalizedMarkers(s.markers);
+    const std::vector<Marker> twice = normalizedMarkers(once);
+    bool same = once.size() == twice.size();
+    for (size_t i = 0; same && i < once.size(); ++i)
+        if (once[i].uid != twice[i].uid || once[i].beat != twice[i].beat ||
+            once[i].name != twice[i].name) same = false;
+    check(same, "normalizedMarkers is idempotent");
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +485,7 @@ int main() {
     testForwarding();
     testReadout();
     testNothingMovesInTime();
+    testMarkers();
     testEditor();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

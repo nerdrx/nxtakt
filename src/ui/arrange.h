@@ -24,7 +24,21 @@ namespace lat {
 
 // Layout, in logical px (multiply by the DPI scale).
 inline constexpr f32 kArrHeaderW   = 138.f;  // the track column on the left
-inline constexpr f32 kArrRulerH    = 20.f;
+// The ruler is TWO BANDS, and the split is the whole of how the two things that
+// want to sit on a timeline position stop fighting over one strip of pixels:
+//
+//   * the MARKER band, on top, carries the locators' flags;
+//   * the BAR band, below, keeps everything it has always had -- the bar
+//     numbers, the signature tags, the loop brace, the locate click.
+//
+// Two bands and therefore two hot rects, which is the disambiguation. A
+// right-click in the lower band still adds or removes a signature change, and
+// it cannot be confused with the right-click that deletes a flag, because the
+// two gestures are not aimed at the same pixels. Nothing is modal and nothing
+// asks which one you meant.
+inline constexpr f32 kArrRulerH    = 20.f;   // the bar band, unchanged
+inline constexpr f32 kArrMarkerH   = 15.f;   // the marker band, above it
+inline constexpr f32 kArrRulerTotal = kArrRulerH + kArrMarkerH;
 // An automation lane needs enough height to aim at and no more (§7.4).
 inline constexpr f32 kArrAutoLaneH = 44.f;
 inline constexpr f32 kArrMinLaneH  = 26.f;
@@ -57,6 +71,18 @@ inline constexpr f32 kArrFadeShare = 0.4f;
 // fresh brace from that point, so the only way to move one end was to redraw
 // the whole thing. This is the zone those uprights always looked like they had.
 inline constexpr f32 kArrLoopGrab  = 5.f;
+// A marker flag's zone. THE EIGHT-PIXEL FLOOR, applied to a thing whose drawn
+// width is its NAME: a flag called "A" is four pixels of text and would be
+// unhittable at any zoom, so the zone is widened to the floor around the pole
+// rather than being whatever the label happened to measure. The slop reaches
+// outside it for kArrEdgeSlop's reason -- the pixels just beside a flag are
+// pixels a hand aiming at that flag lands on -- and it is what makes two flags
+// a few beats apart still separable: nearest-pole wins inside the overlap.
+inline constexpr f32 kArrMarkerGrab = 8.f;
+inline constexpr f32 kArrMarkerSlop = 3.f;
+// How wide one flag may get before its name is truncated. Past this a single
+// long name would cover the bars either side of it and hide its neighbours.
+inline constexpr f32 kArrMarkerMaxW = 116.f;
 // Default zoom: one bar is 64 logical px, which fits about 25 bars in a
 // 1600 px window and is the scale an arrangement is usually looked at.
 inline constexpr f32 kArrZoomDefault = 16.f;
@@ -209,6 +235,94 @@ public:
     // draw -- so Ctrl+E works with the mouse outside the window.
     f64  cursorBeat() const { return cursorBeat_; }
 
+    // --- markers (locators) -------------------------------------------------
+    //
+    // WHY THESE ARE ON THE VIEW AND NOT IN ArrangeContext, which is where they
+    // plainly belong. The context is built and drained in app_chrome.cpp
+    // (buildArrangeContext / arrangeCommit), and this wave does not own that
+    // file. The precedent is exactly the one the signature publisher set two
+    // waves ago and states over syncSignatures below -- state that belongs on
+    // App, parked one seam over until one agent owns both files -- and the same
+    // note applies: `markers` becomes an ArrangeContext field and the request
+    // below becomes three more of them the moment that is true. Nothing else
+    // about the design changes when it moves.
+    //
+    // The list is BORROWED and READ-ONLY, for the reason ctx.sig is borrowed:
+    // the view draws it and asks for edits, the caller owns it, and a view that
+    // mutated it would have to take the undo point itself. Rebind every frame;
+    // an undo replaces the session's contents under it.
+    void bindMarkers(const std::vector<Marker>* m) { markers_ = m; }
+    // THE QUEUED JUMP. A click on a flag while the transport is running does not
+    // move the playhead: it asks for a move AT THE NEXT LAUNCH QUANTUM, which is
+    // the same boundary a clip launch waits for and the reason a locator is
+    // usable in a performance at all.
+    //
+    // The pending request is held HERE for the reason markers_ is bound here --
+    // app.h is one seam over and this wave does not own it -- and it earns its
+    // keep meanwhile by being what the cyan ring is drawn from. The POLICY is
+    // entirely the caller's: it decides whether a jump is immediate or queued,
+    // it computes the boundary, and it is the only thing that sends a command.
+    // This holds three numbers and answers one question about them.
+    void queueJump(u64 uid, f64 beat, f64 fireBeat, f64 nowBeat) {
+        queuedMarker_ = uid; queuedBeat_ = beat;
+        queuedFire_ = fireBeat; queuedFrom_ = nowBeat;
+    }
+    void clearJump() { queuedMarker_ = 0; }
+    u64  queuedMarker() const { return queuedMarker_; }
+    f64  queuedFire() const { return queuedFire_; }
+    // True ONCE, on the first frame `now` has reached the boundary; the queue is
+    // cleared in the same breath so a slow frame cannot fire it twice.
+    bool takeDueJump(f64 now, f64* outBeat) {
+        if (!queuedMarker_ || now + 1e-9 < queuedFire_) return false;
+        if (outBeat) *outBeat = queuedBeat_;
+        queuedMarker_ = 0;
+        return true;
+    }
+    // The playhead went BACKWARDS past where the queue was armed -- a loop wrap,
+    // another locate, a stop. The boundary this queue is waiting for may now
+    // never arrive (a quantum longer than the loop is the ordinary way that
+    // happens), and a cyan ring that waits forever is worse than a cancelled
+    // jump, because it says something is about to occur and nothing ever does.
+    bool jumpOverrun(f64 now) const {
+        return queuedMarker_ != 0 && now + 1e-9 < queuedFrom_;
+    }
+
+    // A jump asked for by the KEYBOARD rather than by the pointer, routed into
+    // the same request the band produces so that "what a jump does" has one
+    // implementation and not two. handleShortcuts runs before the view is drawn
+    // and the request is drained after it, so both arrive in the same frame.
+    void requestJump(u64 uid) {
+        markerReq_ = MarkerReq{};
+        markerReq_.kind = MarkerReq::Kind::Jump;
+        markerReq_.uid  = uid;
+    }
+
+    // What the ruler's marker band asked for this frame. AT MOST ONE, because
+    // one pointer can only do one thing at a time, and a request rather than an
+    // edit for `ctx.sigBar`'s reason: the undo point has to be taken before the
+    // model moves and only the caller can take one.
+    struct MarkerReq {
+        enum class Kind { None, Add, Remove, Move, Rename, Jump };
+        Kind kind = Kind::None;
+        u64  uid  = 0;          // Remove / Move / Rename / Jump
+        f64  beat = 0.0;        // Add / Move
+        std::string name;       // Rename
+        // Non-zero while a DRAG is producing Moves. The caller coalesces its
+        // undo entry on it, so one drag across the ruler is one entry -- the
+        // same id the item drags already hand out through gesture().
+        u64  gesture = 0;
+    };
+    MarkerReq takeMarkerReq() {
+        MarkerReq r = markerReq_;
+        markerReq_ = MarkerReq{};
+        return r;
+    }
+    // The selected flag, so a caller that wants to say something about it can.
+    // Settable for the reason selectItem is (§7.7): nothing inside gamescope can
+    // click a flag, and a screenshot of a selected one is a check.
+    u64  selectedMarker() const { return selMarker_; }
+    void selectMarker(u64 uid) { selMarker_ = uid; }
+
     // --- headless hooks (§7.7) ---------------------------------------------
     // Nothing inside gamescope can click an item, so the selection is settable.
     void selectItem(int track, u64 uid) { selTrack_ = track; selItem_ = uid; }
@@ -249,7 +363,7 @@ private:
     // measured from the values the item had at the press -- so a drag is
     // absolute against its own start and cannot accumulate rounding.
     enum class Drag {
-        None, Move, TrimL, TrimR, FadeIn, FadeOut, LaneH, Loop
+        None, Move, TrimL, TrimR, FadeIn, FadeOut, LaneH, Loop, Marker
     } drag_ = Drag::None;
     bool moved_ = false;              // past the movement threshold; see pendingEdit()
     u64  gesture_ = 0;
@@ -267,6 +381,25 @@ private:
     // be a brace rather than a locate.
     f64  loopAnchor_ = 0.0;
     bool loopMoved_ = false;
+
+    // The markers. `markers_` is borrowed and rebound every frame; everything
+    // else here is the view's own and survives across frames because a selection
+    // and a drag have to.
+    const std::vector<Marker>* markers_ = nullptr;
+    u64  selMarker_    = 0;
+    u64  queuedMarker_ = 0;      // 0 when no jump is waiting on the quantum
+    f64  queuedBeat_   = 0.0;    // where it will land
+    f64  queuedFire_   = 0.0;    // the boundary it lands on
+    f64  queuedFrom_   = 0.0;    // the playhead when it was armed; see jumpOverrun
+    u64  dragMarker_   = 0;      // the flag Drag::Marker is holding
+    f64  markerGrab_   = 0.0;    // cursor beat - marker beat, at the press
+    f64  markerOrig_   = 0.0;    // where it was at the press; see origStart_
+    // The inline rename. The buffer is the view's because Ui::textField writes
+    // into whatever it is given and the marker list here is read-only -- so the
+    // field edits a copy and the COMMIT is what becomes a request.
+    u64  renameMarker_ = 0;
+    std::string renameBuf_;
+    MarkerReq markerReq_;
 
     const char* lastEdit_ = "arrangement edit";
     const char* pendingEdit_ = nullptr;

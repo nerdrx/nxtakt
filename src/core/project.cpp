@@ -181,7 +181,12 @@ namespace {
 // distinguishable, or a typo loads as the value that hides it. No file this
 // program has ever written has a fifth field, so nothing that used to load
 // stops loading.
-constexpr int kFormatVersion = 9;
+// v10 adds the markers (locators), one sparse `marker <beat> <color> <name...>`
+// line each, top level beside `loop`. See project.h for the full note and for
+// why the name is the tail of the line rather than a field in the middle of it.
+// A set with no markers writes none, so it differs from its v9 self by exactly
+// the header line.
+constexpr int kFormatVersion = 10;
 constexpr int kMinFormatVersion = 1;
 
 // What saveProject writes. Reading accepts this and every spelling in
@@ -994,6 +999,24 @@ struct Scan {
         while (*q == ' ' || *q == '\t') ++q;
         return *q == '\0';
     }
+    // Everything left, as the free-text TAIL of a line: exactly ONE separator is
+    // eaten and the rest is returned verbatim, still escaped. Only `marker`
+    // needs this, because it is the one line with a free-text field that has
+    // numbers in front of it -- every other one (`name`, `plugin`, `state`,
+    // `autolane`) takes the whole remainder of the line and so is handled by the
+    // caller's `rest` directly.
+    //
+    // ONE separator and not "skip whitespace", which is the whole point: the
+    // scan above stopped on the space that ends the last number, so that space
+    // is punctuation and belongs to the format, while a SECOND one is a
+    // character the user typed at the front of the name. `name` preserves a
+    // leading space for the same reason, and a name that round-trips has to
+    // include the daft ones.
+    std::string tail() const {
+        const char* q = p;
+        if (*q == ' ' || *q == '\t') ++q;
+        return std::string(q);
+    }
 };
 
 // Parser states. The three arrangement ones are §8.6: St::Arrange opens from
@@ -1299,6 +1322,29 @@ bool saveProject(const Session& s, const std::string& path, std::string* err) {
             kn(o, "", "loop", fmtF64(ls) + " " + fmtF64(le));
         if (s.loopOn) kn(o, "", "loopon", "1");
     }
+    // The markers (v10), beside the brace and for the brace's reason: there is
+    // one timeline and these are positions on it.
+    //
+    // Written from a NORMALIZED copy, exactly as the signature map above is and
+    // for the same argument: saving must not depend on whether the caller
+    // remembered to normalize, and the sorted, deduped, clamped form is the only
+    // one that round-trips.
+    //
+    // Sparse in the way `loop` is -- a set with no markers writes nothing, which
+    // is what keeps the v9 -> v10 diff for such a set down to the header line.
+    // The name is the TAIL of the line so that spaces in it survive (project.h),
+    // and an empty name writes no third field at all, which is `kv`'s bare form
+    // applied to a line that has other fields in front of it.
+    {
+        const std::vector<Marker> ms = normalizedMarkers(s.markers);
+        for (const Marker& m : ms) {
+            std::string v = fmtF64(clMarkerBeat(m.beat)) + " " +
+                            std::to_string(clColor(m.colorIdx));
+            const std::string nm = clMarkerName(m.name);
+            if (!nm.empty()) { v += ' '; v += esc(nm); }
+            kn(o, "", "marker", v);
+        }
+    }
     // The key (v9). Beside the signature, because the two say the same kind of
     // thing about a piece and a reader looking for one will look for the other.
     //
@@ -1537,6 +1583,36 @@ bool loadProject(Session& s, const std::string& path, f64 engineRate, std::strin
             } else if (key == "loopon") {
                 int v; if (!sc.integer(v)) return fail("loopon: expected 0 or 1");
                 out.loopOn = v != 0;
+            } else if (key == "marker") {
+                // A marker (v10). Two required numbers and then the name, which
+                // is whatever is left of the line -- so there is no `exhausted`
+                // check here and there must not be one: trailing text is not a
+                // fourth field, it IS the third, and refusing it would refuse
+                // every marker with a space in its name.
+                //
+                // Both numbers are required, for the reason `loop`'s two are: a
+                // marker with no beat is not a smaller marker, it is a line that
+                // means nothing, and a colour that is absent could not be told
+                // from a name beginning with a digit. Structure is refused, the
+                // values are clamped -- a beat of -3 or of NaN is a line that
+                // says something, just not something a position can be.
+                f64 beat = 0.0; i64 col = 0;
+                if (!sc.num(beat) || !sc.integer(col))
+                    return fail("marker: expected a beat, a colour and a name");
+                Marker m;
+                // The uid comes from the session's own non-serialized counter,
+                // in FILE ORDER, so the same file always yields the same marker
+                // identities. See Session::nextMarkerUid for why it is not
+                // newUid() and why that matters to the round trip.
+                m.uid = out.newMarkerUid();
+                m.beat = clMarkerBeat(beat);
+                m.colorIdx = clColor((int)clampv(col, (i64)INT32_MIN, (i64)INT32_MAX));
+                m.name = clMarkerName(unesc(sc.tail()));
+                // Appended, not resolved: normalizeMarkers() at the end of the
+                // load sorts and dedupes last-wins, so the order the lines
+                // appear in a hand-edited file is the only thing that decides a
+                // tie and the parser stays a parser. `sig` says the same.
+                out.markers.push_back(std::move(m));
             } else if (key == "scale") {
                 // The set's key (v9). Both numbers required, for the reason
                 // `loop`'s two are: a key is one statement with two halves, and
@@ -1942,6 +2018,10 @@ bool loadProject(Session& s, const std::string& path, f64 engineRate, std::strin
     // where sigNum/sigDen get their value: the parser only ever appends, so the
     // mirror is set here, once, from the map.
     out.normalizeSigs();
+    // Sorted, clamped, deduped last-wins -- the same one-call finalize the
+    // signature map gets, and for the same reason: the parser appends, and there
+    // is exactly one definition of what a well-formed list is.
+    out.normalizeMarkers();
 
     out.path = path;
     s = std::move(out);

@@ -727,6 +727,7 @@ void App::drawDeviceStrip(const Rect& r) {
         // After debugSeedRack, never before: that one calls undo(), which
         // move-assigns ses_ and dangles every DeviceModel* taken above it.
         debugSeedSpectra();
+        debugSeedSampler();
         co = chainOwner(devOwner_);
     }
     if (!co.devices) return;
@@ -790,10 +791,15 @@ void App::drawDeviceStrip(const Rect& r) {
     const f32 boxW = 150 * s, gap = 5 * s, rackW = 448 * s;
     // Spectra's editor opens the same way a rack does and is laid out to the
     // same constraint -- a dock 200 logical pixels tall -- so it is wide and
-    // short. The number is the seven column widths plus six gaps plus two pads
-    // (app_spectra.cpp's kColW), and it fits the strip with the file browser
-    // closed; wider than the strip it simply scrolls, like everything else here.
-    const f32 specW = 1112 * s;
+    // short. Its width is its own columns added up (lay::spectraPanelW), and it
+    // fits the strip with the file browser closed; wider than the strip it
+    // simply scrolls, like everything else here.
+    const f32 specW = lay::spectraPanelW * s;
+    // The Sampler's editor opens the same way and is cut to the same 200px
+    // dock. The number is its six column widths plus five gaps plus two pads
+    // (app_sampler.cpp's kColW) -- a third of it is the waveform, which is the
+    // one control on it that gets wider the more room it is given.
+    const f32 smpW = 1116 * s;
     // A rack that is open puts its inside into the strip, immediately after the
     // box it belongs to. Resolved before the layout because it widens it.
     RackControl* openRc = openRack();
@@ -803,9 +809,11 @@ void App::drawDeviceStrip(const Rect& r) {
             if (devices[i].uid == rackOpenUid_) { openIdx = (int)i; break; }
     if (openIdx < 0) openRc = nullptr;
     const int specIdx = spectraOpenIdx(devices);
+    const int smpIdx  = samplerOpenIdx(devices);
 
     const f32 total = devices.size() * (boxW + gap) + (openRc ? rackW + gap : 0.f)
-                    + (specIdx >= 0 ? specW + gap : 0.f) + 6 * s;
+                    + (specIdx >= 0 ? specW + gap : 0.f)
+                    + (smpIdx  >= 0 ? smpW  + gap : 0.f) + 6 * s;
     const f32 maxScroll = std::max(0.f, total - area.w);
     stripScroll_ = clampv(stripScroll_, 0.f, maxScroll);
     bool wheelUsed = false;
@@ -830,6 +838,15 @@ void App::drawDeviceStrip(const Rect& r) {
                                       0.f, maxScroll);
             }
         }
+        Rect smpBox{x, box.y, smpW, box.h};
+        if ((int)i == smpIdx) {
+            x += smpW + gap;
+            if (samplerScrollTo_) {               // the same one scroll, same reason
+                samplerScrollTo_ = false;
+                stripScroll_ = clampv(stripScroll_ + (smpBox.x - area.x - 4 * s),
+                                      0.f, maxScroll);
+            }
+        }
         // The panel is drawn at the bottom of this iteration, so an off-screen
         // device box must not skip it.
         const bool boxVisible = !(box.right() < area.x || box.x > area.right());
@@ -837,15 +854,19 @@ void App::drawDeviceStrip(const Rect& r) {
                                  !(rackBox.right() < area.x || rackBox.x > area.right());
         const bool specVisible = (int)i == specIdx &&
                                  !(specBox.right() < area.x || specBox.x > area.right());
-        if (!boxVisible && !rackVisible && !specVisible) continue;
+        const bool smpVisible = (int)i == smpIdx &&
+                                !(smpBox.right() < area.x || smpBox.x > area.right());
+        if (!boxVisible && !rackVisible && !specVisible && !smpVisible) continue;
         // Drawn at the END of this device's iteration, whichever way the body
         // leaves it, so the panel's own widgets take `hot` back from the box
         // beside them -- last setHot() of the frame wins, as everywhere here.
-        // A device is a rack or a Spectra and never both, so the two are
-        // mutually exclusive in practice and the layout does not have to care.
+        // A device is a rack, a Spectra or a Sampler and never two of them, so
+        // the three are mutually exclusive in practice and the layout does not
+        // have to care.
         const auto panel = [&] {
             if (rackVisible) drawRackPanel(rackBox, *openRc, tc);
             if (specVisible) drawSpectraPanel(specBox, d, tc);
+            if (smpVisible)  drawSamplerPanel(smpBox, d, tc);
         };
         if (!boxVisible) { panel(); continue; }
 
@@ -914,14 +935,20 @@ void App::drawDeviceStrip(const Rect& r) {
         // second virtual for one device would be the larger change. When
         // another instrument grows one, this is the line that becomes a lookup.
         const bool isSpec = isSpectra(d.inst.get());
+        // ...and the Sampler, which answers a VIRTUAL rather than a URI: `smp`
+        // is already resolved above for the drop target, and "this device plays
+        // a file" is the same kind of question as "this device has an inside".
+        // Two instruments now have editors, so the next one is the one that
+        // turns these three lines into a lookup rather than a chain of elses.
+        const bool isSmp = smp != nullptr;
         // 38, not 34: "CHAIN" at §5's 0.12em tracking is five glyphs and four
         // gaps, and 34 left it with nothing on either side. The box is 150 wide
         // and the name beside it is a micro-label that already fits itself, so
         // the four pixels come out of slack rather than out of the name.
         Rect kr{br.x, title.y, 0, title.h};
-        if (isRack)      kr = Rect{br.x - 38 * s, title.y + 2 * s, 38 * s, 12 * s};
-        else if (isSpec) kr = Rect{br.x - 32 * s, title.y + 2 * s, 32 * s, 12 * s};
-        const bool hasPanel = isRack || isSpec;
+        if (isRack)                 kr = Rect{br.x - 38 * s, title.y + 2 * s, 38 * s, 12 * s};
+        else if (isSpec || isSmp)   kr = Rect{br.x - 32 * s, title.y + 2 * s, 32 * s, 12 * s};
+        const bool hasPanel = isRack || isSpec || isSmp;
 
         // The card's controls are ONE cluster, not two or three little capsules
         // adrift in the title bar: chain or edit (only where there is one),
@@ -994,6 +1021,29 @@ void App::drawDeviceStrip(const Rect& r) {
                 ui_.tip = open ? "Close the Spectra panel"
                                : "Open Spectra's editor: the wavetable, the oscillators, "
                                  "the filter, the envelopes and the LFO";
+        } else if (isSmp) {
+            // The same chip, the same word, the same width: two instruments
+            // with editors must not have two different ways of being opened.
+            const bool open = (int)i == smpIdx;
+            if (ui_.segButton(uiId(11, (int)i, 5), kr, open, nx::violet)) {
+                if (open) { samplerOpenUid_ = 0; samplerForced_ = false; }
+                else {
+                    samplerOpenUid_ = d.uid;
+                    samplerForced_  = false;
+                    samplerScrollTo_ = true;
+                    selDevice_ = (int)i;
+                    paramScroll_ = 0.f;
+                }
+                panel();
+                rend_.popClip();
+                return;                   // the strip's layout just changed width
+            }
+            microFit(ui_, fSmall_, ui_.lastRect, "edit",
+                     open ? nx::text : nx::muted, Align::Center, 2 * s);
+            if (ui_.hovered(kr))
+                ui_.tip = open ? "Close the Sampler panel"
+                               : "Open the Sampler's editor: the waveform, the region "
+                                 "handles, the loop and the filter";
         }
 
         // The card's title is a micro-label (§5): 10px, uppercase, wide

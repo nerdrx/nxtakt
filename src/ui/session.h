@@ -13,6 +13,7 @@
 #include "../audio/sample.h"
 #include "../plugin/host.h"
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -620,6 +621,92 @@ inline std::vector<SigChange> normalizedSigMap(const std::vector<SigChange>& in,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Markers (locators), GUI side.
+//
+// Live's locators: named points on the arrangement ruler you can jump to, and
+// launch while playing. A timeline with no named positions makes every session
+// a scroll hunt, which is the whole of why this exists.
+//
+// SHAPED LIKE THE SIGNATURE MAP ABOVE, and deliberately so -- a sorted
+// per-session list, one normalizer every edit goes through, drawn on the ruler.
+// The three differences are worth naming, because each is a decision:
+//
+//   * A marker lives in BEATS, not in bars. docs/ARRANGEMENT.md's first rule is
+//     that a position on the timeline is a beat; a signature change is the one
+//     thing that is genuinely about bars, and re-barring a piece must move a
+//     marker no more than it moves an item or the loop brace.
+//   * A marker carries a UID. Two markers may not share a beat (the normalizer
+//     dedupes), but a DRAG moves one across others, and an index is a wrong-
+//     marker edit the moment the sort reorders behind it -- the same argument
+//     ArrangeClip::uid already makes, for the same gesture.
+//   * There is no entry the list must contain. `sigs` must have bar 0 because a
+//     piece is always in some signature; a piece with no named positions is the
+//     normal case, and an empty list writes no lines at all.
+//
+// GUI-ONLY. Nothing here is published to the engine: a marker names a place, it
+// does not change what is played there. The jump it produces is an ordinary
+// Cmd::Locate, which is the command the ruler's own click has always sent.
+// ---------------------------------------------------------------------------
+struct Marker {
+    u64 uid = 0;
+    f64 beat = 0.0;            // absolute timeline beats
+    std::string name;
+    // 0 is THE ACCENT -- violet, which is what every marker is today. 1..N
+    // index pal::clipColors, wrapped, for the colour a later build's picker
+    // will set. Clamped to the FIELD's width (0..255, as a track's colour is)
+    // and never to pal::clipColorCount: the palette's size is a fact about this
+    // build, and folding an index a later one has into 0 would silently repaint
+    // somebody's marker in a file that could then never say otherwise. Same
+    // argument as AutoPoint::curve and ArrangeClip::fadeShape.
+    int colorIdx = 0;
+};
+
+inline constexpr int kMaxMarkers = 512;
+// A marker beat shares clArrBeat's ceiling (project.cpp): it is a position on
+// the same timeline the items and the brace are on, so it cannot have a
+// different one and stay comparable with them.
+inline f64 clMarkerBeat(f64 b) {
+    return std::isfinite(b) ? clampv(b, 0.0, 1e7) : 0.0;
+}
+// Names are clamped to a length rather than to a character set: `esc()` in the
+// project writer already makes any byte survive the line format, so the only
+// thing worth bounding is how much of the ruler one marker may eat.
+inline constexpr size_t kMarkerNameMax = 64;
+inline std::string clMarkerName(const std::string& n) {
+    return n.size() <= kMarkerNameMax ? n : n.substr(0, kMarkerNameMax);
+}
+
+// Sort, clamp and deduplicate. THE normalizer, in normalizedSigMap's image: the
+// parser calls it, every edit calls it, so there is one definition of what a
+// well-formed marker list is.
+//
+// Duplicate BEATS resolve LAST-WINS, exactly as duplicate bars do above, and
+// the stable sort is again what makes "last" mean the later of the two in the
+// file. Two markers on one beat would draw one flag on top of another with no
+// way to reach the one underneath, which is the same unreachability a duplicate
+// signature entry would be.
+inline std::vector<Marker> normalizedMarkers(const std::vector<Marker>& in) {
+    std::vector<Marker> m;
+    m.reserve(in.size());
+    for (const Marker& s : in) {
+        Marker c = s;
+        c.beat = clMarkerBeat(s.beat);
+        c.name = clMarkerName(s.name);
+        m.push_back(std::move(c));
+    }
+    std::stable_sort(m.begin(), m.end(),
+                     [](const Marker& a, const Marker& b) { return a.beat < b.beat; });
+    std::vector<Marker> out;
+    out.reserve(m.size());
+    for (size_t i = 0; i < m.size(); ++i) {
+        if (i + 1 < m.size() && m[i + 1].beat == m[i].beat) continue;
+        out.push_back(std::move(m[i]));
+    }
+    if (out.size() > (size_t)kMaxMarkers) out.resize((size_t)kMaxMarkers);
+    return out;
+}
+
 struct Session {
     std::vector<TrackModel> tracks;
     std::vector<SceneModel> scenes;
@@ -708,6 +795,126 @@ struct Session {
         const SigChange one = lone();
         return sigs.empty() ? sigPosAt(&one, 1, beat)
                             : sigPosAt(sigs.data(), (int)sigs.size(), beat);
+    }
+
+    // The markers (locators). Sorted by beat, unique beats, possibly empty --
+    // see the block above Marker for why this one has no entry it must contain.
+    // Session-wide, like the loop brace and for the same one-sentence reason:
+    // there is one timeline.
+    std::vector<Marker> markers;
+    // A marker's identifier comes from HERE and not from newUid(), and this
+    // counter is NOT serialized. The reason is round-trip identity: `nextuid` is
+    // a line in the file, so handing markers session uids would make every
+    // save -> load -> save bump that line by the number of markers, and the
+    // format's whole promise is that the second save is byte-identical to the
+    // first. A marker's uid is never written either, so there is nothing across
+    // a save for it to stay unique WITH -- it exists only so that a drag can
+    // hold on to one flag while the sort moves it past the others, which is the
+    // same job ArrangeClip::uid does and the reason an index will not do.
+    //
+    // The parser assigns these in file order, so the same file always produces
+    // the same marker uids -- which is what makes a selected flag survive an
+    // undo of an unrelated edit, undo being a save and a load.
+    u64 nextMarkerUid = 1;
+    u64 newMarkerUid() { return nextMarkerUid++; }
+
+    void normalizeMarkers() { markers = normalizedMarkers(markers); }
+    // Add a marker at `beat` and return its uid, or 0 when the list is full or
+    // a marker is already there. THE mutator, in setSignature's image: it
+    // normalizes, so the sort can never be stale after it.
+    //
+    // An occupied beat is REFUSED rather than replaced, which is where this
+    // parts company with setSignature -- and the difference is that a signature
+    // at a bar is a property of that bar (setting it again means "make it this
+    // instead"), while a marker is a thing with a name and an identity. Silently
+    // replacing one would throw a name away that the user typed.
+    u64 addMarker(f64 beat, const std::string& name, int colorIdx = 0) {
+        const f64 b = clMarkerBeat(beat);
+        if ((int)markers.size() >= kMaxMarkers) return 0;
+        for (const Marker& m : markers) if (m.beat == b) return 0;
+        Marker m;
+        m.uid = newMarkerUid();
+        m.beat = b;
+        m.name = clMarkerName(name);
+        m.colorIdx = colorIdx;
+        const u64 uid = m.uid;
+        markers.push_back(std::move(m));
+        normalizeMarkers();
+        return uid;
+    }
+    bool removeMarker(u64 uid) {
+        if (!uid) return false;
+        for (size_t i = 0; i < markers.size(); ++i)
+            if (markers[i].uid == uid) {
+                markers.erase(markers.begin() + (long)i);
+                return true;                 // still sorted; nothing to redo
+            }
+        return false;
+    }
+    bool renameMarker(u64 uid, const std::string& name) {
+        Marker* m = marker(uid);
+        if (!m) return false;
+        const std::string n = clMarkerName(name);
+        if (m->name == n) return false;
+        m->name = n;
+        return true;                         // a name does not move anything
+    }
+    // Move one marker. Returns false when it did not move -- because there is no
+    // such marker, or because the beat is already taken, which is the same
+    // refusal addMarker makes and for the same reason: the marker sitting there
+    // has a name of its own.
+    bool moveMarker(u64 uid, f64 beat) {
+        Marker* m = marker(uid);
+        if (!m) return false;
+        const f64 b = clMarkerBeat(beat);
+        if (m->beat == b) return false;
+        for (const Marker& o : markers) if (o.uid != uid && o.beat == b) return false;
+        m->beat = b;
+        normalizeMarkers();                  // the sort is what a move can break
+        return true;
+    }
+    // The marker sitting exactly on `beat`, or null. What "occupied" means, in
+    // one place, so the caller that has to decide whether an add is going to be
+    // refused asks the same question addMarker will.
+    const Marker* markerAtBeat(f64 beat) const {
+        const f64 b = clMarkerBeat(beat);
+        for (const Marker& m : markers) if (m.beat == b) return &m;
+        return nullptr;
+    }
+    Marker* marker(u64 uid) {
+        if (!uid) return nullptr;
+        for (Marker& m : markers) if (m.uid == uid) return &m;
+        return nullptr;
+    }
+    const Marker* marker(u64 uid) const {
+        return const_cast<Session*>(this)->marker(uid);
+    }
+    // The name a fresh marker gets: "Marker N" for the lowest N that no marker
+    // is already called. Not markers.size() + 1 -- delete the middle three of
+    // five and the next two creations would both want "Marker 3", and a ruler
+    // with two identically-named flags on it is a ruler that cannot be read.
+    std::string nextMarkerName() const {
+        for (int n = 1; n <= kMaxMarkers + 1; ++n) {
+            const std::string want = "Marker " + std::to_string(n);
+            bool taken = false;
+            for (const Marker& m : markers) if (m.name == want) { taken = true; break; }
+            if (!taken) return want;
+        }
+        return "Marker";
+    }
+    // The nearest marker strictly after / before `beat`, or null. The jump keys'
+    // one implementation, so "next" cannot mean two things. kMarkerEps is what
+    // stops a jump landing on the marker the playhead is already sitting on and
+    // reporting a move: the engine's beat arrives here a few ulps either side of
+    // where the last locate put it.
+    const Marker* markerAfter(f64 beat) const {
+        for (const Marker& m : markers) if (m.beat > beat + 1e-6) return &m;
+        return nullptr;
+    }
+    const Marker* markerBefore(f64 beat) const {
+        const Marker* best = nullptr;
+        for (const Marker& m : markers) { if (m.beat < beat - 1e-6) best = &m; else break; }
+        return best;
     }
 
     // The key the set is in. Session-wide, like the tempo and the signature and

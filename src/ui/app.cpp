@@ -16,6 +16,38 @@
 
 namespace lat {
 
+// ---------------------------------------------------------------------------
+// THE LAUNCH QUANTUM, GUI SIDE.
+//
+// Where a jump asked for NOW would actually land. Engine::nextQuantum's
+// dispatch, and only its dispatch: both arms below call the ENGINE'S OWN
+// functions -- sigNextBarLine for the whole-bar quanta and sigPosAt for the
+// beat fractions, the same two engine.cpp's nextQuantum calls -- so this is the
+// arrangement made once more, not the arithmetic written twice. It is exactly
+// the relationship timeaxis.h already has with the same functions for the
+// ruler's bar lines, and it is what keeps a queued jump landing on the boundary
+// a launched clip lands on.
+//
+// THIS IS A STAND-IN AND SHOULD NOT SURVIVE. A queued locate computed up here
+// fires on a FRAME boundary -- up to one frame late, ~16 ms at 60 Hz -- while a
+// clip launch fires on a SAMPLE. The engine already schedules launches against
+// exactly this number and would schedule a locate the same way for two lines;
+// engine.h and engine.cpp are frozen to this wave, so the diff is filed
+// (scratchpad mkr-filed-locate-quantum.diff) rather than applied, and this
+// function is what makes the feature usable until it lands.
+static f64 nextQuantumBeat(const Session& s, f64 from) {
+    constexpr f64 kEps = 1e-9;              // engine.cpp's, and for its reason
+    const int idx = clampv(s.quantumIdx, 0, kQuantumCount - 1);
+    const f64 q = kQuantumBeats[idx];
+    if (idx <= 0 || q <= 0.0) return from;  // quantum None: there is no boundary
+    if (!std::isfinite(from)) from = 0.0;
+    if (s.sigs.empty()) return std::ceil(from / q - kEps) * q;
+    if (idx <= kQuantumBarMax)
+        return sigNextBarLine(s.sigs.data(), (int)s.sigs.size(), from, kQuantumBars[idx]);
+    const BarPos p = sigPosAt(s.sigs.data(), (int)s.sigs.size(), from);
+    return p.barStart + std::ceil((from - p.barStart) / q - kEps) * q;
+}
+
 // App owns a PianoRoll through a unique_ptr, so the two functions that have to
 // see the whole type live here rather than in the header.
 App::App()  = default;
@@ -300,7 +332,119 @@ void App::frame() {
     }
 
     if (view_ == MainView::Session) drawSessionView(main);
-    else                            drawArrangementView(main);
+    else {
+        // THE MARKERS' SEAM. The ruler's marker band draws the session's
+        // locators and asks for edits to them; this is where an ask becomes an
+        // edit. It sits HERE, around the call, rather than inside
+        // buildArrangeContext / arrangeCommit where the rest of the
+        // arrangement's plumbing lives, for the reason arrange.h states over
+        // bindMarkers: those two are in app_chrome.cpp and this wave does not
+        // own that file. Everything below moves into arrangeCommit unchanged the
+        // moment one agent owns both.
+        //
+        // The view is created here rather than left to drawArrangementView's own
+        // lazy init, because the binding has to happen BEFORE the draw and there
+        // is no other point between the two.
+        if (!arrView_) arrView_ = std::make_unique<ArrangeView>();
+        arrView_->bindMarkers(&ses_.markers);
+
+        // A QUEUE THAT CAN NO LONGER FIRE, cleared before the frame draws a ring
+        // promising that it will. Two ways that happens: the transport stopped,
+        // or the playhead went backwards past where the queue was armed (a loop
+        // wrap, another locate). See ArrangeView::jumpOverrun.
+        if (arrView_->queuedMarker() &&
+            (!es_.playing || arrView_->jumpOverrun(es_.beat))) {
+            arrView_->clearJump();
+            status_ = "Marker jump cancelled - the transport moved";
+        }
+        // The boundary, if it has arrived. Before the draw, so the frame that
+        // fires is the frame that stops drawing the ring.
+        f64 dueBeat = 0.0;
+        if (es_.playing && arrView_->takeDueJump(es_.beat, &dueBeat))
+            send(Cmd::Locate, 0, 0, dueBeat);
+
+        drawArrangementView(main);
+
+        // ONE request per frame -- one pointer, one thing at a time. The undo
+        // point goes FIRST on every arm that mutates, because an entry that
+        // already contains the edit undoes nothing; the MOVE arm is the one
+        // exception and it is not an exception at all -- arrangeCommit has just
+        // taken that entry, off the view's pendingEdit handshake, on the frame
+        // the drag first travelled and before this line runs.
+        const ArrangeView::MarkerReq q = arrView_->takeMarkerReq();
+        using MK = ArrangeView::MarkerReq::Kind;
+        switch (q.kind) {
+        case MK::None: break;
+
+        case MK::Add: {
+            // Asked BEFORE the undo point, because addMarker refuses an occupied
+            // beat and an entry taken for an edit that does not happen is an
+            // undo that appears to do nothing.
+            if (ses_.markerAtBeat(q.beat)) {
+                status_ = "There is already a marker there";
+            } else if ((int)ses_.markers.size() >= kMaxMarkers) {
+                status_ = "Markers: " + std::to_string(kMaxMarkers) + " is the limit";
+            } else {
+                undoPoint("add marker");
+                const std::string nm = ses_.nextMarkerName();
+                const u64 uid = ses_.addMarker(q.beat, nm);
+                if (uid) arrView_->selectMarker(uid);
+                status_ = "Marker \"" + nm + "\" at bar " +
+                          std::to_string((int)std::floor(ses_.barOfBeat(q.beat)) + 1);
+            }
+            break;
+        }
+        case MK::Remove: {
+            const Marker* m = ses_.marker(q.uid);
+            if (!m) break;
+            const std::string nm = m->name;
+            undoPoint("remove marker");
+            ses_.removeMarker(q.uid);
+            if (arrView_->queuedMarker() == q.uid) arrView_->clearJump();
+            status_ = "Removed marker \"" + nm + "\"";
+            break;
+        }
+        case MK::Move: {
+            // No undo point here: see the note above the switch.
+            ses_.moveMarker(q.uid, q.beat);
+            break;
+        }
+        case MK::Rename: {
+            const Marker* m = ses_.marker(q.uid);
+            if (!m || m->name == clMarkerName(q.name)) break;
+            undoPoint("rename marker");
+            ses_.renameMarker(q.uid, q.name);
+            break;
+        }
+        case MK::Jump: {
+            const Marker* m = ses_.marker(q.uid);
+            if (!m) break;
+            const std::string nm = m->name.empty() ? std::string("(unnamed)") : m->name;
+            const f64 to = m->beat;
+            const int bar = (int)std::floor(ses_.barOfBeat(to)) + 1;
+            // STOPPED: go now. There is no boundary to wait for and waiting for
+            // one would be a jump that does not happen.
+            //
+            // PLAYING: wait for the launch quantum, which is the whole point --
+            // a locator you can hit mid-bar and have land in time is what makes
+            // one usable in a performance. The SAME boundary a clip launch
+            // waits for, computed from the SAME two engine functions, so the
+            // jump and a scene fired on the same beat land together.
+            const f64 fire = es_.playing ? nextQuantumBeat(ses_, es_.beat) : es_.beat;
+            if (!es_.playing || fire <= es_.beat + 1e-9) {
+                arrView_->clearJump();
+                send(Cmd::Locate, 0, 0, to);
+                status_ = "Marker: " + nm + " - bar " + std::to_string(bar);
+            } else {
+                arrView_->queueJump(q.uid, to, fire, es_.beat);
+                status_ = "Marker: " + nm + " - bar " + std::to_string(bar) +
+                          ", at the next " + kQuantumNames[clampv(ses_.quantumIdx, 0,
+                                                                  kQuantumCount - 1)];
+            }
+            break;
+        }
+        }
+    }
 
     if (showDetail_) drawDetailPanel(detail);
     drawStatusBar(status);
@@ -427,6 +571,53 @@ void App::handleShortcuts() {
         }
         // Home locates to zero (answer #4 names it beside stop-does-not-rewind).
         if (in.keyPressed[KeyHome]) send(Cmd::Locate, 0, 0, 0.0);
+
+        // JUMP TO THE PREVIOUS / NEXT MARKER.
+        //
+        // `,` and `.`, which carry the < and > legends on every keyboard this
+        // program will meet, so the pair reads as back and forward without
+        // having to be learned. Both were free: nothing in this program binds a
+        // punctuation key, and the full list is in the wave's report.
+        // `[` and `]` were the other candidate and are free too; the legends
+        // decided it.
+        //
+        // Through `plain`, like M, so the computer MIDI keyboard keeps owning
+        // every printable key while it is on (KbdPiano::consumes) -- a shortcut
+        // that fired under the piano would be a shortcut that fires while
+        // somebody is playing.
+        //
+        // ARRANGEMENT-SCOPED, beside Home and for Home's reason: these are
+        // statements about the timeline, and the timeline is what this view is.
+        //
+        // Routed through the ruler's own request rather than sending a locate
+        // here, so "what a jump does" -- immediate when stopped, queued on the
+        // launch quantum when playing -- has ONE implementation. handleShortcuts
+        // runs before the view is drawn and the request is drained after it, so
+        // the ask and the answer are in this same frame.
+        {
+            const bool prev = plain(',');
+            const bool next = plain('.');
+            if (prev || next) {
+                // From the PLAYHEAD and not from the selection: "next marker" is
+                // a question about where the music is, and answering it from a
+                // flag the user clicked ten minutes ago would make the key jump
+                // somewhere they are not looking. A queued jump has not happened
+                // yet, so it is not where we are counting from either.
+                const Marker* m = next ? ses_.markerAfter(es_.beat)
+                                       : ses_.markerBefore(es_.beat);
+                if (!m) {
+                    status_ = ses_.markers.empty()
+                                  ? "No markers - double-click the ruler's upper band "
+                                    "to drop one"
+                                  : (next ? "No marker after this point"
+                                          : "No marker before this point");
+                } else {
+                    if (!arrView_) arrView_ = std::make_unique<ArrangeView>();
+                    arrView_->selectMarker(m->uid);
+                    arrView_->requestJump(m->uid);
+                }
+            }
+        }
 
         if (in.keyPressed['s'] && in.ctrl()) {
             const std::string p = ses_.path.empty()

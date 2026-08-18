@@ -31,6 +31,24 @@ constexpr const char* kEditDel   = "delete clip";
 constexpr const char* kEditSplit = "split clip";
 constexpr const char* kEditAuto  = "automation edit";
 constexpr const char* kEditLayout = "lane height";
+constexpr const char* kEditMarkerMove = "move marker";
+
+// WIDGET IDS IN THIS FILE. Everything here hashes under uiId kind 24 (plus 25
+// and 26 for the automation lanes), and the markers take three FRESH SUB-IDS
+// inside it rather than a kind of their own:
+//
+//     (24, 9)            the marker band's hot rect
+//     (24, 10, <uid>)    a flag's drag gesture
+//     (24, 11, <uid>)    a flag's inline rename field
+//
+// A named UiKind would have been the tidier answer and is not available here:
+// the enum lives in app_internal.h, and this file is on the view seam that
+// arrange.h's header comment exists to keep clean -- pulling App's private
+// header into the editor to name a constant would undo the separation for a
+// cosmetic gain. Sub-ids are additive and RENUMBER NOTHING. The collision this
+// paragraph used to reserve around is gone: app_detail.cpp's key row moved off
+// raw 24/25 onto named kinds (UiDetailKeyRow/UiDetailNotes, app_internal.h),
+// so kinds 24-26 now belong to this file alone.
 
 // How far past the last thing on the timeline the view may scroll. A view that
 // stopped dead at the last item would give nowhere to drop the next one.
@@ -102,6 +120,30 @@ bool probeOn() {
     return on;
 }
 
+// A marker's label, truncated to fit `maxW`.
+//
+// ASCII ONLY for the tail, and that is not laziness: the glyph atlas is 32..126
+// (gfx/font.h), so a U+2026 ellipsis renders as three invisible bytes -- the
+// exact failure the status bar's separators had before they became a hyphen.
+// Two dots is legible and is in the atlas.
+//
+// The back-off loop refuses to cut a UTF-8 sequence in half. Those bytes have no
+// glyph either way, but half a sequence is worse than none of it: it is what
+// turns a name into mojibake in a copy-paste or a later font.
+std::string markerLabel(const Font& f, const std::string& name, f32 maxW) {
+    if (name.empty()) return std::string();
+    if (f.measure(name.c_str()) <= maxW) return name;
+    const f32 dots = f.measure("..");
+    std::string out;
+    for (size_t i = 0; i < name.size(); ++i) {
+        out.push_back(name[i]);
+        if (f.measure(out.c_str()) + dots > maxW) { out.pop_back(); break; }
+    }
+    while (!out.empty() && ((unsigned char)out.back() & 0xC0) == 0x80) out.pop_back();
+    if (!out.empty() && ((unsigned char)out.back() & 0x80)) out.pop_back();
+    return out + "..";
+}
+
 void probeArrange(const ArrangeContext& ctx, u32 changed, int selTrack, u64 selItem) {
     if (!probeOn() || !changed) return;
     LOGI("NXTAKT_DEBUG_PROBE: arr changed=0x%02x sel=%d/%llu loop=%.4f..%.4f %s",
@@ -125,6 +167,28 @@ void probeArrange(const ArrangeContext& ctx, u32 changed, int selTrack, u64 selI
                 LOGI("NXTAKT_DEBUG_PROBE: arrauto t=%zu l=%zu p=%zu beat=%.4f val=%.5f",
                      i, j, p, (*a)[j].points[p].beat, (double)(*a)[j].points[p].value);
     }
+}
+
+// The markers' own probe, on its own trigger. probeArrange fires on `changed`,
+// and a marker gesture changes NOTHING in that mask -- markers are not items,
+// not lanes and not the brace -- so a marker edit driven inside gamescope would
+// otherwise leave no trace at all. This logs the request the band produced and,
+// with it, the list as the view was drawing it, which is what lets a headless
+// run assert a gesture rather than eyeball a screenshot of it.
+void probeMarkers(const std::vector<Marker>* v, const ArrangeView::MarkerReq& q,
+                  u64 sel, u64 queued) {
+    if (!probeOn() || q.kind == ArrangeView::MarkerReq::Kind::None) return;
+    static const char* kName[] = {"none", "add", "remove", "move", "rename", "jump"};
+    LOGI("NXTAKT_DEBUG_PROBE: mkreq %s uid=%llu beat=%.4f name='%s' gesture=%llu "
+         "sel=%llu queued=%llu",
+         kName[(int)q.kind], (unsigned long long)q.uid, q.beat, q.name.c_str(),
+         (unsigned long long)q.gesture, (unsigned long long)sel,
+         (unsigned long long)queued);
+    if (!v) return;
+    for (size_t i = 0; i < v->size(); ++i)
+        LOGI("NXTAKT_DEBUG_PROBE: mkr %zu uid=%llu beat=%.4f col=%d name='%s'",
+             i, (unsigned long long)(*v)[i].uid, (*v)[i].beat, (*v)[i].colorIdx,
+             (*v)[i].name.c_str());
 }
 
 } // namespace
@@ -244,7 +308,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     const f32 headW = kArrHeaderW * s;
     if (r.w < headW + 80.f * s || r.h < 60.f * s) return changed;
 
-    const Rect ruler{r.x + headW, r.y, r.w - headW, kArrRulerH * s};
+    // `ruler` is BOTH bands and is what the body sits below; `mband` is the
+    // markers' strip on top and `bruler` is the bar strip that was the whole of
+    // the ruler until this wave. Everything the old code called `ruler` is now
+    // `bruler` -- the bar numbers, the signature tags, the brace, the locate
+    // click -- and the only two things that still span both are the panel fill
+    // and the playhead, because those are about the ruler as an object rather
+    // than about either band's contents.
+    const Rect ruler{r.x + headW, r.y, r.w - headW, kArrRulerTotal * s};
+    const Rect mband{ruler.x, ruler.y, ruler.w, kArrMarkerH * s};
+    const Rect bruler{ruler.x, mband.bottom(), ruler.w, kArrRulerH * s};
     const Rect corner{r.x, r.y, headW, ruler.h};
     const Rect body{r.x, ruler.bottom(), r.w, r.h - ruler.h};
     const Rect heads{body.x, body.y, headW, body.h};
@@ -362,9 +435,18 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     rr.rect(corner, tl::panelFill);
     rr.hairlineH(ruler.x, ruler.right(), ruler.bottom() - 1.f * s);
     rr.hairlineV(corner.right() - 1.f * s, corner.y, corner.bottom());
+    // The seam between the two bands. A hairline and not a rule, for the reason
+    // the ruler's own underline is one -- and it is what makes the marker band
+    // read as a strip of its own rather than as headroom above the bar numbers,
+    // which is what tells a hand that the two halves answer to different clicks.
+    rr.hairlineH(ruler.x, ruler.right(), bruler.y, nx::hairlineInk, 1.f * s);
 
+    // The hot rect is the BAR band only. Everything below -- the brace grab, the
+    // locate click, the signature right-click -- therefore stops at the seam and
+    // cannot be triggered from the marker band, which is the disambiguation
+    // kArrMarkerH's note describes.
     const u64 rulerId = uiId(24, 0);
-    ui.setHot(rulerId, ruler);
+    ui.setHot(rulerId, bruler);
     const bool hotRuler = ui.isHot(rulerId);
 
     // THE BRACE'S ENDS, which until this pass had a zone of exactly zero px.
@@ -437,10 +519,133 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         }
     }
 
+    // --- the marker band: locators ------------------------------------------
+    //
+    // The geometry is built ONCE, here, and is what both the hit test below and
+    // the draw further down read. Two passes that each worked out where a flag
+    // is would be two answers to "did I click it", which is the same trap the
+    // lane layout pass at the top of this function exists to avoid.
+    struct Flag {
+        size_t i; u64 uid; f32 x;
+        Rect box;               // what is drawn
+        Rect hit;               // what is clickable -- the floor, plus slop
+        std::string label;
+    };
+    std::vector<Flag> flags;
+    if (markers_ && ui.fSmall) {
+        for (size_t i = 0; i < markers_->size(); ++i) {
+            const Marker& m = (*markers_)[i];
+            const f32 fx = beatToX(ta, m.beat);
+            // The list is sorted by beat, so the first flag past the right edge
+            // is the last one worth looking at.
+            if (fx > mband.right() + kArrMarkerSlop * s) break;
+            std::string lab = markerLabel(*ui.fSmall, m.name, kArrMarkerMaxW * s);
+            const f32 tw = lab.empty() ? 0.f : ui.fSmall->measure(lab.c_str());
+            // THE EIGHT-PIXEL FLOOR. A flag's drawn width is its name, and a
+            // name can be one letter or none at all; the zone is the greater of
+            // what it draws and what a hand can hit.
+            const f32 w = std::max(kArrMarkerGrab * s, tw + 8.f * s);
+            const Rect box{fx, mband.y + 1.f * s, w, mband.h - 3.f * s};
+            if (box.right() < mband.x - kArrMarkerSlop * s) continue;
+            const Rect hit{box.x - kArrMarkerSlop * s, mband.y,
+                           box.w + 2.f * kArrMarkerSlop * s, mband.h};
+            flags.push_back({i, m.uid, fx, box, hit, std::move(lab)});
+        }
+    }
+
+    const u64 bandId = uiId(24, 9);
+    ui.setHot(bandId, mband);
+    const bool hotBand = ui.isHot(bandId);
+
+    // NEAREST POLE WINS inside an overlap, which is the brace ends' rule applied
+    // to a row of things rather than to two: at a zoom where two flags' slop
+    // rectangles meet, the one whose pole the pointer is closer to is the one
+    // the hand is aiming at.
+    int hitFlag = -1;
+    if (hotBand && drag_ == Drag::None) {
+        f32 best = 1e9f;
+        for (size_t k = 0; k < flags.size(); ++k) {
+            if (!flags[k].hit.contains(in.mx, in.my)) continue;
+            const f32 d = std::fabs(in.mx - flags[k].x);
+            if (d < best) { best = d; hitFlag = (int)k; }
+        }
+    }
+
+    // The gestures. Right-click deletes and double-click creates, which are the
+    // same two verbs the lanes below already answer with the same two buttons --
+    // and they cannot be confused with the bar band's right-click, because that
+    // band's hot rect stops at the seam.
+    if (hotBand && drag_ == Drag::None && renameMarker_ == 0) {
+        if (in.pressed[2] && hitFlag >= 0) {
+            markerReq_.kind = MarkerReq::Kind::Remove;
+            markerReq_.uid  = flags[(size_t)hitFlag].uid;
+            if (selMarker_ == markerReq_.uid) selMarker_ = 0;
+        } else if (in.pressed[0] && hitFlag >= 0) {
+            const Flag& f = flags[(size_t)hitFlag];
+            selMarker_ = f.uid;
+            if (in.dblClick) {
+                // The rename. The FIRST click of the double already jumped, and
+                // that is the right order rather than a wart: a jump is harmless
+                // and instantaneous, and making the rename wait for a gesture
+                // that does not also jump would cost it its only obvious home.
+                renameMarker_ = f.uid;
+                renameBuf_    = (*markers_)[f.i].name;
+            } else {
+                // A click JUMPS. The caller decides whether that is a locate now
+                // or a queued one, because whether the transport is running is
+                // its business and not the ruler's.
+                markerReq_.kind = MarkerReq::Kind::Jump;
+                markerReq_.uid  = f.uid;
+                drag_       = Drag::Marker;
+                gesture_    = uiId(24, 10, (int)(u32)f.uid);
+                dragMarker_ = f.uid;
+                markerOrig_ = (*markers_)[f.i].beat;
+                markerGrab_ = (f64)xToBeat(ta, in.mx) - markerOrig_;
+                moved_      = false;
+                ui.active   = gesture_;
+            }
+        } else if (in.pressed[0] && in.dblClick) {
+            // Empty band. The same double-click that fills an empty lane with a
+            // note block fills an empty ruler with a marker.
+            markerReq_.kind = MarkerReq::Kind::Add;
+            markerReq_.beat = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+        }
+    }
+
+    if (drag_ == Drag::Marker) {
+        if (!in.down[0]) {
+            if (ui.active == gesture_) ui.active = 0;
+            drag_ = Drag::None;
+            gesture_ = 0;
+            dragMarker_ = 0;
+        } else {
+            // Measured from the beat the flag had at the press, exactly as every
+            // item drag is, so a drag is absolute against its own start and
+            // cannot integrate its own rounding. Shift is unquantized, which is
+            // the modifier's meaning everywhere else in this editor.
+            const f64 raw = (f64)xToBeat(ta, in.mx) - markerGrab_;
+            const f64 b = std::max(0.0, in.shift() ? raw : quantNear(raw));
+            if (!moved_ &&
+                std::fabs(beatToX(ta, b) - beatToX(ta, markerOrig_)) > 3.f * s) {
+                // THE UNDO HANDSHAKE, verbatim: the edit is named on the frame
+                // the drag first travels and BEFORE anything moves, the caller
+                // takes its point, and the move below is what it took it against.
+                moved_ = true;
+                pendingEdit_ = kEditMarkerMove;
+            }
+            if (moved_) {
+                markerReq_.kind    = MarkerReq::Kind::Move;
+                markerReq_.uid     = dragMarker_;
+                markerReq_.beat    = b;
+                markerReq_.gesture = gesture_;
+            }
+        }
+    }
+
     rr.pushClip(ruler);
     if (ui.fSmall)
-        drawRulerLabels(rr, *ui.fSmall, ta, ruler.x, ruler.right(),
-                        ruler.y + (ruler.h - ui.fSmall->height()) * 0.5f, s,
+        drawRulerLabels(rr, *ui.fSmall, ta, bruler.x, bruler.right(),
+                        bruler.y + (bruler.h - ui.fSmall->height()) * 0.5f, s,
                         tl::rulerOnBar, tl::rulerOffBar, ctx.sig, 44.f * s);
     // The signature markers. Drawn ONLY for a map that has more than one entry,
     // which is not a shortcut: a set in one signature has nothing to mark -- the
@@ -453,19 +658,23 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         for (int i = 0; i < ctx.sig.count(); ++i) {
             const RtSig sg = ctx.sig.entry(i);
             const f32 mx = beatToX(ta, ctx.sig.beatOfBar((f64)sg.bar));
-            if (mx < ruler.x - 40.f * s || mx > ruler.right()) continue;
+            if (mx < bruler.x - 40.f * s || mx > bruler.right()) continue;
             char buf[24];
             std::snprintf(buf, sizeof buf, "%d/%d", sg.num, sg.den);
             const f32 tw = ui.fSmall->measure(buf);
-            const Rect tag{mx + 1.f * s, ruler.y + 3.f * s,
-                           tw + 7.f * s, ruler.h - 6.f * s};
+            const Rect tag{mx + 1.f * s, bruler.y + 3.f * s,
+                           tw + 7.f * s, bruler.h - 6.f * s};
             // The one accent tag on the ruler, and it keeps its violet fill:
             // a signature change is identity, not decoration. inkOn picks the
             // ink -- §7's table says `text` clears 4.8:1 on a violet fill and
             // `muted` is illegible on one, so nothing secondary may go here.
             rr.roundRect(tag, 2.f * s, nx::violet.alpha(0.92f));
             rr.textIn(*ui.fSmall, tag, buf, nx::inkOn(nx::violet), Align::Center, 0.f);
-            rr.rect({nx::snapPx(mx), ruler.y, std::max(1.f, s), ruler.h},
+            // The tag's own line stops at the seam. A signature change belongs
+            // to the bar band; running it up through the marker band would put
+            // a second vertical rule beside every flag that shares its bar and
+            // make the two look like one thing.
+            rr.rect({nx::snapPx(mx), bruler.y, std::max(1.f, s), bruler.h},
                     nx::violetSoft.alpha(0.85f));
         }
     }
@@ -479,11 +688,65 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // rather than a thing that is happening. Cyan is reserved for the one
         // element on this surface that is live, and that is the playhead.
         const Col c = nx::violetSoft.alpha(on ? 0.95f : 0.34f);
-        rr.rect({x0, ruler.y, std::max(1.f * s, x1 - x0), 3.f * s}, c);
-        rr.rect({x0, ruler.y, 1.5f * s, ruler.h - 1.f * s}, c);
-        rr.rect({x1 - 1.5f * s, ruler.y, 1.5f * s, ruler.h - 1.f * s}, c);
+        rr.rect({x0, bruler.y, std::max(1.f * s, x1 - x0), 3.f * s}, c);
+        rr.rect({x0, bruler.y, 1.5f * s, bruler.h - 1.f * s}, c);
+        rr.rect({x1 - 1.5f * s, bruler.y, 1.5f * s, bruler.h - 1.f * s}, c);
     }
-    {   // The playhead's head, in the ruler, where a hand looks for it.
+    // THE FLAGS. A pole at the marker's beat and a labelled block hanging off
+    // it to the right -- the shape a locator has had since Live invented it, and
+    // the shape that makes "this names THAT beat" readable at a glance.
+    //
+    // VIOLET, because a marker is a thing the user SET, which is the same
+    // argument the loop brace's colour note makes one screen up. Cyan stays
+    // reserved for what is happening -- and that is exactly why a QUEUED jump
+    // gets a cyan ring: at that moment the flag has stopped being only a place
+    // and has become something the transport is about to do.
+    if (ui.fSmall) {
+        for (const Flag& f : flags) {
+            const Marker& m = (*markers_)[f.i];
+            // Colour 0 is the accent; anything else indexes the clip palette,
+            // wrapped, so a file from a build with a wider palette draws a
+            // sensible colour here instead of reading off the end of ours.
+            const Col base = m.colorIdx <= 0
+                                 ? nx::violet
+                                 : pal::clipColors[(m.colorIdx - 1) % pal::clipColorCount];
+            if (renameMarker_ == m.uid) {
+                // The inline rename. A field wide enough to type a name into,
+                // even when the flag it replaces is four pixels of "A".
+                const Rect fr{f.box.x, mband.y + 1.f * s,
+                              std::max(f.box.w, 104.f * s), mband.h - 3.f * s};
+                const u64 fid = uiId(24, 11, (int)(u32)m.uid);
+                if (ui.textField(fid, fr, &renameBuf_, nx::panel2, nx::text,
+                                 Align::Left, true)) {
+                    markerReq_.kind = MarkerReq::Kind::Rename;
+                    markerReq_.uid  = m.uid;
+                    markerReq_.name = renameBuf_;
+                    renameMarker_ = 0;
+                } else if (ui.editId != fid) {
+                    renameMarker_ = 0;      // Escape, or a press somewhere else
+                }
+                continue;
+            }
+            const bool sel = m.uid == selMarker_;
+            const Col fill = base.alpha(sel ? 0.98f : 0.80f);
+            rr.rect({nx::snapPx(f.x), mband.y, std::max(1.f, s), mband.h},
+                    base.mix(nx::violetSoft, 0.35f).alpha(sel ? 0.98f : 0.8f));
+            rr.roundRect(f.box, 2.f * s, fill);
+            if (!f.label.empty())
+                rr.textIn(*ui.fSmall, f.box, f.label.c_str(), nx::inkOn(fill),
+                          Align::Center, 0.f);
+            // The selected flag is RINGED and not merely brighter: brightness
+            // alone is a difference somebody has to be shown twice to see, and
+            // the ring is what the focus vocabulary already uses everywhere else.
+            if (sel) rr.roundRectOutline(f.box, 2.f * s, 1.f * s, nx::text.alpha(0.85f));
+            if (m.uid == queuedMarker_)
+                rr.roundRectOutline(f.box.inset(-1.5f * s), 3.f * s, 1.5f * s,
+                                    nx::live.alpha(0.95f));
+        }
+    }
+    {   // The playhead's head, and it spans BOTH bands: it is the one thing on
+        // this ruler that belongs to neither, and a head that stopped at the
+        // seam would leave the marker band looking like a different widget.
         const f32 px = beatToX(ta, ctx.playhead);
         if (px >= ruler.x && px <= ruler.right())
             tl::drawPlayhead(rr, px, ruler.y, ruler.h, s * 1.5f, true);
@@ -1088,7 +1351,15 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     clampv(origHeight_ + (in.my - grabY_) / s, kArrMinLaneH, kArrMaxLaneH);
             }
         }
-    } else if (drag_ != Drag::None && drag_ != Drag::Loop) {
+    } else if (drag_ != Drag::None && drag_ != Drag::Loop && drag_ != Drag::Marker) {
+        // THE ITEM DRAGS, and the exclusions above are what makes that true. This
+        // arm is written as "anything still dragging", so every drag that is not
+        // an item's has to be named in it -- Drag::Loop always was, and
+        // Drag::Marker joins it. A marker drag carries no dragUid_, indexOf(0)
+        // answers -1, and the `idx < 0` branch below would then cancel the
+        // gesture on the frame after the press. Which is exactly what it did:
+        // the flag jumped on the click and would not move.
+        //
         // Every item drag is measured from the values the item had at the press
         // and written absolutely, so it never integrates its own error and a
         // wheel mid-drag cannot walk the item away from the hand.
@@ -1233,6 +1504,27 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     else if (drag_ == Drag::Move)                          ui.cursor = Cursor::Grab;
     else if (drag_ == Drag::Loop)                          ui.cursor = Cursor::ResizeH;
     else if (drag_ == Drag::LaneH)                         ui.cursor = Cursor::ResizeV;
+    else if (drag_ == Drag::Marker)                        ui.cursor = Cursor::Grab;
+    else if (hotBand && renameMarker_ == 0) {
+        if (hitFlag >= 0) {
+            ui.cursor = Cursor::Grab;
+            // THE FLAG TIPS ITS NAME, and that is the whole reason the tip is
+            // here rather than a badge: a label truncated to "Chorus ver.." is
+            // the one thing on this ruler that cannot say what it is, and no
+            // badge in the vocabulary means "this is called something".
+            const Marker& m = (*markers_)[flags[(size_t)hitFlag].i];
+            ui.tip = (m.name.empty() ? std::string("(unnamed)") : m.name) +
+                     " - click to jump here, drag to move, double-click to "
+                     "rename, right-click to delete";
+        } else {
+            // A CREATION ZONE, which is the badge rule's own worked example: an
+            // empty strip above the bar numbers is indistinguishable from
+            // padding, and the double-click that puts a marker on it is
+            // invisible until it is found by accident.
+            ui.badge = Badge::Add;
+            if (ui.tip.empty()) ui.tip = "double-click to drop a marker here";
+        }
+    }
     else if (hotRuler && drag_ == Drag::None) {
         ui.cursor = braceEnd >= 0 ? Cursor::ResizeH : Cursor::Hand;
         if (braceEnd >= 0)
@@ -1282,6 +1574,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     ctx.selTrack = selTrack_;
     ctx.selItem  = selItem_;
     probeArrange(ctx, changed, selTrack_, selItem_);
+    probeMarkers(markers_, markerReq_, selMarker_, queuedMarker_);
     return changed;
 }
 

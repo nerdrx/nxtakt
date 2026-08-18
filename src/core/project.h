@@ -107,7 +107,38 @@
 // is a broken line and says so, rather than silently loading as the value that
 // suppresses it.
 //
-// Saving always writes the current version; versions 1 through 9 all load,
+// Version 10 adds the arrangement's MARKERS (locators): named points on the
+// timeline, one sparse top-level line each,
+//
+//     marker <beat> <color> <name...>
+//
+// beside `loop` and `loopon`, because there is one timeline and these are
+// positions on it. Written in normalized order (sorted by beat, unique beats),
+// so the file is the same list the ruler draws and a hand-edited one is sorted
+// on the way in rather than being trusted.
+//
+// THE NAME IS LAST, and it is last so that spaces in it survive. Every other
+// line in this format is either all numbers or ends in one free-text field, and
+// the free-text field is always the tail: `name`, `plugin`, `state` and
+// `autolane <address>` all take the whole remainder of the line and unescape it
+// (see `kv`/`unesc`). A marker's two numbers therefore come first and are
+// scanned, and whatever is left -- spaces, punctuation, unicode and all -- is
+// the name. An EMPTY name is written as the bare `marker <beat> <color>`, which
+// is `kv`'s bare form applied to a line that has other fields in front of it,
+// and reads back as the empty string.
+//
+// The colour is a POSITIONAL field rather than a sparse one, unlike the note's
+// chance and velrange, and for the opposite reason those two are sparse: there
+// is a free-text field behind it, so an omitted colour could not be told from a
+// name that happens to begin with a number. Writing it always costs two bytes
+// and removes the ambiguity entirely. Index 0 is the accent; the value is
+// clamped to the field's own width and NOT to this build's palette, for the
+// reason `curve` and `fadeshape` are -- see `struct Marker` in session.h.
+//
+// A set with no markers writes no `marker` line, so it produces the identical
+// bytes version 9 produced apart from the header line.
+//
+// Saving always writes the current version; versions 1 through 10 all load,
 // through one parser, with every field a file does not mention taking its
 // default.
 //

@@ -486,6 +486,46 @@ private:
     // sixty times a second does not allocate sixty times a second.
     std::vector<f32> spectraWave_;
 
+    // --- the Sampler's editor (app_sampler.cpp) ----------------------------
+    //
+    // Spectra's panel, for the instrument whose hero is a picture of the user's
+    // own file rather than of a table the DSP generated: a card that opens
+    // BESIDE its device box, with the waveform across the top of it and the
+    // playback region drawn ON the waveform as two draggable edges.
+    //
+    // Built against the frozen twenty-parameter table at the top of
+    // src/plugin/sampler.cpp and nothing else, with every id guarded the same
+    // way Spectra's are.
+    //
+    // "This device plays a file" is SamplerControl, not a URI: only a sampler
+    // answers sampler(), exactly as only a rack answers rack().
+    static bool isSampler(PluginInstance* p);
+    void drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc);
+    // Which slot of `devices` has its panel open, or -1. Resolved from the uid
+    // every frame, for the reason rackOpenUid_ is a uid.
+    int  samplerOpenIdx(const std::vector<DeviceModel>& devices) const;
+    // Headless hooks: NXTAKT_DEBUG_SAMPLER opens the panel, _SAMPLERFILE loads
+    // a file through the drop target's own call, _SAMPLERSET writes parameters
+    // through the handles' own commit path and _SAMPLERDRAG arms a browser drag
+    // so the drop-in-flight state can be photographed. Inert without them.
+    void debugSeedSampler();
+    // The peaks the hero is drawn from: SamplerControl::sampleBuffer(), which
+    // is the buffer the device is playing rather than a copy of it. Borrowed
+    // for the frame that draws it and re-borrowed on the next one, so a load or
+    // an undo between two frames can never leave the previous file drawn under
+    // this file's region handles.
+    const SampleBuffer* samplerBuffer(SamplerControl* sc);
+    u64  samplerOpenUid_ = 0;          // 0 = no Sampler panel open
+    bool samplerForced_ = false;       // opened on something with no sampler()
+    bool samplerSeeded_ = false;
+    bool samplerScrollTo_ = false;
+    int  samplerPreset_ = 0;           // the preset row's cursor
+    SampleRef samplerWave_;            // the borrowed reference, held while drawing
+    // NXTAKT_DEBUG_SAMPLERDRAG's payload. Non-empty means "hold a browser-file
+    // drag over this panel every frame", which is the only way the in-flight
+    // drop state can be photographed on a machine with no mouse to hold one.
+    std::string samplerDragHold_;
+
     Session  ses_;
     MainView view_ = MainView::Session;
 
