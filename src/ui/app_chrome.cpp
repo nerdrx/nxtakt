@@ -1859,7 +1859,6 @@ void App::drawStatusBar(const Rect& r) {
     // subordinate to a tooltip, which is the distinction the two inks exist to
     // draw. "Quiet" is not the same thing as "hard to read".
     static const Col kIdleInk = pal::textFaint.mix(pal::textDim, 0.5f);
-    const bool tip = !ui_.tip.empty();
 
     // The MIDI tag carries the sequencer client id: nothing is auto-connected,
     // so the number is what the user needs to hand aconnect or qpwgraph.
@@ -1895,17 +1894,38 @@ void App::drawStatusBar(const Rect& r) {
     // takesFailed/takesLost join the family: each is a performance that
     // happened and was not kept, which is the most expensive kind of loss
     // this program can have. takesEmpty is deliberately NOT counted -- an
-    // empty take is a musician changing their mind, not a failure.
+    // empty take is a musician changing their mind, not a failure (it gets
+    // its own quiet sentence in the diagnostics tip below, as information).
     // deviceStatesRefused and racksRefused join it too: each is an instrument
     // or a rack drawn loaded that plays nothing (engine_handle.h §15 / v7),
     // counted in neither remoteRefusals nor any other member of the sum.
-    const u64 refusals = eng_.remoteRefusals()
-                       + eng_.arrangementsRefused()
-                       + eng_.signaturesRefused()
-                       + eng_.deviceStatesRefused()
-                       + eng_.racksRefused()
-                       + eng_.takesFailed()
-                       + eng_.takesLost();
+    //
+    // The families are held apart rather than summed at the call, because the
+    // tag's hover names them: "3 refused" alone sends the user to the log to
+    // learn WHICH lie is on screen, and the answer -- a timeline that does not
+    // play versus a 4/4 engine under a 7/8 ruler -- is exactly one hover's
+    // worth of text.
+    u64 rCmd   = eng_.remoteRefusals();
+    u64 rArr   = eng_.arrangementsRefused();
+    u64 rSig   = eng_.signaturesRefused();
+    u64 rState = eng_.deviceStatesRefused();
+    u64 rRack  = eng_.racksRefused();
+    u64 rTFail = eng_.takesFailed();
+    u64 rTLost = eng_.takesLost();
+    // NXTAKT_DEBUG_REFUSED=<cmd>,<arr>,<sig>,<state>,<rack>,<tfail>,<tlost>
+    // (trailing entries optional) -- display-level override in
+    // DEBUG_STATEREFUSED's pattern (app_devices.cpp): a real refusal needs the
+    // daemon to reject a publication, which a screenshot run cannot stage on
+    // demand for every family at once.
+    if (const char* f = env("DEBUG_REFUSED")) {
+        u64* fam[7] = { &rCmd, &rArr, &rSig, &rState, &rRack, &rTFail, &rTLost };
+        int i = 0;
+        for (const char* p = f; *p && i < 7; ++i) {
+            *fam[i] = (u64)strtoull(p, (char**)&p, 10);
+            if (*p == ',') ++p;
+        }
+    }
+    const u64 refusals = rCmd + rArr + rSig + rState + rRack + rTFail + rTLost;
     if (refusals > 0)
         snprintf(refuseTag, sizeof refuseTag, "%s%llu refused", kSep,
                  (unsigned long long)refusals);
@@ -1952,9 +1972,81 @@ void App::drawStatusBar(const Rect& r) {
     // retires itself the moment the last answer lands). They accumulate
     // leftwards from the diagnostics in that order.
     f32 diagW = fSmall_.measure(buf);
+    // The diagnostics run answers "what am I actually running" on hover: which
+    // engine (the one fact the bar's driver tag does not carry -- a daemon and
+    // an in-process engine print the same "JACK 48000 Hz"), its pid (the
+    // number a user needs to hand kill or gdb, and until now readable only by
+    // a test), restarts, MIDI traffic, and the take ledger. takesReturned /
+    // takesEmpty are INFORMATION, not amber: a kept take is a clip on screen
+    // and an empty one is a musician changing their mind, so they belong here
+    // in muted hover text and not in the refusal tag beside it.
+    {
+        const u64 idDiag = uiId(UiControlBar, 51);
+        const Rect diagR{r.right() - nx::sp1 * s - diagW, r.y, diagW, r.h};
+        if (ui_.setHot(idDiag, diagR) && ui_.isHot(idDiag)) {
+            char t[224];
+            int n;
+            if (eng_.remoteOpen())
+                n = snprintf(t, sizeof t, "Engine: nxtaktd, pid %d",
+                             eng_.enginePid());
+            else if (eng_.localOpen())
+                n = snprintf(t, sizeof t, "Engine: in-process (NXTAKT_ENGINE=local)");
+            else
+                n = snprintf(t, sizeof t, "Engine: none - the set is editable, "
+                                          "nothing sounds");
+            if (eng_.resyncs() > 0 && n < (int)sizeof t)
+                n += snprintf(t + n, sizeof t - (size_t)n,
+                              " - restarted %llu time%s this run",
+                              (unsigned long long)eng_.resyncs(),
+                              eng_.resyncs() == 1 ? "" : "s");
+            if (eng_.midiRunning() && n < (int)sizeof t)
+                n += snprintf(t + n, sizeof t - (size_t)n,
+                              " - MIDI in: %llu message%s",
+                              (unsigned long long)eng_.midiReceived(),
+                              eng_.midiReceived() == 1 ? "" : "s");
+            if ((eng_.takesReturned() || eng_.takesEmpty()) && n < (int)sizeof t)
+                snprintf(t + n, sizeof t - (size_t)n,
+                         " - takes: %llu kept, %llu empty",
+                         (unsigned long long)eng_.takesReturned(),
+                         (unsigned long long)eng_.takesEmpty());
+            ui_.tip = t;
+        }
+    }
     if (refuseTag[0]) {
-        rend_.textIn(fSmall_, {r.x, r.y, r.w - diagW - 12 * s, r.h},
-                     refuseTag + kSepLen, pal::meterAmber, Align::Right, nx::sp1 * s);
+        const Rect avail{r.x, r.y, r.w - diagW - 12 * s, r.h};
+        rend_.textIn(fSmall_, avail, refuseTag + kSepLen, pal::meterAmber,
+                     Align::Right, nx::sp1 * s);
+        // The hover names the families. Same voice as the device strip's
+        // refused-state tip: what is wrong, what it sounds like where that is
+        // not obvious, and where the reasons are.
+        const f32 tw = fSmall_.measure(refuseTag + kSepLen);
+        const u64 idRef = uiId(UiControlBar, 50);
+        const Rect tagR{avail.right() - nx::sp1 * s - tw, r.y, tw, r.h};
+        if (ui_.setHot(idRef, tagR) && ui_.isHot(idRef)) {
+            char t[320];
+            int n = snprintf(t, sizeof t, "Engine refused:");
+            bool first = true;
+            auto fam = [&](u64 c, const char* one, const char* many) {
+                if (!c || n >= (int)sizeof t) return;
+                n += snprintf(t + n, sizeof t - (size_t)n, "%s %llu %s",
+                              first ? "" : ",", (unsigned long long)c,
+                              c == 1 ? one : many);
+                first = false;
+            };
+            fam(rCmd,   "command the wire cannot carry",
+                        "commands the wire cannot carry");
+            fam(rArr,   "arrangement lane",  "arrangement lanes");
+            fam(rSig,   "signature map (engine kept 4/4)",
+                        "signature maps (engine kept 4/4)");
+            fam(rState, "device state",      "device states");
+            fam(rRack,  "rack",              "racks");
+            fam(rTFail, "take failed",       "takes failed");
+            fam(rTLost, "take lost with the engine",
+                        "takes lost with the engine");
+            if (n < (int)sizeof t)
+                snprintf(t + n, sizeof t - (size_t)n, " - the log says why");
+            ui_.tip = t;
+        }
         diagW += fSmall_.measure(refuseTag);
     }
     if (syncTag[0]) {
@@ -1971,6 +2063,11 @@ void App::drawStatusBar(const Rect& r) {
     // now stops with "..." where the diagnostics begin -- and it is the message
     // that yields, because the diagnostics are a fixed-width readout and the
     // message is prose that survives being cut.
+    // Read AFTER the hotspots above, not at the top of the function: the
+    // refusal tag and the diagnostics run set ui_.tip from inside this very
+    // bar, and a capture taken before they ran would draw their tip one frame
+    // late (or, for a moving pointer, never).
+    const bool tip = !ui_.tip.empty();
     const f32 msgW = std::max(0.f, r.w - diagW - nx::sp3 * s);
     rend_.textIn(fSmall_, {r.x, r.y, msgW, r.h}, tip ? ui_.tip.c_str() : status_.c_str(),
                  tip ? pal::textDim : kIdleInk, Align::Left, nx::sp1 * s);
