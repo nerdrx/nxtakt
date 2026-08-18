@@ -3417,7 +3417,7 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 17, "Sub",           0.f,     1.f,     false, false },
     { 18, "Cutoff",        20.f,    20000.f, false, true  },
     { 19, "Resonance",     0.f,     1.f,     false, false },
-    { 20, "Filter Type",   0.f,     2.f,     true,  false },
+    { 20, "Filter Type",   0.f,     5.f,     true,  false },   // widened by v2
     { 21, "Drive",         0.f,     24.f,    false, false },
     { 22, "Env2>Cutoff",  -1.f,     1.f,     false, false },
     { 23, "Keytrack",      0.f,     1.f,     false, false },
@@ -3435,22 +3435,90 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 35, "LFO>Cutoff",   -1.f,     1.f,     false, false },
     { 36, "LFO>Pitch",     0.f,     100.f,   false, false },
     { 37, "LFO Shape",     0.f,     4.f,     true,  false },
-    { 38, "Glide",         0.f,     500.f,   false, false },
+    { 38, "Glide",         0.f,     2000.f,  false, false },   // widened by v2
     { 39, "Voices",        1.f,     16.f,    true,  false },
     { 40, "Master",        0.f,     1.5f,    false, false },
     { 41, "Env2>Position",-1.f,     1.f,     false, false },
+    // --- v2, ids 42..99 ("v2 — the parity push"). Reserved ids are
+    // registered: name "—", 0..1, default 0.
+    { 42, "Sub Shape",     0.f,     2.f,     true,  false },
+    { 43, "Sub Oct",      -2.f,     0.f,     true,  false },
+    { 44, "Noise Color",   0.f,     1.f,     false, false },
+    { 45, "Noise Track",   0.f,     1.f,     true,  false },
+    { 46, "—",             0.f,     1.f,     false, false },
+    { 47, "—",             0.f,     1.f,     false, false },
+    { 48, "A Warp",        0.f,     7.f,     true,  false },
+    { 49, "A Warp Amt",    0.f,     1.f,     false, false },
+    { 50, "B Warp",        0.f,     7.f,     true,  false },
+    { 51, "B Warp Amt",    0.f,     1.f,     false, false },
+    { 52, "—",             0.f,     1.f,     false, false },
+    { 53, "—",             0.f,     1.f,     false, false },
+    { 54, "L2 Rate",       0.01f,   40.f,    false, true  },
+    { 55, "L2 Sync",       0.f,     9.f,     true,  false },
+    { 56, "L2 Shape",      0.f,     4.f,     true,  false },
+    { 57, "L3 Rate",       0.01f,   40.f,    false, true  },
+    { 58, "L3 Sync",       0.f,     9.f,     true,  false },
+    { 59, "L3 Shape",      0.f,     4.f,     true,  false },
+    { 60, "—",             0.f,     1.f,     false, false },
+    { 61, "—",             0.f,     1.f,     false, false },
+    { 62, "E3 Attack",     0.1f,    5000.f,  false, true  },
+    { 63, "E3 Decay",      1.f,     5000.f,  false, true  },
+    { 64, "E3 Sustain",    0.f,     1.f,     false, false },
+    { 65, "E3 Release",    1.f,     8000.f,  false, true  },
+    { 66, "—",             0.f,     1.f,     false, false },
+    { 67, "—",             0.f,     1.f,     false, false },
+    { 68, "M1 Src",        0.f,     13.f,    true,  false },
+    { 69, "M1 Dst",        0.f,     19.f,    true,  false },
+    { 70, "M1 Amt",       -1.f,     1.f,     false, false },
+    { 71, "M2 Src",        0.f,     13.f,    true,  false },
+    { 72, "M2 Dst",        0.f,     19.f,    true,  false },
+    { 73, "M2 Amt",       -1.f,     1.f,     false, false },
+    { 74, "M3 Src",        0.f,     13.f,    true,  false },
+    { 75, "M3 Dst",        0.f,     19.f,    true,  false },
+    { 76, "M3 Amt",       -1.f,     1.f,     false, false },
+    { 77, "M4 Src",        0.f,     13.f,    true,  false },
+    { 78, "M4 Dst",        0.f,     19.f,    true,  false },
+    { 79, "M4 Amt",       -1.f,     1.f,     false, false },
+    { 80, "M5 Src",        0.f,     13.f,    true,  false },
+    { 81, "M5 Dst",        0.f,     19.f,    true,  false },
+    { 82, "M5 Amt",       -1.f,     1.f,     false, false },
+    { 83, "M6 Src",        0.f,     13.f,    true,  false },
+    { 84, "M6 Dst",        0.f,     19.f,    true,  false },
+    { 85, "M6 Amt",       -1.f,     1.f,     false, false },
+    { 86, "M7 Src",        0.f,     13.f,    true,  false },
+    { 87, "M7 Dst",        0.f,     19.f,    true,  false },
+    { 88, "M7 Amt",       -1.f,     1.f,     false, false },
+    { 89, "M8 Src",        0.f,     13.f,    true,  false },
+    { 90, "M8 Dst",        0.f,     19.f,    true,  false },
+    { 91, "M8 Amt",       -1.f,     1.f,     false, false },
+    { 92, "—",             0.f,     1.f,     false, false },
+    { 93, "—",             0.f,     1.f,     false, false },
+    { 94, "Macro 1",       0.f,     1.f,     false, false },
+    { 95, "Macro 2",       0.f,     1.f,     false, false },
+    { 96, "Macro 3",       0.f,     1.f,     false, false },
+    { 97, "Macro 4",       0.f,     1.f,     false, false },
+    { 98, "Voice Mode",    0.f,     2.f,     true,  false },
+    { 99, "—",             0.f,     1.f,     false, false },
 };
 static constexpr int kSpectraContractN =
     (int)(sizeof kSpectraContract / sizeof kSpectraContract[0]);
 
-// The preset names, also a contract: the editor's selector displays exactly
-// these, in exactly this order.
-static const char* kSpectraPresetNames[] = {
-    "Init", "Supersaw Lead", "Solid Bass", "Sub Bass", "Pluck", "Warm Pad",
-    "Formant Keys", "Bell", "Acid", "Wobble", "Air Pad", "Organ",
+// The factory bank (v2): presets are CONTENT, not interface — the contract
+// says "retiring or renaming presets never breaks a project" — so the suite
+// checks the bank's RULES rather than transcribing its names: 49 rows, row 0
+// Init, the category tags in contract order with the contract counts,
+// alphabetical within a category, and the naming constraints. The bank file
+// itself (src/plugin/spectra_presets.inc) is authored against the doc.
+static constexpr int kSpectraPresetN = 49;    // Init + 48
+struct SpectraPresetCat { const char* tag; int count; };
+static const SpectraPresetCat kSpectraPresetCats[] = {
+    { "BA", 9 }, { "LD", 9 }, { "PD", 8 }, { "KY", 7 },
+    { "PL", 6 }, { "FX", 5 }, { "SQ", 4 },
 };
-static constexpr int kSpectraPresetN =
-    (int)(sizeof kSpectraPresetNames / sizeof kSpectraPresetNames[0]);
+static const char* spPresetName(const PluginInstance& s, int k) {
+    const char* n = s.presetName(k);
+    return n ? n : "(null)";
+}
 
 // --- measurement helpers ---------------------------------------------------
 
@@ -4602,21 +4670,59 @@ static void testSpectraPresets(PluginRegistry& reg) {
     if (!s) return;
 
     CHECK(s->presetCount() == kSpectraPresetN,
-          "presetCount() is %d (the editor expects %d)", s->presetCount(), kSpectraPresetN);
+          "presetCount() is %d (the contract's bank is Init + 48 = %d rows)",
+          s->presetCount(), kSpectraPresetN);
     CHECK(s->presetName(-1) == nullptr && s->presetName(s->presetCount()) == nullptr,
           "presetName() is null out of range");
+    CHECK(s->presetName(0) && std::strcmp(s->presetName(0), "Init") == 0,
+          "row 0 is \"Init\" (it is \"%s\")", spPresetName(*s, 0));
 
-    bool names = true;
-    for (int i = 0; i < s->presetCount() && i < kSpectraPresetN; ++i) {
-        const char* n = s->presetName(i);
-        if (!n || std::strcmp(n, kSpectraPresetNames[i]) != 0) {
-            CHECK(false, "preset %d is \"%s\", the editor expects \"%s\"",
-                  i, n ? n : "(null)", kSpectraPresetNames[i]);
-            names = false;
+    // The naming and ordering rules, mechanically: "<tag> Name", letters /
+    // digits / spaces only, <= 20 chars, no trailing number (numbered names
+    // are banned); categories in contract order at contract counts;
+    // alphabetical within a category.
+    {
+        bool ok = true;
+        int row = 1;
+        for (const SpectraPresetCat& cat : kSpectraPresetCats) {
+            const char* prev = nullptr;
+            for (int j = 0; j < cat.count; ++j, ++row) {
+                const char* n = s->presetName(row);
+                if (!n) { CHECK(false, "row %d has no name", row); ok = false; continue; }
+                const size_t len = std::strlen(n);
+                if (len > 20) {
+                    CHECK(false, "\"%s\" is %zu chars (cap 20)", n, len);
+                    ok = false;
+                }
+                if (len < 4 || n[0] != cat.tag[0] || n[1] != cat.tag[1] || n[2] != ' ') {
+                    CHECK(false, "row %d \"%s\" does not carry the tag \"%s \"",
+                          row, n, cat.tag);
+                    ok = false;
+                    continue;
+                }
+                bool chars = true;
+                for (size_t c = 0; c < len; ++c) {
+                    const char ch = n[c];
+                    if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                          (ch >= '0' && ch <= '9') || ch == ' '))
+                        chars = false;
+                }
+                if (!chars) { CHECK(false, "\"%s\" uses characters outside letters/digits/spaces", n); ok = false; }
+                if (len >= 2 && n[len - 2] == ' ' && n[len - 1] >= '0' && n[len - 1] <= '9') {
+                    CHECK(false, "\"%s\" is a numbered name, which the contract bans", n);
+                    ok = false;
+                }
+                if (prev && std::strcmp(prev, n) >= 0) {
+                    CHECK(false, "\"%s\" is out of alphabetical order after \"%s\"", n, prev);
+                    ok = false;
+                }
+                prev = n;
+            }
         }
+        CHECK(ok && row == kSpectraPresetN,
+              "the bank is BA9 LD9 PD8 KY7 PL6 FX5 SQ4 in order, alphabetical within "
+              "each category, names tagged and <= 20 chars");
     }
-    CHECK(names, "all %d preset names match, in order — this list IS the contract "
-                 "with the editor's selector", kSpectraPresetN);
 
     // Init is the defaults, exactly. Not approximately: a preset that drifts
     // from the constructor is a preset that cannot be trusted as a reset.
@@ -4652,13 +4758,13 @@ static void testSpectraPresets(PluginRegistry& reg) {
                 const f32 v = a->getParam(i);
                 if (!std::isfinite(v) || v < pi.min || v > pi.max) {
                     CHECK(false, "preset \"%s\" leaves %s at %g, outside [%g, %g]",
-                          kSpectraPresetNames[k], pi.name.c_str(), (double)v,
+                          spPresetName(*s, k), pi.name.c_str(), (double)v,
                           (double)pi.min, (double)pi.max);
                     inRange = false;
                 }
                 if (pi.isInt && v != std::floor(v)) {
                     CHECK(false, "preset \"%s\" leaves the stepped parameter %s at %g",
-                          kSpectraPresetNames[k], pi.name.c_str(), (double)v);
+                          spPresetName(*s, k), pi.name.c_str(), (double)v);
                     inRange = false;
                 }
             }
@@ -4684,7 +4790,7 @@ static void testSpectraPresets(PluginRegistry& reg) {
                 if (fresh->getParam(i) != dirty->getParam(i)) {
                     CHECK(false, "preset \"%s\" is not self-contained: %s is %g from a "
                                  "dirty state and %g from a fresh one",
-                          kSpectraPresetNames[k], fresh->paramInfo(i).name.c_str(),
+                          spPresetName(*s, k), fresh->paramInfo(i).name.c_str(),
                           (double)dirty->getParam(i), (double)fresh->getParam(i));
                     complete = false;
                     break;
@@ -4714,7 +4820,7 @@ static void testSpectraPresets(PluginRegistry& reg) {
             for (int i = 0; i < 48000 + kN; ++i) pk = std::fmax(pk, std::fabs(L[(size_t)i]));
             if (!(pk > 0.01f)) {
                 CHECK(false, "preset \"%s\" is silent (peak %.5f)",
-                      kSpectraPresetNames[k], (double)pk);
+                      spPresetName(*s, k), (double)pk);
                 sounded = false;
             }
             std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
@@ -4740,8 +4846,10 @@ static void testSpectraPresets(PluginRegistry& reg) {
         CHECK(sounded, "every one of the %d presets renders a non-silent note",
               s->presetCount());
 
-        // Three that must be plainly different instruments.
-        const int probe[3] = { 1, 7, 11 };            // Supersaw Lead, Bell, Organ
+        // Three from three categories that must be plainly different
+        // instruments: the first Bass (row 1), the first Pad (row 19: after
+        // BA9 + LD9), the first Keys (row 27: after PD8).
+        const int probe[3] = { 1, 19, 27 };
         bool distinct = true;
         f64 worst = 0.0;
         for (int i = 0; i < 3; ++i) {
@@ -4754,12 +4862,12 @@ static void testSpectraPresets(PluginRegistry& reg) {
                 if (dot > 0.95) {
                     CHECK(false, "presets \"%s\" and \"%s\" have near-identical spectra "
                                  "(similarity %.3f)",
-                          kSpectraPresetNames[probe[i]], kSpectraPresetNames[probe[j]], dot);
+                          spPresetName(*s, probe[i]), spPresetName(*s, probe[j]), dot);
                     distinct = false;
                 }
             }
         }
-        CHECK(distinct, "Supersaw Lead, Bell and Organ are three different sounds "
+        CHECK(distinct, "the first Bass, Pad and Keys are three different sounds "
                         "(worst spectral similarity %.3f, limit 0.95)", worst);
     }
 
@@ -4774,6 +4882,827 @@ static void testSpectraPresets(PluginRegistry& reg) {
                       "a device with no presets answers 0 / null, so the UI draws no "
                       "selector for it");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spectra v2 (ids 42..99) — sub/noise completion, warp, LFO2/3, ENV3, the
+// mod matrix, macros, voice modes. Same house rule as the v1 sections:
+// everything below MEASURES.
+// ---------------------------------------------------------------------------
+
+// A fresh default instance with the handful of levels every v2 test wants:
+// osc A only, filter open, full sustain.
+static std::unique_ptr<PluginInstance> spV2Base(PluginRegistry& reg, const PluginDesc& d) {
+    auto s = reg.instantiate(d, kSR, kBlock);
+    if (!s) return s;
+    s->setParam(spIdx(*s, "A Level"), 1.f);
+    s->setParam(spIdx(*s, "Attack"), 2.f);
+    s->setParam(spIdx(*s, "Decay"), 5000.f);
+    s->setParam(spIdx(*s, "Sustain"), 1.f);
+    s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+    s->setParam(spIdx(*s, "Resonance"), 0.f);
+    s->setParam(spIdx(*s, "Master"), 1.f);
+    return s;
+}
+
+// One matrix slot, by raw contract ids: slot k is 68+3k / 69+3k / 70+3k.
+static void spV2Slot(PluginInstance& s, int k, int src, int dst, f32 amt) {
+    s.setParam(68 + 3 * k, (f32)src);
+    s.setParam(69 + 3 * k, (f32)dst);
+    s.setParam(70 + 3 * k, amt);
+}
+
+// Alias measurement, the v1 C7 test's method factored out: Hann-windowed FFT
+// of the steady part, energy within 6% of a multiple of f0 is signal,
+// everything else is not; returns 10*log10(alias/signal).
+static f64 spV2AliasDb(const std::vector<f32>& L, int from, int kN, f64 f0) {
+    std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
+    for (int i = 0; i < kN; ++i)
+        re[(size_t)i] = L[(size_t)(from + i)] *
+            (f32)(0.5 - 0.5 * std::cos(6.283185307179586 * i / kN));
+    tFft(re, im);
+    const f64 binHz = kSR / (f64)kN;
+    f64 sig = 0.0, alias = 0.0;
+    for (int k = 4; k < kN / 2; ++k) {
+        const f64 h  = (f64)k * binHz / f0;
+        const f64 dh = std::fabs(h - std::floor(h + 0.5));
+        const f64 e  = (f64)re[(size_t)k] * re[(size_t)k] +
+                       (f64)im[(size_t)k] * im[(size_t)k];
+        if (std::floor(h + 0.5) >= 1.0 && dh < 0.06) sig += e;
+        else                                          alias += e;
+    }
+    return 10.0 * std::log10(alias / (sig + 1e-30));
+}
+
+// Energy in [lo, hi) Hz over a Hann-windowed window, in dB (relative scale).
+static f64 spV2BandDb(const std::vector<f32>& L, int from, int kN, f64 lo, f64 hi) {
+    std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
+    for (int i = 0; i < kN; ++i)
+        re[(size_t)i] = L[(size_t)(from + i)] *
+            (f32)(0.5 - 0.5 * std::cos(6.283185307179586 * i / kN));
+    tFft(re, im);
+    const f64 binHz = kSR / (f64)kN;
+    f64 e = 0.0;
+    for (int k = 1; k < kN / 2; ++k) {
+        const f64 f = (f64)k * binHz;
+        if (f >= lo && f < hi)
+            e += (f64)re[(size_t)k] * re[(size_t)k] + (f64)im[(size_t)k] * im[(size_t)k];
+    }
+    return 10.0 * std::log10(e + 1e-30);
+}
+
+static f32 spV2MaxDiff(const std::vector<f32>& a, const std::vector<f32>& b) {
+    f32 d = 0.f;
+    const size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (size_t i = 0; i < n; ++i) d = std::fmax(d, std::fabs(a[i] - b[i]));
+    return d;
+}
+
+static void testSpectraV2SubNoise(PluginRegistry& reg) {
+    banner("Spectra v2: sub shapes and octaves, noise color and tracking");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // --- 1. SUB OCT places the fundamental. Sine sub alone at C3; the
+    // contract's default -1 is one octave below, 0 is unison, -2 two down.
+    {
+        const f64 fn = tMidiHz(48);
+        const struct { f32 oct; f64 mul; } cases[3] = { {0.f, 1.0}, {-1.f, 0.5}, {-2.f, 0.25} };
+        bool ok = true;
+        for (const auto& c : cases) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Sub"), 1.f);
+            s->setParam(spIdx(*s, "Sub Oct"), c.oct);
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, 48, 110 } }, 48000, kBlock, L, R);
+            const f64 want  = tBinMag(L, 24000, 16384, fn * c.mul);
+            const f64 above = tBinMag(L, 24000, 16384, fn * c.mul * 2.0);
+            if (!(want > 0.1 && want > 8.0 * above)) {
+                CHECK(false, "Sub Oct %g: fundamental %.3f at %.1f Hz, %.4f an octave up",
+                      (double)c.oct, want, fn * c.mul, above);
+                ok = false;
+            }
+        }
+        CHECK(ok, "Sub Oct 0/-1/-2 put a clean sine at f, f/2, f/4");
+    }
+
+    // --- 2. SUB SHAPES. The triangle carries h3 and (nearly) no h2; the
+    // polyBLEP square likewise, with more of it; both keep the fundamental.
+    {
+        bool ok = true;
+        for (int shape = 1; shape <= 2; ++shape) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Sub"), 1.f);
+            s->setParam(spIdx(*s, "Sub Shape"), (f32)shape);
+            s->setParam(spIdx(*s, "Sub Oct"), 0.f);
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, 48, 110 } }, 48000, kBlock, L, R);
+            const f64 fn = tMidiHz(48);
+            const f64 h1 = tBinMag(L, 24000, 16384, fn);
+            const f64 h2 = tBinMag(L, 24000, 16384, fn * 2.0);
+            const f64 h3 = tBinMag(L, 24000, 16384, fn * 3.0);
+            if (!(h1 > 0.1 && h3 > 0.02 * h1 && h2 < 0.05 * h1)) {
+                CHECK(false, "sub shape %d: h1 %.3f h2 %.4f h3 %.4f — not an odd-harmonic wave",
+                      shape, h1, h2, h3);
+                ok = false;
+            }
+        }
+        CHECK(ok, "sub triangle and square are odd-harmonic waves on the sub pitch");
+    }
+
+    // --- 3. THE POLYBLEP EARNS ITS NAME: the square sub two octaves up the
+    // keyboard still keeps its aliasing floor down.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Level"), 0.f);
+        s->setParam(spIdx(*s, "Sub"), 1.f);
+        s->setParam(spIdx(*s, "Sub Shape"), 2.f);
+        s->setParam(spIdx(*s, "Sub Oct"), 0.f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 84, 110 } }, 8192 + 16384, kBlock, L, R);
+        const f64 db = spV2AliasDb(L, 8192, 16384, tMidiHz(84));
+        CHECK(db < -40.0, "polyBLEP square sub at C6: alias/signal %.1f dB (limit -40)", db);
+    }
+
+    // --- 4. NOISE COLOR tilts the white source down. Color 0 puts the pole
+    // at 200 Hz; 6 dB/oct means the top of the band drops by tens of dB
+    // against the bypassed white of color 1.
+    {
+        f64 tilt[2] = { 0.0, 0.0 };     // [0] color 1 (bypass), [1] color 0
+        for (int c = 0; c < 2; ++c) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Noise"), 1.f);
+            s->setParam(spIdx(*s, "Noise Color"), c == 0 ? 1.f : 0.f);
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, 60, 110 } }, 8192 + 16384, kBlock, L, R);
+            tilt[c] = spV2BandDb(L, 8192, 16384, 4000.0, 16000.0) -
+                      spV2BandDb(L, 8192, 16384, 50.0, 200.0);
+        }
+        CHECK(tilt[1] < tilt[0] - 20.0,
+              "Noise Color 0 tilts the top band down %.1f dB against bypassed white "
+              "(needs > 20)", tilt[0] - tilt[1]);
+    }
+
+    // --- 5. NOISE TRACK moves the color pole with the note: the same color
+    // is brighter under a high note than a low one.
+    {
+        f64 hf[2] = { 0.0, 0.0 };
+        const u8 notes[2] = { 36, 96 };
+        for (int c = 0; c < 2; ++c) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Noise"), 1.f);
+            s->setParam(spIdx(*s, "Noise Color"), 0.5f);
+            s->setParam(spIdx(*s, "Noise Track"), 1.f);
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, notes[c], 110 } }, 8192 + 16384, kBlock, L, R);
+            hf[c] = spV2BandDb(L, 8192, 16384, 6000.0, 16000.0) -
+                    spV2BandDb(L, 8192, 16384, 100.0, 400.0);
+        }
+        CHECK(hf[1] > hf[0] + 10.0,
+              "Noise Track follows the note: C7 is %.1f dB brighter than C2 at the same "
+              "color (needs > 10)", hf[1] - hf[0]);
+    }
+}
+
+static void testSpectraV2Warp(PluginRegistry& reg) {
+    banner("Spectra v2: the seven warp modes");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    auto render = [&](int mode, f32 amt, u8 note, std::vector<f32>& L,
+                      int frames = 8192 + 16384) {
+        auto s = spV2Base(reg, *d);
+        if (!s) return false;
+        s->setParam(spIdx(*s, "A Warp"), (f32)mode);
+        s->setParam(spIdx(*s, "A Warp Amt"), amt);
+        std::vector<f32> R;
+        spRender(*s, { { 0, 0x90, note, 110 } }, frames, kBlock, L, R);
+        return true;
+    };
+
+    // --- 1. AT ZERO DEPTH EVERY MODE IS OFF — bit-identically, the id-49
+    // gate. (The Quantize formula alone would say otherwise at a = 0; the
+    // depth gate governs, as the implementation notes record.)
+    {
+        std::vector<f32> off, m;
+        if (!render(0, 0.f, 60, off)) return;
+        bool same = true;
+        for (int mode = 1; mode <= 7; ++mode) {
+            if (!render(mode, 0.f, 60, m)) return;
+            const f32 diff = spV2MaxDiff(off, m);
+            if (diff != 0.f) {
+                CHECK(false, "mode %d at zero depth differs from Off (max %.9f)",
+                      mode, (double)diff);
+                same = false;
+            }
+        }
+        CHECK(same, "all seven modes at zero depth render bit-identical to Off");
+    }
+
+    // --- 2. AND AT DEPTH, EVERY MODE DOES SOMETHING.
+    {
+        std::vector<f32> off, m;
+        if (!render(0, 0.f, 60, off)) return;
+        bool moved = true;
+        for (int mode = 1; mode <= 7; ++mode) {
+            if (!render(mode, mode == 1 ? 0.5f : 0.8f, 60, m)) return;
+            f32 pk = 0.f;
+            bool fin = true;
+            for (f32 v : m) { pk = std::fmax(pk, std::fabs(v)); if (!std::isfinite(v)) fin = false; }
+            if (!fin || !(pk > 0.02f) || !(spV2MaxDiff(off, m) > 0.01f)) {
+                CHECK(false, "mode %d at depth: finite %d, peak %.4f, moved %.4f",
+                      mode, (int)fin, (double)pk, (double)spV2MaxDiff(off, m));
+                moved = false;
+            }
+        }
+        CHECK(moved, "every warp mode at depth is audible, finite and bounded");
+    }
+
+    // --- 3. SYNC'S RATIO IS THE CONTRACT'S: a = 1/7 makes r = 2, and
+    // frac(2p) has period 1/2 — the energy sits on 2f0 and the f0 line all
+    // but vanishes.
+    {
+        std::vector<f32> m;
+        if (!render(1, 1.f / 7.f, 57, m)) return;
+        const f64 f0 = tMidiHz(57);
+        const f64 at1 = tBinMag(m, 8192, 16384, f0);
+        const f64 at2 = tBinMag(m, 8192, 16384, f0 * 2.0);
+        CHECK(at2 > 5.0 * at1,
+              "Sync at a=1/7 doubles the read rate: |2f0| %.4f vs |f0| %.4f", at2, at1);
+    }
+
+    // --- 4. ALIASING BOUNDS, per mode, at C6 and full depth (Sync at 0.5:
+    // r = 4.5, well past anything a table alone reaches). The contract
+    // accepts "mild aliasing" for the phase reshapers and chooses the mip
+    // under Sync from f*r; these bounds are the measured behaviour with
+    // headroom, recorded so a regression cannot hide behind the word "mild".
+    // FM is measured against its own sidebands' harmonicity (both oscs at
+    // the same pitch keep the products harmonic); RM at equal pitch is a
+    // spectrum reshuffle and is covered by section 2's bounds.
+    {
+        // Measured on the reference render (this suite, 2026-08): Sync -35.5,
+        // Bend+ -14.2, Bend- -32.0, Mirror -20.1, Quantize -19.6 dB. The
+        // limits sit ~4 dB above those. Bend+ is the honest worst case: its
+        // p^(1/(1+3a)) has an unbounded phase slope at p = 0, so full depth
+        // at C6 genuinely reads past the mip — the contract accepts it, and
+        // this row is what keeps "accepted" from quietly becoming "worse".
+        const struct { int mode; f32 amt; f64 limit; const char* name; } cases[] = {
+            { 1, 0.5f, -30.0, "Sync"     },
+            { 2, 1.0f, -10.0, "Bend+"    },
+            { 3, 1.0f, -28.0, "Bend-"    },
+            { 4, 1.0f, -16.0, "Mirror"   },
+            { 5, 0.5f, -15.0, "Quantize" },
+        };
+        for (const auto& c : cases) {
+            std::vector<f32> m;
+            if (!render(c.mode, c.amt, 84, m)) return;
+            const f64 db = spV2AliasDb(m, 8192, 16384, tMidiHz(84));
+            CHECK(db < c.limit, "%s at C6, depth %.2f: alias/signal %.1f dB (limit %.0f)",
+                  c.name, (double)c.amt, db, c.limit);
+        }
+    }
+
+    // --- 5. FM AT EQUAL PITCH STAYS HARMONIC: through-zero linear FM by a
+    // same-pitch modulator can only put energy on harmonics of f0, so the
+    // alias measure stays a real measure under FM too.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Warp"), 6.f);
+        s->setParam(spIdx(*s, "A Warp Amt"), 0.5f);
+        s->setParam(spIdx(*s, "B Level"), 0.f);        // silent, still the tap
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 69, 110 } }, 8192 + 16384, kBlock, L, R);
+        const f64 db = spV2AliasDb(L, 8192, 16384, tMidiHz(69));
+        f32 pk = 0.f;
+        for (f32 v : L) pk = std::fmax(pk, std::fabs(v));
+        CHECK(pk > 0.05f && db < -25.0,
+              "A FM'd by a silent B at equal pitch: sounding (%.3f) and harmonic "
+              "(%.1f dB non-harmonic, limit -25)", (double)pk, db);
+    }
+
+    // --- 6. MUTUAL FM/RM (the one-sample delay) is stable and audible both
+    // ways at once.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "B Level"), 0.6f);
+        s->setParam(spIdx(*s, "B Coarse"), 7.f);
+        s->setParam(spIdx(*s, "A Warp"), 6.f);
+        s->setParam(spIdx(*s, "A Warp Amt"), 0.4f);
+        s->setParam(spIdx(*s, "B Warp"), 7.f);
+        s->setParam(spIdx(*s, "B Warp Amt"), 0.7f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 60, 110 } }, 24000, kBlock, L, R);
+        f32 pk = 0.f;
+        bool fin = true;
+        for (f32 v : L) { pk = std::fmax(pk, std::fabs(v)); if (!std::isfinite(v)) fin = false; }
+        CHECK(fin && pk > 0.05f && pk < 4.f,
+              "A FM'd by B while B ring-mods against A: finite, sounding, bounded "
+              "(peak %.3f)", (double)pk);
+    }
+}
+
+static void testSpectraV2Matrix(PluginRegistry& reg) {
+    banner("Spectra v2: the eight-slot mod matrix");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    const std::vector<SpEvent> one = { { 0, 0x90, 60, 110 } };
+
+    // --- 1. A NORM DESTINATION SUMS EXACTLY: Macro1 at 1.0 through a
+    // full-depth slot into A Pos lands bit-identically on A Position = 1.0.
+    // Not approximately — the sum is 0 + 1 in the same domain the knob is in.
+    {
+        auto a = spV2Base(reg, *d);
+        auto b = spV2Base(reg, *d);
+        if (!a || !b) return;
+        a->setParam(spIdx(*a, "A Position"), 1.f);
+        spV2Slot(*b, 0, 9 /*Macro1*/, 1 /*A Pos*/, 1.f);
+        b->setParam(spIdx(*b, "Macro 1"), 1.f);
+        std::vector<f32> aL, aR, bL, bR;
+        spRender(*a, one, 12000, kBlock, aL, aR);
+        spRender(*b, one, 12000, kBlock, bL, bR);
+        CHECK(spV2MaxDiff(aL, bL) == 0.f && spV2MaxDiff(aR, bR) == 0.f,
+              "Macro1 -> A Pos at full depth == the knob at 1.0, bit for bit");
+    }
+
+    // --- 2. A DEAD SLOT COSTS NOTHING AND CHANGES NOTHING: source Off,
+    // dest Off, or amount 0 each leave the render bit-identical.
+    {
+        auto ref = spV2Base(reg, *d);
+        if (!ref) return;
+        std::vector<f32> rL, rR;
+        spRender(*ref, one, 12000, kBlock, rL, rR);
+        const struct { int src, dst; f32 amt; const char* what; } dead[3] = {
+            { 0, 1, 1.f, "source Off" },
+            { 9, 0, 1.f, "dest Off"   },
+            { 9, 1, 0.f, "amount 0"   },
+        };
+        bool same = true;
+        for (const auto& c : dead) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            spV2Slot(*s, 0, c.src, c.dst, c.amt);
+            s->setParam(spIdx(*s, "Macro 1"), 1.f);
+            std::vector<f32> L, R;
+            spRender(*s, one, 12000, kBlock, L, R);
+            if (spV2MaxDiff(rL, L) != 0.f) {
+                CHECK(false, "a slot with %s changed the render", c.what);
+                same = false;
+            }
+        }
+        CHECK(same, "slots with source Off / dest Off / amount 0 contribute nothing");
+    }
+
+    // --- 3. VELOCITY AS A SOURCE: vel/127 into B Level turns a silent osc B
+    // on for a hard note and leaves it (near) off for a soft one.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "A Level"), 0.f);
+        spV2Slot(*s, 0, 6 /*Velocity*/, 6 /*B Level*/, 1.f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 60, 127 }, { 24000, 0x80, 60, 0 },
+                       { 36000, 0x90, 60, 4 } }, 72000, kBlock, L, R);
+        f32 hard = 0.f, soft = 0.f;
+        for (int i = 4000; i < 20000; ++i) hard = std::fmax(hard, std::fabs(L[(size_t)i]));
+        for (int i = 40000; i < 56000; ++i) soft = std::fmax(soft, std::fabs(L[(size_t)i]));
+        CHECK(hard > 0.05f && soft < 0.15f * hard,
+              "velocity drives B Level: vel 127 peaks %.3f, vel 4 peaks %.3f",
+              (double)hard, (double)soft);
+    }
+
+    // --- 4. PAN IS EQUAL-POWER AND REACHES THE EDGES: a macro at 1.0 through
+    // a full slot is hard right — the left channel collapses.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        spV2Slot(*s, 0, 9 /*Macro1*/, 16 /*Pan*/, 1.f);
+        s->setParam(spIdx(*s, "Macro 1"), 1.f);
+        std::vector<f32> L, R;
+        spRender(*s, one, 12000, kBlock, L, R);
+        f32 pl = 0.f, pr = 0.f;
+        for (int i = 2000; i < 12000; ++i) {
+            pl = std::fmax(pl, std::fabs(L[(size_t)i]));
+            pr = std::fmax(pr, std::fabs(R[(size_t)i]));
+        }
+        CHECK(pr > 0.05f && pl < 1e-4f * pr,
+              "Pan at +1 is hard right: L %.2e vs R %.3f", (double)pl, (double)pr);
+    }
+
+    // --- 5. ENV3 IS A REAL SOURCE: routed to Cutoff over a dark filter, its
+    // sustain-1 plateau holds the filter open.
+    {
+        f64 hf[2] = { 0.0, 0.0 };
+        for (int c = 0; c < 2; ++c) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "Cutoff"), 250.f);
+            s->setParam(spIdx(*s, "E3 Sustain"), 1.f);
+            if (c) spV2Slot(*s, 0, 5 /*ENV3*/, 11 /*Cutoff*/, 0.7f);
+            std::vector<f32> L, R;
+            spRender(*s, one, 8192 + 16384, kBlock, L, R);
+            hf[c] = spV2BandDb(L, 8192, 16384, 2000.0, 8000.0);
+        }
+        CHECK(hf[1] > hf[0] + 10.0,
+              "ENV3 -> Cutoff opens the filter by %.1f dB up top (needs > 10)",
+              hf[1] - hf[0]);
+    }
+
+    // --- 6. LFO2 EXISTS AND ONLY SPEAKS THROUGH THE MATRIX: routed to A Pos
+    // it moves the render; unrouted, its knobs change nothing.
+    {
+        auto ref = spV2Base(reg, *d);
+        auto silent = spV2Base(reg, *d);
+        auto routed = spV2Base(reg, *d);
+        if (!ref || !silent || !routed) return;
+        silent->setParam(spIdx(*silent, "L2 Rate"), 9.f);
+        silent->setParam(spIdx(*silent, "L2 Shape"), 3.f);
+        routed->setParam(spIdx(*routed, "L2 Rate"), 6.f);
+        spV2Slot(*routed, 0, 2 /*LFO2*/, 1 /*A Pos*/, 1.f);
+        std::vector<f32> rL, rR, sL, sR, mL, mR;
+        spRender(*ref, one, 24000, kBlock, rL, rR);
+        spRender(*silent, one, 24000, kBlock, sL, sR);
+        spRender(*routed, one, 24000, kBlock, mL, mR);
+        CHECK(spV2MaxDiff(rL, sL) == 0.f,
+              "an unrouted LFO2's knobs change nothing (no fixed routings)");
+        CHECK(spV2MaxDiff(rL, mL) > 0.01f,
+              "LFO2 -> A Pos moves the sound (max diff %.4f)",
+              (double)spV2MaxDiff(rL, mL));
+    }
+
+    // --- 7. RANDOM IS PER NOTE AND PER IDENTITY: two notes at different
+    // stamped samples take different pitches through Random -> A Pitch; the
+    // whole render is still bit-repeatable instance to instance.
+    {
+        auto a = spV2Base(reg, *d);
+        auto b = spV2Base(reg, *d);
+        if (!a || !b) return;
+        spV2Slot(*a, 0, 13 /*Random*/, 7 /*A Pitch*/, 1.f);
+        spV2Slot(*b, 0, 13, 7, 1.f);
+        const std::vector<SpEvent> two = {
+            { 0,     0x90, 60, 110 }, { 20000, 0x80, 60, 0 },
+            { 26000, 0x90, 60, 110 }, { 50000, 0x80, 60, 0 },
+        };
+        std::vector<f32> aL, aR, bL, bR;
+        spRender(*a, two, 56000, kBlock, aL, aR);
+        spRender(*b, two, 56000, kBlock, bL, bR);
+        CHECK(spV2MaxDiff(aL, bL) == 0.f,
+              "Random-per-note renders bit-identically across instances — a hash of "
+              "the note identity, not a stream");
+
+        // The two notes really did land on different pitches: compare their
+        // 16-band spectra; a ±24 st spread makes them plainly different.
+        auto bandsOf = [&](int from) {
+            const int kN = 8192;
+            std::vector<f32> re((size_t)kN), im((size_t)kN, 0.f);
+            for (int i = 0; i < kN; ++i)
+                re[(size_t)i] = aL[(size_t)(from + i)] *
+                    (f32)(0.5 - 0.5 * std::cos(6.283185307179586 * i / kN));
+            tFft(re, im);
+            std::vector<f64> bnd(24, 0.0);
+            for (int j = 4; j < kN / 2; ++j) {
+                const f64 f = (f64)j * kSR / (f64)kN;
+                int bi = (int)(std::log2(std::fmax(f, 30.0) / 30.0) * 24.0 / 9.5);
+                if (bi < 0) bi = 0;
+                if (bi > 23) bi = 23;
+                bnd[(size_t)bi] += (f64)re[(size_t)j] * re[(size_t)j] +
+                                   (f64)im[(size_t)j] * im[(size_t)j];
+            }
+            f64 n = 0.0;
+            for (f64 v : bnd) n += v * v;
+            n = std::sqrt(n);
+            if (n > 0.0) for (f64& v : bnd) v /= n;
+            return bnd;
+        };
+        const std::vector<f64> n1 = bandsOf(8000), n2 = bandsOf(34000);
+        f64 dot = 0.0;
+        for (int i = 0; i < 24; ++i) dot += n1[(size_t)i] * n2[(size_t)i];
+        CHECK(dot < 0.9,
+              "the two notes drew different Randoms: spectral similarity %.3f "
+              "(limit 0.9)", dot);
+    }
+
+    // --- 8. AFTERTOUCH IS A SOURCE: channel pressure through a slot into
+    // Cutoff brightens a held note when it arrives.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "Cutoff"), 250.f);
+        spV2Slot(*s, 0, 8 /*Aftertouch*/, 11 /*Cutoff*/, 0.8f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 60, 110 }, { 24000, 0xD0, 127, 0 } },
+                 24000 + 16384, kBlock, L, R);
+        const f64 before = spV2BandDb(L, 6000, 16384, 2000.0, 8000.0);
+        const f64 after  = spV2BandDb(L, 24000 + 2000 - 2000, 16384, 2000.0, 8000.0);
+        CHECK(after > before + 10.0,
+              "channel pressure opens the filter: %.1f dB more top after 0xD0 "
+              "(needs > 10)", after - before);
+    }
+
+    // --- 9. SLOTS SUM ON ONE DESTINATION: two half-depth macro slots into
+    // A Pos land where one full-depth slot does, bit for bit.
+    {
+        auto a = spV2Base(reg, *d);
+        auto b = spV2Base(reg, *d);
+        if (!a || !b) return;
+        spV2Slot(*a, 0, 9, 1, 1.f);
+        a->setParam(spIdx(*a, "Macro 1"), 1.f);
+        spV2Slot(*b, 2, 9, 1, 0.5f);       // arbitrary slots: order is summed,
+        spV2Slot(*b, 5, 9, 1, 0.5f);       // not positional
+        b->setParam(spIdx(*b, "Macro 1"), 1.f);
+        std::vector<f32> aL, aR, bL, bR;
+        spRender(*a, one, 12000, kBlock, aL, aR);
+        spRender(*b, one, 12000, kBlock, bL, bR);
+        CHECK(spV2MaxDiff(aL, bL) < 1e-6f,
+              "0.5 + 0.5 on one destination equals 1.0 (max diff %.2e)",
+              (double)spV2MaxDiff(aL, bL));
+    }
+}
+
+static void testSpectraV2Voice(PluginRegistry& reg) {
+    banner("Spectra v2: Mono and Legato voice modes, filter widening");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // --- 1. MONO IS ONE VOICE: two notes stamped one frame apart leave only
+    // the newer one sounding.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "Voice Mode"), 1.f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 45, 110 }, { 1, 0x90, 52, 110 } },
+                 48000, kBlock, L, R);
+        const f64 low  = tBinMag(L, 24000, 16384, tMidiHz(45));
+        const f64 high = tBinMag(L, 24000, 16384, tMidiHz(52));
+        CHECK(high > 0.02 && high > 8.0 * low,
+              "Mono keeps one voice: |new| %.4f vs |old| %.4f", high, low);
+    }
+
+    // --- 2. MONO RETRIGGERS, LEGATO DOES NOT. Same overlapped phrase, low
+    // sustain: the retrigger's fresh attack peaks far above the legato's
+    // continued sustain plateau.
+    {
+        f32 pk[2] = { 0.f, 0.f };
+        for (int mode = 1; mode <= 2; ++mode) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "Voice Mode"), (f32)mode);
+            s->setParam(spIdx(*s, "Sustain"), 0.2f);
+            s->setParam(spIdx(*s, "Decay"), 120.f);
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, 48, 127 }, { 24000, 0x90, 55, 127 } },
+                     33600, kBlock, L, R);
+            for (int i = 24000; i < 33600; ++i)
+                pk[mode - 1] = std::fmax(pk[mode - 1], std::fabs(L[(size_t)i]));
+        }
+        CHECK(pk[0] > 2.0f * pk[1],
+              "the overlapped note re-attacks in Mono (peak %.3f) and only glides in "
+              "Legato (peak %.3f)", (double)pk[0], (double)pk[1]);
+    }
+
+    // --- 3. LEGATO DETACHED RETRIGGERS: after everything is released, the
+    // next note gets its own attack.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "Voice Mode"), 2.f);
+        s->setParam(spIdx(*s, "Sustain"), 0.2f);
+        s->setParam(spIdx(*s, "Decay"), 120.f);
+        s->setParam(spIdx(*s, "Release"), 40.f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 48, 127 }, { 20000, 0x80, 48, 0 },
+                       { 30000, 0x90, 55, 127 } }, 40000, kBlock, L, R);
+        f32 pk = 0.f;
+        for (int i = 30000; i < 40000; ++i) pk = std::fmax(pk, std::fabs(L[(size_t)i]));
+        CHECK(pk > 0.3f, "a detached Legato note re-attacks (peak %.3f)", (double)pk);
+    }
+
+    // --- 4. MONO NOTE-OFF FALLS BACK to the most recent still-held note.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "Voice Mode"), 1.f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 45, 110 }, { 12000, 0x90, 50, 110 },
+                       { 24000, 0x80, 50, 0 } }, 60000, kBlock, L, R);
+        const f64 back  = tBinMag(L, 36000, 16384, tMidiHz(45));
+        const f64 gone  = tBinMag(L, 36000, 16384, tMidiHz(50));
+        CHECK(back > 0.02 && back > 5.0 * gone,
+              "releasing the top of a held pair falls back: |held| %.4f vs "
+              "|released| %.4f", back, gone);
+    }
+
+    // --- 5. LEGATO GLIDES THE OVERLAP: with 2000 ms glide (the widened id
+    // 38), 250 ms in, the pitch is still travelling — between the two notes.
+    {
+        auto s = spV2Base(reg, *d);
+        if (!s) return;
+        s->setParam(spIdx(*s, "Voice Mode"), 2.f);
+        s->setParam(spIdx(*s, "Glide"), 2000.f);
+        std::vector<f32> L, R;
+        spRender(*s, { { 0, 0x90, 48, 110 }, { 24000, 0x90, 60, 110 } },
+                 48000, kBlock, L, R);
+        // 250 ms after the overlap the glide has covered ~1.5 of 12 st: the
+        // instantaneous pitch sits between the endpoints, so BOTH endpoint
+        // bins are weak over this window compared to the note before.
+        const f64 before = tBinMag(L, 8000, 8192, tMidiHz(48));
+        const f64 stillA = tBinMag(L, 30000, 8192, tMidiHz(48));
+        const f64 yetB   = tBinMag(L, 30000, 8192, tMidiHz(60));
+        CHECK(before > 0.02 && stillA < 0.5 * before && yetB < 0.5 * before,
+              "a 2 s glide is mid-travel at 250 ms: |48| %.4f -> %.4f, |60| %.4f",
+              before, stillA, yetB);
+    }
+
+    // --- 6. THE WIDENED FILTER: LP24 rolls off far harder than LP12 above
+    // cutoff, HP24 harder below, and the Notch notches.
+    {
+        f64 hf12 = 0.0, hf24 = 0.0;
+        for (int t = 0; t < 2; ++t) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Noise"), 1.f);
+            s->setParam(spIdx(*s, "Cutoff"), 800.f);
+            s->setParam(spIdx(*s, "Filter Type"), t == 0 ? 0.f : 3.f);
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, 60, 110 } }, 8192 + 16384, kBlock, L, R);
+            const f64 v = spV2BandDb(L, 8192, 16384, 6000.0, 16000.0) -
+                          spV2BandDb(L, 8192, 16384, 100.0, 700.0);
+            if (t == 0) hf12 = v; else hf24 = v;
+        }
+        CHECK(hf24 < hf12 - 12.0,
+              "LP24 is %.1f dB steeper than LP12 three octaves up (needs > 12)",
+              hf12 - hf24);
+
+        // Notch: a sine sub parked exactly on the cutoff all but disappears;
+        // the same sub through the wide-open v1 LP does not.
+        f64 mag[2] = { 0.0, 0.0 };
+        for (int t = 0; t < 2; ++t) {
+            auto s = spV2Base(reg, *d);
+            if (!s) return;
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Sub"), 1.f);
+            s->setParam(spIdx(*s, "Sub Oct"), 0.f);
+            s->setParam(spIdx(*s, "Resonance"), 0.7f);
+            if (t == 1) {
+                s->setParam(spIdx(*s, "Filter Type"), 5.f);
+                s->setParam(spIdx(*s, "Cutoff"), (f32)tMidiHz(81));
+            }
+            std::vector<f32> L, R;
+            spRender(*s, { { 0, 0x90, 81, 110 } }, 48000, kBlock, L, R);
+            mag[t] = tBinMag(L, 24000, 16384, tMidiHz(81));
+        }
+        CHECK(mag[1] < 0.1 * mag[0],
+              "the Notch parked on the tone kills it: %.4f -> %.4f", mag[0], mag[1]);
+    }
+}
+
+// The v2 busy patch: both warps on (mutually — FM one way, RM the other),
+// every slot of the matrix live across nine destinations and eight distinct
+// sources, all three LFOs running (one synced, one S&H), ENV3 in play, a
+// shaped tracking sub, colored tracked noise, LP24, drive — nothing left at
+// rest except what the script then moves.
+static void spV2BusyPatch(PluginInstance& s) {
+    spBusyPatch(s);
+    s.setParam(spIdx(s, "Filter Type"), 3.f);       // LP24
+    s.setParam(spIdx(s, "Sub Shape"), 2.f);
+    s.setParam(spIdx(s, "Sub Oct"), -2.f);
+    s.setParam(spIdx(s, "Noise Color"), 0.4f);
+    s.setParam(spIdx(s, "Noise Track"), 1.f);
+    s.setParam(spIdx(s, "A Warp"), 6.f);            // A FM'd by B
+    s.setParam(spIdx(s, "A Warp Amt"), 0.45f);
+    s.setParam(spIdx(s, "B Warp"), 7.f);            // B ring-mods against A
+    s.setParam(spIdx(s, "B Warp Amt"), 0.6f);
+    s.setParam(spIdx(s, "L2 Rate"), 3.7f);
+    s.setParam(spIdx(s, "L2 Shape"), 1.f);
+    s.setParam(spIdx(s, "L3 Sync"), 6.f);           // 1/8 against the transport
+    s.setParam(spIdx(s, "L3 Shape"), 4.f);          // S&H
+    s.setParam(spIdx(s, "E3 Attack"), 40.f);
+    s.setParam(spIdx(s, "E3 Decay"), 500.f);
+    s.setParam(spIdx(s, "E3 Sustain"), 0.4f);
+    s.setParam(spIdx(s, "Macro 2"), 0.7f);
+    spV2Slot(s, 0, 2  /*LFO2*/,      1  /*A Pos*/,     0.5f);
+    spV2Slot(s, 1, 3  /*LFO3 S&H*/,  11 /*Cutoff*/,    0.4f);
+    spV2Slot(s, 2, 5  /*ENV3*/,      8  /*B Pitch*/,   0.3f);
+    spV2Slot(s, 3, 13 /*Random*/,    16 /*Pan*/,       0.8f);
+    spV2Slot(s, 4, 6  /*Velocity*/,  13 /*Drive*/,     0.5f);
+    spV2Slot(s, 5, 10 /*Macro2*/,    12 /*Resonance*/, 0.3f);
+    spV2Slot(s, 6, 8  /*Aftertouch*/,10 /*Noise Lvl*/, 0.5f);
+    spV2Slot(s, 7, 7  /*KeyTrk*/,    14 /*A Detune*/,  0.4f);
+}
+
+static void testSpectraV2Determinism(PluginRegistry& reg) {
+    banner("Spectra v2: block-size invariance with everything engaged");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    const int kFrames = 14000;
+    // The v1 script plus channel pressure landing mid-phrase — aftertouch
+    // rides the same stamped-sample queue as the notes.
+    std::vector<SpEvent> ev = spScript();
+    ev.push_back({ 3000, 0xD0, 96, 0 });
+    ev.push_back({ 9000, 0xD0, 20, 0 });
+    std::sort(ev.begin(), ev.end(),
+              [](const SpEvent& a, const SpEvent& b) { return a.frame < b.frame; });
+
+    // --- 1. the busy v2 patch, Poly.
+    {
+        auto build = [&]() {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (s) spV2BusyPatch(*s);
+            return s;
+        };
+        auto ref = build();
+        if (!ref) return;
+        std::vector<f32> refL, refR, altL, altR;
+        spRender(*ref, ev, kFrames, kBlock, refL, refR, 120.0);
+        f32 pk = 0.f;
+        for (f32 v : refL) pk = std::fmax(pk, std::fabs(v));
+        CHECK(pk > 0.05f, "the v2 busy render is not silent (peak %.4f)", (double)pk);
+
+        bool all = true;
+        for (int chunk : { 1, 7, 64, 300, 1024 }) {
+            auto alt = build();
+            if (!alt) break;
+            spRender(*alt, ev, kFrames, chunk, altL, altR, 120.0);
+            f32 diff = 0.f;
+            for (int i = 0; i < kFrames; ++i) {
+                diff = std::fmax(diff, std::fabs(refL[(size_t)i] - altL[(size_t)i]));
+                diff = std::fmax(diff, std::fabs(refR[(size_t)i] - altR[(size_t)i]));
+            }
+            if (diff != 0.f) all = false;
+            CHECK(diff == 0.f,
+                  "v2 busy patch: blocks of %d bit-identical to %d (max diff %.9f)",
+                  chunk, kBlock, (double)diff);
+        }
+        CHECK(all, "warp (mutual FM/RM and its one-sample delay), all matrix slots, "
+                   "LFO2/3, ENV3, colored noise, LP24 — all on absolute sample time");
+
+        // Two instances, same file: the Random hash and the S&H streams are
+        // identity- and seed-based, never clocked.
+        auto a = build();
+        auto b = build();
+        if (a && b) {
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, ev, kFrames, kBlock, aL, aR, 120.0);
+            spRender(*b, ev, kFrames, kBlock, bL, bR, 120.0);
+            CHECK(spV2MaxDiff(aL, bL) == 0.f,
+                  "two fresh instances render the v2 busy patch identically");
+        }
+    }
+
+    // --- 2. the same, Legato with a long glide — the held-note stack, the
+    // no-retrigger path and the fallback all land on stamped samples.
+    {
+        auto build = [&]() {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (s) {
+                spV2BusyPatch(*s);
+                s->setParam(spIdx(*s, "Voice Mode"), 2.f);
+                s->setParam(spIdx(*s, "Glide"), 900.f);
+            }
+            return s;
+        };
+        auto ref = build();
+        if (!ref) return;
+        std::vector<f32> refL, refR, altL, altR;
+        spRender(*ref, ev, kFrames, kBlock, refL, refR, 120.0);
+        f32 pk = 0.f;
+        for (f32 v : refL) pk = std::fmax(pk, std::fabs(v));
+        CHECK(pk > 0.02f, "the Legato render is not silent (peak %.4f)", (double)pk);
+        bool all = true;
+        for (int chunk : { 1, 64, 300, 1024 }) {
+            auto alt = build();
+            if (!alt) break;
+            spRender(*alt, ev, kFrames, chunk, altL, altR, 120.0);
+            f32 diff = 0.f;
+            for (int i = 0; i < kFrames; ++i) {
+                diff = std::fmax(diff, std::fabs(refL[(size_t)i] - altL[(size_t)i]));
+                diff = std::fmax(diff, std::fabs(refR[(size_t)i] - altR[(size_t)i]));
+            }
+            if (diff != 0.f) all = false;
+            CHECK(diff == 0.f,
+                  "Legato + glide: blocks of %d bit-identical to %d (max diff %.9f)",
+                  chunk, kBlock, (double)diff);
+        }
+        CHECK(all, "Mono/Legato voice management applies at stamped samples");
     }
 }
 
@@ -7542,6 +8471,11 @@ int main() {
     testSpectraSweeps(reg);
     testSpectraState(reg);
     testSpectraPresets(reg);
+    testSpectraV2SubNoise(reg);
+    testSpectraV2Warp(reg);
+    testSpectraV2Matrix(reg);
+    testSpectraV2Voice(reg);
+    testSpectraV2Determinism(reg);
     testSamplerContract(reg);
     testSamplerEmpty(reg);
     testSamplerPlayback(reg);

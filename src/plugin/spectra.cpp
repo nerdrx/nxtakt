@@ -97,6 +97,38 @@
 //     destroy the property above. Rate-synced is what the Auto Filter does too.
 //
 // ---------------------------------------------------------------------------
+// V2 — THE PARITY PUSH (ids 42..99), and how the v1 gates were kept
+//
+// The contract's own gate: every new parameter at its default reproduces v1
+// output EXACTLY. The discipline that buys it is visible all through the
+// voice: wherever v2 adds arithmetic, the v1 EXPRESSION is kept on its own
+// branch and the new one is only taken when a v2 parameter has left its
+// default (warp mode 0 / amount 0 is the v1 read; a destination the matrix
+// does not reach keeps the v1 formula, selected by a per-block bitmask; sub
+// shape 0 is the v1 sine and Sub Oct's default multiplier is 0.5f exactly;
+// noise color 1.0 bypasses the color filter by branch, not by neutrality).
+// Floating point makes "mathematically equal" and "bit-identical" different
+// claims, and the gate is the second one.
+//
+// Determinism grew three obligations and kept the old rules:
+//   * LFO2/3 mirror LFO1 sample-by-sample: own phase, own S&H stream from an
+//     own fixed-seed counter, rate from the pushed transport when synced.
+//   * The matrix's Random source is NOT a stream at all: it is a hash of the
+//     note's stable identity (channel, note, the note-on's absolute timeline
+//     sample as stamped on the event), so it cannot be perturbed by voice
+//     stealing, block size, or anything drawn before it.
+//   * Aftertouch (channel pressure) goes through the same event queue as
+//     notes and lands at its stamped sample.
+// Matrix modulation of cutoff, resonance and LFO rates applies at the
+// control tick (absolute-time, kCtrl), exactly as v1's LFO->cutoff does; all
+// other destinations are evaluated per voice per sample.
+//
+// Mutual FM/RM is well-defined the way the contract says: the modulator tap
+// is the other oscillator's voice 0, read at its RAW phase (pre-warp,
+// pre-level, mono) and DELAYED ONE SAMPLE — each sample both oscillators read
+// last sample's taps, then both write this sample's, so A<->B has no
+// evaluation order and block boundaries cannot move it.
+//
 // REALTIME. process() and midi() allocate nothing, lock nothing, throw nothing
 // and call nothing that could. The only allocation in the device is the shared
 // table set, built on the GUI thread at the first prepare() in the process.
@@ -122,6 +154,7 @@ namespace lat { namespace detail { /* see internal_devices.cpp */ } }
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -535,7 +568,28 @@ enum : int {
     kPE2Attack = 28, kPE2Decay, kPE2Sustain, kPE2Release,
     kPLfoRate = 32, kPLfoSync, kPLfoPos, kPLfoCut, kPLfoPitch, kPLfoShape,
     kPGlide = 38, kPVoices, kPMaster, kPE2Pos,
-    kSpParamCount = 42
+
+    // --- v2, ids 42..99 (docs/SPECTRA-PARAMS.md, "v2 — the parity push").
+    // Reserved ids are registered (name "—", 0..1, default 0) and never read.
+    kPSubShape = 42, kPSubOct, kPNzColor, kPNzTrack,
+    kPAWarp = 48, kPAWarpAmt, kPBWarp, kPBWarpAmt,
+    kPL2Rate = 54, kPL2Sync, kPL2Shape, kPL3Rate, kPL3Sync, kPL3Shape,
+    kPE3Attack = 62, kPE3Decay, kPE3Sustain, kPE3Release,
+    kPM1Src = 68,                    // slot k: ids 68+3k / 69+3k / 70+3k
+    kPMacro1 = 94, kPMacro2, kPMacro3, kPMacro4,
+    kPVoiceMode = 98,
+    kSpParamCount = 100
+};
+
+// The matrix enums, verbatim from the contract's source and destination lists.
+enum : int {
+    kSOff = 0, kSLfo1, kSLfo2, kSLfo3, kSEnv2, kSEnv3, kSVel, kSKey, kSAft,
+    kSMac1, kSMac2, kSMac3, kSMac4, kSRandom
+};
+enum : int {
+    kDOff = 0, kDAPos, kDBPos, kDAWAmt, kDBWAmt, kDALvl, kDBLvl, kDAPitch,
+    kDBPitch, kDSub, kDNoise, kDCut, kDRes, kDDrive, kDADet, kDBDet, kDPan,
+    kDL1Rate, kDL2Rate, kDL3Rate, kDstCount
 };
 
 // LFO Sync, in beats per cycle. Index 0 is "free" and is never read from here.
@@ -570,114 +624,23 @@ constexpr f32 kSpSyncBeats[kSpSyncCount] = {
 
 struct SpPreset {
     const char* name;
-    int         n;
-    struct { int id; f32 v; } set[40];
+    // 64 overrides (the contract's cap, raised from v1's 40) plus a
+    // terminator: id -1 ends the list, so the include needs no counting.
+    struct { int id; f32 v; } set[65];
 };
 
+// The factory bank lives in spectra_presets.inc — a textual include of
+// nothing but SP_PRESET/SP/SP_END rows, so its author needs the contract
+// document and no C++. The macros exist only across the include.
+#define SP_PRESET(nm) { nm, {
+#define SP(id, v)     { (id), (f32)(v) },
+#define SP_END()      { -1, 0.f } } },
 const SpPreset kSpPresets[] = {
-    { "Init", 0, {} },
-
-    { "Supersaw Lead", 21, {
-        { kPATable, 0 }, { kPAPos, 0.02f }, { kPALevel, 0.72f },
-        { kPAUni, 7 }, { kPADet, 28.f }, { kPASpread, 0.85f },
-        { kPBTable, 0 }, { kPBPos, 0.10f }, { kPBLevel, 0.48f },
-        { kPBUni, 7 }, { kPBDet, 22.f }, { kPBSpread, 0.70f }, { kPBFine, 7.f },
-        { kPCutoff, 14000.f }, { kPRes, 0.15f },
-        { kPAttack, 6.f }, { kPDecay, 1500.f }, { kPSustain, 0.85f }, { kPRelease, 320.f },
-        { kPVoices, 8 }, { kPMaster, 0.50f },
-    } },
-
-    { "Solid Bass", 21, {
-        { kPATable, 0 }, { kPAPos, 0.18f }, { kPALevel, 0.90f },
-        { kPAUni, 2 }, { kPADet, 8.f }, { kPASpread, 0.20f },
-        { kPSub, 0.35f },
-        { kPCutoff, 900.f }, { kPRes, 0.35f }, { kPFType, 0 }, { kPDrive, 6.f },
-        { kPE2Cut, 0.55f }, { kPE2Attack, 0.5f }, { kPE2Decay, 180.f }, { kPE2Sustain, 0.f },
-        { kPAttack, 1.f }, { kPDecay, 700.f }, { kPSustain, 0.70f }, { kPRelease, 90.f },
-        { kPGlide, 25.f }, { kPVoices, 1 },
-    } },
-
-    { "Sub Bass", 12, {
-        { kPALevel, 0.18f }, { kPAPos, 0.f }, { kPAUni, 1 },
-        { kPSub, 1.f },
-        { kPCutoff, 300.f }, { kPRes, 0.05f },
-        { kPAttack, 4.f }, { kPDecay, 900.f }, { kPSustain, 0.90f }, { kPRelease, 200.f },
-        { kPGlide, 40.f }, { kPVoices, 1 },
-    } },
-
-    { "Pluck", 18, {
-        { kPATable, 2 }, { kPAPos, 0.35f }, { kPALevel, 0.85f },
-        { kPAUni, 3 }, { kPADet, 12.f }, { kPASpread, 0.50f },
-        { kPCutoff, 500.f }, { kPRes, 0.50f },
-        { kPE2Cut, 0.75f }, { kPE2Attack, 0.1f }, { kPE2Decay, 220.f },
-        { kPE2Sustain, 0.f }, { kPE2Release, 200.f },
-        { kPAttack, 0.5f }, { kPDecay, 320.f }, { kPSustain, 0.f }, { kPRelease, 260.f },
-        { kPMaster, 0.62f },
-    } },
-
-    { "Warm Pad", 22, {
-        { kPATable, 6 }, { kPAPos, 0.25f }, { kPALevel, 0.62f },
-        { kPAUni, 5 }, { kPADet, 24.f }, { kPASpread, 0.90f },
-        { kPBTable, 3 }, { kPBPos, 0.40f }, { kPBLevel, 0.34f }, { kPBCoarse, 12 },
-        { kPBUni, 3 }, { kPBDet, 16.f }, { kPBSpread, 0.60f },
-        { kPCutoff, 3200.f }, { kPRes, 0.20f },
-        { kPLfoRate, 0.18f }, { kPLfoShape, 0 }, { kPLfoPos, 0.45f },
-        { kPAttack, 900.f }, { kPDecay, 2500.f }, { kPSustain, 0.75f }, { kPRelease, 1800.f },
-    } },
-
-    { "Formant Keys", 15, {
-        { kPATable, 3 }, { kPAPos, 0.30f }, { kPALevel, 0.85f },
-        { kPAUni, 2 }, { kPADet, 10.f }, { kPASpread, 0.35f },
-        { kPCutoff, 6000.f }, { kPRes, 0.25f }, { kPKeytrack, 0.85f },
-        { kPE2Cut, 0.30f }, { kPE2Decay, 400.f }, { kPE2Sustain, 0.20f },
-        { kPAttack, 3.f }, { kPDecay, 900.f }, { kPRelease, 350.f },
-    } },
-
-    { "Bell", 16, {
-        { kPATable, 4 }, { kPAPos, 0.55f }, { kPALevel, 0.78f },
-        { kPAUni, 2 }, { kPADet, 6.f }, { kPASpread, 0.40f },
-        { kPBTable, 4 }, { kPBPos, 0.80f }, { kPBLevel, 0.28f }, { kPBCoarse, 12 },
-        { kPCutoff, 12000.f },
-        { kPE2Pos, -0.35f }, { kPE2Decay, 1200.f }, { kPE2Sustain, 0.f },
-        { kPAttack, 1.f }, { kPDecay, 2200.f },
-    } },
-
-    { "Acid", 19, {
-        { kPATable, 5 }, { kPAPos, 0.25f }, { kPALevel, 0.80f }, { kPAUni, 1 },
-        { kPCutoff, 320.f }, { kPRes, 0.82f }, { kPFType, 0 }, { kPDrive, 9.f },
-        { kPKeytrack, 0.35f },
-        { kPE2Cut, 0.80f }, { kPE2Attack, 0.2f }, { kPE2Decay, 260.f }, { kPE2Sustain, 0.05f },
-        { kPAttack, 0.5f }, { kPDecay, 900.f }, { kPSustain, 0.60f }, { kPRelease, 80.f },
-        { kPGlide, 45.f }, { kPMaster, 0.38f },
-    } },
-
-    { "Wobble", 19, {
-        { kPATable, 0 }, { kPAPos, 0.50f }, { kPALevel, 0.80f },
-        { kPAUni, 5 }, { kPADet, 20.f }, { kPASpread, 0.70f },
-        { kPSub, 0.40f },
-        { kPCutoff, 700.f }, { kPRes, 0.60f }, { kPDrive, 8.f },
-        { kPLfoSync, 5 }, { kPLfoShape, 1 }, { kPLfoCut, 0.85f },
-        { kPAttack, 2.f }, { kPDecay, 2000.f }, { kPSustain, 0.90f }, { kPRelease, 200.f },
-        { kPVoices, 4 }, { kPMaster, 0.45f },
-    } },
-
-    { "Air Pad", 19, {
-        { kPATable, 7 }, { kPAPos, 0.45f }, { kPALevel, 0.55f },
-        { kPAUni, 5 }, { kPADet, 30.f }, { kPASpread, 1.f },
-        { kPNoise, 0.12f },
-        { kPCutoff, 8000.f }, { kPRes, 0.15f },
-        { kPLfoRate, 0.12f }, { kPLfoShape, 0 }, { kPLfoPos, 0.35f }, { kPLfoPitch, 6.f },
-        { kPAttack, 1200.f }, { kPDecay, 3000.f }, { kPSustain, 0.70f }, { kPRelease, 2500.f },
-        { kPVoices, 8 }, { kPMaster, 0.55f },
-    } },
-
-    { "Organ", 14, {
-        { kPATable, 2 }, { kPAPos, 0.f }, { kPALevel, 0.70f }, { kPAUni, 1 },
-        { kPBTable, 2 }, { kPBPos, 1.f }, { kPBLevel, 0.45f }, { kPBCoarse, 12 }, { kPBUni, 1 },
-        { kPCutoff, 20000.f }, { kPRes, 0.f },
-        { kPAttack, 1.f }, { kPDecay, 5.f }, { kPSustain, 1.f },
-    } },
+#include "spectra_presets.inc"
 };
+#undef SP_PRESET
+#undef SP
+#undef SP_END
 
 constexpr int kSpPresetCount = (int)(sizeof kSpPresets / sizeof kSpPresets[0]);
 
@@ -716,7 +679,9 @@ public:
 
         addParam   ("Cutoff",      "Hz", 20.f, 20000.f, 20000.f, true);
         addParam   ("Resonance",   "",   0.f,  1.f,     0.1f);
-        addIntParam("Filter Type", "",   0, 2, 0);
+        // Widened 0..2 -> 0..5 by the v2 contract (a strict superset: the
+        // three v1 values keep their meaning; 3 LP24, 4 HP24, 5 Notch).
+        addIntParam("Filter Type", "",   0, 5, 0);
         addParam   ("Drive",       "dB", 0.f,  24.f,    0.f);
         addParam   ("Env2>Cutoff", "",  -1.f,  1.f,     0.f);
         addParam   ("Keytrack",    "",   0.f,  1.f,     0.f);
@@ -738,11 +703,65 @@ public:
         addParam   ("LFO>Pitch",    "ct", 0.f, 100.f, 0.f);
         addIntParam("LFO Shape",    "",   0, 4, 0);
 
-        addParam   ("Glide",  "ms", 0.f, 500.f, 0.f);
+        // Widened 0..500 -> 0..2000 ms by the v2 contract (still lin, still
+        // constant-time, 0 = off; every stored plain-ms value keeps meaning).
+        addParam   ("Glide",  "ms", 0.f, 2000.f, 0.f);
         addIntParam("Voices", "",   1, kSpVoices, kSpVoices);
         addParam   ("Master", "",   0.f, 1.5f, 0.7f);
         addParam   ("Env2>Position", "", -1.f, 1.f, 0.f);
+
+        // --- v2, ids 42..99. APPEND ONLY, same as everything above. Every
+        // default is "do what v1 did" — that is the contract's bit-identity
+        // gate, not a style choice.
+        addIntParam("Sub Shape",   "",    0, 2, 0);                   // 42
+        addIntParam("Sub Oct",     "oct", -2, 0, -1);                 // 43
+        addParam   ("Noise Color", "",    0.f, 1.f, 1.f);             // 44
+        addIntParam("Noise Track", "",    0, 1, 0);                   // 45
+        addReserved();                                                // 46
+        addReserved();                                                // 47
+        addIntParam("A Warp",      "",    0, 7, 0);                   // 48
+        addParam   ("A Warp Amt",  "",    0.f, 1.f, 0.f);             // 49
+        addIntParam("B Warp",      "",    0, 7, 0);                   // 50
+        addParam   ("B Warp Amt",  "",    0.f, 1.f, 0.f);             // 51
+        addReserved();                                                // 52
+        addReserved();                                                // 53
+        addParam   ("L2 Rate",     "Hz",  0.01f, 40.f, 2.f, true);    // 54
+        addIntParam("L2 Sync",     "",    0, kSpSyncCount - 1, 0);    // 55
+        addIntParam("L2 Shape",    "",    0, 4, 0);                   // 56
+        addParam   ("L3 Rate",     "Hz",  0.01f, 40.f, 2.f, true);    // 57
+        addIntParam("L3 Sync",     "",    0, kSpSyncCount - 1, 0);    // 58
+        addIntParam("L3 Shape",    "",    0, 4, 0);                   // 59
+        addReserved();                                                // 60
+        addReserved();                                                // 61
+        addParam("E3 Attack",  "ms", 0.1f, 5000.f, 2.f,   true);      // 62
+        addParam("E3 Decay",   "ms", 1.f,  5000.f, 300.f, true);      // 63
+        addParam("E3 Sustain", "",   0.f,  1.f,    0.f);              // 64
+        addParam("E3 Release", "ms", 1.f,  8000.f, 150.f, true);      // 65
+        addReserved();                                                // 66
+        addReserved();                                                // 67
+        for (int k = 0; k < 8; ++k) {                                 // 68..91
+            char nm[8];
+            std::snprintf(nm, sizeof nm, "M%d Src", k + 1);
+            addIntParam(nm, "", 0, 13, 0);
+            std::snprintf(nm, sizeof nm, "M%d Dst", k + 1);
+            addIntParam(nm, "", 0, 19, 0);
+            std::snprintf(nm, sizeof nm, "M%d Amt", k + 1);
+            addParam(nm, "", -1.f, 1.f, 0.f);
+        }
+        addReserved();                                                // 92
+        addReserved();                                                // 93
+        addParam("Macro 1", "", 0.f, 1.f, 0.f);                       // 94
+        addParam("Macro 2", "", 0.f, 1.f, 0.f);                       // 95
+        addParam("Macro 3", "", 0.f, 1.f, 0.f);                       // 96
+        addParam("Macro 4", "", 0.f, 1.f, 0.f);                       // 97
+        addIntParam("Voice Mode", "", 0, 2, 0);                       // 98
+        addReserved();                                                // 99
     }
+
+    // A reserved id IS registered (contract rule: the addParam() sequence
+    // stays dense so indices never move): name "—", 0..1, default 0, hidden
+    // by the editor, never read by the DSP.
+    void addReserved() { addParam("—", "", 0.f, 1.f, 0.f); }
 
     bool prepare(f64 sampleRate, int maxBlock) override {
         sr_ = sampleRate > 0.0 ? sampleRate : 48000.0;
@@ -769,6 +788,16 @@ public:
         shVal_    = 0.f;
         lastPitch_ = 60.f;
         havePitch_ = false;
+        // v2 state, same rules: fixed seeds, zeroed counters, no clocks.
+        lfo2_.reset();
+        lfo3_.reset();
+        shVal2_   = 0.f;
+        shVal3_   = 0.f;
+        lfo2Rng_  = 0x6C078965u;      // one counter per S&H stream, so the
+        lfo3Rng_  = 0xB5297A4Du;      // three streams cannot interleave
+        after_    = 0.f;
+        absPos_   = 0;
+        nHeld_    = 0;
         return true;
     }
 
@@ -785,7 +814,8 @@ public:
         if (i < 0 || i >= kSpPresetCount) return;
         for (int k = 0; k < n_; ++k) setParam(k, info_[(size_t)k].def);
         const SpPreset& p = kSpPresets[i];
-        for (int k = 0; k < p.n; ++k) setParam(p.set[k].id, p.set[k].v);
+        for (int k = 0; k < 64 && p.set[k].id >= 0; ++k)
+            setParam(p.set[k].id, p.set[k].v);
     }
 
     // REALTIME. Called before process() for the same block; voice state is
@@ -808,20 +838,28 @@ public:
     void midi(const u8* data, int len, int frameOffset) override {
         if (!data || len < 1) return;
         const u8 status = (u8)(data[0] & 0xF0u);
+        const u8 chan   = (u8)(data[0] & 0x0Fu);   // part of the note's stable
+                                                   // identity (matrix Random)
         const int off = frameOffset < 0 ? 0 : frameOffset;
         switch (status) {
             case 0x90:
-                if (len >= 3 && data[2] > 0) { queue(off, kEvOn, data[1], data[2]); return; }
-                if (len >= 2) queue(off, kEvOff, data[1], 0);
+                if (len >= 3 && data[2] > 0) { queue(off, kEvOn, data[1], data[2], chan); return; }
+                if (len >= 2) queue(off, kEvOff, data[1], 0, chan);
                 return;
             case 0x80:
-                if (len >= 2) queue(off, kEvOff, data[1], 0);
+                if (len >= 2) queue(off, kEvOff, data[1], 0, chan);
                 return;
             case 0xB0:
                 // 120 = all sound off, 123 = all notes off. Anything else is a
                 // controller we do not map; ignoring it is the honest answer.
-                if (len >= 2 && data[1] == 120) queue(off, kEvSoundOff, 0, 0);
-                else if (len >= 2 && data[1] == 123) queue(off, kEvNotesOff, 0, 0);
+                if (len >= 2 && data[1] == 120) queue(off, kEvSoundOff, 0, 0, chan);
+                else if (len >= 2 && data[1] == 123) queue(off, kEvNotesOff, 0, 0, chan);
+                return;
+            case 0xD0:
+                // Channel pressure — the matrix's Aftertouch source. Queued
+                // like a note so it lands at its stamped sample; instance-wide
+                // by the contract ("applies to all voices").
+                if (len >= 2) queue(off, kEvPressure, data[1], 0, chan);
                 return;
             default:
                 return;
@@ -839,6 +877,7 @@ public:
         if (isBypassed() || nframes > kMaxBlock || !tbl_) {
             passthrough(nullptr, out, channels, nframes);
             clearSchedule();
+            absPos_ += (u64)nframes;      // engine time still advances
             return;
         }
 
@@ -857,23 +896,26 @@ public:
             // queue() for why it is last and not first.
             if (haveOvf_ && n == nframes - 1) applyOverflow();
 
-            // The LFO value for THIS sample, read before it is advanced, so the
-            // control tick and the audio path see the same number.
-            const f32 lfoV = lfoValue(b.lfoShape);
+            // The LFO values for THIS sample, read before they are advanced,
+            // so the control tick and the audio path see the same numbers.
+            const Glob g = { lfoValue(lfo_,  b.lfoShape, shVal_),
+                             lfoValue(lfo2_, b.l2Shape,  shVal2_),
+                             lfoValue(lfo3_, b.l3Shape,  shVal3_),
+                             after_ };
 
             // Control tick on ABSOLUTE sample time (the Auto Filter's rule):
             // the counter is a member and survives the block boundary, which is
             // what makes blocks of 1 and of 300 bit-identical to blocks of 256.
-            if (ctrl_ <= 0) { retarget(b, lfoV); ctrl_ = kCtrl; }
+            if (ctrl_ <= 0) { retarget(b, g); ctrl_ = kCtrl; }
             --ctrl_;
 
             f32 accL = 0.f, accR = 0.f;
             for (Voice& v : voices_) {
                 if (!v.active) continue;
-                renderVoice(v, b, lfoV, accL, accR);
+                renderVoice(v, b, g, accL, accR);
             }
 
-            lfoTick();
+            lfoTicks();
 
             const f32 l = accL * b.master;
             const f32 r = accR * b.master;
@@ -892,6 +934,7 @@ public:
             ++keep;
         }
         nPend_ = keep;
+        absPos_ += (u64)nframes;
 
         copyExtra(nullptr, out, 2, channels, nframes);
     }
@@ -907,6 +950,13 @@ private:
     // Modulation depths, in octaves at full parameter travel.
     static constexpr f32 kEnvCutOct = 6.f;
     static constexpr f32 kLfoCutOct = 4.f;
+    // The matrix's two log-domain spans: cutoff (id 18, 20..20000 Hz) and the
+    // LFO rates (0.01..40 Hz). A norm-domain contribution of 1.0 is the whole
+    // travel of the knob, which is what the contract's "log domain of id N"
+    // means.
+    static constexpr f32 kCutOct  = 9.9657843f;    // log2(20000/20)
+    static constexpr f32 kRateOct = 11.9657843f;   // log2(40/0.01)
+    static constexpr int kMods    = 8;
     // The one-pole attack aims past its own target so the curve is exponential
     // rather than asymptotic; 1.3 is the usual overshoot and reaches 1.0 in
     // ln(1.3/0.3) = 1.466 time constants.
@@ -926,17 +976,31 @@ private:
         f32  phA[kUni] = {}, phB[kUni] = {};
         f32  subPh = 0.f;
         u32  rng = 1u;
-        Env  e1, e2;
+        Env  e1, e2, e3;
         dsp::SvfCoeffs fc, fInc;
         dsp::SvfState  fs[2];
+        dsp::SvfState  fs2[2];       // second stage, LP24/HP24 only
         bool fSnap = true;
         u32  age = 0;
+        // v2 per-note state
+        f32  vel01 = 0.f;            // raw velocity 0..1 (matrix source 6)
+        f32  rnote = 0.f;            // Random-per-note, the identity hash
+        f32  lastA = 0.f, lastB = 0.f;   // FM/RM taps, one sample late
+        f32  nzL = 0.f, nzR = 0.f;   // Noise Color one-pole state
+        f32  nzCoef = 1.f;
     };
 
-    // A queued note event. Four bytes of payload and a frame stamp; nothing in
+    // The per-sample globals every voice reads: the three LFO values and the
+    // channel pressure, gathered once so retarget() and renderVoice() see the
+    // same numbers.
+    struct Glob { f32 l1, l2, l3, after; };
+
+    // A queued note event. Five bytes of payload and a frame stamp; nothing in
     // here allocates and the queue is a fixed array, so midi() stays realtime.
-    enum : u8 { kEvOn = 0, kEvOff, kEvNotesOff, kEvSoundOff };
-    struct PendEv { int frame; u8 type, a, b; };
+    // The channel rides along because it is part of the note's stable identity
+    // (the matrix's Random source hashes it).
+    enum : u8 { kEvOn = 0, kEvOff, kEvNotesOff, kEvSoundOff, kEvPressure };
+    struct PendEv { int frame; u8 type, a, b, ch; };
 
     // Everything read from the parameters once per block. Reading them once is
     // the one block-size dependence every device in this tree shares: a knob
@@ -961,11 +1025,49 @@ private:
         int lfoShape;
         f32 master;
         f32 incScale;                        // 440/sr
+
+        // --- v2 ---
+        int  subShape; f32 subMul;           // 2^SubOct; 0.5f at the default
+        bool nzBypass, nzTrack; f32 nzFc;
+        int  warpA, warpB; f32 warpAmtA, warpAmtB;
+        bool needTapA, needTapB;             // "compute osc X's voice-0 tap"
+        int  l2Shape, l3Shape;
+        bool lfree[3];                       // Sync == 0 per LFO
+        f32  lRateNorm[3];                   // rate knob on its log scale, 0..1
+        f32  a3, d3, s3, r3;
+        struct Slot { u8 src, dst; f32 amt; };
+        Slot slot[kMods]; int mN; u32 dstMask;
+        f32  macro[4];
+        f32  driveDb;
+        f32  cutNorm, resNorm;               // matrix base positions
+        f32  detA, detB;
+        f32  offA[kUni], offB[kUni];         // the fan's -1..1 offsets
     };
 
     // --- parameter -> coefficient -----------------------------------------
 
     void readParams(Blk& b) {
+        // The matrix first: dstMask gates arithmetic all through this function
+        // and the voice — a destination no live slot reaches keeps the exact
+        // v1 expression, which is how the bit-identity gate survives the
+        // feature. A slot with source Off, dest Off or amount 0 contributes
+        // nothing and costs nothing.
+        b.mN = 0;
+        b.dstMask = 0;
+        for (int k = 0; k < kMods; ++k) {
+            const int src = (int)clampv(p(kPM1Src + 3 * k) + 0.5f, 0.f, 13.f);
+            const int dst = (int)clampv(p(kPM1Src + 3 * k + 1) + 0.5f, 0.f, 19.f);
+            const f32 amt = clampv(p(kPM1Src + 3 * k + 2), -1.f, 1.f);
+            if (src == kSOff || dst == kDOff || amt == 0.f) continue;
+            b.slot[b.mN].src = (u8)src;
+            b.slot[b.mN].dst = (u8)dst;
+            b.slot[b.mN].amt = amt;
+            ++b.mN;
+            b.dstMask |= 1u << dst;
+        }
+        for (int j = 0; j < 4; ++j)
+            b.macro[j] = clampv(p(kPMacro1 + j), 0.f, 1.f);
+
         const int ta = (int)clampv(p(kPATable) + 0.5f, 0.f, 7.f);
         const int tb = (int)clampv(p(kPBTable) + 0.5f, 0.f, 7.f);
         b.tblA = tbl_->frame(ta, 0);
@@ -985,10 +1087,12 @@ private:
 
         b.uniA = (int)clampv(p(kPAUni) + 0.5f, 1.f, (f32)kUni);
         b.uniB = (int)clampv(p(kPBUni) + 0.5f, 1.f, (f32)kUni);
-        buildFan(b.uniA, clampv(p(kPADet), 0.f, 100.f), clampv(p(kPASpread), 0.f, 1.f),
-                 b.uratA, b.panLA, b.panRA, b.ugainA, b.maxRatA);
-        buildFan(b.uniB, clampv(p(kPBDet), 0.f, 100.f), clampv(p(kPBSpread), 0.f, 1.f),
-                 b.uratB, b.panLB, b.panRB, b.ugainB, b.maxRatB);
+        b.detA = clampv(p(kPADet), 0.f, 100.f);
+        b.detB = clampv(p(kPBDet), 0.f, 100.f);
+        buildFan(b.uniA, b.detA, clampv(p(kPASpread), 0.f, 1.f),
+                 b.uratA, b.panLA, b.panRA, b.offA, b.ugainA, b.maxRatA);
+        buildFan(b.uniB, b.detB, clampv(p(kPBSpread), 0.f, 1.f),
+                 b.uratB, b.panLB, b.panRB, b.offB, b.ugainB, b.maxRatB);
 
         b.cutoff   = clampv(p(kPCutoff), 20.f, 20000.f);
         // Resonance 0..1 -> Q 0.5..20 geometrically, as the Auto Filter maps
@@ -999,16 +1103,21 @@ private:
         b.keytrack = clampv(p(kPKeytrack), 0.f, 1.f);
         b.env2Cut  = clampv(p(kPE2Cut), -1.f, 1.f);
         b.lfoCut   = clampv(p(kPLfoCut), -1.f, 1.f);
-        b.ftype    = (int)clampv(p(kPFType) + 0.5f, 0.f, 2.f);
+        b.ftype    = (int)clampv(p(kPFType) + 0.5f, 0.f, 5.f);
+        // The matrix's base positions on the two norm scales. One log2 per
+        // block; only read when a slot targets Cutoff/Resonance.
+        b.cutNorm  = (f32)(std::log2((f64)b.cutoff / 20.0) / (f64)kCutOct);
+        b.resNorm  = clampv(p(kPRes), 0.f, 1.f);
 
         const f32 drv = clampv(p(kPDrive), 0.f, 24.f);
         // A branch, not a computation: at 0 dB the drive stage is a wire and
         // not tanh(x), so the default patch is exactly the oscillator it says
         // it is. The compensation is the Saturator's -- the gain that keeps a
         // -6 dBFS reference at the level it had at unity drive.
-        b.drive  = drv > 0.f;
-        b.driveG = dbToGain(drv);
-        b.driveC = b.drive ? std::tanh(0.5f) / std::tanh(b.driveG * 0.5f) : 1.f;
+        b.drive   = drv > 0.f;
+        b.driveG  = dbToGain(drv);
+        b.driveC  = b.drive ? std::tanh(0.5f) / std::tanh(b.driveG * 0.5f) : 1.f;
+        b.driveDb = drv;                       // the matrix sums in dB
 
         b.a1 = atkCoef(clampv(p(kPAttack), 0.1f, 5000.f));
         b.d1 = decCoef(clampv(p(kPDecay), 1.f, 5000.f));
@@ -1018,6 +1127,10 @@ private:
         b.d2 = decCoef(clampv(p(kPE2Decay), 1.f, 5000.f));
         b.s2 = clampv(p(kPE2Sustain), 0.f, 1.f);
         b.r2 = decCoef(clampv(p(kPE2Release), 1.f, 8000.f));
+        b.a3 = atkCoef(clampv(p(kPE3Attack), 0.1f, 5000.f));
+        b.d3 = decCoef(clampv(p(kPE3Decay), 1.f, 5000.f));
+        b.s3 = clampv(p(kPE3Sustain), 0.f, 1.f);
+        b.r3 = decCoef(clampv(p(kPE3Release), 1.f, 8000.f));
 
         b.lfoShape = (int)clampv(p(kPLfoShape) + 0.5f, 0.f, 4.f);
         b.lfoPos   = clampv(p(kPLfoPos), -1.f, 1.f);
@@ -1025,6 +1138,7 @@ private:
         b.env2Pos  = clampv(p(kPE2Pos), -1.f, 1.f);
 
         const int sync = (int)clampv(p(kPLfoSync) + 0.5f, 0.f, (f32)(kSpSyncCount - 1));
+        b.lfree[0] = sync == 0;
         if (sync > 0) {
             // The pushed transport, with no Tempo parameter behind it: this
             // instrument postdates setTransport, so a knob that only existed to
@@ -1033,9 +1147,59 @@ private:
             // contract rather than guessed at.
             const f32 bpm = trBpm_ > 0.0 ? clampv((f32)trBpm_, 20.f, 999.f) : 120.f;
             lfo_.setRate(sr_, bpm / (60.f * kSpSyncBeats[sync]));
-        } else {
+        } else if (!(b.dstMask & (1u << kDL1Rate))) {
+            // When a matrix slot drives this rate, the control tick owns it
+            // (retarget); a per-block write here would quantise the modulation
+            // to block boundaries and break block-size invariance.
             lfo_.setRate(sr_, clampv(p(kPLfoRate), 0.01f, 40.f));
         }
+
+        // LFO2/3 — the same block, three times (contract: same division
+        // table, same shapes, same behaviour; no fixed routings).
+        b.l2Shape = (int)clampv(p(kPL2Shape) + 0.5f, 0.f, 4.f);
+        b.l3Shape = (int)clampv(p(kPL3Shape) + 0.5f, 0.f, 4.f);
+        {
+            dsp::Lfo* ls[2] = { &lfo2_, &lfo3_ };
+            const int syncIds[2]  = { kPL2Sync, kPL3Sync };
+            const int rateIds[2]  = { kPL2Rate, kPL3Rate };
+            const int rateDst[2]  = { kDL2Rate, kDL3Rate };
+            for (int j = 0; j < 2; ++j) {
+                const int sy = (int)clampv(p(syncIds[j]) + 0.5f, 0.f, (f32)(kSpSyncCount - 1));
+                b.lfree[j + 1] = sy == 0;
+                if (sy > 0) {
+                    const f32 bpm = trBpm_ > 0.0 ? clampv((f32)trBpm_, 20.f, 999.f) : 120.f;
+                    ls[j]->setRate(sr_, bpm / (60.f * kSpSyncBeats[sy]));
+                } else if (!(b.dstMask & (1u << rateDst[j]))) {
+                    ls[j]->setRate(sr_, clampv(p(rateIds[j]), 0.01f, 40.f));
+                }
+            }
+        }
+        // Rate-knob positions on the log scale, for the matrix's rate
+        // destinations. Only meaningful when a slot targets them.
+        b.lRateNorm[0] = (f32)(std::log2((f64)clampv(p(kPLfoRate), 0.01f, 40.f) / 0.01) / (f64)kRateOct);
+        b.lRateNorm[1] = (f32)(std::log2((f64)clampv(p(kPL2Rate), 0.01f, 40.f) / 0.01) / (f64)kRateOct);
+        b.lRateNorm[2] = (f32)(std::log2((f64)clampv(p(kPL3Rate), 0.01f, 40.f) / 0.01) / (f64)kRateOct);
+
+        // Sub & noise completion (ids 42..45). subMul is exactly 0.5f at the
+        // default (-1 oct): exp2 of an integer is exact, so the v1 sub
+        // increment `base * 0.5f` is reproduced bit for bit.
+        b.subShape = (int)std::floor(clampv(p(kPSubShape), 0.f, 2.f) + 0.5f);
+        b.subMul   = std::exp2(std::floor(clampv(p(kPSubOct), -2.f, 0.f) + 0.5f));
+        const f32 nzColor = clampv(p(kPNzColor), 0.f, 1.f);
+        b.nzBypass = nzColor >= 1.f;      // "at exactly 1.0 the filter is
+                                          // bypassed" — a branch, not a limit
+        b.nzFc     = 200.f * std::pow(100.f, nzColor);
+        b.nzTrack  = (int)clampv(p(kPNzTrack) + 0.5f, 0.f, 1.f) != 0;
+
+        // Warp (ids 48..51).
+        b.warpA    = (int)clampv(p(kPAWarp) + 0.5f, 0.f, 7.f);
+        b.warpAmtA = clampv(p(kPAWarpAmt), 0.f, 1.f);
+        b.warpB    = (int)clampv(p(kPBWarp) + 0.5f, 0.f, 7.f);
+        b.warpAmtB = clampv(p(kPBWarpAmt), 0.f, 1.f);
+        // "An osc whose Level is 0 still computes voice 0 whenever the other
+        // osc's mode is FM/RM": needTapX = the OTHER osc wants X as modulator.
+        b.needTapA = b.warpB == 6 || b.warpB == 7;
+        b.needTapB = b.warpA == 6 || b.warpA == 7;
 
         b.master   = clampv(p(kPMaster), 0.f, 1.5f);
         b.incScale = (f32)(440.0 / sr_);
@@ -1046,10 +1210,13 @@ private:
     // in the image. Panning is constant power and never inverts a polarity,
     // which is the whole reason a mono sum of this cannot cancel.
     static void buildFan(int u, f32 detune, f32 spread,
-                         f32* rat, f32* panL, f32* panR, f32& gain, f32& maxRat) {
+                         f32* rat, f32* panL, f32* panR, f32* offOut,
+                         f32& gain, f32& maxRat) {
         maxRat = 1.f;
         for (int i = 0; i < u; ++i) {
             const f32 off = (u > 1) ? ((f32)i / (f32)(u - 1)) * 2.f - 1.f : 0.f;
+            offOut[i] = off;    // kept for the matrix's Detune destinations,
+                                // which rebuild the ratios at audio rate
             const f32 ct  = off * detune * 0.5f;          // total spread = detune
             rat[i] = std::exp2(ct * (1.f / 1200.f));
             if (rat[i] > maxRat) maxRat = rat[i];
@@ -1057,7 +1224,7 @@ private:
             panL[i] = 1.4142136f * std::cos(th);
             panR[i] = 1.4142136f * std::sin(th);
         }
-        for (int i = u; i < kUni; ++i) { rat[i] = 1.f; panL[i] = 0.f; panR[i] = 0.f; }
+        for (int i = u; i < kUni; ++i) { rat[i] = 1.f; panL[i] = 0.f; panR[i] = 0.f; offOut[i] = 0.f; }
         // Detuned voices sum incoherently, so their RMS grows as sqrt(u).
         gain = 1.f / std::sqrt((f32)u);
     }
@@ -1073,23 +1240,32 @@ private:
 
     // --- LFO ---------------------------------------------------------------
 
-    f32 lfoValue(int shape) const {
-        const f32 ph = lfo_.phase;
+    // One shape read, shared by all three LFOs — the shape list is the
+    // contract's id 37 list, verbatim for id 56 and 59 too.
+    static f32 lfoValue(const dsp::Lfo& l, int shape, f32 sh) {
+        const f32 ph = l.phase;
         switch (shape) {
             case 1:  return ph < 0.5f ? (4.f * ph - 1.f) : (3.f - 4.f * ph);   // triangle
             case 2:  return 2.f * ph - 1.f;                                    // saw up
             case 3:  return ph < 0.5f ? 1.f : -1.f;                            // square
-            case 4:  return shVal_;                                            // sample & hold
+            case 4:  return sh;                                                // sample & hold
             default: return std::sin(dsp::kTwoPi * ph);
         }
     }
 
-    void lfoTick() {
-        const f32 was = lfo_.phase;
-        lfo_.tick();
-        // A new sample-and-hold value on every wrap. Drawn from the LFO's OWN
-        // counter, never the note counter -- see the file header.
-        if (lfo_.phase < was) shVal_ = 2.f * rnd(lfoRng_) - 1.f;
+    // A new sample-and-hold value on every wrap, drawn from that LFO's OWN
+    // counter, never the note counter and never each other's -- see the file
+    // header: three streams, three seeds, no interleaving.
+    static void lfoTickOne(dsp::Lfo& l, u32& rng, f32& sh) {
+        const f32 was = l.phase;
+        l.tick();
+        if (l.phase < was) sh = 2.f * rnd(rng) - 1.f;
+    }
+
+    void lfoTicks() {
+        lfoTickOne(lfo_,  lfoRng_,  shVal_);
+        lfoTickOne(lfo2_, lfo2Rng_, shVal2_);
+        lfoTickOne(lfo3_, lfo3Rng_, shVal3_);
     }
 
     // 24 bits of a plain LCG, in [0, 1). Deterministic and seeded in prepare().
@@ -1142,9 +1318,11 @@ private:
     // whatever is done with it. The gate that survives past the threshold is
     // therefore not bit-identity -- it is "no voice is left sounding", and that
     // one is absolute rather than approximate.
-    void queue(int frame, u8 type, u8 a, u8 b) {
-        if (type == kEvOn) {
-            if (nPend_ >= kOnCap) return;              // droppable, by the argument above
+    void queue(int frame, u8 type, u8 a, u8 b, u8 ch) {
+        if (type == kEvOn || type == kEvPressure) {
+            // Both droppable, by the argument above: a pressure value lost in
+            // a flood this dense is replaced by the next one.
+            if (nPend_ >= kOnCap) return;
         } else if (nPend_ >= kPend) {
             if (type == kEvOff) {
                 ovfOff_[(a >> 5) & 3] |= 1u << (a & 31);
@@ -1161,6 +1339,7 @@ private:
         e.type  = type;
         e.a     = a;
         e.b     = b;
+        e.ch    = ch;
         ++nPend_;
     }
 
@@ -1183,14 +1362,133 @@ private:
 
     void apply(const PendEv& e) {
         switch (e.type) {
-            case kEvOn:       noteOn(e.a, e.b); break;
+            // The absolute timeline sample the event was stamped for — block
+            // start plus its in-block frame — is the third leg of the note's
+            // stable identity (the matrix's Random source).
+            case kEvOn:       noteOn(e.a, e.b, e.ch, absPos_ + (u64)e.frame); break;
             case kEvOff:      noteOff(e.a); break;
             case kEvNotesOff: allNotesOff(); break;
+            case kEvPressure: after_ = (f32)e.a * (1.f / 127.f); break;
             default:          allSoundOff(); break;
         }
     }
 
-    void noteOn(u8 note, u8 vel) {
+    // Random-per-note (matrix source 13): a splitmix64-finalised hash of the
+    // note's stable identity — channel, note number, and the note-on's
+    // absolute timeline sample as stamped on the event. NO stream, no clock:
+    // it cannot be perturbed by voice stealing or block size, and the same
+    // render yields the same values, which is the contract's own wording.
+    static f32 noteRandom(u8 ch, u8 note, u64 absSample) {
+        u64 x = absSample ^ ((u64)note << 48) ^ ((u64)ch << 56);
+        x += 0x9E3779B97F4A7C15ull;
+        x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 27; x *= 0x94D049BB133111EBull;
+        x ^= x >> 31;
+        return (f32)(x >> 40) * (2.f / 16777216.f) - 1.f;      // [-1, 1)
+    }
+
+    // The mono/legato held-note stack, newest last. Maintained in EVERY mode
+    // (cheap, silent in Poly) so switching into Mono/Legato mid-phrase starts
+    // from the truth rather than from an empty memory.
+    void heldPush(u8 n) {
+        if (nHeld_ >= kHeld) {          // drop the oldest: fallback wants newest
+            for (int i = 1; i < kHeld; ++i) held_[i - 1] = held_[i];
+            --nHeld_;
+        }
+        held_[nHeld_++] = n;
+    }
+    void heldRemove(u8 n) {
+        int w = 0;
+        for (int i = 0; i < nHeld_; ++i)
+            if (held_[i] != n) held_[w++] = held_[i];
+        nHeld_ = w;
+    }
+
+    // Retarget a sounding mono voice's pitch: a glide when Glide > 0, a jump
+    // when not. Constant TIME, like every other glide in this file.
+    void monoGlide(Voice& v, u8 note, f32 glideMs) {
+        v.note = note;
+        v.pitchTarget = (f32)note;
+        const int nsteps = (int)(glideMs * 1e-3 * sr_);
+        if (glideMs > 0.f && nsteps > 0) {
+            v.glideStep = (v.pitchTarget - v.pitch) / (f32)nsteps;
+            v.glideLeft = nsteps;
+        } else {
+            v.pitch = v.pitchTarget;
+            v.glideLeft = 0;
+        }
+    }
+
+    void noteOn(u8 note, u8 vel, u8 ch, u64 absSample) {
+        const int vm = (int)clampv(p(kPVoiceMode) + 0.5f, 0.f, 2.f);
+        const bool otherHeld = nHeld_ > 0;   // before this note joins
+        heldRemove(note);
+        heldPush(note);
+
+        if (vm == 0) { polyNoteOn(note, vel, ch, absSample); return; }
+
+        // Mono / Legato: voices_[0] is THE voice; id 39 is ignored (contract).
+        Voice& v = voices_[0];
+        const bool sounding = v.active;
+        const f32 glideMs = clampv(p(kPGlide), 0.f, 2000.f);
+
+        if (vm == 2 && sounding && otherHeld) {
+            // Legato overlap: no retrigger of anything — the note only
+            // glides. Velocity keeps the phrase's value; the per-note Random
+            // updates to the new note's identity (it IS a note-on).
+            v.rnote = noteRandom(ch, note, absSample);
+            monoGlide(v, note, glideMs);
+            lastPitch_ = (f32)note;
+            havePitch_ = true;
+            v.age = ++age_;
+            return;
+        }
+
+        // Mono retrigger, or a detached Legato note. A voice that is still
+        // sounding keeps its phases and filter state and restarts ENV1-3 from
+        // their CURRENT values — a retrigger is a new attack, not a click; a
+        // silent voice starts exactly like a Poly note.
+        const f32 fromPitch = sounding ? v.pitch : lastPitch_;
+        const bool canGlide = sounding || havePitch_;
+        if (!sounding) {
+            v = Voice{};
+            for (int i = 0; i < kUni; ++i) {
+                v.phA[i] = rnd(noteRng_);
+                v.phB[i] = rnd(noteRng_);
+            }
+            v.subPh = rnd(noteRng_);
+            v.rng   = (noteRng_ = noteRng_ * 1664525u + 1013904223u) | 1u;
+        }
+        v.active = true;
+        v.note   = note;
+        v.velAmp = 0.30f + 0.70f * ((f32)vel * (1.f / 127.f));
+        v.vel01  = (f32)vel * (1.f / 127.f);
+        v.rnote  = noteRandom(ch, note, absSample);
+        v.pitchTarget = (f32)note;
+        if (glideMs > 0.f && canGlide) {
+            const int nsteps = (int)(glideMs * 1e-3 * sr_);
+            if (nsteps > 0) {
+                v.pitch     = fromPitch;
+                v.glideStep = (v.pitchTarget - v.pitch) / (f32)nsteps;
+                v.glideLeft = nsteps;
+            } else {
+                v.pitch = v.pitchTarget;
+                v.glideLeft = 0;
+            }
+        } else {
+            v.pitch = v.pitchTarget;
+            v.glideLeft = 0;
+        }
+        lastPitch_ = v.pitchTarget;
+        havePitch_ = true;
+        v.e1.stage = kAtk;
+        v.e2.stage = kAtk;
+        v.e3.stage = kAtk;
+        v.age = ++age_;
+    }
+
+    // The v1 note-on, verbatim plus the v2 per-note fields (vel01, rnote, e3).
+    void polyNoteOn(u8 note, u8 vel, u8 ch, u64 absSample) {
         Voice* pv = alloc();
         Voice& v = *pv;
         v = Voice{};
@@ -1199,9 +1497,11 @@ private:
         // Velocity with a 30% floor (the contract's fixed routing): the softest
         // possible note is quiet, not inaudible.
         v.velAmp = 0.30f + 0.70f * ((f32)vel * (1.f / 127.f));
+        v.vel01  = (f32)vel * (1.f / 127.f);
+        v.rnote  = noteRandom(ch, note, absSample);
         v.pitchTarget = (f32)note;
 
-        const f32 glideMs = clampv(p(kPGlide), 0.f, 500.f);
+        const f32 glideMs = clampv(p(kPGlide), 0.f, 2000.f);
         if (glideMs > 0.f && havePitch_) {
             // Constant TIME: the whole interval is covered in `glideMs`,
             // whatever the interval is.
@@ -1232,6 +1532,7 @@ private:
 
         v.e1.stage = kAtk; v.e1.v = 0.f;
         v.e2.stage = kAtk; v.e2.v = 0.f;
+        v.e3.stage = kAtk; v.e3.v = 0.f;
         v.fs[0].reset();
         v.fs[1].reset();
         v.fSnap = true;
@@ -1241,6 +1542,32 @@ private:
     // Newest matching voice first: a repeated note that stole its own older
     // voice should release the one actually sounding.
     void noteOff(u8 note) {
+        const int vm = (int)clampv(p(kPVoiceMode) + 0.5f, 0.f, 2.f);
+        heldRemove(note);
+
+        if (vm != 0) {
+            Voice& v = voices_[0];
+            // Voices left over from a Poly phrase (the mode switched while a
+            // chord rang) still honour their note-offs — nothing may strand.
+            for (size_t i = 1; i < (size_t)kSpVoices; ++i) {
+                Voice& o = voices_[i];
+                if (o.active && o.note == note && o.e1.stage != kRel) release(o);
+            }
+            if (!v.active || v.note != note || v.e1.stage == kRel) return;
+            if (nHeld_ > 0) {
+                // Fall back to the most recent still-held note (contract). A
+                // glide, not a retrigger: a fallback is not a note-on, so the
+                // envelopes keep running — see the implementation notes.
+                const u8 back = held_[nHeld_ - 1];
+                monoGlide(v, back, clampv(p(kPGlide), 0.f, 2000.f));
+                lastPitch_ = (f32)back;
+                havePitch_ = true;
+            } else {
+                release(v);
+            }
+            return;
+        }
+
         Voice* best = nullptr;
         for (Voice& v : voices_) {
             if (!v.active || v.note != note) continue;
@@ -1257,8 +1584,12 @@ private:
 
     void allNotesOff() {
         for (Voice& v : voices_) if (v.active && v.e1.stage != kRel) release(v);
+        nHeld_ = 0;
     }
-    void allSoundOff() { for (Voice& v : voices_) v = Voice{}; }
+    void allSoundOff() {
+        for (Voice& v : voices_) v = Voice{};
+        nHeld_ = 0;
+    }
 
     void clearSchedule() {
         nPend_ = 0;
@@ -1287,130 +1618,183 @@ private:
         return quietest;
     }
 
+    // --- the matrix's source fetch ------------------------------------------
+
+    // One slot source, for one voice, this sample. `v` may be null (the LFO
+    // rate destinations are instance-wide; with no active voice the
+    // voice-bound sources read 0).
+    inline f32 srcValue(int src, const Voice* v, const Blk& b, const Glob& g) const {
+        switch (src) {
+            case kSLfo1:   return g.l1;
+            case kSLfo2:   return g.l2;
+            case kSLfo3:   return g.l3;
+            case kSEnv2:   return v ? v->e2.v : 0.f;
+            case kSEnv3:   return v ? v->e3.v : 0.f;
+            case kSVel:    return v ? v->vel01 : 0.f;
+            case kSKey:    return v ? clampv(((f32)v->note - 60.f) * (1.f / 60.f), -1.f, 1.f) : 0.f;
+            case kSAft:    return g.after;
+            case kSMac1: case kSMac2: case kSMac3: case kSMac4:
+                           return b.macro[src - kSMac1];
+            case kSRandom: return v ? v->rnote : 0.f;
+            default:       return 0.f;
+        }
+    }
+
+    // The slot sums for the two control-tick destinations (Cutoff, Resonance).
+    inline void cutResMods(const Blk& b, const Voice& v, const Glob& g,
+                           f32& mdCut, f32& mdRes) const {
+        mdCut = 0.f;
+        mdRes = 0.f;
+        for (int k = 0; k < b.mN; ++k) {
+            if (b.slot[k].dst == kDCut)
+                mdCut += b.slot[k].amt * srcValue(b.slot[k].src, &v, b, g);
+            else if (b.slot[k].dst == kDRes)
+                mdRes += b.slot[k].amt * srcValue(b.slot[k].src, &v, b, g);
+        }
+    }
+
     // --- per-voice cutoff --------------------------------------------------
 
-    f32 voiceCutoff(const Voice& v, const Blk& b, f32 lfoV) const {
+    // `matrixed` selects between the v1 expression — kept verbatim, because
+    // "mathematically the same" is not "bit-identical" — and the contract's
+    // norm-domain sum: clamp(base_norm + fixed_v1 + Σ, 0, 1) mapped to Hz
+    // after the clamp (then the engine's fcMax guard, as always).
+    f32 voiceCutoff(const Voice& v, const Blk& b, f32 lfoV, bool matrixed, f32 mdCut) const {
         const f32 kt = b.keytrack * ((f32)v.note - 60.f) * (1.f / 12.f);
         const f32 e2 = b.env2Cut * v.e2.v * kEnvCutOct;
         const f32 lf = b.lfoCut * lfoV * kLfoCutOct;
-        return clampv(b.cutoff * std::exp2(kt + e2 + lf), 20.f, b.fcMax);
+        if (!matrixed)
+            return clampv(b.cutoff * std::exp2(kt + e2 + lf), 20.f, b.fcMax);
+        const f32 norm = clampv(b.cutNorm + (kt + e2 + lf) * (1.f / kCutOct) + mdCut, 0.f, 1.f);
+        return clampv(20.f * std::exp2(norm * kCutOct), 20.f, b.fcMax);
+    }
+
+    f32 voiceQ(const Blk& b, bool matrixed, f32 mdRes) const {
+        if (!matrixed) return b.q;
+        return 0.5f * std::pow(40.f, clampv(b.resNorm + mdRes, 0.f, 1.f));
+    }
+
+    // The Noise Color coefficient for one voice. Track multiplies fc by
+    // f_note/261.63 — C4 reference, post-glide, i.e. 2^((pitch-60)/12).
+    f32 noiseCoef(const Voice& v, const Blk& b) const {
+        f32 fc = b.nzFc;
+        if (b.nzTrack) fc *= std::exp2((v.pitch - 60.f) * (1.f / 12.f));
+        fc = clampv(fc, 1.f, (f32)(sr_ * 0.49));
+        return clampv(1.f - std::exp(-dsp::kTwoPi * fc / (f32)sr_), 1e-5f, 1.f);
     }
 
     // One control tick: every sounding voice gets a new coefficient target and
     // the per-sample slope that walks it there over the next kCtrl samples.
-    void retarget(const Blk& b, f32 lfoV) {
+    // The matrix's control-tick destinations live here too: Cutoff and
+    // Resonance per voice (the same cadence v1's LFO->cutoff already has), and
+    // the three LFO rates instance-wide.
+    void retarget(const Blk& b, const Glob& g) {
+        if (b.dstMask & ((1u << kDL1Rate) | (1u << kDL2Rate) | (1u << kDL3Rate))) {
+            // An LFO has one phase for all voices, so a per-voice source
+            // driving its rate needs one voice picked: the NEWEST active one
+            // (the musically obvious choice for the mono patches this is
+            // for); none active reads the voice-bound sources as 0.
+            const Voice* nv = nullptr;
+            for (const Voice& v : voices_)
+                if (v.active && (!nv || v.age > nv->age)) nv = &v;
+            dsp::Lfo* ls[3] = { &lfo_, &lfo2_, &lfo3_ };
+            const int dstOf[3] = { kDL1Rate, kDL2Rate, kDL3Rate };
+            for (int j = 0; j < 3; ++j) {
+                if (!(b.dstMask & (1u << dstOf[j])) || !b.lfree[j]) continue;
+                f32 s = 0.f;
+                for (int k = 0; k < b.mN; ++k)
+                    if (b.slot[k].dst == dstOf[j])
+                        s += b.slot[k].amt * srcValue(b.slot[k].src, nv, b, g);
+                const f32 norm = clampv(b.lRateNorm[j] + s, 0.f, 1.f);
+                ls[j]->setRate(sr_, 0.01f * std::exp2(norm * kRateOct));
+            }
+        }
+
         const f32 invk = 1.f / (f32)kCtrl;
+        const bool mc = (b.dstMask & (1u << kDCut)) != 0;
+        const bool mr = (b.dstMask & (1u << kDRes)) != 0;
         for (Voice& v : voices_) {
             if (!v.active || v.fSnap) continue;      // fSnap: snapped on first sample
-            const dsp::SvfCoeffs tgt = dsp::svfCoeffs(sr_, voiceCutoff(v, b, lfoV), b.q);
+            f32 mdC = 0.f, mdR = 0.f;
+            if (mc || mr) cutResMods(b, v, g, mdC, mdR);
+            const dsp::SvfCoeffs tgt =
+                dsp::svfCoeffs(sr_, voiceCutoff(v, b, g.l1, mc, mdC), voiceQ(b, mr, mdR));
             v.fInc = dsp::svfSlope(v.fc, tgt, invk);
+            if (!b.nzBypass) v.nzCoef = noiseCoef(v, b);
         }
     }
 
-    // --- the voice -----------------------------------------------------------
+    // --- the oscillator's shared selection ----------------------------------
 
-    inline void renderVoice(Voice& v, const Blk& b, f32 lfoV, f32& accL, f32& accR) {
-        // Envelopes, per sample. Cheap enough that a control rate would buy
-        // nothing, and per-sample is inherently block-size invariant.
-        envTick(v.e1, b.a1, b.d1, b.s1, b.r1);
-        envTick(v.e2, b.a2, b.d2, b.s2, b.r2);
-        if (v.e1.stage == kIdle) { v.active = false; return; }
+    // Frame pair and mip pair for one oscillator this sample. This is v1's
+    // arithmetic hoisted out of the read loop, expression for expression,
+    // because the FM/RM tap reads share it with the main read.
+    struct OscSel { int f0, f1, m0; f32 ff, mf; };
 
-        // Glide, then vibrato, then the increment.
-        if (v.glideLeft > 0) {
-            v.pitch += v.glideStep;
-            if (--v.glideLeft == 0) v.pitch = v.pitchTarget;
-        }
-        const f32 midi = v.pitch + b.lfoPitch * lfoV * 0.01f;
-        const f32 base = clampv(b.incScale * std::exp2((midi - 69.f) * (1.f / 12.f)),
-                                0.f, 0.45f);
-
-        // Position: the parameter plus both modulators, clamped into the frame
-        // axis. ENV2 is per voice, so this is too.
-        const f32 mod = b.lfoPos * lfoV + b.env2Pos * v.e2.v;
-
-        f32 xl = 0.f, xr = 0.f;
-
-        if (b.lvlA > 0.f) oscillator(v.phA, b.tblA, b.posA + mod, base * b.ratioA,
-                                     b.uniA, b.uratA, b.panLA, b.panRA,
-                                     b.ugainA * b.lvlA, b.maxRatA, xl, xr);
-        else               advance(v.phA, base * b.ratioA, b.uniA, b.uratA);
-
-        if (b.lvlB > 0.f) oscillator(v.phB, b.tblB, b.posB + mod, base * b.ratioB,
-                                     b.uniB, b.uratB, b.panLB, b.panRB,
-                                     b.ugainB * b.lvlB, b.maxRatB, xl, xr);
-        else               advance(v.phB, base * b.ratioB, b.uniB, b.uratB);
-
-        // Noise: always drawn, whatever the level, so the voice's random stream
-        // is a function of time alone and not of a parameter.
-        const f32 nl = 2.f * rnd(v.rng) - 1.f;
-        const f32 nr = 2.f * rnd(v.rng) - 1.f;
-        xl += nl * b.lvlN;
-        xr += nr * b.lvlN;
-
-        // Sub: one octave below the note, so it follows the glide for free.
-        const f32 subInc = base * 0.5f;
-        if (b.lvlSub > 0.f) {
-            const f32 s = std::sin(dsp::kTwoPi * v.subPh) * b.lvlSub;
-            xl += s;
-            xr += s;
-        }
-        v.subPh += subInc;
-        if (v.subPh >= 1.f) v.subPh -= 1.f;
-
-        if (b.drive) {
-            xl = std::tanh(b.driveG * xl) * b.driveC;
-            xr = std::tanh(b.driveG * xr) * b.driveC;
-        }
-
-        // Filter. Coefficients are snapped on a voice's very first sample (one
-        // tan per note-on) and walked between control ticks after that.
-        if (v.fSnap) {
-            v.fc   = dsp::svfCoeffs(sr_, voiceCutoff(v, b, lfoV), b.q);
-            v.fInc = dsp::SvfCoeffs{ 0.f, 0.f, 0.f, 0.f };
-            v.fSnap = false;
-        }
-        const dsp::SvfOut ol = dsp::svfTick(v.fc, v.fs[0], xl);
-        const dsp::SvfOut orr = dsp::svfTick(v.fc, v.fs[1], xr);
-        dsp::svfStep(v.fc, v.fInc);
-
-        // The bandpass is normalised by k = 1/Q so its peak stays at unity, for
-        // the reason the Auto Filter gives: an SVF's raw bandpass tap has a peak
-        // gain of Q, and a band filter that gets 26 dB louder as the resonance
-        // knob turns is a hazard rather than a feature.
-        f32 yl, yr;
-        if (b.ftype == 0)      { yl = ol.lp; yr = orr.lp; }
-        else if (b.ftype == 1) { yl = ol.bp * v.fc.k; yr = orr.bp * v.fc.k; }
-        else                   { yl = ol.hp; yr = orr.hp; }
-
-        const f32 amp = v.e1.v * v.velAmp;
-        accL += yl * amp;
-        accR += yr * amp;
-    }
-
-    // One oscillator: mip choice from the fan's HIGHEST increment, frame pair
-    // from the position, then one linear read per unison voice.
-    inline void oscillator(f32* ph, const f32* tbl, f32 pos, f32 inc, int u,
-                           const f32* rat, const f32* panL, const f32* panR,
-                           f32 gain, f32 maxRat, f32& outL, f32& outR) {
+    static inline OscSel oscSelect(f32 pos, f32 inc, f32 maxRat) {
+        OscSel s;
         const f32 fpos = clampv(pos, 0.f, 1.f) * (f32)(kSpFrames - 1);
         int f0 = (int)fpos;
         if (f0 > kSpFrames - 2) f0 = kSpFrames - 2;
         if (f0 < 0) f0 = 0;
-        const f32 ff = fpos - (f32)f0;
-        const int f1 = f0 + 1;
+        s.ff = fpos - (f32)f0;
+        s.f0 = f0;
+        s.f1 = f0 + 1;
 
         const f32 mipf = spLog2(inc * maxRat) + 12.f;
         int m0 = (int)mipf;
         f32 mf = mipf - (f32)m0;
         if (m0 < 0)             { m0 = 0; mf = 0.f; }
         if (m0 > kSpMips - 2)   { m0 = kSpMips - 2; mf = 1.f; }
+        s.m0 = m0;
+        s.mf = mf;
+        return s;
+    }
 
+    // The FM/RM modulator tap: this osc's voice 0 read at its RAW phase
+    // (pre-warp, pre-level, mono), at the mip of the unwarped fundamental.
+    // Read BEFORE any phase advances, so what the other oscillator sees one
+    // sample later is this sample's value.
+    static inline f32 oscTap(const f32* ph, const f32* tbl, const OscSel& s) {
+        return spRead(tbl, s.f0, s.f1, s.ff, s.m0, s.mf, ph[0]);
+    }
+
+    // p^e for p in [0,1) — the Bend curves. exp2(e*log2(p)) with the same
+    // fast log2 the mip selector trusts: deterministic, smooth to ~1e-5, and
+    // an order of magnitude cheaper than powf in a 7-voice unison loop.
+    static inline f32 spPow01(f32 p, f32 e) {
+        if (p <= 0.f) return 0.f;
+        return std::exp2(e * spLog2(p));
+    }
+
+    // The read-phase warp (contract, "Block: warp"): Bend+/Bend-/Mirror/
+    // Quantize. Sync is in the caller (it also moves the mip); FM moves the
+    // increment; RM scales the output.
+    static inline f32 spWarpPhase(int mode, f32 a, f32 p) {
+        switch (mode) {
+            case 2:  return spPow01(p, 1.f / (1.f + 3.f * a));
+            case 3:  return spPow01(p, 1.f + 3.f * a);
+            case 4:  return (1.f - a) * p + a * (1.f - std::fabs(2.f * p - 1.f));
+            case 5: {
+                const f32 n = (f32)(2 + (int)(62.f * (1.f - a) + 0.5f));
+                return (f32)(int)(p * n) / n;
+            }
+            default: return p;
+        }
+    }
+
+    // One oscillator, v1 path: mip choice from the fan's HIGHEST increment,
+    // frame pair from the position, then one linear read per unison voice.
+    // Taken whenever the osc's warp is Off or at zero depth — the arithmetic
+    // is v1's, bit for bit.
+    inline void oscillator(f32* ph, const f32* tbl, const OscSel& s, f32 inc, int u,
+                           const f32* rat, const f32* panL, const f32* panR,
+                           f32 gain, f32& outL, f32& outR) {
         f32 l = 0.f, r = 0.f;
         for (int i = 0; i < u; ++i) {
-            const f32 s = spRead(tbl, f0, f1, ff, m0, mf, ph[i]);
-            l += s * panL[i];
-            r += s * panR[i];
+            const f32 smp = spRead(tbl, s.f0, s.f1, s.ff, s.m0, s.mf, ph[i]);
+            l += smp * panL[i];
+            r += smp * panR[i];
             ph[i] += inc * rat[i];
             if (ph[i] >= 1.f) ph[i] -= 1.f;
             if (!(ph[i] >= 0.f && ph[i] < 1.f)) ph[i] = 0.f;
@@ -1419,12 +1803,325 @@ private:
         outR += r * gain;
     }
 
+    // One oscillator, warp engaged (mode 1..7 at depth > 0). `m` is the other
+    // osc's one-sample-delayed voice-0 tap.
+    inline void oscWarp(f32* ph, const f32* tbl, const OscSel& sel, int mode, f32 a,
+                        f32 inc, f32 m, int u, const f32* rat,
+                        const f32* panL, const f32* panR,
+                        f32 gain, f32 maxRat, f32& outL, f32& outR) {
+        OscSel s = sel;
+        f32 slave = 1.f;
+        if (mode == 1) {
+            // Sync: slave ratio r = 1 + 7a; the mip follows f*r (the one warp
+            // whose brightness genuinely moves), the master wrap is not
+            // BLEP'd — the contract accepts that, same policy as table 5.
+            slave = 1.f + 7.f * a;
+            const f32 mipf = spLog2(inc * maxRat * slave) + 12.f;
+            int m0 = (int)mipf;
+            f32 mf = mipf - (f32)m0;
+            if (m0 < 0)             { m0 = 0; mf = 0.f; }
+            if (m0 > kSpMips - 2)   { m0 = kSpMips - 2; mf = 1.f; }
+            s.m0 = m0;
+            s.mf = mf;
+        }
+        f32 incEff = inc;
+        if (mode == 6) {
+            // Through-zero linear FM: k = 2^(3a)-1, so a full-scale modulator
+            // detunes by exactly 36a semitones; a negative (1 + k*m) runs the
+            // wavetable backwards, which is the through-zero.
+            const f32 k = std::exp2(3.f * a) - 1.f;
+            incEff = inc * (1.f + k * m);
+        }
+        f32 l = 0.f, r = 0.f;
+        for (int i = 0; i < u; ++i) {
+            f32 lp;
+            if (mode == 1)      lp = spFrac(ph[i] * slave);
+            else                lp = spWarpPhase(mode, a, ph[i]);
+            const f32 smp = spRead(tbl, s.f0, s.f1, s.ff, s.m0, s.mf, lp);
+            l += smp * panL[i];
+            r += smp * panR[i];
+            ph[i] += incEff * rat[i];
+            // frac in both directions: FM can step more than a cycle and can
+            // step backwards. (int) truncation then a negative fix-up.
+            ph[i] -= (f32)(int)ph[i];
+            if (ph[i] < 0.f) ph[i] += 1.f;
+            if (!(ph[i] >= 0.f && ph[i] < 1.f)) ph[i] = 0.f;
+        }
+        f32 g = gain;
+        if (mode == 7) g *= (1.f - a) + a * m;    // dry-to-ring-mod crossfade
+        outL += l * g;
+        outR += r * g;
+    }
+
     // The same phase bookkeeping with no read, for a silent oscillator.
     static inline void advance(f32* ph, f32 inc, int u, const f32* rat) {
         for (int i = 0; i < u; ++i) {
             ph[i] += inc * rat[i];
             if (ph[i] >= 1.f) ph[i] -= 1.f;
             if (!(ph[i] >= 0.f && ph[i] < 1.f)) ph[i] = 0.f;
+        }
+    }
+
+    // Silent but FM'd: the phases must advance exactly as if audible, because
+    // this osc's tap can still be the other one's modulator.
+    static inline void advanceFm(f32* ph, f32 inc, f32 m, f32 a, int u, const f32* rat) {
+        const f32 k = std::exp2(3.f * a) - 1.f;
+        const f32 incEff = inc * (1.f + k * m);
+        for (int i = 0; i < u; ++i) {
+            ph[i] += incEff * rat[i];
+            ph[i] -= (f32)(int)ph[i];
+            if (ph[i] < 0.f) ph[i] += 1.f;
+            if (!(ph[i] >= 0.f && ph[i] < 1.f)) ph[i] = 0.f;
+        }
+    }
+
+    // polyBLEP corrective for the sub square's edges; t in [0,1), dt = inc.
+    static inline f32 spBlep(f32 t, f32 dt) {
+        if (dt <= 0.f) return 0.f;
+        if (t < dt)       { const f32 x = t / dt;          return x + x - x * x - 1.f; }
+        if (t > 1.f - dt) { const f32 x = (t - 1.f) / dt;  return x * x + x + x + 1.f; }
+        return 0.f;
+    }
+
+    // --- the voice -----------------------------------------------------------
+
+    inline void renderVoice(Voice& v, const Blk& b, const Glob& g, f32& accL, f32& accR) {
+        // Envelopes, per sample. Cheap enough that a control rate would buy
+        // nothing, and per-sample is inherently block-size invariant. ENV3
+        // ticks whether or not a slot reads it: envelope state must be a
+        // function of the notes, never of the routing.
+        envTick(v.e1, b.a1, b.d1, b.s1, b.r1);
+        envTick(v.e2, b.a2, b.d2, b.s2, b.r2);
+        envTick(v.e3, b.a3, b.d3, b.s3, b.r3);
+        if (v.e1.stage == kIdle) { v.active = false; return; }
+
+        // Glide, then vibrato, then the increment.
+        if (v.glideLeft > 0) {
+            v.pitch += v.glideStep;
+            if (--v.glideLeft == 0) v.pitch = v.pitchTarget;
+        }
+        const f32 midi = v.pitch + b.lfoPitch * g.l1 * 0.01f;
+        const f32 base = clampv(b.incScale * std::exp2((midi - 69.f) * (1.f / 12.f)),
+                                0.f, 0.45f);
+
+        // The matrix, per voice at audio rate. md[] is only READ under a
+        // dstMask bit, and a bit is only set when a live slot targets that
+        // destination — so a patch with an empty matrix runs the v1
+        // expressions below untouched.
+        f32 md[kDstCount] = {};
+        for (int k = 0; k < b.mN; ++k)
+            md[b.slot[k].dst] += b.slot[k].amt * srcValue(b.slot[k].src, &v, b, g);
+
+        // Position: the parameter plus both fixed modulators plus the matrix,
+        // clamped into the frame axis (inside oscSelect). ENV2 is per voice,
+        // so this is too.
+        const f32 mod = b.lfoPos * g.l1 + b.env2Pos * v.e2.v;
+        f32 posA = b.posA + mod;
+        f32 posB = b.posB + mod;
+        if (b.dstMask & (1u << kDAPos)) posA += md[kDAPos];
+        if (b.dstMask & (1u << kDBPos)) posB += md[kDBPos];
+
+        f32 lvlA = b.lvlA, lvlB = b.lvlB;
+        if (b.dstMask & (1u << kDALvl)) lvlA = clampv(lvlA + md[kDALvl], 0.f, 1.f);
+        if (b.dstMask & (1u << kDBLvl)) lvlB = clampv(lvlB + md[kDBLvl], 0.f, 1.f);
+
+        // Pitch: ±24 st per full-scale slot, added after coarse/fine/glide,
+        // the summed matrix pitch clamped ±48 st (contract).
+        f32 incA = base * b.ratioA;
+        f32 incB = base * b.ratioB;
+        if (b.dstMask & (1u << kDAPitch))
+            incA *= std::exp2(clampv(md[kDAPitch] * 24.f, -48.f, 48.f) * (1.f / 12.f));
+        if (b.dstMask & (1u << kDBPitch))
+            incB *= std::exp2(clampv(md[kDBPitch] * 24.f, -48.f, 48.f) * (1.f / 12.f));
+
+        // Detune: the fan's ratios rebuilt at audio rate; the pans hold (the
+        // spread's geometry does not move, only its width in cents).
+        const f32* ratA = b.uratA;
+        const f32* ratB = b.uratB;
+        f32 maxRatA = b.maxRatA, maxRatB = b.maxRatB;
+        f32 dynRatA[kUni], dynRatB[kUni];
+        if (b.dstMask & (1u << kDADet)) {
+            const f32 det = clampv(b.detA + md[kDADet] * 100.f, 0.f, 100.f);
+            maxRatA = 1.f;
+            for (int i = 0; i < b.uniA; ++i) {
+                dynRatA[i] = std::exp2(b.offA[i] * det * (0.5f / 1200.f));
+                if (dynRatA[i] > maxRatA) maxRatA = dynRatA[i];
+            }
+            for (int i = b.uniA; i < kUni; ++i) dynRatA[i] = 1.f;
+            ratA = dynRatA;
+        }
+        if (b.dstMask & (1u << kDBDet)) {
+            const f32 det = clampv(b.detB + md[kDBDet] * 100.f, 0.f, 100.f);
+            maxRatB = 1.f;
+            for (int i = 0; i < b.uniB; ++i) {
+                dynRatB[i] = std::exp2(b.offB[i] * det * (0.5f / 1200.f));
+                if (dynRatB[i] > maxRatB) maxRatB = dynRatB[i];
+            }
+            for (int i = b.uniB; i < kUni; ++i) dynRatB[i] = 1.f;
+            ratB = dynRatB;
+        }
+
+        // Warp depth, then the contract's id-49 gate: at zero depth every
+        // mode IS Off — enforced by selection, so it is bit-identical rather
+        // than approximately neutral.
+        f32 wAmtA = b.warpAmtA, wAmtB = b.warpAmtB;
+        if (b.dstMask & (1u << kDAWAmt)) wAmtA = clampv(wAmtA + md[kDAWAmt], 0.f, 1.f);
+        if (b.dstMask & (1u << kDBWAmt)) wAmtB = clampv(wAmtB + md[kDBWAmt], 0.f, 1.f);
+        const int modeA = wAmtA > 0.f ? b.warpA : 0;
+        const int modeB = wAmtB > 0.f ? b.warpB : 0;
+
+        f32 xl = 0.f, xr = 0.f;
+
+        const bool useA = lvlA > 0.f;
+        const bool useB = lvlB > 0.f;
+        OscSel selA{}, selB{};
+        if (useA || b.needTapA) selA = oscSelect(posA, incA, maxRatA);
+        if (useB || b.needTapB) selB = oscSelect(posB, incB, maxRatB);
+
+        // Fresh taps, read before any phase advances; last sample's values
+        // (v.lastA/B) are what modulate THIS sample — the contract's
+        // one-sample delay, which is what makes mutual FM/RM well-defined.
+        f32 tapA = 0.f, tapB = 0.f;
+        if (b.needTapA) tapA = oscTap(v.phA, b.tblA, selA);
+        if (b.needTapB) tapB = oscTap(v.phB, b.tblB, selB);
+
+        if (useA) {
+            if (modeA == 0)
+                oscillator(v.phA, b.tblA, selA, incA, b.uniA, ratA,
+                           b.panLA, b.panRA, b.ugainA * lvlA, xl, xr);
+            else
+                oscWarp(v.phA, b.tblA, selA, modeA, wAmtA, incA, v.lastB, b.uniA,
+                        ratA, b.panLA, b.panRA, b.ugainA * lvlA, maxRatA, xl, xr);
+        } else if (modeA == 6) {
+            advanceFm(v.phA, incA, v.lastB, wAmtA, b.uniA, ratA);
+        } else {
+            advance(v.phA, incA, b.uniA, ratA);
+        }
+
+        if (useB) {
+            if (modeB == 0)
+                oscillator(v.phB, b.tblB, selB, incB, b.uniB, ratB,
+                           b.panLB, b.panRB, b.ugainB * lvlB, xl, xr);
+            else
+                oscWarp(v.phB, b.tblB, selB, modeB, wAmtB, incB, v.lastA, b.uniB,
+                        ratB, b.panLB, b.panRB, b.ugainB * lvlB, maxRatB, xl, xr);
+        } else if (modeB == 6) {
+            advanceFm(v.phB, incB, v.lastA, wAmtB, b.uniB, ratB);
+        } else {
+            advance(v.phB, incB, b.uniB, ratB);
+        }
+
+        v.lastA = tapA;
+        v.lastB = tapB;
+
+        // Noise: always drawn, whatever the level, so the voice's random stream
+        // is a function of time alone and not of a parameter.
+        const f32 nl = 2.f * rnd(v.rng) - 1.f;
+        const f32 nr = 2.f * rnd(v.rng) - 1.f;
+        f32 lvlN = b.lvlN, lvlSub = b.lvlSub;
+        if (b.dstMask & (1u << kDNoise)) lvlN = clampv(lvlN + md[kDNoise], 0.f, 1.f);
+        if (b.dstMask & (1u << kDSub))   lvlSub = clampv(lvlSub + md[kDSub], 0.f, 1.f);
+        if (b.nzBypass) {
+            // Color at exactly 1.0: the v1 white path, bit for bit.
+            xl += nl * lvlN;
+            xr += nr * lvlN;
+        } else {
+            // One-pole 6 dB/oct lowpass on the white source; the coefficient
+            // walks at the control tick (retarget), like the filter's.
+            v.nzL += v.nzCoef * (nl - v.nzL);
+            v.nzR += v.nzCoef * (nr - v.nzR);
+            xl += v.nzL * lvlN;
+            xr += v.nzR * lvlN;
+        }
+
+        // Sub: the voice's post-glide pitch shifted by Sub Oct (0.5f at the
+        // default — v1's octave-below, bit for bit), so it follows the glide
+        // for free. Square gets polyBLEP edges; the triangle's slope kinks
+        // fall off at 1/h^2 an octave or two down and need none.
+        const f32 subInc = base * b.subMul;
+        if (lvlSub > 0.f) {
+            f32 sv;
+            if (b.subShape == 1) {
+                sv = v.subPh < 0.5f ? (4.f * v.subPh - 1.f) : (3.f - 4.f * v.subPh);
+            } else if (b.subShape == 2) {
+                sv = (v.subPh < 0.5f ? 1.f : -1.f)
+                   + spBlep(v.subPh, subInc)
+                   - spBlep(spFrac(v.subPh + 0.5f), subInc);
+            } else {
+                sv = std::sin(dsp::kTwoPi * v.subPh);
+            }
+            const f32 s = sv * lvlSub;
+            xl += s;
+            xr += s;
+        }
+        v.subPh += subInc;
+        if (v.subPh >= 1.f) v.subPh -= 1.f;
+
+        if (b.dstMask & (1u << kDDrive)) {
+            // Matrix on Drive: sum in dB, clamp to the knob's 0..24, and only
+            // then the wire-vs-tanh branch — 0 dB stays a wire under
+            // modulation too.
+            const f32 db = clampv(b.driveDb + md[kDDrive] * 24.f, 0.f, 24.f);
+            if (db > 0.f) {
+                const f32 dg = dbToGain(db);
+                const f32 dc = std::tanh(0.5f) / std::tanh(dg * 0.5f);
+                xl = std::tanh(dg * xl) * dc;
+                xr = std::tanh(dg * xr) * dc;
+            }
+        } else if (b.drive) {
+            xl = std::tanh(b.driveG * xl) * b.driveC;
+            xr = std::tanh(b.driveG * xr) * b.driveC;
+        }
+
+        // Filter. Coefficients are snapped on a voice's very first sample (one
+        // tan per note-on) and walked between control ticks after that.
+        if (v.fSnap) {
+            const bool mc = (b.dstMask & (1u << kDCut)) != 0;
+            const bool mr = (b.dstMask & (1u << kDRes)) != 0;
+            f32 mdC = 0.f, mdR = 0.f;
+            if (mc || mr) cutResMods(b, v, g, mdC, mdR);
+            v.fc   = dsp::svfCoeffs(sr_, voiceCutoff(v, b, g.l1, mc, mdC), voiceQ(b, mr, mdR));
+            v.fInc = dsp::SvfCoeffs{ 0.f, 0.f, 0.f, 0.f };
+            v.fSnap = false;
+            if (!b.nzBypass) v.nzCoef = noiseCoef(v, b);
+        }
+        const dsp::SvfOut ol  = dsp::svfTick(v.fc, v.fs[0], xl);
+        const dsp::SvfOut orr = dsp::svfTick(v.fc, v.fs[1], xr);
+
+        // The 24 dB modes tick their second stage on the same (pre-step)
+        // coefficients as the first — two identical stages in series sharing
+        // cutoff and resonance, as the widened contract row says.
+        f32 yl = 0.f, yr = 0.f;
+        if (b.ftype == 3) {
+            yl = dsp::svfTick(v.fc, v.fs2[0], ol.lp).lp;
+            yr = dsp::svfTick(v.fc, v.fs2[1], orr.lp).lp;
+        } else if (b.ftype == 4) {
+            yl = dsp::svfTick(v.fc, v.fs2[0], ol.hp).hp;
+            yr = dsp::svfTick(v.fc, v.fs2[1], orr.hp).hp;
+        }
+        dsp::svfStep(v.fc, v.fInc);
+
+        // The bandpass is normalised by k = 1/Q so its peak stays at unity, for
+        // the reason the Auto Filter gives: an SVF's raw bandpass tap has a peak
+        // gain of Q, and a band filter that gets 26 dB louder as the resonance
+        // knob turns is a hazard rather than a feature. (The k read here is the
+        // post-step one, exactly as v1 read it.)
+        if (b.ftype == 0)      { yl = ol.lp; yr = orr.lp; }
+        else if (b.ftype == 1) { yl = ol.bp * v.fc.k; yr = orr.bp * v.fc.k; }
+        else if (b.ftype == 2) { yl = ol.hp; yr = orr.hp; }
+        else if (b.ftype == 5) { yl = ol.lp + ol.hp; yr = orr.lp + orr.hp; }
+
+        const f32 amp = v.e1.v * v.velAmp;
+        if (b.dstMask & (1u << kDPan)) {
+            // Equal power, base centre, on the voice's summed output before
+            // Master — the unison fan's own pan law, one stage later.
+            const f32 pan = clampv(md[kDPan], -1.f, 1.f);
+            const f32 th  = (pan + 1.f) * 0.7853981f;
+            accL += yl * amp * (1.4142136f * std::cos(th));
+            accR += yr * amp * (1.4142136f * std::sin(th));
+        } else {
+            accL += yl * amp;
+            accR += yr * amp;
         }
     }
 
@@ -1476,12 +2173,25 @@ private:
     int   ctrl_ = 0;
     dsp::Lfo lfo_;
     f32   shVal_ = 0.f;
-    // TWO counters, deliberately: see the file header. The note stream and the
-    // sample-and-hold stream must not be able to interleave into each other.
+    // SEPARATE counters, deliberately: see the file header. The note stream
+    // and the three sample-and-hold streams must not be able to interleave
+    // into each other.
     u32   noteRng_ = 0x9E3779B9u;
     u32   lfoRng_  = 0x2545F491u;
     f32   lastPitch_ = 60.f;
     bool  havePitch_ = false;
+
+    // --- v2 instance state ---
+    dsp::Lfo lfo2_, lfo3_;
+    f32   shVal2_ = 0.f, shVal3_ = 0.f;
+    u32   lfo2Rng_ = 0x6C078965u;
+    u32   lfo3Rng_ = 0xB5297A4Du;
+    f32   after_ = 0.f;                 // channel pressure, instance-wide
+    u64   absPos_ = 0;                  // absolute sample position of the
+                                        // NEXT block's first frame
+    static constexpr int kHeld = 64;    // mono/legato held-note stack
+    u8    held_[kHeld] = {};
+    int   nHeld_ = 0;
 };
 
 constexpr const char* kSpectraUri = "nxtakt:spectra";

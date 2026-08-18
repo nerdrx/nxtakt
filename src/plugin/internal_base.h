@@ -138,7 +138,11 @@ public:
     }
 
 protected:
-    // 64, raised from 16 when Spectra arrived with 42.
+    // 128, raised from 64 when Spectra v2 arrived with 100 ids (docs/
+    // SPECTRA-PARAMS.md, ids 0..99); 64 itself was raised from 16 when
+    // Spectra v1 arrived with 42. The headroom past 100 is deliberate: the v2
+    // contract appends in blocks with reserved tails, so the next revision
+    // grows the id space without touching this constant again.
     //
     // This is a per-instance array bound, not an id space: ids ARE indices and
     // a saved set stores them, so raising the cap cannot disturb any existing
@@ -149,7 +153,7 @@ protected:
     // must buy: addParam() can never allocate, so a device's parameter list is
     // built without a heap call and process() reads a member array with no
     // indirection.
-    static constexpr int kMaxParams = 64;
+    static constexpr int kMaxParams = 128;
 
     // Transport as last pushed by the host; 0 BPM = never pushed.
     f64  trBpm_ = 0.0;

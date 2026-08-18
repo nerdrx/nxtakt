@@ -189,6 +189,13 @@ CORE_SRC  := src/core/common.cpp src/core/project.cpp src/audio/sample.cpp src/a
 # translation units.
 INTERNAL_INSTR := src/plugin/spectra.cpp src/plugin/sampler.cpp \
                   src/plugin/fx_shimmer.cpp src/plugin/fx_bloom.cpp src/plugin/fx_tape.cpp
+# Data an instrument includes textually (spectra_presets.inc, the Spectra v2
+# factory bank). Same staleness class as INTERNAL_INSTR itself: it must be a
+# prerequisite of every target that compiles internal_devices.cpp, or editing
+# a preset leaves every tool and test binary stale. It is NOT a source, so
+# recipes that used $^ raw now filter %.cpp — the idiom internal_device_test
+# and handle_test already use, for the same reason.
+INTERNAL_DATA := src/plugin/spectra_presets.inc
 TOOL_LIBS := $(shell pkg-config --libs sndfile samplerate lilv-0) -ldl -lpthread -lm
 TOOL_CF   := -std=c++20 -O2 -w $(shell pkg-config --cflags sndfile samplerate lilv-0) -Ivendor/clap/include
 
@@ -201,15 +208,15 @@ build/gen_demo: tools/gen_demo.cpp $(CORE_SRC)
 # render materialises a project's device chains, so unlike gen_demo it needs the
 # plugin backends linked in.
 build/render: tools/render.cpp $(CORE_SRC) src/plugin/host.cpp src/plugin/lv2_host.cpp \
-              src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR)
+              src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA)
 	@mkdir -p build
-	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
+	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(TOOL_LIBS)
 build/pitch_check: tools/pitch_check.cpp
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
-build/plugin_scan: tools/plugin_scan.cpp src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR)
+build/plugin_scan: tools/plugin_scan.cpp src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA)
 	@mkdir -p build
-	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
+	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(TOOL_LIBS)
 build/engine_test: tests/engine_test.cpp src/audio/engine.cpp src/core/common.cpp
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
@@ -245,7 +252,7 @@ DAEMON_LD  := $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -l
 # builds a SampleBuffer from bytes the GUI decoded, so it now depends on that
 # struct's LAYOUT while still linking none of sample.cpp. A header it compiles
 # against and does not list is the $(IPC_H) lesson with a different filename.
-build/nxtaktd: $(DAEMON_SRC) $(IPC_H) src/audio/engine.h src/audio/backend.h \
+build/nxtaktd: $(DAEMON_SRC) $(INTERNAL_DATA) $(IPC_H) src/audio/engine.h src/audio/backend.h \
                src/plugin/host.h src/audio/sample.h
 	@mkdir -p build
 	$(CXX) $(DAEMON_CF) $(DAEMON_SRC) -o $@ $(DAEMON_LD)
@@ -269,7 +276,7 @@ build/daemon_test: tests/daemon_test.cpp $(IPC_H) src/audio/engine.h build/nxtak
 # handed to g++ is compiled as a precompiled header, not ignored.
 build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
                             src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) \
+                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA) \
                             src/plugin/host.h src/audio/sample.h
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(shell pkg-config --libs lilv-0) -ldl
@@ -284,9 +291,9 @@ build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
 build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
                          src/audio/sample.cpp src/core/common.cpp \
                          src/plugin/host.cpp src/plugin/lv2_host.cpp \
-                         src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR)
+                         src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA)
 	@mkdir -p build
-	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS) -ldl
+	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(TOOL_LIBS) -ldl
 
 # EngineHandle across both of its backings: the in-process engine and a real
 # nxtaktd. Warnings stay on (it is our code, not a tool wrapper) and it links no
@@ -313,7 +320,7 @@ build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
 build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp \
                    src/audio/backend.cpp src/audio/midi_in.cpp src/core/common.cpp \
                    src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                   src/plugin/internal_devices.cpp $(INTERNAL_INSTR) \
+                   src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA) \
                    $(IPC_H) src/ui/engine_handle.h src/ui/engine_state.h \
                    src/audio/engine.h src/plugin/host.h src/audio/sample.h \
                    build/nxtaktd

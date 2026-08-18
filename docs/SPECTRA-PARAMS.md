@@ -331,3 +331,90 @@ SP_END()
   params take `f`-suffixed literals, int params take bare ints.
 - List only non-default values; everything unlisted is the default. At most
   64 overrides per preset (the SpPreset set-array cap rises from 40 to 64).
+
+---
+
+# v2 implementation notes (NOT contract — the contract above stays frozen)
+
+Decisions the DSP took where the contract leaves latitude, recorded so the
+editor and preset agents read the same behaviour the voices run. Where any of
+these later needs to change, it changes here and in spectra.cpp together; the
+tables above do not move.
+
+- **Bit-identity discipline.** Everywhere v2 adds arithmetic to a v1 path,
+  the v1 EXPRESSION is kept on its own branch, selected when the v2 feature
+  is at its default (warp mode/amount 0, empty matrix per destination via a
+  per-block destination bitmask, Noise Color exactly 1.0, Sub Shape 0 with
+  `2^SubOct == 0.5f` exact). "Mathematically equal" is not "bit-identical";
+  the gate is the second one.
+- **Sub pitch base (id 42/43).** "Follows osc A's post-glide pitch" is
+  implemented as the voice's post-glide, post-vibrato pitch — the same base
+  the v1 sub tracked — NOT including A Coarse/Fine or matrix A-Pitch. It has
+  to be: a v1 state with A Coarse nonzero must render bit-identically, and a
+  sub that suddenly tracked Coarse would move. Sub Shape 1 (triangle) is the
+  naive triangle (slope kinks fall at 1/h², inaudible at sub registers);
+  shape 2 (square) carries polyBLEP edges as the row says.
+- **Warp amount zero (id 49/51).** "At 0 every mode is bit-identical to Off"
+  and Quantize's `N = 2 + round(62·(1-a))` cannot both hold at a = 0 (N = 64
+  is not the identity). The id-49 sentence governs: depth 0 selects the Off
+  path outright, for every mode; the N formula applies for a > 0. Bend's
+  `p^e` is computed as `exp2(e·log2(p))` with the mip selector's fast log2
+  (deterministic, ~1e-5), which is also why the a = 0 identity is enforced by
+  selection rather than trusted to arithmetic.
+- **FM/RM tap (warp modes 6/7).** The tap is the other osc's voice 0 read at
+  its RAW phase accumulator — "pre-warp" means Sync/Bend/Mirror/Quantize's
+  read-phase transform is not applied to the tap; under FM the accumulator
+  itself is FM'd (there is no unwarped phase to read), and under RM the tap
+  is the pre-crossfade read. Taps are read before any phase advances and
+  consumed one sample later (the contract's delay). An osc at Level 0 under
+  its own FM mode still advances its phases FM'd, because its tap may feed
+  the other osc.
+- **Matrix cadence.** Destinations 11 (Cutoff), 12 (Resonance) and 17..19
+  (LFO rates) apply at the control tick (kCtrl = 16 samples, absolute-timed),
+  exactly the cadence v1's LFO→cutoff already had — the filter walks its
+  coefficients between ticks, so this is where those destinations physically
+  live. Every other destination is per voice per sample. Cutoff maps through
+  the norm clamp and then keeps the engine's fcMax guard (0.45·sr), which
+  only bites below ~44.1 kHz.
+- **LFO-rate destinations (17..19).** An LFO is instance-wide; per-voice
+  sources feeding its rate read from the NEWEST active voice (age order), and
+  from 0 with no active voice. When a slot drives a free LFO's rate, the rate
+  knob's per-block write is skipped so the tick owns it (block-size
+  invariance). Synced LFOs ignore rate slots, as the table says.
+- **Random source (13).** splitmix64 finalisation of
+  `absSample ^ (note << 48) ^ (channel << 56)`, top 24 bits mapped to
+  [-1, 1). `absSample` is the note-on's absolute sample position: samples
+  processed since prepare() plus the event's stamped in-block frame.
+- **Aftertouch source (8).** MIDI channel pressure (0xD0), queued through
+  the same event queue as notes and applied at its stamped sample;
+  instance-wide; 0 after prepare(). Poly aftertouch (0xA0) is not mapped.
+- **Mono/Legato (id 98).** The mono voice is voice slot 0. A held-note stack
+  (64 deep, oldest dropped first) is maintained in every mode so a mid-phrase
+  mode switch starts from the truth. Note-off fallback to the most recent
+  held note is a GLIDE, not a retrigger — a fallback is not a note-on, and
+  the contract only retriggers on note-ons. Mono retriggers ENV1-3 from
+  their CURRENT values (a new attack, not a click) and keeps the sounding
+  voice's phases; a retrigger from silence starts exactly like a Poly note.
+  Legato-overlap note-ons update the voice's note (KeyTrk source follows
+  immediately, the pitch glides) and its per-note Random, and keep velocity.
+  Poly voices still sounding when the mode switches honour their note-offs.
+- **Pan destination (16).** Equal-power: `θ = (pan+1)·π/4`,
+  gains `√2·cos θ / √2·sin θ` — the unison fan's own law, applied to the
+  voice's summed output before Master. The centre gain is therefore ~1.0 but
+  not bitwise 1.0, which is fine: the v1 path is only left when a slot
+  actually targets Pan.
+- **24 dB filter modes.** Two identical TPT SVF stages sharing coefficients;
+  the second stage's state is reset at note-on and not ticked in the 12 dB
+  modes. Switching type mid-note reuses whatever the second stage last held —
+  a one-transient concession the 12 dB modes never see.
+- **Reserved ids** are registered exactly as the rule says (name `—`, 0..1,
+  default 0) and are never read by the DSP.
+- **Measured warp alias energy** (C6, non-harmonic/harmonic, 16384-pt Hann,
+  48 kHz — the suite's regression gates sit ~4 dB above these): Sync a=0.5
+  −35.5 dB · Bend+ a=1 −14.2 dB · Bend− a=1 −32.0 dB · Mirror a=1 −20.1 dB ·
+  Quantize a=0.5 −19.6 dB · FM a=0.5 (equal pitch) −26.8 dB non-harmonic.
+  Bend+ is the true worst case: p^(1/(1+3a)) has an unbounded phase slope at
+  p=0, so full depth at high pitch genuinely exceeds the (contract-mandated)
+  unwarped-fundamental mip — the "mild aliasing, accepted" the contract
+  states. The v1 gate (every table at C7 under −60 dB with warps Off) is
+  unchanged and still measured.
