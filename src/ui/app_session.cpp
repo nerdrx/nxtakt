@@ -565,6 +565,14 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
         if (sel) rend_.roundRectOutline(snapRect(cell), rad, hair, nx::violet);
         if (hot) {
             ui_.cursor = Cursor::Hand;
+            // The same invisible affordance the owner hit on the timeline,
+            // badged the same way: an empty slot that secretly creates on
+            // double-click looks exactly like dead space until it says so.
+            if (trackHasNoteDevice(ti) && !recIntent_ && !recHere) {
+                ui_.badge = Badge::Add;
+                if (ui_.tip.empty())
+                    ui_.tip = "Double-click to make an empty pattern here";
+            }
             if (in.pressed[0]) {
                 selectTrack(ti); selSlot_ = si;
                 if (recHere)      stopRecording(ti);       // second click stops

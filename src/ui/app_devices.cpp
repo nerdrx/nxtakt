@@ -646,6 +646,7 @@ void App::drawPluginBrowser(const Rect& r) {
         // an opened container means everywhere else and what the header above
         // the strip says it will do. The rack's own add button does the same
         // thing from the other end, so neither is the only way in.
+        if (hot && openRack()) ui_.badge = Badge::Add;   // a rack is open: double-click adds INTO it
         if (hot && in.dblClick) {
             if (RackControl* rc = openRack()) {
                 undoPoint("add device to rack");
@@ -1327,6 +1328,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         }
 
         if (hot && in.pressed[0]) rackSel_ = i;
+        if (hot && nested && ui_.tip.empty()) ui_.tip = "Double-click to open this rack";
         if (hot && in.dblClick && nested) { rackPath_.push_back(i); rackSel_ = -1; return; }
         if (hot) ui_.tip = nested ? "Double-click to open this rack"
                                   : "Select it; the arrows reorder, the cross removes";
