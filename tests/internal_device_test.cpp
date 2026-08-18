@@ -24,6 +24,8 @@
 // this binary no link dependency at all, which is the whole reason the sampler
 // can be tested in a process that deliberately has no decoder.
 #include "../src/audio/sample.h"
+// Spectra's table accessor -- detail::spectraTables() and friends.
+#include "../src/plugin/internal_base.h"
 
 #include <algorithm>
 #include <cctype>
@@ -1237,6 +1239,26 @@ static void testReverb(PluginRegistry& reg) {
             after = std::fmax(after, std::fabs(l[(size_t)i]));
         CHECK(before < 1e-6f, "100 ms of pre-delay is silent (%.9f)", (double)before);
         CHECK(after > 1e-4f, "and the tank fires after it (%.5f)", (double)after);
+    }
+
+    // 5b. Pre-delay ZERO is zero, not a buffer's worth. The pre-delay line is
+    //     read-then-push, so a tap of 0 lands on the write position -- the
+    //     sample from a whole (power-of-two) buffer ago, i.e. ~341 ms at 48 kHz.
+    //     With the tap clamped to >= 1 sample, an impulse must reach the wet
+    //     output within the first few milliseconds.
+    {
+        auto r5 = reg.instantiate(*d, kSR, kBlock);
+        r5->setParam(paramIndex(*r5, "Dry/Wet"), 1.f);
+        r5->setParam(paramIndex(*r5, "Pre-Delay"), 0.f);
+        std::vector<f32> l, r;
+        impulseResponse(*r5, 24000, l, r);
+        int first = -1;
+        for (int i = 0; i < (int)l.size(); ++i) {
+            if (std::fabs(l[(size_t)i]) > 1e-4f) { first = i; break; }
+        }
+        CHECK(first >= 0, "pre-delay 0: the tank fires at all");
+        CHECK(first >= 0 && first < 1000,
+              "pre-delay 0 fires within 1000 frames, not a buffer later (first at %d)", first);
     }
 
     // 6. Width 0 collapses the two outputs onto each other exactly.
@@ -3575,6 +3597,186 @@ static std::vector<SpEvent> spScript() {
 }
 
 // ---------------------------------------------------------------------------
+
+// MUST RUN BEFORE ANY OTHER TEST INSTANTIATES A SPECTRA: the first check --
+// spectraTables() is null until a Spectra has prepared -- is observable
+// exactly once per process. main() calls this immediately before
+// testSpectraContract(), which is the suite's first Spectra instantiation.
+static void testSpectraTables(PluginRegistry& reg) {
+    banner("Spectra wavetables, as the editor sees them");
+
+    // 1. NULL BEFORE ANYTHING HAS PREPARED. This is the property the editor's
+    //    fallback path exists for, and it is only observable once per process,
+    //    so it has to be the first thing asked. It also says the accessor does
+    //    not BUILD the set: calling it in a program with no Spectra in it must
+    //    not spend ten megabytes and a second of FFTs on a picture nobody
+    //    asked for.
+    CHECK(detail::spectraTables() == nullptr,
+          "null before any Spectra has prepared");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    CHECK(d != nullptr, "registry finds nxtakt:spectra");
+    if (!d) return;
+
+    auto syn = reg.instantiate(*d, kSR, kBlock);
+    CHECK(syn != nullptr, "instantiate + prepare");
+    if (!syn) return;
+
+    const detail::SpectraTableSet* t = detail::spectraTables();
+    CHECK(t != nullptr, "non-null once a Spectra has prepared");
+    if (!t) return;
+
+    // 2. GEOMETRY, against the file header's own numbers.
+    CHECK(t->tables == 8 && t->frames == 32,
+          "%d tables x %d frames", t->tables, t->frames);
+    CHECK(t->len == 2048, "a mip-0 frame is %d samples", t->len);
+    CHECK(t->stride == 10240, "the whole mip chain is %d floats a frame", t->stride);
+    CHECK(t->data != nullptr, "the set has a pointer to point at");
+
+    // 3. STABLE AND SHARED. A second instance must publish the same set, not a
+    //    second one: the tables are built once per process and every voice in
+    //    the program reads the same floats.
+    auto syn2 = reg.instantiate(*d, kSR, kBlock);
+    CHECK(syn2 != nullptr, "a second Spectra instantiates");
+    const detail::SpectraTableSet* t2 = detail::spectraTables();
+    CHECK(t2 == t && t2->data == t->data,
+          "a second instance publishes the SAME set, not a second one");
+
+    // Re-preparing must not move it either -- prepare() is called again on
+    // every sample-rate change, and a display holding the pointer across one
+    // would be reading freed memory if it did.
+    syn->prepare(44100.0, 64);
+    CHECK(detail::spectraTables() == t && detail::spectraTables()->data == t->data,
+          "re-preparing at another rate does not move the set");
+
+    // 4. THE FRAME PAIR IS THE OSCILLATOR'S. Position 0..1 spans 31 steps, and
+    //    the pair is (f0, f0+1) with f0 stopping at frames-2 -- so the last
+    //    frame is arrived at by blend, never stepped onto.
+    {
+        const detail::SpectraFrameView v0 = t->morph(0, 0.f);
+        CHECK(v0.valid() && v0.a == t->frame(0, 0) && v0.b == t->frame(0, 1) &&
+              std::fabs(v0.blend) < 1e-6f,
+              "position 0.00 -> frames 0/1 at blend %.3f", (double)v0.blend);
+
+        const detail::SpectraFrameView v1 = t->morph(0, 1.f);
+        CHECK(v1.valid() && v1.a == t->frame(0, 30) && v1.b == t->frame(0, 31) &&
+              std::fabs(v1.blend - 1.f) < 1e-6f,
+              "position 1.00 -> frames 30/31 at blend %.3f", (double)v1.blend);
+
+        const detail::SpectraFrameView vm = t->morph(0, 0.5f);
+        CHECK(vm.valid() && vm.a == t->frame(0, 15) && vm.b == t->frame(0, 16) &&
+              std::fabs(vm.blend - 0.5f) < 1e-5f,
+              "position 0.50 -> frames 15/16 at blend %.3f", (double)vm.blend);
+
+        // Out of range is clamped and not undefined: the panel reads Position
+        // from a device that may not be a Spectra at all.
+        const detail::SpectraFrameView vlo = t->morph(0, -3.f);
+        const detail::SpectraFrameView vhi = t->morph(0, 7.f);
+        CHECK(vlo.a == v0.a && vhi.b == v1.b, "position is clamped, not wrapped");
+        CHECK(t->morph(-1, 0.5f).a == t->morph(0, 0.5f).a &&
+              t->morph(99, 0.5f).a == t->morph(7, 0.5f).a,
+              "the table index is clamped too");
+    }
+
+    // 5. at() IS THE FRAME LERP, exactly. Not approximately: the display and
+    //    the voice have to agree about what "between two frames" means, and
+    //    the voice's is a + (b - a) * blend.
+    {
+        const detail::SpectraFrameView v = t->morph(4, 0.37f);
+        f64 worst = 0.0;
+        for (int i = 0; i < v.len; ++i) {
+            const f32 want = v.a[i] + (v.b[i] - v.a[i]) * v.blend;
+            worst = std::fmax(worst, std::fabs((f64)(v.at(i) - want)));
+        }
+        CHECK(worst == 0.0, "at() is the frame lerp bit for bit (worst %g)", worst);
+    }
+
+    // 6. EVERY MIP-0 FRAME IS UNIT PEAK AND HAS NO DC. Both are properties the
+    //    display leans on: it draws these without a normalising pass, and it
+    //    draws them centred on the well's midline.
+    {
+        f64 worstPeak = 0.0, worstDc = 0.0;
+        int worstT = -1, worstF = -1;
+        for (int tb = 0; tb < t->tables; ++tb) {
+            for (int fr = 0; fr < t->frames; ++fr) {
+                const f32* f = t->frame(tb, fr);
+                f64 pk = 0.0, sum = 0.0;
+                for (int i = 0; i < t->len; ++i) {
+                    pk = std::fmax(pk, std::fabs((f64)f[i]));
+                    sum += (f64)f[i];
+                }
+                const f64 dp = std::fabs(pk - 1.0);
+                if (dp > worstPeak) { worstPeak = dp; worstT = tb; worstF = fr; }
+                worstDc = std::fmax(worstDc, std::fabs(sum) / (f64)t->len);
+            }
+        }
+        CHECK(worstPeak < 1e-4, "every frame peaks at 1 (worst %g, table %d frame %d)",
+              worstPeak, worstT, worstF);
+        CHECK(worstDc < 1e-4, "no frame carries DC (worst mean %g)", worstDc);
+    }
+
+    // 7. THE EIGHT TABLES ARE EIGHT TABLES. A set where two of them held the
+    //    same floats would draw eight identical pictures and nobody would
+    //    notice for a year.
+    {
+        int same = 0;
+        for (int a = 0; a < t->tables; ++a)
+            for (int b = a + 1; b < t->tables; ++b) {
+                const f32* fa = t->frame(a, 16);
+                const f32* fb = t->frame(b, 16);
+                f64 diff = 0.0;
+                for (int i = 0; i < t->len; ++i) diff += std::fabs((f64)(fa[i] - fb[i]));
+                if (diff / (f64)t->len < 1e-6) ++same;
+            }
+        CHECK(same == 0, "no two tables share a frame (%d collisions)", same);
+    }
+
+    // 8. AND THE FRAME AXIS MOVES. Frame 0 and frame 31 of a table must differ,
+    //    or Position is a knob that does nothing on it.
+    {
+        int flat = 0;
+        for (int tb = 0; tb < t->tables; ++tb) {
+            const f32* f0 = t->frame(tb, 0);
+            const f32* f31 = t->frame(tb, 31);
+            f64 diff = 0.0;
+            for (int i = 0; i < t->len; ++i) diff += std::fabs((f64)(f0[i] - f31[i]));
+            if (diff / (f64)t->len < 1e-4) ++flat;
+        }
+        CHECK(flat == 0, "every table's frame axis moves (%d flat)", flat);
+    }
+
+    // 9. THE PEAK-PRESERVING DECIMATION the display uses, checked against the
+    //    thing it promises: the extremes of every column survive it. Striding
+    //    is the comparison, and it is here to show the difference is real and
+    //    not a matter of taste.
+    {
+        const detail::SpectraFrameView v = t->morph(0, 0.f);   // Basic at a saw
+        const int cols = 120;
+        f32 decLo = 1e9f, decHi = -1e9f, strLo = 1e9f, strHi = -1e9f;
+        for (int c = 0; c < cols; ++c) {
+            const int i0 = (int)((long long)c * v.len / cols);
+            int i1 = (int)((long long)(c + 1) * v.len / cols);
+            if (i1 <= i0) i1 = i0 + 1;
+            for (int i = i0; i < i1; ++i) {
+                decLo = std::fmin(decLo, v.at(i));
+                decHi = std::fmax(decHi, v.at(i));
+            }
+            strLo = std::fmin(strLo, v.at(i0));       // naive stride: first only
+            strHi = std::fmax(strHi, v.at(i0));
+        }
+        f32 fullLo = 1e9f, fullHi = -1e9f;
+        for (int i = 0; i < v.len; ++i) {
+            fullLo = std::fmin(fullLo, v.at(i));
+            fullHi = std::fmax(fullHi, v.at(i));
+        }
+        CHECK(decLo == fullLo && decHi == fullHi,
+              "min/max decimation keeps the frame's extremes exactly (%.4f .. %.4f)",
+              (double)decLo, (double)decHi);
+        CHECK(strHi < fullHi || strLo > fullLo,
+              "striding loses one (stride %.4f .. %.4f vs %.4f .. %.4f)",
+              (double)strLo, (double)strHi, (double)fullLo, (double)fullHi);
+    }
+}
 
 static void testSpectraContract(PluginRegistry& reg) {
     banner("Spectra: the frozen parameter contract");
@@ -7331,6 +7533,7 @@ int main() {
     testLegacyUris(reg);
     testSaturator(reg);
     testPulse(reg);
+    testSpectraTables(reg);      // must precede the first Spectra instantiation
     testSpectraContract(reg);
     testSpectraVoices(reg);
     testSpectraQuality(reg);

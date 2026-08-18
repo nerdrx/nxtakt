@@ -977,7 +977,7 @@ public:
 
         inLp_.setCutoff(sr_, (f32)std::fmin(16000.0, sr_ * 0.45));
         preT_.setTime(sr_, 0.08f);
-        preT_.snap(clampv(p(pPre_), 0.f, 250.f) * 1e-3f * (f32)sr_);
+        preT_.snap(preDelaySamples());
         width_.setTime(sr_, 0.02f);
         width_.snap(clampv(p(pWidth_), 0.f, 1.f));
         mix_.setTime(sr_, 0.02f);
@@ -999,7 +999,7 @@ public:
 
         dampA_.setCutoff(sr_, clampv(p(pDamp_), 500.f, 18000.f));
         dampC_.a = dampA_.a;
-        preT_.set(clampv(p(pPre_), 0.f, 250.f) * 1e-3f * (f32)sr_);
+        preT_.set(preDelaySamples());
         width_.set(clampv(p(pWidth_), 0.f, 1.f));
         mix_.set(clampv(p(pMix_), 0.f, 1.f));
         decay_.set(decayGain());
@@ -1114,6 +1114,15 @@ private:
     static int clampTap(int t, const dsp::DelayLine& l) {
         const int m = l.capacity();
         return t < 1 ? 1 : (t > m ? m : t);
+    }
+
+    // Pre-delay in samples. The tap convention is `read then push`, so
+    // tapLerp(d) is d samples of delay -- for d >= 1. At d = 0 the read lands
+    // on the write position, which holds the sample from a whole buffer ago,
+    // so Pre-Delay at zero would silently mean the line's full length.
+    f32 preDelaySamples() const {
+        const f32 n = clampv(p(pPre_), 0.f, 250.f) * 1e-3f * (f32)sr_;
+        return clampv(n, 1.f, (f32)pre_.capacity() - 2.f);
     }
 
     // Solve the two per-loop multipliers for the requested RT60.
