@@ -6,6 +6,14 @@
 // RemoteEngine that step 2 and step 3 add, and the dispatch between them.
 #include "engine_handle.h"
 #include "../ipc/client.h"
+// SampleBuffer as a COMPLETE type. The Makefile's note on build/handle_test says
+// the seam links no sndfile "because the handle is the seam and the seam has no
+// business knowing how a wav is decoded", and that still holds: this is a
+// header, nothing here calls loadSample(), buildPeaks() or buildTransients(),
+// and the seam still does not know how a wav is decoded. What it now has to
+// know is how a DECODED one is SHAPED, because a sampler's audio has to reach a
+// daemon that links no decoder either (GUI-ON-DAEMON.md §15.2).
+#include "../audio/sample.h"
 
 #include <algorithm>
 #include <cmath>
@@ -181,6 +189,49 @@ u64 rackFingerprint(const RackState& s) {
     return h;
 }
 
+// ONE DEVICE'S GENERIC STATE, and it is two fingerprints in a trench coat
+// because the thing it identifies is two things.
+//
+// THE TEXT, IN FULL. The rack's decision (rackFingerprint) reached from the same
+// place: `stateString()` builds a fresh string at a fresh address on every call,
+// so there is no address to key on, and a device is edited in place all session,
+// so the question is genuinely "did the content change". A stride that skipped a
+// field would be the notes bug wearing a state string -- a path's last character
+// changed, the same fingerprint computed, the cached publication served, and a
+// sampler in the daemon still playing the previous file with nothing but the ear
+// to notice. It is cheap in absolute terms: bounded by kMaxDeviceState, and
+// today's only implementer writes a path.
+//
+// THE BUFFER, STRIDED. sampleRefFor's decision, reached from ITS place: a
+// SampleBuffer's samples are immutable for the life of the allocation, so
+// address plus shape plus 256 spread words settles "is this still the buffer I
+// sent", which is the only question there is.
+//
+// AND THE BUFFER HAS TO BE IN HERE AT ALL, which is the part worth stating: the
+// state string of a sampler is a PATH, and a path does not identify audio. A
+// file edited on disk and re-loaded, or the same file re-decoded at a new engine
+// rate, produces the same string and a different buffer. Hashing only the text
+// would serve the cached publication and leave the daemon playing the old bytes
+// under the right name -- a difference nothing on screen could show.
+u64 deviceStateFingerprint(const std::string& text, const SampleBuffer* sb) {
+    u64 h = 1469598103934665603ull;
+    auto mix = [&](u64 v) {
+        for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xffull; h *= 1099511628211ull; }
+    };
+    mix((u64)text.size());
+    for (unsigned char c : text) mix((u64)c);
+    if (!sb) { mix(~0ull); return h; }
+    mix((u64)(uintptr_t)sb);
+    mix((u64)sb->frames);
+    mix((u64)sb->channels);
+    u64 rbits = 0;
+    std::memcpy(&rbits, &sb->rate, sizeof rbits);
+    mix(rbits);
+    mix(fingerprint(sb->data.data(), sb->data.size() * sizeof(f32),
+                    sb->frames, sb->channels, sb->rate, 256));
+    return h;
+}
+
 // argv[0]'s directory plus "nxtaktd". The daemon ships beside the GUI, so
 // /proc/self/exe is the answer that keeps working from a build tree, an install
 // prefix and a test harness alike. $NXTAKT_DAEMON overrides it outright.
@@ -326,6 +377,19 @@ struct RemoteEngine {
         // discipline as DevChain::refused, one level down.
         u64  rackFinger = 0;
         bool rackFailed = false;        // for the log line and for diagnostics
+        // The same three fields for the GENERIC state channel (v10). Separate
+        // from the rack's and not folded into them, because the two channels are
+        // separate commands with separate refusals and a device could in
+        // principle answer both -- one number covering two publications would
+        // tombstone whichever failed second.
+        u64  stateFinger = 0;
+        bool stateFailed = false;
+        // Whether a state has EVER gone for this slot. An empty state is a
+        // meaningful thing to send (a sampler whose file was cleared) and a
+        // meaningless thing to send FIRST -- almost every device in a set has no
+        // state at all, and a command per device per chain publish, forever,
+        // would be the reconciler talking to itself.
+        bool stateSent = false;
     };
     struct DevChain {
         u32 target = ipc::DevTargetTrack;
@@ -356,6 +420,11 @@ struct RemoteEngine {
     // the reason, and because a rack that quietly never published is otherwise
     // indistinguishable from one that published an empty state.
     u64 racksSent = 0, racksFailed = 0;
+    // The same pair for the generic device-state channel. Readable for the same
+    // reason: a sampler that quietly never published is otherwise
+    // indistinguishable from one that published and was refused, and both sound
+    // like an instrument that went missing.
+    u64 statesSent = 0, statesFailed = 0;
     // Arrangement lanes and automation sets this handle put on the wire, and the
     // ones the daemon refused (EvArrangementAck with ArrAckRefused). A refusal
     // means a timeline that is drawn and does not play, which is not a state a
@@ -432,6 +501,12 @@ struct RemoteEngine {
     u64  poolFull = 0;
     bool loggedCmd[64] = {};            // one log line per Cmd type, not per push
     bool loggedPoolFull = false;
+    // syncDeviceStates()'s own once-per-session gate. Separate from
+    // loggedPoolFull because a sampler's audio is the largest single thing this
+    // handle writes, so it is the first publication a nearly-full pool refuses
+    // -- and "the clips would not fit" and "the instrument would not fit" are
+    // different sentences for the person reading the log.
+    bool loggedStatePool = false;
     bool loggedLost = false;
 
     // ---------------------------------------------------------------------
@@ -1500,6 +1575,95 @@ struct RemoteEngine {
             }
     }
 
+    // ONE DEVICE'S GENERIC STATE, ONCE PER FRAME, AND ONLY WHEN IT MOVED.
+    //
+    // syncRacks() with the serial numbers filed off, and for the identical
+    // reason: a user dropping a file onto a sampler calls straight into the
+    // GUI's own SamplerControl and nothing tells this object. There is no
+    // command to hang a hook on, so the model is compared against what was last
+    // sent.
+    //
+    // A RACK IS SKIPPED HERE, and that is not a tidy-up waiting to happen. In
+    // this tree a rack's contents are NOT reachable through stateString():
+    // `Rack` overrides neither half of the generic pair, so calling it would
+    // return the base class's empty string and calling setStateString() on the
+    // far side would hit the base class's accept-anything-remember-nothing
+    // default. The rack has its own command precisely because its state has its
+    // own accessor. GUI-ON-DAEMON.md §15.1 says what folding the two would take
+    // and why this wave could not.
+    //
+    // ORDER: after syncParams() and after syncRacks(), so that a state string is
+    // the LAST thing to land for a device in any one frame. host.h's ordering
+    // rule ("parameters FIRST, then setStateString()") is enforced on the far
+    // side -- doSetDeviceState applies the pending param row itself -- but
+    // sending them in the order the far side will apply them keeps the two
+    // sides' reasoning the same shape, which is the same argument syncRacks()
+    // makes one line up.
+    void syncDeviceStates() {
+        for (int ci = 0; ci < kChainCount; ++ci)
+            for (DevSlot& s : chains[ci].live) {
+                if (!s.live || !s.src) continue;
+                if (s.src->rack()) continue;            // see above
+
+                const std::string text = s.src->stateString();
+                // The buffer is held for the whole publication, on purpose: the
+                // pool write below is a memcpy of every sample, and a sampler
+                // re-pointed during it would otherwise leave the copy reading a
+                // buffer that has already moved to `retired_`. host.h says so at
+                // the accessor.
+                SamplerControl* sc = s.src->sampler();
+                const SampleRef buf = sc ? sc->sampleBuffer() : SampleRef{};
+                const u64 finger = deviceStateFingerprint(text, buf.get());
+                if (finger == s.stateFinger) continue;
+
+                // Nothing to say, and nothing has ever been said. Almost every
+                // device in a set lands here exactly once and never again.
+                if (text.empty() && !buf && !s.stateSent) { s.stateFinger = finger; continue; }
+
+                if (text.size() + 1 > ipc::kMaxDeviceState) {
+                    // A silent truncation would install a DIFFERENT state, not a
+                    // shorter one -- for a sampler, a different FILE -- so it is
+                    // refused and tombstoned like any other permanent failure.
+                    if (!s.stateFailed) {
+                        s.stateFailed = true;
+                        LOGE("device %u: its state serialises to %zu bytes, past the "
+                             "%llu the pool will carry; the engine keeps the state it "
+                             "already has", s.id, text.size(),
+                             (unsigned long long)ipc::kMaxDeviceState);
+                    }
+                    s.stateFinger = finger;
+                    continue;
+                }
+
+                auto it = devInfo.find(s.src);
+                const u32 gen = it != devInfo.end() ? it->second.generation
+                                                    : cli.deviceGeneration(s.id);
+                // A refusal here is "could not send" -- ring full, pool full,
+                // nothing attached -- so the fingerprint is deliberately NOT
+                // advanced and the next frame tries again. The pool refusal is
+                // the one that matters: a sampler's audio is the largest single
+                // thing this handle ever writes, so a full pool shows up here
+                // first and shows up as an instrument that will not load.
+                if (!cli.setDeviceState(s.id, gen, text.c_str(),
+                                        buf ? buf->data.data() : nullptr,
+                                        buf ? buf->frames      : 0,
+                                        buf ? buf->channels    : 0,
+                                        buf ? buf->rate        : 0.0)) {
+                    if (!s.stateSent && buf && !loggedStatePool) {
+                        loggedStatePool = true;
+                        LOGW("the engine would not take device %u's state yet (%s); "
+                             "retrying every frame [further attempts silent]",
+                             s.id, cli.error());
+                    }
+                    continue;
+                }
+                s.stateFinger = finger;
+                s.stateFailed = false;
+                s.stateSent   = true;
+                ++statesSent;
+            }
+    }
+
     // An AddDevice has been answered. Bind the id, work out which of the GUI's
     // controls each of the daemon's is, and push every value at once.
     void bindDevice(int ci, PluginInstance* src, u32 id) {
@@ -1611,6 +1775,32 @@ struct RemoteEngine {
                     return;
                 }
         LOGW("the engine refused a rack state for device %u, which is not on any "
+             "chain we track: %s", id, ipc::rejectReasonName(reason));
+    }
+
+    // The daemon would not take a device's state. The fingerprint stays where
+    // syncDeviceStates() put it, which tombstones this exact state: it is not
+    // re-sent until the device changes again, and then it is. Silence here would
+    // be a sampler drawn with a filename and sounding like nothing -- the very
+    // thing this channel exists to end -- so it is logged once per device.
+    void failDeviceState(u32 id, u32 reason) {
+        ++statesFailed;
+        for (int ci = 0; ci < kChainCount; ++ci)
+            for (DevSlot& s : chains[ci].live)
+                if (s.live && s.id == id) {
+                    if (!s.stateFailed) {
+                        s.stateFailed = true;
+                        auto it = devInfo.find(s.src);
+                        LOGE("the engine would not take the state of device %u ('%s'): "
+                             "%s. It is drawn loaded here and sounds as whatever the "
+                             "engine already had.",
+                             id, it != devInfo.end() ? it->second.name.c_str() : "?",
+                             ipc::rejectReasonName(reason));
+                        if (it != devInfo.end()) it->second.error = ipc::rejectReasonName(reason);
+                    }
+                    return;
+                }
+        LOGW("the engine refused a device state for device %u, which is not on any "
              "chain we track: %s", id, ipc::rejectReasonName(reason));
     }
 
@@ -1737,6 +1927,7 @@ struct RemoteEngine {
                 // wrong instance — the exact bug the `x` check below exists to
                 // prevent, one command wider.
                 if ((u32)w.x == ipc::CmdSetRackState) { failRackState((u32)w.a, (u32)w.b); break; }
+                if ((u32)w.x == ipc::CmdSetDeviceState) { failDeviceState((u32)w.a, (u32)w.b); break; }
                 if ((u32)w.x != ipc::CmdAddDevice) {
                     LOGW("the engine refused a device command: %s",
                          ipc::rejectReasonName((u32)w.b));
@@ -1787,7 +1978,7 @@ struct RemoteEngine {
                 // the sum of the chain the DAEMON built, and RACKS.md §1 is
                 // explicit that the figure is not constant after prepare(). Ours
                 // would be the sum of the GUI's copy, which renders nothing.
-                if (w.flags & ipc::DeviceChangedRackState)
+                if (w.flags & (ipc::DeviceChangedRackState | ipc::DeviceChangedState))
                     for (int ci = 0; ci < kChainCount; ++ci)
                         for (DevSlot& s : chains[ci].live)
                             if (s.live && s.id == (u32)w.ref) {
@@ -2189,6 +2380,7 @@ void EngineHandle::poll(EngineState& out) {
         remote_->reconcile();
         remote_->syncParams();
         remote_->syncRacks();
+        remote_->syncDeviceStates();
         out.devicesPending = remote_->pendingDevices();
         return;
     }
@@ -2361,6 +2553,8 @@ u64 EngineHandle::devicesAdded() const   { return remote_ ? remote_->devAdded : 
 u64 EngineHandle::devicesFailed() const  { return remote_ ? remote_->devFailed : 0u; }
 u64 EngineHandle::racksPublished() const { return remote_ ? remote_->racksSent : 0u; }
 u64 EngineHandle::racksRefused() const   { return remote_ ? remote_->racksFailed : 0u; }
+u64 EngineHandle::deviceStatesPublished() const { return remote_ ? remote_->statesSent : 0u; }
+u64 EngineHandle::deviceStatesRefused() const   { return remote_ ? remote_->statesFailed : 0u; }
 u64 EngineHandle::arrangementsPublished() const { return remote_ ? remote_->arrPublished : 0u; }
 u64 EngineHandle::arrangementsRefused() const   { return remote_ ? remote_->arrRefused : 0u; }
 u64 EngineHandle::poolBlocksLive() const {

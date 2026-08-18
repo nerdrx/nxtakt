@@ -63,6 +63,12 @@
 //     for why that is the same guarantee host.h documents and not a weaker one.
 #include "../audio/backend.h"
 #include "../audio/engine.h"
+// SampleBuffer only. sample.cpp is NOT linked here (the Makefile's DAEMON_SRC
+// says so and means it): nxtaktd renders, it does not decode. Nothing below
+// calls loadSample(), buildPeaks() or buildTransients() — the daemon fills a
+// SampleBuffer from bytes the GUI already decoded, and every one of those three
+// lives in the translation unit this build deliberately does without.
+#include "../audio/sample.h"
 #include "../core/common.h"
 #include "../ipc/control.h"
 #include "../ipc/pool.h"
@@ -2644,6 +2650,7 @@ private:
                 case ipc::CmdMoveDevice:   doMoveDevice(w);   break;
                 case ipc::CmdSetBypass:    doSetBypass(w);    break;
                 case ipc::CmdSetRackState: doSetRackState(w); break;
+                case ipc::CmdSetDeviceState: doSetDeviceState(w); break;
                 default:                   break;             // CmdScanPlugins: done
             }
         }
@@ -2710,6 +2717,15 @@ private:
     // client's only description of what came home, and a rack state echoed back
     // as "string" would be a diagnostic that lies in exactly the situation
     // somebody is reading it.
+    // The same rule, under the name it earned once a SAMPLE started coming down
+    // this path (GUI-ON-DAEMON.md §15): retireString's "a text blob is retired
+    // the instant it has been copied" was never about text. It is about the
+    // COPY -- a block nothing the audio thread can reach ever points into needs
+    // no drain proof, because there is nothing to be quiescent OF. A device
+    // state's sample is copied into the SampleBuffer the device adopts, on this
+    // thread, before this is called; see doSetDeviceState's invariant.
+    void retireAfterCopy(u64 ref, u32 kind) { retireString(ref, kind); }
+
     void retireString(u64 ref, u32 kind = ipc::PoolKindString) {
         Retire r{};
         r.ref       = ref;
@@ -3044,6 +3060,284 @@ private:
         LOGW("device %u: rack state refused (%s)", id, ipc::rejectReasonName(reason));
     }
 
+    // -- SetDeviceState (v10) -----------------------------------------------
+    //
+    // The generic half of what doSetRackState does for one device type, and the
+    // reason the sampler was structurally silent here until now: a device's
+    // stateString() is the only place some devices keep what they ARE (a
+    // sampler is a file; no parameter can say which one), and nothing carried
+    // it across.
+    //
+    // ORDERING, and it is host.h's own rule rather than a new one: parameters
+    // FIRST, then setStateString(). RACKS.md's trap arrives in generic clothing
+    // — a state string is allowed to move parameters, so a param write that
+    // landed after it would overwrite exactly what the state just restored —
+    // and the cure is the same two lines doSetRackState uses: applyParamRow()
+    // before, a cache re-seed from the INSTANCE after.
+    //
+    // -----------------------------------------------------------------------
+    // THE POOL-LIFETIME INVARIANT FOR A DEVICE STATE AND THE SAMPLE IT NAMES
+    // -----------------------------------------------------------------------
+    //
+    //   NOTHING THE AUDIO THREAD CAN REACH EVER POINTS INTO EITHER BLOCK, so
+    //   both are retired the instant they have been copied — confirmed on the
+    //   spot, with no drain proof, exactly as a URI blob is.
+    //
+    // That is the whole answer to "what pins the sample block while the daemon's
+    // sampler plays it": NOTHING DOES, because the sampler never reads it. The
+    // state text is copied into a std::string and the samples are copied into
+    // the SampleBuffer the device adopts, both on the pump thread, before either
+    // offset is echoed back. The shared_ptr the sampler holds therefore has the
+    // ORDINARY deleter over ordinary heap: there is no path on which destroying
+    // a SampleBuffer touches pool memory, and none on which a client releasing a
+    // block can pull the floor out from under a voice.
+    //
+    // THE COPY IS WHAT BUYS THAT, and it is not free — see GUI-ON-DAEMON.md
+    // §15.3. A loaded sample exists three times (the GUI's SampleBuffer, the
+    // pool block until its echo lands, the daemon's SampleBuffer). The zero-copy
+    // shape — a SampleBuffer viewing pool memory — is not reachable from here:
+    // `SampleBuffer::data` is a `std::vector<f32>` and owns what it points at,
+    // so a view is a change to src/audio/sample.h. It would also replace this
+    // three-line rule with a retirement proof against a DEVICE's use, for which
+    // the engine emits no event at all: a sampler publishes its buffer with one
+    // release store and `SamplerControl::reclaim()` exists precisely because
+    // "nothing inside a PluginInstance can know when the audio thread last
+    // dereferenced the pointer it published". The daemon can answer that (the
+    // chain retirement proof, which the reclaim below rides) — but only for a
+    // buffer the sampler has ALREADY DISPLACED, never for the one it is playing,
+    // which is pinned for the life of the device. A pool block pinned for the
+    // life of a device is a 256 MiB arena that a long set fills and never
+    // recovers, and the free-after-confirm machinery would have nothing to say
+    // about it.
+    void doSetDeviceState(const ipc::WireCommand& w) {
+        // The blob, and the sample it names, copied out FIRST -- before any
+        // refusal path can return -- so that both offsets can be retired on
+        // every path. A client whose command was refused must not be left
+        // holding pool blocks it can never free.
+        ipc::WireDeviceState h{};
+        std::string text;
+        const bool haveBlob = readPoolDeviceState(w.ref, h, text);
+
+        std::shared_ptr<SampleBuffer> sb;
+        bool badSample = false;
+        if (haveBlob && h.audioRef) {
+            sb = readPoolSample(h);
+            if (!sb) badSample = true;
+        }
+        // A blob so broken that its HEADER would not parse takes its sample
+        // block with it: we never learned the offset, so we cannot echo it. That
+        // is the one leak this path admits and it costs the client one block of
+        // its own pool, on a payload the client itself built wrong.
+        if (w.ref)      retireAfterCopy(w.ref, ipc::PoolKindDeviceState);
+        if (h.audioRef) retireAfterCopy(h.audioRef, ipc::PoolKindSamples);
+
+        const u32 id = (u32)w.a;
+        Device* d = deviceById(id);
+        if (!d || !d->inst) { failDeviceState(w, id, ipc::RejectBadDevice); return; }
+        // The same stale-write guard the param table and CmdSetRackState carry.
+        // It bites hardest here: a stale state names a FILE, so a state in
+        // flight when a device was removed would load a sampler's audio into
+        // whatever now occupies the slot.
+        if (w.flags != d->generation) { failDeviceState(w, id, ipc::RejectBadDevice); return; }
+        if (!haveBlob) {
+            failDeviceState(w, id, w.ref ? ipc::RejectBadDeviceState : ipc::RejectNoPool);
+            return;
+        }
+        if (badSample) { failDeviceState(w, id, ipc::RejectBadDeviceSample); return; }
+
+        SamplerControl* sc = d->inst->sampler();
+        if (sb && !sc) {
+            // A state that carries audio for a device that plays no files is
+            // not a state we can half-apply: refused whole, so the client is
+            // told rather than left with a device it believes is loaded.
+            logDevice("SetDeviceState: device %u carries a sample and plays no files", id);
+            failDeviceState(w, id, ipc::RejectBadDeviceSample);
+            return;
+        }
+
+        // 1. PARAMS FIRST (host.h, "ORDERING, on load").
+        applyParamRow(*d);
+
+        // 2. THEN the state. Allocating and able to fail, which is exactly why
+        //    it is on the pump thread and nowhere near the audio callback.
+        if (!d->inst->setStateString(text)) {
+            logDevice("SetDeviceState: device %u refused a %zu-byte state", id, text.size());
+            failDeviceState(w, id, ipc::RejectBadDeviceState);
+            return;
+        }
+
+        // 3. ACCEPTED AND IGNORED IS NOT ACCEPTED. PluginInstance's DEFAULT
+        //    setStateString takes any bytes and remembers none of them, so a
+        //    state sent to a device that does not implement the pair would come
+        //    back "applied" and change nothing -- the silent success this
+        //    boundary refuses everywhere else. The round trip is the test: a
+        //    device that kept a non-empty state answers a non-empty
+        //    stateString(). NON-EMPTINESS and not equality, deliberately -- a
+        //    device is allowed to normalise what it was handed (drop a record it
+        //    does not know, re-escape a path), and demanding byte equality would
+        //    make this a stricter contract than host.h's and would fail on
+        //    exactly the forward compatibility that format was designed for.
+        if (!text.empty() && d->inst->stateString().empty()) {
+            logDevice("SetDeviceState: device %u took a %zu-byte state and kept nothing",
+                      id, text.size());
+            failDeviceState(w, id, ipc::RejectNotStateful);
+            return;
+        }
+
+        // 4. THE SAMPLE, after the state and not before it: the state is what
+        //    names the file, and adopt() wants the path the DEVICE parsed rather
+        //    than one this function would have to parse for itself. In a build
+        //    with no decoder -- which is this one, by design -- setStateString
+        //    has just left the sampler holding the path and no audio, so this is
+        //    the line that turns it back into an instrument.
+        if (sb && sc) {
+            sb->path = sc->samplePath();
+            sc->adopt(sb, sc->samplePath());
+        } else if (sc && text.empty() && sc->hasSample()) {
+            // AN EMPTY STATE MEANS "NO FILE", and the daemon has to do this
+            // itself. host.h is explicit that an empty string is a NO-OP for
+            // setStateString ("it means 'no state', it is what stateString()
+            // answers for a fresh instance, and it must be accepted as a no-op
+            // returning true") -- which is right for a loader and exactly wrong
+            // for a reconciler. The client is not replaying a file, it is
+            // declaring what the device now IS; a sampler the user emptied that
+            // went on playing would be the mirror image of the bug this whole
+            // channel exists to end.
+            sc->clearSample();
+        }
+
+        // 5. Re-seed the cache from the INSTANCE. Same reason doSetRackState
+        //    does: the instance is the truth now, and a difference the next pump
+        //    tick noticed would be written straight back over what the state set.
+        for (int i = 0; i < d->paramCount; ++i) d->cached[i] = d->inst->getParam(i);
+
+        // 6. Latency, re-read and republished. A state string may change what a
+        //    device costs (RACKS.md §1 makes the point for racks and it is not a
+        //    rack-specific one), and a caller that does not republish leaves the
+        //    engine's cached figure describing a device that no longer exists.
+        const i32 latency = d->inst->latencyFrames();
+        if (ipc::WireDeviceInfo* row = map_.device(id)) row->latencyFrames = latency;
+        publishChain(d->target, d->targetIdx);
+        // 7. adopt() RETIRED the buffer it displaced rather than freeing it, for
+        //    the reason RackControl::reclaim() gives one level up: nothing inside
+        //    a PluginInstance can know when the audio thread last dereferenced
+        //    the pointer it published. The daemon DOES know -- it is the chain
+        //    retirement proof it already computes -- so the reclaim rides it.
+        //    Without this a sampler re-pointed enough times in one session holds
+        //    every buffer it ever played.
+        chainPush_.back().reclaim.push_back(id);
+
+        map_.hdr->deviceStatesApplied.fetch_add(1, std::memory_order_relaxed);
+        emitChanged(id, ipc::DeviceChangedState, -1, latency);
+        LOGI("device %u: state applied, %zu byte(s), %lld frames of audio, "
+             "%d frames latency",
+             id, text.size(), sb ? (long long)sb->frames : 0ll, latency);
+    }
+
+    // The PoolKindDeviceState blob: [WireDeviceState][text]. `h` is filled on a
+    // best-effort basis even when the text is refused, because `h.audioRef` is
+    // the only way this side ever learns about the second block and it has to be
+    // echoed home whatever else happens.
+    bool readPoolDeviceState(u64 ref, ipc::WireDeviceState& h, std::string& out) {
+        out.clear();
+        h = ipc::WireDeviceState{};
+        if (!ref || !pool_.valid()) return false;
+        const char* why = "";
+        u64 blockBytes = 0;
+        // needBytes = the header, so validate() proves the header is inside the
+        // allocation before a single field of it is read.
+        if (!pool_.validate(ref, ipc::PoolKindDeviceState, sizeof(ipc::WireDeviceState),
+                            &why, &blockBytes)) {
+            logBadRef("device state", ref, -1, -1, why);
+            return false;
+        }
+        // ONE copy of the header, then reason about the copy and never about the
+        // mapping again: the pool is client-writable, so a field re-read after a
+        // check is a field a peer may have changed in between. This is
+        // translateClip's `const WireClip c` rule, verbatim.
+        std::memcpy(&h, pool_.at(ref), sizeof h);
+        if (h.version != ipc::kDeviceStateVersion) {
+            logBadRef("device state", ref, -1, -1, "state blob version this build does not know");
+            h.audioRef = 0;                 // not a number we may trust either
+            return false;
+        }
+        if (h.textBytes == 0 || (u64)h.textBytes > ipc::kMaxDeviceState) {
+            logBadRef("device state", ref, -1, -1, "text length is zero or past the bound");
+            return false;
+        }
+        if ((u64)sizeof(ipc::WireDeviceState) + h.textBytes > blockBytes) {
+            logBadRef("device state", ref, -1, -1, "text runs past the end of its own block");
+            return false;
+        }
+        const char* t = (const char*)pool_.at(ref) + sizeof(ipc::WireDeviceState);
+        u64 len = 0;
+        while (len < h.textBytes && t[len]) ++len;
+        // The terminator must be INSIDE the declared length. A "string" whose
+        // NUL is past its own allocation is not a truncated string, it is a read
+        // off the end of somebody else's data -- readPoolText's rule, here too.
+        if (len >= h.textBytes) {
+            logBadRef("device state", ref, -1, -1, "no terminator inside the block");
+            return false;
+        }
+        out.assign(t, (size_t)len);
+        return true;
+    }
+
+    // The audio a device state named, copied into a SampleBuffer of our own.
+    // Null on any disagreement -- never a partial buffer, because a sampler
+    // handed half a file is a sampler that plays half a file for the rest of the
+    // session with nothing to notice it but the ear.
+    std::shared_ptr<SampleBuffer> readPoolSample(const ipc::WireDeviceState& h) {
+        if (!pool_.valid()) return nullptr;
+        if (h.audioFrames <= 0 || (h.audioChannels != 1 && h.audioChannels != 2))
+            return nullptr;
+        if (!std::isfinite(h.audioRate) || h.audioRate <= 0.0) return nullptr;
+        // The COMMAND's numbers bound the copy, and the BLOCK is checked against
+        // them. Both are written by the client, so this is not two independent
+        // sources agreeing -- it is one source having to be consistently wrong
+        // in two places, which is the same bar translateClip sets. The absolute
+        // bound is the pool's own: validate() refuses a block that runs past the
+        // arena, and the arena is 256 MiB, so the worst copy a peer can drive is
+        // one pool.
+        const u64 need = (u64)h.audioFrames * (u64)h.audioChannels * sizeof(f32);
+        const char* why = "";
+        u64 blockBytes = 0;
+        if (!pool_.validate(h.audioRef, ipc::PoolKindSamples, need, &why, &blockBytes)) {
+            logBadRef("device sample", h.audioRef, -1, -1, why);
+            return nullptr;
+        }
+        const ipc::PoolBlock* b = pool_.block(h.audioRef);
+        if (b->frames != h.audioFrames || b->channels != h.audioChannels) {
+            logBadRef("device sample", h.audioRef, -1, -1,
+                      "the block's shape is not the shape the state claims");
+            return nullptr;
+        }
+        auto sb = std::make_shared<SampleBuffer>();
+        sb->frames   = h.audioFrames;
+        sb->channels = (int)h.audioChannels;
+        sb->rate     = h.audioRate;
+        sb->data.resize((size_t)(h.audioFrames * (i64)h.audioChannels));
+        std::memcpy(sb->data.data(), pool_.at(h.audioRef), (size_t)need);
+        return sb;
+    }
+
+    // EvDeviceFailed for a device-state command, with `a` carrying the DEVICE ID
+    // for the reason failRack's does: the client retries from a fingerprint, and
+    // a failure it could not attribute would either be re-sent sixty times a
+    // second forever or blamed on the wrong device.
+    void failDeviceState(const ipc::WireCommand& w, u32 id, u32 reason) {
+        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_relaxed);
+        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
+        ipc::WireEvent e{};
+        e.type = ipc::EvDeviceFailed;
+        e.a    = (i32)id;
+        e.b    = (i32)reason;
+        e.x    = (f64)w.type;
+        e.ref  = w.ref;
+        map_.evts->push(e);
+        LOGW("device %u: state refused (%s)", id, ipc::rejectReasonName(reason));
+    }
+
     void emitChanged(u32 id, u32 flags, int pos, int a) {
         ipc::WireEvent e{};
         e.type  = ipc::EvDeviceChanged;
@@ -3152,10 +3446,20 @@ private:
             // The device may have been removed in the meantime — the reclaim
             // list holds ids and not pointers precisely so that is a lookup
             // miss and not a dangling read.
+            //
+            // TWO KINDS OF RECLAIM RIDE THIS ONE PROOF, and deliberately one
+            // list: a rack's setState unlinks sub-devices and a sampler's
+            // adopt() displaces a SampleBuffer, and both are held rather than
+            // freed for the identical reason -- neither object can know when the
+            // audio thread last dereferenced the pointer it published. A device
+            // is at most one of the two, so calling both is a null check and not
+            // a branch anybody has to reason about.
             for (u32 id : r.reclaim)
                 if (Device* d = deviceById(id))
-                    if (d->inst)
+                    if (d->inst) {
                         if (RackControl* rk = d->inst->rack()) rk->reclaim();
+                        if (SamplerControl* sm = d->inst->sampler()) sm->reclaim();
+                    }
             // r goes out of scope at the end of the loop body -> the RtChain and
             // every instance in `dying` are destructed here, on the pump thread,
             // provably outside anything the audio thread can reach.

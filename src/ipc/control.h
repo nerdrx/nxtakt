@@ -109,7 +109,27 @@ namespace lat::ipc {
 //
 //        This is the last item on §7's list, and with it the daemon path carries
 //        everything the in-process one does.
-inline constexpr u32 kProtocolVersion = 9;
+//   v10 — GENERIC DEVICE STATE, and with it the SAMPLER (GUI-ON-DAEMON.md §15).
+//        CmdSetDeviceState carries a PoolKindDeviceState blob — the device's own
+//        stateString() output, plus, for a device that plays a file, a pool
+//        reference to the audio the GUI decoded. It is a SIBLING of
+//        CmdSetRackState and not a replacement for it, because a rack's contents
+//        are not reachable through stateString() in this tree (RackControl is
+//        the accessor; src/plugin/internal_devices.cpp overrides neither half of
+//        the generic pair) and that file was not this wave's to change. §15.1
+//        argues the case and says what it would take to fold the two.
+//
+//        ControlHeader gains `deviceStatesApplied` out of its reserved words, so
+//        no section moves; the version and the layout hash are what make a v9
+//        and a v10 binary refuse each other, which is the mechanism working.
+//
+//        Until this existed `nxtakt:sampler` was STRUCTURALLY SILENT in daemon
+//        mode: generic device state did not cross at all, so the path the
+//        sampler is defined by never reached the engine, and nxtaktd links no
+//        decoder so it could not have opened the file even if it had. A set with
+//        an instrument in it played the instrument in-process and nothing at all
+//        through the daemon.
+inline constexpr u32 kProtocolVersion = 10;
 
 // Daemon-generated wire events start here, well clear of lat::Ev. The event
 // ring carries a superset of Ev: the boundary itself has things to report
@@ -172,6 +192,33 @@ enum : u32 {
     // its macro's curve. See Daemon::doSetRackState.
     CmdSetRackState = kDaemonCommandBase + 5,
 
+    // Install one device's GENERIC state: whatever `PluginInstance::stateString()`
+    // said, plus — for a device that plays a file — the audio the GUI decoded.
+    // a = device id, flags = the device's WireDeviceInfo generation (the same
+    // stale-write guard the param table and CmdSetRackState carry), ref = a
+    // PoolKindDeviceState blob. Answered by exactly one EvDeviceChanged (flags &
+    // DeviceChangedState) or EvDeviceFailed; the blob AND the sample block it
+    // names are retired (EvBlockRetired) either way.
+    //
+    // WHY A SIBLING OF CmdSetRackState AND NOT A WIDENING OF IT. The obvious
+    // move is to make one "device state" command and delete the rack's, since
+    // host.h says a rack's state IS a state string. In THIS tree it is not
+    // reachable as one: `Rack` overrides neither stateString() nor
+    // setStateString(), and its contents are read through RackControl::state()
+    // and written through RackControl::setState() — see
+    // src/plugin/internal_devices.cpp, which is where the fold would have to
+    // happen and which this wave did not own. Sending a rack down this channel
+    // today would call the BASE-CLASS setStateString(), which accepts anything
+    // and does nothing: accepted-and-ignored, which is the trade this boundary
+    // refuses. GUI-ON-DAEMON.md §15.1 states what folding them would take.
+    //
+    // ORDERING, host.h's own rule and RACKS.md's trap in generic clothing: the
+    // daemon applies the device's pending param row BEFORE setStateString and
+    // re-seeds its parameter cache after. A state string is allowed to move
+    // parameters; a param write that landed after it would overwrite what the
+    // state just restored. See Daemon::doSetDeviceState.
+    CmdSetDeviceState = kDaemonCommandBase + 6,
+
     // "I have copied that take out of its file; it is yours to drop."
     // ref = the take uid EvTakeReady carried, flags = TakeReleaseKeepFile.
     //
@@ -188,7 +235,14 @@ enum : u32 {
     // death (a new attach epoch sweeps the directory) rather than on a timer,
     // because a timer would be a deadline on a GUI thread that may legitimately
     // be busy decoding the take it was just given.
-    CmdTakeRelease  = kDaemonCommandBase + 6,
+    //
+    // RENUMBERED from +6 to +7 in v10, when CmdSetDeviceState took the slot
+    // below it. It is a wire change and it rides the version bump that a wire
+    // change is for; the alternative was a HOLE in commandIsDevice()'s range
+    // (a device command at +7 with a take release at +6 inside it), and a
+    // range predicate with a named exception in it is a predicate the next
+    // person appends to wrongly.
+    CmdTakeRelease  = kDaemonCommandBase + 7,
 };
 
 // CmdTakeRelease::flags.
@@ -370,6 +424,11 @@ enum : u32 {
     // latencyFrames, are not what the client last read. b carries the new
     // latency so a status bar does not have to re-read the row for it.
     DeviceChangedRackState = 1u << 2,
+    // A CmdSetDeviceState landed: the device's state string, and possibly the
+    // sample it names, are now what the client asked for. `a` carries the
+    // device's latencyFrames as re-read from the instance, for the reason the
+    // rack's does — a state string may change what a device costs.
+    DeviceChangedState = 1u << 3,
 };
 
 // EvClipAck::flags.
@@ -453,6 +512,31 @@ enum : u32 {
     // anyway, because the alternative is a client that thinks it has been
     // freeing takes for an hour.
     RejectNoTake         = 23,
+
+    // --- generic device state (v10) -----------------------------------------
+    //
+    // The state string arrived, and the device DID NOT KEEP IT: after
+    // setStateString() answered true, the device's own stateString() came back
+    // empty for a non-empty input. That is the base-class default — accept
+    // anything, remember nothing — so this reason is the boundary refusing
+    // "accepted and ignored" one more time, and it is what makes a state sent
+    // to the wrong device a refusal instead of silence. See
+    // Daemon::doSetDeviceState for why the round trip is the test and why it is
+    // a NON-EMPTINESS test rather than an equality one.
+    RejectNotStateful     = 24,
+    // The blob's own shape (version, length, terminator), or a state string the
+    // device refused. One reason for both, for the reason RejectBadRackState
+    // gives: setStateString answers a bare bool and inventing a distinction the
+    // plugin layer does not make would be this header claiming to know
+    // something it does not.
+    RejectBadDeviceState  = 25,
+    // The state named a sample block and it did not validate, or its shape
+    // disagreed with what the header said, or the device it named plays no
+    // files. Distinct from RejectBadPoolRef because the client's recourse is
+    // different: a bad clip offset is a clip that does not sound, and this is a
+    // device that will sound EMPTY while it is drawn full — the exact failure
+    // this whole channel exists to end, so it gets its own line in the log.
+    RejectBadDeviceSample = 26,
 };
 
 inline const char* rejectReasonName(u32 r) {
@@ -480,6 +564,9 @@ inline const char* rejectReasonName(u32 r) {
         case RejectTakeTooLarge:    return "the take capacity asked for is past the ceiling";
         case RejectTakeIo:          return "the take's buffer or its file could not be written";
         case RejectNoTake:          return "no take with that id is held";
+        case RejectNotStateful:     return "that device does not keep a state string";
+        case RejectBadDeviceState:  return "the device state would not parse or would not apply";
+        case RejectBadDeviceSample: return "the sample the device state named is not usable";
         default:                    return "none";
     }
 }
@@ -1054,7 +1141,7 @@ inline constexpr bool commandIsSignatures(u32 type) {
 // name here is what left four appended commands classifying as unknown for a
 // whole wave.
 inline constexpr bool commandIsDevice(u32 type) {
-    return type >= kDaemonCommandBase && type <= CmdSetRackState;
+    return type >= kDaemonCommandBase && type <= CmdSetDeviceState;
 }
 
 // A take command: `a` = track, `b` = slot, `x` = capacity in FRAMES (or in
@@ -1302,6 +1389,16 @@ struct ControlHeader {
     // a second counter for the same event is a second thing to keep true.
     std::atomic<u32> rackStatesApplied;
 
+    // --- generic device state (v10) -----------------------------------------
+    //
+    // CmdSetDeviceState commands the daemon accepted and applied. Out of the
+    // reserved words for the reason rackStatesApplied is: ControlHeader keeps
+    // its size, so every section offset below it stays where it was and the
+    // version plus the layout hash are what make two builds refuse each other.
+    //
+    // Refusals are already devicesFailed and are deliberately not counted twice.
+    std::atomic<u32> deviceStatesApplied;
+
     // Cmd::SetSignatures commands accepted and handed to the engine. It reads 0
     // on every build before v8 AND on a set that never publishes a map, which is
     // why nothing asserts it equals a number on its own: the discriminating
@@ -1339,7 +1436,7 @@ struct ControlHeader {
     // truncated path is a path that names the wrong directory rather than one
     // that fails to open.
     char takeDir[160];
-    u32  reserved[4];
+    u32  reserved[3];
 
     // Creator only, before publishReady(). `takes` is the directory the daemon
     // will write takes into, or null/empty if it could not make one — which is a
@@ -1373,6 +1470,7 @@ struct ControlHeader {
         catalogCount.store(0, std::memory_order_relaxed);
         catalogTruncated.store(0, std::memory_order_relaxed);
         rackStatesApplied.store(0, std::memory_order_relaxed);
+        deviceStatesApplied.store(0, std::memory_order_relaxed);
         signaturesApplied.store(0, std::memory_order_relaxed);
         takesStarted.store(0, std::memory_order_relaxed);
         takesCommitted.store(0, std::memory_order_relaxed);

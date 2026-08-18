@@ -30,6 +30,10 @@
 // For reapStale(): a SIGKILLed daemon leaves its region behind, and picking it
 // up is the client's job (§4.1), not a tidy-up this test invented.
 #include "src/ipc/client.h"
+// SampleBuffer, built by hand. No decoder is linked here and none is wanted:
+// what this suite drives is the SEAM, and a sampler is handed a decoded buffer
+// through SamplerControl::adopt() whether a file or a test made it.
+#include "src/audio/sample.h"
 // For the hardware-MIDI check below, which sends a real sequencer event into
 // the GUI's own ALSA client. There is no other way to prove that path: the
 // reader thread is the producer and a fake would test the fake.
@@ -1120,6 +1124,305 @@ int main() {
         CHECK(eng.racksRefused() == 0,
               "no rack state was refused over the whole section (%llu)",
               (unsigned long long)eng.racksRefused());
+    }
+
+    // =====================================================================
+    // STEP 4e: THE SAMPLER — generic device state, and the audio it names
+    // =====================================================================
+    //
+    // The near side of GUI-ON-DAEMON.md §15. `nxtakt:sampler` IS the file it
+    // plays and no parameter can say which one, so until this wave a sampler in
+    // daemon mode was structurally silent: the path lives in stateString(),
+    // generic device state did not cross, and `nxtaktd` links no decoder anyway.
+    //
+    // Everything below is driven exactly as `app_devices.cpp` drives it — a
+    // buffer handed to the GUI's OWN SamplerControl::adopt(), which is what
+    // dropping a file on a sampler card calls — and nothing is sent by hand.
+    // The handle notices by polling a fingerprint of the state string and of the
+    // buffer behind it, the same shape as the rack's, for the same reason: there
+    // is no command to hook.
+    banner("step 4e: a sampler's file and its audio cross, and it SOUNDS");
+    {
+        // Track 1's meter, not the master: track 0 is where the clip section
+        // leaves a 0.5 DC clip running, and a master peak would be that clip
+        // whatever the sampler did.
+        auto peakTrack1 = [&](int frames) {
+            Event ev;
+            f32 pk = 0.f;
+            const int settle = frames / 3 + 10;
+            for (int i = 0; i < settle; ++i) { eng.poll(es); while (eng.popEvent(ev)) {} sleepMs(10); }
+            for (int i = 0; i < frames; ++i) {
+                eng.poll(es);
+                while (eng.popEvent(ev)) {}
+                pk = std::fmax(pk, es.meterL[1]);
+                sleepMs(10);
+            }
+            return pk;
+        };
+        auto noteOn  = [&](u8 v) { MidiMsg mm{}; mm.status = 0x90; mm.d1 = 60; mm.d2 = v; eng.pushMidi(mm); };
+        auto noteOff = [&]()     { MidiMsg mm{}; mm.status = 0x80; mm.d1 = 60; mm.d2 = 0; eng.pushMidi(mm); };
+
+        const PluginDesc* smpDesc = reg.find("nxtakt:sampler");
+        CHECK(smpDesc != nullptr, "the local registry has nxtakt:sampler");
+        std::unique_ptr<PluginInstance> smpInst;
+        if (smpDesc) smpInst = reg.instantiate(*smpDesc, eng.sampleRate(), 1024);
+        SamplerControl* sc = smpInst ? smpInst->sampler() : nullptr;
+        CHECK(sc != nullptr, "and a real sampler instance answers sampler() non-null");
+
+        if (sc && smpDesc) {
+            Command arm{};
+            arm.type = Cmd::TrackArm; arm.a = 1; arm.b = 1;
+            CHECK(eng.pushCommand(arm),
+                  "arm track 1 — MIDI reaches a chain only on an armed track");
+
+            RtChain chS;
+            chS.fx[0] = smpInst.get();
+            chS.count = 1;
+            Command sChain{};
+            sChain.type = Cmd::SetChain; sChain.a = 1; sChain.p = &chS;
+            CHECK(eng.pushCommand(sChain), "publish a chain on track 1 holding one sampler");
+
+            const RemoteDevice* sd = nullptr;
+            for (int i = 0; i < 600 && !(sd && sd->live); ++i) {
+                eng.poll(es);
+                while (eng.popEvent(e)) {}
+                sd = eng.remoteDevice(smpInst.get());
+                sleepMs(10);
+            }
+            CHECK(sd && sd->live, "the engine instantiated it: device %u '%s'",
+                  sd ? sd->id : 0u, sd ? sd->name.c_str() : "-");
+
+            // --- the negative control ---------------------------------------
+            //
+            // Measured rather than assumed, because "the sampler sounds" below
+            // only means something beside "the sampler was silent". This is the
+            // shipped behaviour of every wave up to this one.
+            noteOn(127);
+            const f32 emptyPeak = peakTrack1(120);
+            noteOff();
+            CHECK(emptyPeak < 1e-3f,
+                  "a sampler with no state is SILENT in the daemon: %.4f",
+                  (double)emptyPeak);
+
+            // --- give the GUI's own sampler a buffer, and send nothing -------
+            //
+            // adopt() is what a file drop calls (app_devices.cpp). The PATH is
+            // what stateString() will carry and what a saved set would carry;
+            // the AUDIO is what the daemon cannot produce for itself.
+            // TEN seconds, not one. Under a sanitizer a frame of this loop costs
+            // milliseconds, so a one-second sample runs out inside peakTrack1's
+            // own settle and the window measures the silence after the note
+            // rather than the note. A test whose answer depends on how fast the
+            // binary is, is a test that will go red on somebody else's machine.
+            const i64 kFrames = 480000;
+            auto buf = std::make_shared<SampleBuffer>();
+            buf->frames   = kFrames;
+            buf->channels = 2;
+            buf->rate     = eng.sampleRate();
+            buf->data.assign((size_t)kFrames * 2, 0.5f);
+            const char* kPath = "/tmp/nxtakt-dw-kick.wav";
+            sc->adopt(buf, kPath);
+            CHECK(sc->hasSample() && sc->samplePath() == kPath,
+                  "the GUI's sampler holds the buffer and names the file");
+            CHECK(smpInst->stateString() == std::string("nxsmp1;p=/tmp/nxtakt-dw-kick.wav"),
+                  "and its state string is the PERSISTED spelling ('%s')",
+                  smpInst->stateString().c_str());
+
+            // WAIT FOR THE PUBLICATION BEFORE PLAYING THE NOTE, and this is not
+            // belt and braces. The sampler's gate is on, so a note-on is HELD:
+            // a voice that starts while the engine's sampler is still empty
+            // produces silence for as long as the key is down, and a buffer
+            // adopted afterwards does not retrigger it. Pushing the note first
+            // and hoping the state beat it there is a test whose answer depends
+            // on how long a 3.8 MB pool write takes — which is exactly what
+            // changes under a sanitizer, and did.
+            const u64 sent0 = eng.deviceStatesPublished();
+            bool published = false;
+            for (int i = 0; i < 600 && !published; ++i) {
+                eng.poll(es);
+                while (eng.popEvent(e)) {}
+                published = eng.deviceStatesPublished() > sent0;
+                sleepMs(10);
+            }
+            CHECK(published, "the state went out (%llu -> %llu)",
+                  (unsigned long long)sent0,
+                  (unsigned long long)eng.deviceStatesPublished());
+            // and let the daemon apply it: one pump tick plus the copy.
+            for (int i = 0; i < 100; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+
+            noteOn(127);
+            const f32 loaded = peakTrack1(200);
+            noteOff();
+            CHECK(eng.deviceStatesPublished() > sent0 && eng.deviceStatesRefused() == 0,
+                  "one device state published, none refused (%llu / %llu)",
+                  (unsigned long long)eng.deviceStatesPublished(),
+                  (unsigned long long)eng.deviceStatesRefused());
+            CHECK(loaded > 0.4f,
+                  "and the SAME note now meters %.4f on track 1 — audio this "
+                  "process decoded, written into this process's pool, played by "
+                  "an instrument in another one (empty was %.4f)",
+                  (double)loaded, (double)emptyPeak);
+
+            // --- LEVEL-MATCHED AGAINST THE SAME PATCH IN-PROCESS -------------
+            //
+            // A second sampler, in THIS process, prepared at the same rate, fed
+            // the same buffer through the same adopt() and the same note. This
+            // is the rack wave's proof shape: the same number on both sides, not
+            // "it made a sound".
+            //
+            // The device is rendered directly rather than through an Engine on
+            // purpose — an in-process Engine would add a mixer, a meter's
+            // ballistics and a scheduling phase to a comparison that is about
+            // the INSTRUMENT. What crosses the wire is the buffer and the path;
+            // what has to match is what the instrument does with them.
+            f32 localPeak = 0.f;
+            if (std::unique_ptr<PluginInstance> ref2 =
+                    reg.instantiate(*smpDesc, eng.sampleRate(), 1024)) {
+                SamplerControl* sc2 = ref2->sampler();
+                CHECK(sc2 != nullptr, "a second sampler, in this process");
+                if (sc2) {
+                    ref2->prepare(eng.sampleRate(), 256);
+                    auto buf2 = std::make_shared<SampleBuffer>(*buf);
+                    sc2->adopt(buf2, kPath);
+                    const u8 on[3] = { 0x90, 60, 127 };
+                    ref2->midi(on, 3, 0);
+                    std::vector<f32> l((size_t)256, 0.f), r((size_t)256, 0.f);
+                    f32* outp[2] = { l.data(), r.data() };
+                    const f32* inp[2] = { l.data(), r.data() };
+                    // A few blocks: the amp envelope's 0.5 ms attack is inside
+                    // the first one, so one block would measure the attack
+                    // rather than the level.
+                    for (int b = 0; b < 8; ++b) {
+                        std::fill(l.begin(), l.end(), 0.f);
+                        std::fill(r.begin(), r.end(), 0.f);
+                        ref2->process(inp, outp, 2, 256);
+                        for (int i = 0; i < 256; ++i) localPeak = std::fmax(localPeak, std::fabs(l[(size_t)i]));
+                    }
+                }
+            }
+            CHECK(localPeak > 0.4f, "the in-process patch peaks at %.4f", (double)localPeak);
+            CHECK(std::fabs(loaded - localPeak) < 0.01f,
+                  "AND THE TWO AGREE: daemon %.4f vs in-process %.4f",
+                  (double)loaded, (double)localPeak);
+
+            // --- an INDEPENDENT client, measuring the daemon's own meter -----
+            //
+            // §11.8's experiment, made a test. This process decoded nothing on
+            // that client's behalf and the client owns no pool: everything it
+            // reads is what nxtaktd published about audio it is rendering out of
+            // a buffer it never opened a file for.
+            {
+                ipc::EngineClient probe;
+                if (probe.attach(session, 2000)) {
+                    // Let the previous note's RELEASE finish first. The sampler
+                    // is polyphonic and its release is 40 ms, so a second note
+                    // pushed on top of a still-dying one sums two voices and
+                    // reads ~1.0 -- a true measurement of the wrong thing, and
+                    // the kind of number that makes a comparison table lie.
+                    for (int i = 0; i < 200; ++i) {
+                        eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5);
+                    }
+                    noteOn(127);
+                    f32 probePeak = 0.f;
+                    for (int i = 0; i < 1500; ++i) {
+                        eng.poll(es);                       // keep the near side pumping
+                        while (eng.popEvent(e)) {}
+                        probePeak = std::fmax(probePeak, probe.state().meterL[1].load());
+                        sleepMs(1);
+                    }
+                    noteOff();
+                    // The engine publishes a meter once per audio block and decays
+                    // it by 0.72 each block, so this polls FASTER than the block
+                    // rate: a 10 ms poll against a 5.33 ms block misses one
+                    // publication in two and reads 0.72x the peak.
+                    CHECK(std::fabs(probePeak - loaded) < 0.01f,
+                          "a second EngineClient on the same session measures %.4f "
+                          "on track 1 — the same number, and it decoded nothing, "
+                          "drew nothing and owns no pool",
+                          (double)probePeak);
+                    probe.detach();
+                } else {
+                    CHECK(false, "a second client could not attach: %s", probe.error());
+                }
+            }
+
+            // --- a re-point is noticed, and the PATH is not enough -----------
+            //
+            // The fingerprint hashes the buffer as well as the string, and this
+            // is why: the same file, re-decoded, is the same PATH and different
+            // AUDIO. Hashing only the text would serve the cached publication and
+            // leave the daemon playing the old bytes under the right name.
+            {
+                auto quiet = std::make_shared<SampleBuffer>();
+                quiet->frames   = kFrames;
+                quiet->channels = 2;
+                quiet->rate     = eng.sampleRate();
+                quiet->data.assign((size_t)kFrames * 2, 0.125f);
+                const u64 sentBefore = eng.deviceStatesPublished();
+                sc->adopt(quiet, kPath);                    // SAME path, new bytes
+                CHECK(smpInst->stateString() == std::string("nxsmp1;p=/tmp/nxtakt-dw-kick.wav"),
+                      "the state string is unchanged by the re-point");
+                // WAIT for the publication instead of assuming a fixed number of
+                // frames is enough for it. The fingerprint moving is what this
+                // paragraph is about, so "did it go out" has to be observed
+                // before "what does it sound like" is asked.
+                bool republished = false;
+                for (int i = 0; i < 400 && !republished; ++i) {
+                    eng.poll(es);
+                    while (eng.popEvent(e)) {}
+                    republished = eng.deviceStatesPublished() > sentBefore;
+                    sleepMs(10);
+                }
+                CHECK(republished,
+                      "the fingerprint moved and a second state went out (%llu -> %llu)",
+                      (unsigned long long)sentBefore,
+                      (unsigned long long)eng.deviceStatesPublished());
+                for (int i = 0; i < 100; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+                noteOn(127);
+                const f32 requiet = peakTrack1(200);
+                noteOff();
+                CHECK(requiet < loaded * 0.5f && requiet > 0.05f,
+                      "and the daemon plays the NEW buffer anyway: %.4f (was %.4f) "
+                      "— the path alone does not identify audio",
+                      (double)requiet, (double)loaded);
+            }
+
+            // --- clearing ----------------------------------------------------
+            const u64 sentClear = eng.deviceStatesPublished();
+            sc->clearSample();
+            CHECK(smpInst->stateString().empty(),
+                  "an empty sampler has no state string at all, so a set with no "
+                  "sampler in it stays byte-identical to what an older writer produced");
+            for (int i = 0; i < 400 && eng.deviceStatesPublished() == sentClear; ++i) {
+                eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10);
+            }
+            CHECK(eng.deviceStatesPublished() > sentClear,
+                  "the empty state went out too (%llu -> %llu)",
+                  (unsigned long long)sentClear,
+                  (unsigned long long)eng.deviceStatesPublished());
+            for (int i = 0; i < 100; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+            noteOn(127);
+            const f32 cleared = peakTrack1(200);
+            noteOff();
+            CHECK(cleared < 1e-3f,
+                  "and the daemon's sampler is empty and silent again: %.4f",
+                  (double)cleared);
+
+            CHECK(eng.deviceStatesRefused() == 0,
+                  "no device state was refused over the whole section (%llu)",
+                  (unsigned long long)eng.deviceStatesRefused());
+
+            // Put track 1 back the way it was found.
+            RtChain none;
+            none.count = 0;
+            Command drop{};
+            drop.type = Cmd::SetChain; drop.a = 1; drop.p = &none;
+            eng.pushCommand(drop);
+            Command unarm{};
+            unarm.type = Cmd::TrackArm; unarm.a = 1; unarm.b = 0;
+            eng.pushCommand(unarm);
+            for (int i = 0; i < 40; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+        }
     }
 
     // =====================================================================

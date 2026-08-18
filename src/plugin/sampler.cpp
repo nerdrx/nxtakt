@@ -603,6 +603,11 @@ public:
     bool               hasSample() const override    { return cur_ != nullptr; }
     const std::string& samplePath() const override   { return path_; }
     i64                sampleFrames() const override { return cur_ ? cur_->frames : 0; }
+    // A COPY of the reference, not `const SampleRef&`: the caller's whole reason
+    // for asking is to read the buffer over a stretch of time in which adopt()
+    // may run, and a reference to `cur_` would be a reference to the member that
+    // adopt() moves out from under it. See host.h.
+    SampleRef          sampleBuffer() const override { return cur_; }
     void               reclaim() override            { retired_.clear(); }
 
     // REALTIME. Called before process() for the same block. Events are QUEUED

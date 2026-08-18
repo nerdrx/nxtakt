@@ -2291,6 +2291,224 @@ static void testRackContents(ipc::EngineClient& c) {
 // posSigNum/posSigDen read 4/4 for a map that never arrived AND for a map that
 // arrived and was ignored; a bar boundary at 3.5 beats can only exist if the
 // engine is walking a 7/8 map.
+// ---------------------------------------------------------------------------
+// 11e. generic device state — and with it the SAMPLER  (GUI-ON-DAEMON.md §15)
+// ---------------------------------------------------------------------------
+//
+// The bug this section ends is structural rather than subtle. `nxtakt:sampler`
+// IS the file it plays, and no parameter can say which one — the path lives in
+// `stateString()`, generic device state did not cross, and `nxtaktd` links no
+// decoder anyway. So a set with an instrument in it played the instrument
+// in-process and NOTHING AT ALL through the daemon: a device row, eight knobs,
+// a filename on screen, and silence.
+//
+// The first check below is that silence, taken deliberately as a negative
+// control, because "the sampler is loud now" only means something beside "the
+// sampler was silent before".
+static void testDeviceState(ipc::EngineClient& c) {
+    banner("11e. generic device state: a sampler's file and its audio cross, and it SOUNDS");
+
+    resetMixer(c);
+    drainEvents(c);
+    const ipc::ControlHeader& h = c.header();
+
+    // Track 1, armed: MIDI reaches a chain only on an armed track (engine.cpp,
+    // "armed tracks receive, and only devices that asked for notes"). Track 0 is
+    // where the clip sections leave things playing, so this one gets its own.
+    c.pushCommand(Cmd::TrackArm, 1, 1);
+
+    u32 smp = 0;
+    const bool added = addDeviceAndWait(c, ipc::DevTargetTrack, 1, -1, "nxtakt:sampler",
+                                        smp, kScanTimeoutMs);
+    CHECK(added, "AddDevice nxtakt:sampler -> device %u", smp);
+    if (!added) { c.pushCommand(Cmd::TrackArm, 1, 0); return; }
+
+    // -- the negative control ------------------------------------------------
+    c.pushMidi(0x90, 60, 127);
+    const f32 emptyPeak = settledPeak(c, 1, 300);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(emptyPeak < 1e-4f,
+          "a sampler the engine has no state for is SILENT (%.4f) — this is the "
+          "shipped behaviour every wave before this one had", (double)emptyPeak);
+
+    // -- the state, and the audio it names -----------------------------------
+    //
+    // The path is a real one in shape and a fiction on disk, which is exactly
+    // the case that matters: the daemon links NO DECODER, so it could not open
+    // the file even if it were there. Everything audible below was decoded on
+    // the other side of the wire and arrived as a pool block.
+    const char* kState = "nxsmp1;p=%2Ftmp%2Fnxtakt-dw-kick.wav";
+    const i64 kFrames = 24000;
+    const std::vector<f32> dc = makeDc(kFrames, 2, 0.5f);
+
+    const u64 applied0 = h.deviceStatesApplied.load();
+    // Let the ADD's URI blob come home before the baseline, or the block count
+    // below is chasing two retirements at once.
+    for (int i = 0; i < 40; ++i) { drainEvents(c); sleepMs(5); }
+    const u64 blocks0 = c.pool().liveBlocks();
+
+    CHECK(c.setDeviceState(smp, c.deviceGeneration(smp), kState,
+                           dc.data(), kFrames, 2, 48000.0),
+          "SetDeviceState crosses as a PoolKindDeviceState blob plus a sample block");
+    CHECK(waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedState) &&
+                (u32)e.ref == smp) return true;
+        return false;
+    }, 5000), "answered by EvDeviceChanged(DeviceChangedState) for device %u", smp);
+
+    // The counter MOVED. Not "is 1": an unwritten field reads 0 and so does a
+    // daemon that never applied anything, so the discriminating question is the
+    // delta across a publication — §11.6's poisoning argument in the form this
+    // field admits, since the client maps the control region read-only and
+    // cannot poison it by hand.
+    CHECK(h.deviceStatesApplied.load() == applied0 + 1,
+          "and the daemon counted it applied (%llu -> %llu)",
+          (unsigned long long)applied0, (unsigned long long)h.deviceStatesApplied.load());
+
+    // FREE-AFTER-CONFIRM, TWICE. This is the invariant doSetDeviceState states
+    // in the code: nothing the audio thread can reach points into either block,
+    // because the text is copied into a std::string and the samples are copied
+    // into the SampleBuffer the device adopts — so both are retired the instant
+    // the copy is made. A publication that leaked one of them would fill a 256
+    // MiB pool with one sampler.
+    CHECK(waitUntil([&] {
+        drainEvents(c);
+        return c.pool().liveBlocks() == blocks0;
+    }, 3000), "both blocks came home as EvBlockRetired (live %llu, was %llu)",
+          (unsigned long long)c.pool().liveBlocks(), (unsigned long long)blocks0);
+
+    // -- and now it sounds ---------------------------------------------------
+    c.pushMidi(0x90, 60, 127);
+    const f32 loaded = settledPeak(c, 1, 400);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(loaded > 0.4f,
+          "the same note now meters %.4f on track 1 — DC 0.5 played at the root "
+          "note, rendered in another process out of a buffer this one decoded",
+          (double)loaded);
+
+    // -- refusals, each with its reason --------------------------------------
+    //
+    // Every one of these is a state the client can reach and every one of them
+    // is a device that would otherwise be drawn loaded and sound like nothing.
+    auto refusedWith = [&](u32 want, const char* what) {
+        ipc::WireEvent e;
+        u32 got = ipc::RejectNone;
+        const bool any = waitUntil([&] {
+            ipc::WireEvent ev;
+            while (c.popEvent(ev))
+                if (ev.type == ipc::EvDeviceFailed &&
+                    (u32)ev.x == ipc::CmdSetDeviceState) { got = (u32)ev.b; return true; }
+            return false;
+        }, 4000);
+        (void)e;
+        CHECK(any && got == want, "%s -> %s (got %s)", what,
+              ipc::rejectReasonName(want), ipc::rejectReasonName(got));
+    };
+
+    const u64 blocksR = c.pool().liveBlocks();
+    CHECK(c.setDeviceState(smp, c.deviceGeneration(smp) + 7u, kState,
+                           dc.data(), kFrames, 2, 48000.0),
+          "a state stamped with the wrong device generation goes out");
+    refusedWith(ipc::RejectBadDevice,
+                "a stale generation cannot land a FILE on somebody else's device");
+    CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+          "and its two blocks still came home — a refusal must not strand a block");
+
+    CHECK(c.setDeviceState(smp, c.deviceGeneration(smp), "not a state string at all",
+                           nullptr, 0, 0, 0.0),
+          "a state the device's own parser will refuse goes out");
+    refusedWith(ipc::RejectBadDeviceState, "the sampler refuses it whole");
+
+    // The device is UNCHANGED by a refusal — host.h's contract, checked where it
+    // can actually be checked: it still plays what it was playing.
+    c.pushMidi(0x90, 60, 127);
+    const f32 stillLoaded = settledPeak(c, 1, 400);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(std::fabs(stillLoaded - loaded) < 0.02f,
+          "and the sampler is exactly as it was: %.4f (was %.4f)",
+          (double)stillLoaded, (double)loaded);
+
+    // A device that keeps no state at all. The BASE-CLASS setStateString takes
+    // any bytes and remembers none, so without the round-trip check this would
+    // be answered "applied" and change nothing.
+    u32 sat = 0;
+    if (addDeviceAndWait(c, ipc::DevTargetTrack, 1, -1, "nxtakt:saturator", sat, 5000)) {
+        CHECK(c.setDeviceState(sat, c.deviceGeneration(sat), "nxsmp1;p=x",
+                               nullptr, 0, 0, 0.0),
+              "a state sent to a saturator goes out");
+        refusedWith(ipc::RejectNotStateful,
+                    "and is refused, because it took the state and kept nothing");
+
+        CHECK(c.setDeviceState(sat, c.deviceGeneration(sat), "", dc.data(), 64, 2, 48000.0),
+              "audio sent to a device that plays no files goes out");
+        refusedWith(ipc::RejectBadDeviceSample, "and is refused whole");
+        c.removeDevice(sat);
+    }
+
+    // A sample block whose SHAPE disagrees with what the state claims. Built by
+    // hand, because the client API derives the header from the arguments and so
+    // cannot produce this — which is the point: the daemon must not trust the
+    // block's own frame count OR the command's alone.
+    {
+        const u64 aref = c.poolWrite(dc.data(), 64, 2, 48000.0, 0);
+        ipc::WireDeviceState hdr{};
+        hdr.audioRef      = aref;
+        hdr.audioFrames   = 64;
+        hdr.audioChannels = 1;              // the block says 2
+        hdr.audioRate     = 48000.0;
+        const u64 bref = c.pool().writeDeviceState(hdr, kState);
+        CHECK(aref && bref, "a hand-built state whose sample shape lies");
+        c.pool().markLive(aref); c.pool().markLive(bref);
+        ipc::WireCommand w{};
+        w.type  = ipc::CmdSetDeviceState;
+        w.flags = c.deviceGeneration(smp);
+        w.a     = (i32)smp;
+        w.ref   = bref;
+        CHECK(c.pushCommand(w), "pushed by hand");
+        c.pool().markDisplaced(bref); c.pool().release(bref);
+        c.pool().markDisplaced(aref); c.pool().release(aref);
+        refusedWith(ipc::RejectBadDeviceSample,
+                    "a shape the block and the state disagree about is refused");
+        CHECK(waitUntil([&] {
+            drainEvents(c);
+            return c.pool().stateOf(bref) != ipc::BlockRetiring &&
+                   c.pool().stateOf(aref) != ipc::BlockRetiring;
+        }, 3000), "and both hand-built blocks came home anyway");
+    }
+
+    // -- clearing ------------------------------------------------------------
+    //
+    // An EMPTY state means "no file". host.h says an empty string is a no-op for
+    // setStateString, and it is — which is exactly why the daemon has to do the
+    // clearing itself, or a sampler the user emptied would go on playing.
+    CHECK(c.setDeviceState(smp, c.deviceGeneration(smp), "", nullptr, 0, 0, 0.0),
+          "an empty state crosses");
+    CHECK(waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedState) &&
+                (u32)e.ref == smp) return true;
+        return false;
+    }, 4000), "and is applied");
+    // Wait for the METER to fall before asking it anything. The track just
+    // peaked at 0.5 and the engine's meter is a decaying hold, so a measurement
+    // taken 60 ms later reads the previous note rather than this one — which
+    // would make this check pass or fail on timing instead of on the clear.
+    CHECK(waitUntil([&] { drainEvents(c); return peakTrack(c, 1, 40) < 1e-3f; }, 4000),
+          "the meter falls back to silence after the last note");
+    c.pushMidi(0x90, 60, 127);
+    const f32 cleared = settledPeak(c, 1, 400);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(cleared < 1e-3f,
+          "the sampler is empty again and silent (%.4f)", (double)cleared);
+
+    c.removeDevice(smp);
+    c.pushCommand(Cmd::TrackArm, 1, 0);
+    drainEvents(c);
+}
+
 static void testSignatures(ipc::EngineClient& c) {
     banner("11d. the signature map crosses, and the engine plays in it");
 
@@ -4475,6 +4693,7 @@ int main(int argc, char** argv) {
         testDevices(client);
         testRackContents(client);
         testSignatures(client);
+        testDeviceState(client);
         testDrainsExactness(client);
         testArrangementCommands(client);
         testArrangementPlays(client);

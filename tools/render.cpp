@@ -191,6 +191,12 @@ static void materializeDevices(Engine& e, const Session& s, PluginRegistry& reg,
                     std::fprintf(stderr, "render: rack state did not parse for %s\n",
                                  sd.uri.c_str());
                 }
+            } else if (!sd.state.empty()) {
+                // Non-rack devices carry their state through the generic
+                // stateString() pair -- a sampler's is the path it loads. Without
+                // this a sampler renders silent, and the offline render is not
+                // what the set sounds like.
+                inst->setStateString(sd.state);
             }
 
             if (!line.empty()) line += ", ";

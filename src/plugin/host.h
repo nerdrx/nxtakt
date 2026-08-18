@@ -414,6 +414,25 @@ public:
     virtual const std::string& samplePath() const  = 0;
     virtual i64                sampleFrames() const = 0;
 
+    // The buffer the device is currently playing, or null. GUI thread, like
+    // everything here.
+    //
+    // The read-back half of adopt(), and it exists for one caller with one
+    // problem: `src/ui/engine_handle.cpp` has to put a sampler's audio into the
+    // sample pool so that `nxtaktd` -- which links no decoder, on purpose --
+    // can play it, and the state string names only a PATH. Re-decoding the file
+    // on the handle's side would be a second decode of the same bytes, at a
+    // rate it would have to re-derive, in a translation unit that has no
+    // business owning a decoder (GUI-ON-DAEMON.md §15.2).
+    //
+    // A shared_ptr and not a raw pointer, because the caller may outlive the
+    // next adopt(): the pool write is a memcpy of the whole buffer, and a
+    // sampler re-pointed on another code path during it would otherwise leave
+    // the copy reading a buffer that has moved to `retired_` and may already
+    // have been reclaimed. Holding a reference is the only thing that makes the
+    // copy safe, and it costs an atomic increment.
+    virtual std::shared_ptr<SampleBuffer> sampleBuffer() const = 0;
+
     // Frees the buffers that loadFile()/adopt()/clearSample() displaced.
     //
     // They are retained rather than dropped for exactly the reason

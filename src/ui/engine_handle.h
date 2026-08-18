@@ -286,6 +286,30 @@ public:
     u64 racksPublished() const;
     u64 racksRefused() const;
 
+    // --- generic device state (protocol v10, GUI-ON-DAEMON.md §15) ----------
+    //
+    // The sampler's channel, and the channel of every device after it that keeps
+    // something no parameter can say. `PluginInstance::stateString()` crosses as
+    // a PoolKindDeviceState blob and the far side applies it with
+    // `setStateString()` after the device's pending parameters, which is
+    // host.h's own ordering rule.
+    //
+    // For a device that plays a FILE it carries more than the string: `nxtaktd`
+    // links no decoder by design, so the GUI's decoded SampleBuffer rides along
+    // in the pool and the daemon's instance adopts a copy of it. Until this
+    // existed a sampler in daemon mode was STRUCTURALLY SILENT -- the set drew
+    // an instrument with a filename on it and the engine had never heard of
+    // either.
+    //
+    // Polled once a frame like the racks and the parameters, and for the same
+    // reason: dropping a file on a sampler calls straight into the GUI's own
+    // SamplerControl and there is no command to hook.
+    //
+    // `deviceStatesRefused()` non-zero is an instrument that is drawn loaded and
+    // plays nothing; the log line says which and why.
+    u64 deviceStatesPublished() const;
+    u64 deviceStatesRefused() const;
+
     // --- the arrangement (docs/ARRANGEMENT.md §9) ---------------------------
     //
     // The daemon has been able to take an arrangement since wave 8g; what was

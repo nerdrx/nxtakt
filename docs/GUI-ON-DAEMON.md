@@ -1924,3 +1924,383 @@ Three things worth doing beside it, none of them blocking:
 3. **The in-process silent-cancel leak** of §14.5, which needs one line in
    `engine.cpp` (an `Ev::RecordFinished` with `x = 0` from `cancelRec`) and
    would let the daemon delete `pumpTakeCancels()` entirely.
+
+---
+
+## 15. Generic device state, and with it the sampler — protocol v10
+
+§14.8 said "nothing in the feature list" stood between `NXTAKT_ENGINE=daemon`
+and the default. That was true of the *commands*; it was not true of the
+instruments. `nxtakt:sampler` was **structurally silent** in daemon mode, and
+the reason has two halves that had to be closed together:
+
+1. a sampler IS the file it plays, and no parameter can say which one — the
+   path lives in `PluginInstance::stateString()`, and **generic device state
+   did not cross at all**;
+2. even if it had, `nxtaktd` **links no decoder** and never will (the Makefile's
+   `DAEMON_SRC` says so and means it: "renders, does not decode or draw"), so a
+   path on its own is a path the daemon cannot open.
+
+So a set with an instrument in it played the instrument in-process and *nothing
+at all* through the daemon: a device row, twenty knobs, a filename on screen,
+and silence. Nothing on screen could tell you.
+
+### 15.1 The wire: `CmdSetDeviceState`, a SIBLING of `CmdSetRackState`
+
+```
+PoolKindDeviceState   [WireDeviceState][char text[textBytes]]
+                      `text` is stateString()'s output, NUL-terminated,
+                      bounded by kMaxDeviceState (64 KiB — the rack's number,
+                      and deliberately the same one: this channel is GENERIC,
+                      and a bound derived from today's only user is a bound
+                      that gets discovered by a truncation)
+
+WireDeviceState       version, textBytes,
+                      audioRef, audioFrames, audioChannels, audioRate
+                      40 B. audioRef names a SECOND block, an ordinary
+                      PoolKindSamples one.
+
+CmdSetDeviceState     a = device id, flags = the row generation, ref = the blob.
+                      Answered by exactly one EvDeviceChanged(DeviceChangedState)
+                      or EvDeviceFailed; the blob AND the sample it names are
+                      retired either way.
+
+RejectNotStateful     the device took the state and kept nothing
+RejectBadDeviceState  the blob's shape, or a state the device refused
+RejectBadDeviceSample the sample did not validate, or its shape disagreed with
+                      the header, or the device plays no files
+
+ControlHeader         deviceStatesApplied, out of the reserved words: no section
+                      moves, and the version plus the layout hash are what make
+                      a v9 and a v10 binary refuse each other.
+```
+
+`CmdTakeRelease` is **renumbered** `+6` → `+7`. It is a wire change and it rides
+the version bump a wire change is for; the alternative was a hole in
+`commandIsDevice()`'s range — a device command at `+7` with a take release at
+`+6` inside it — and a range predicate with a named exception in it is a
+predicate the next person appends to wrongly.
+
+**Why a sibling and not a widening of `CmdSetRackState`.** The obvious move is
+one "device state" command, since `host.h` says a rack's state *is* a state
+string. **In this tree it is not reachable as one.** `Rack`
+(`src/plugin/internal_devices.cpp`) overrides neither `stateString()` nor
+`setStateString()`; its contents are read through `RackControl::state()` and
+written through `RackControl::setState()`, which is exactly why `rack()` exists
+as a virtual. Sending a rack down the generic channel today would call the
+**base-class** `setStateString()`, which accepts anything and remembers nothing:
+accepted-and-ignored, the trade this boundary refuses everywhere else.
+
+Folding them is two overrides in `internal_devices.cpp` (`stateString()` →
+`rackStateToString(state())`, `setStateString()` → `rackStateFromString` +
+`setState`) plus deleting `CmdSetRackState`, `RejectNotARack` and
+`RejectBadRackState` — and it must keep four things the rack path does that the
+generic one now also does: the param row before, the cache re-seed after, the
+latency republish, and the reclaim riding the chain proof. That file was not
+this wave's. Until it happens the two channels are one command apart and share
+every rule; `syncDeviceStates()` skips a device that answers `rack()` non-null
+and says so at the line that does it.
+
+### 15.2 The sample, and the accessor it needed
+
+The GUI decodes; the daemon must not. So the decoded `SampleBuffer` rides the
+pool exactly as a clip's audio does — `poolWrite`, `markLive`, push,
+`markDisplaced`, `release` — and `WireDeviceState` names the block.
+
+The near side needed one thing it did not have: **`SamplerControl::sampleBuffer()`**,
+added to `src/plugin/host.h`.
+
+```c++
+virtual std::shared_ptr<SampleBuffer> sampleBuffer() const = 0;
+```
+
+A `shared_ptr` **by value**, not a raw pointer and not a `const&`, and that is
+the load-bearing part: the pool write is a memcpy of every sample, and a sampler
+re-pointed during it (a second file drop, a project load) moves the old buffer
+into `retired_`, where `reclaim()` frees it. A caller holding a reference is
+reading memory that is still there. A caller holding a raw pointer is not, and
+`const SampleRef&` would be a reference to the very member `adopt()` moves out
+from under it. `internal_device_test` asserts exactly that: a reference taken
+before a re-point *and a reclaim* still reads its own 4800 frames.
+
+**The two spellings, and how they are kept apart.** `text` is the PERSISTED
+spelling, verbatim; everything wire-only lives in the binary header in front of
+it. The alternative — appending a wire-only record to the state string, which
+both the rack's and the sampler's `;`-separated tag-per-record formats invite —
+was rejected: a state string is written into project files, a pool offset is
+meaningless five seconds later and catastrophic five days later when it names
+whatever now lives at that offset. Keeping the transient fields in a struct
+makes "could this be saved?" a question about which type a field is in, rather
+than a question about whether every writer remembers to strip a record. **The
+persistence format is unchanged and the daemon hands `text` to
+`setStateString()` unmodified**, so a set saved on either side of the wire
+produces the same bytes.
+
+**The cache is deliberately NOT reused.** `poolRefFor`'s address-keyed table
+holds a *live* block for as long as a clip cell names it. A device state's
+sample is retired the instant it is copied (§15.3), so a cached entry would be
+serving a dead offset — and worse, a `SampleBuffer` that is both a clip's audio
+and a sampler's would name ONE block, which the daemon would then retire out
+from under the clip cell. Two blocks for one buffer is a one-time waste; one
+block for two owners with different lifetimes is a use-after-free.
+
+### 15.3 The pool-lifetime invariant, verbatim as coded
+
+From `Daemon::doSetDeviceState`:
+
+> **NOTHING THE AUDIO THREAD CAN REACH EVER POINTS INTO EITHER BLOCK, so both
+> are retired the instant they have been copied — confirmed on the spot, with no
+> drain proof, exactly as a URI blob is.**
+
+That is the whole answer to "what pins the sample block while the daemon's
+sampler plays it": **nothing does, because the sampler never reads it.** The
+text is copied into a `std::string` and the samples are copied into the
+`SampleBuffer` the device adopts, both on the pump thread, before either offset
+is echoed back. The `shared_ptr` the sampler holds therefore has the **ordinary
+deleter over ordinary heap**: there is no path on which destroying a
+`SampleBuffer` touches pool memory, and none on which a client releasing a block
+can pull the floor out from under a voice.
+
+**The copy is what buys that, and it is not free.** A loaded sample exists three
+times — the GUI's `SampleBuffer`, the pool block until its echo lands, the
+daemon's `SampleBuffer` — where a clip's exists twice. The zero-copy shape (a
+`SampleBuffer` *viewing* pool memory) is **not reachable from here**:
+`SampleBuffer::data` is a `std::vector<f32>` and owns what it points at, so a
+view is a change to `src/audio/sample.h` and to every path that builds one, and
+that file was not this wave's.
+
+It is also not obviously the better end state, which is worth writing down
+before somebody "fixes" it:
+
+* a pool block borrowed by a device is pinned **for the life of the device**,
+  not for the life of an edit. A sampler holding a ten-minute file pins 240 MiB
+  of a 256 MiB arena until it is removed, and the free-after-confirm machinery
+  has nothing to say about that;
+* the retirement proof does not exist. A sampler publishes its buffer with one
+  release store and `SamplerControl::reclaim()` exists *precisely because*
+  "nothing inside a `PluginInstance` can know when the audio thread last
+  dereferenced the pointer it published". The daemon can answer that for a
+  **displaced** buffer — that is the chain retirement proof, which the reclaim
+  below rides — and cannot answer it for the one currently sounding, because
+  there is no event that says "no voice is inside this any more" short of
+  removing the device.
+
+So the copy is the cheap answer and the borrow is the expensive one, which is
+the reverse of how it looks. If `sample.h` ever grows a buffer that can view
+foreign memory, this is the paragraph to argue with.
+
+`adopt()` retires what it displaced rather than freeing it, so the device's id
+joins `ChainPush::reclaim` — **the same list a rack's setState uses, and one
+list on purpose**: a rack unlinks sub-devices and a sampler displaces a
+`SampleBuffer` for the identical reason, and a device is at most one of the two,
+so calling both is a null check rather than a branch.
+
+### 15.4 The near side: a fingerprint of the string AND of the buffer
+
+`syncDeviceStates()` is `syncRacks()` with the serial numbers filed off, polled
+once a frame from `poll()` after the parameters and after the racks. There is no
+command to hook: dropping a file on a sampler calls straight into the GUI's own
+`SamplerControl`.
+
+**What the fingerprint hashes: the text in full, and the buffer strided.** Two
+decisions, each reached from where it belongs.
+
+* *The text, in full* — the rack's decision (§13.1). `stateString()` builds a
+  fresh string at a fresh address on every call, so there is no address to key
+  on; a device is edited in place all session, so the question is genuinely "did
+  the content change"; and a stride that skipped a field would be the notes bug
+  wearing a state string. It is cheap in absolute terms: bounded by
+  `kMaxDeviceState`, and today's only implementer writes a path.
+* *The buffer, strided at 256 probes plus its address and shape* —
+  `sampleRefFor`'s decision (§11.4), because a `SampleBuffer`'s samples are
+  immutable for the life of the allocation and the only question is "is this
+  still the buffer I sent".
+* **And the buffer has to be in there at all**, which is the part the rack has
+  no analogue for: **a state string of a sampler is a PATH, and a path does not
+  identify audio.** A file edited on disk and re-loaded, or the same file
+  re-decoded at a new engine rate, produces the same string and a different
+  buffer. Hashing only the text would serve the cached publication and leave the
+  daemon playing the old bytes under the right name — a difference nothing on
+  screen could show. `handle_test` re-points a sampler at the same path with
+  quieter audio and watches the daemon's level move; hashing the text alone
+  turns that red.
+
+Refusals split the way §11.2 requires: "could not send" leaves the fingerprint
+alone and retries next frame; an `EvDeviceFailed` **tombstones** the exact state
+so it is not re-sent sixty times a second, and the next genuine edit produces a
+different number and genuinely retries.
+
+An **empty** state is a meaningful thing to send (a sampler whose file was
+cleared) and a meaningless thing to send *first* — almost every device in a set
+has no state at all — so `stateSent` gates it, and a set of forty effects puts
+nothing on the wire.
+
+### 15.5 Ordering, and one thing `host.h` did not anticipate
+
+`doSetDeviceState` applies the device's **pending param row before**
+`setStateString()` and **re-seeds `Device::cached[]` from the instance after**.
+That is `host.h`'s own rule ("parameters FIRST, then setStateString()") and
+RACKS.md's ordering trap in generic clothing: a state string is allowed to move
+parameters, so a param write that landed after it would overwrite exactly what
+the state just restored.
+
+**Accepted-and-ignored is not accepted.** `PluginInstance`'s default
+`setStateString()` takes any bytes and remembers none, so a state sent to a
+device that implements neither half would come back "applied" and change
+nothing. The round trip is the test: after `setStateString()` answers true, a
+device that kept a non-empty state answers a **non-empty** `stateString()`.
+Non-emptiness and not equality, deliberately — a device is allowed to normalise
+what it was handed (drop a record it does not know, re-escape a path), and
+demanding byte equality would make this a stricter contract than `host.h`'s and
+would break exactly the forward compatibility those formats were designed for.
+
+**An empty state means "no file", and the daemon has to do the clearing
+itself.** `host.h` is explicit that an empty string is a *no-op* for
+`setStateString` — right for a loader, exactly wrong for a reconciler. The client
+is not replaying a file, it is declaring what the device now IS, and a sampler
+the user emptied that went on playing would be the mirror image of the bug this
+channel exists to end. So a sampler whose state is empty and which still has a
+sample is cleared.
+
+### 15.6 Local mode is unchanged, by a byte
+
+`loadFile()` decodes directly as it always did; the pool path is reached only
+from `RemoteEngine`, and `EngineHandle`'s local branch calls none of it. The
+project format does not change: the `state` key still carries `stateString()`'s
+output and nothing else, because the pool reference never enters the string
+(§15.2). The four demo renders are `cmp`-identical to the baseline.
+
+### 15.7 Evidence
+
+`make test`, from clean binaries, zero warnings:
+**753 / 160 / 738 / 709 / 1030 / 205** (engine, ipc, daemon, internal_device,
+timesig_view, handle). ipc +26, daemon +25, internal_device +6, handle +22.
+(timesig_view's +10 is another agent's wave in the same tree, not this one's:
+the same binary built from `git archive HEAD` reads 1020.)
+
+ASan+UBSan with `detect_leaks=1` against a **sanitised `nxtaktd`**: ipc 160,
+internal_device 709, daemon 738, handle 205, and no sanitiser diagnostic of any
+kind. Four demo renders `cmp`-identical.
+
+**THE AUDIBLE PROOF, at the seam.** `handle_test` step 4e, against a real spawned
+`nxtaktd`: a real `nxtakt:sampler` on track 1, armed, handed a buffer through the
+GUI's own `SamplerControl::adopt()` — which is what a file drop calls — and a
+note-on pushed on the MIDI ring. Nothing is sent by hand.
+
+| | track 1 peak |
+|---|---|
+| sampler with no state — the negative control, i.e. every wave before this one | **0.0000** |
+| loaded, read off the handle's own frame snapshot | **0.5000** |
+| the same patch rendered IN-PROCESS by a second sampler in this process | **0.5000** |
+| a second, independent `EngineClient` on the same session | **0.5000** |
+| re-pointed at the SAME PATH with quieter audio | **0.1250** |
+| cleared | **0.0000** |
+
+The independent client decoded nothing, drew nothing and owns no pool.
+
+**THE AUDIBLE PROOF, with the shipping GUI and a real file.** The set is the
+four-scene demo reduced to its `keys` track, whose device is an
+`nxtakt:sampler` with a `state` line naming `kick.wav` on disk — so the path is
+a *project* path and the decode is the GUI's real `loadSample()`. The GUI runs
+headless in gamescope in daemon mode against an `nxtaktd` started outside the
+compositor; an independent `EngineClient` launches the scene and reads the
+daemon's own meter.
+
+| | track peak |
+|---|---|
+| `git archive HEAD` binaries, same set, clip provably PLAYING (`slotState 3`, `activeSlot 1`) | **0.0000** |
+| this wave's binaries, same set, same client | **0.7787** |
+| the same set rendered IN-PROCESS (`build/render`, scene 1, 4 bars) | **0.7787** |
+
+Four decimal places, and a measured zero underneath them. The daemon's log says
+`device 0: state applied, 74 byte(s), 192000 frames of audio` — 74 bytes of
+state string, four seconds of audio, and `sampler: this build links no audio
+decoder` two lines above it, which is the whole design in three lines of log.
+
+*One measurement note that is a property of the engine and not of this wave:* a
+track meter is published **once per audio block and decayed by 0.72 each block**,
+so a probe polling at 10 ms against a 5.33 ms block misses one publication in two
+and reads up to 0.72x the true peak. Both proofs poll faster than the block rate;
+the first version of the headless one did not and read 0.6720 for the same
+0.7787.
+
+`daemon_test` §11e adds, against a real daemon: the silence, the state and its
+audio crossing, `deviceStatesApplied` moving across the publication, **both**
+blocks coming home as `EvBlockRetired`, the note metering 0.5000, and five
+refusals each with its reason and each leaving its blocks free — a stale
+generation (the guard that stops a state naming a FILE landing on somebody
+else's device), a state the sampler's own parser refuses (with the device
+provably unchanged afterwards), a state sent to a saturator, audio sent to a
+device that plays no files, and a hand-built blob whose sample shape disagrees
+with the block's.
+
+`ipc_test` §11 adds the blob in one process: the classifiers (including that
+`CmdTakeRelease` is still not a device command after the renumber), the header
+recomputing what a lying caller passed it, the kind discipline in both
+directions, refusal at the bound rather than truncation, and free-after-confirm
+on both blocks.
+
+**Removal tests, run and watched go red.** Each fragment was removed from a
+green tree, the affected suites rebuilt from clean binaries and run, and the
+fragment restored.
+
+| removed | red |
+|---|---|
+| `syncDeviceStates()` from `poll()` | handle x5 |
+| the BUFFER half of `deviceStateFingerprint` (hash the text only) | handle x1 — the path does not identify audio |
+| the round-trip check (`RejectNotStateful`) | daemon x1 — accepted-and-ignored |
+| `clearSample()` on an empty state | daemon x1, handle x1 |
+| the sample block's retirement | daemon x3 — the pool grows |
+| the block/header shape cross-check | daemon x1 |
+| the `deviceStatesApplied` store | daemon x1 |
+| `sc->adopt()` of the pool sample | daemon x1, handle x4 |
+| `audioRef` from the wire header (client side) | daemon x4, handle x4 |
+| the kind: send the state as `PoolKindString` | ipc x2, daemon x10 |
+
+Two things are **not** removal-tested and are not claimed to be. The **sampler's
+`reclaim()`** on the chain proof leaks a displaced `SampleBuffer` per re-point
+and nothing outside the daemon can observe the difference — it is there for the
+reason `RackControl::reclaim()` is, and the rack's arm of the same list is
+tested. The **param-row-before-`setStateString` ordering** has no red available
+either: today's only implementer (`nxtakt:sampler`) keeps its state and its
+parameters in disjoint places, so nothing observable changes if the two swap.
+`daemon_test` proves the rack's version of the same rule (§13.6) and this path
+runs the identical two lines for the identical reason; the day a device keeps
+both, the test becomes writable.
+
+### 15.8 Owed
+
+1. **`tools/render.cpp` has the bug this wave just fixed on the wire.** It
+   applies `SavedDevice::state` **only** through `rack()`, so a sampler in a
+   rendered set is silent and a set rendered offline does not sound like the set.
+   One line, beside the rack arm it already has:
+   ```c++
+   if (!inst->rack() && !sd.state.empty()) inst->setStateString(sd.state);
+   ```
+   That file was not this wave's; the in-process column of §15.7's second table
+   was produced with exactly that line applied to a scratchpad copy, which is why
+   the number exists to compare against.
+2. **`deviceStatesRefused()` is readable and undrawn** — the sentence §13.8 wrote
+   about `arrangementsRefused()` and §14.8 about `takesFailed()`, a third time.
+   Non-zero means an instrument that is drawn loaded and plays nothing, and
+   `RemoteDevice::error` already carries the reason.
+3. **Fold the rack channel into this one** (§15.1) once
+   `src/plugin/internal_devices.cpp` can be edited: two overrides on `Rack`, and
+   `CmdSetRackState`, `RejectNotARack` and `RejectBadRackState` delete.
+4. **The third copy** (§15.3). Only worth spending if `src/audio/sample.h` grows
+   a buffer that can view foreign memory, and read §15.3 before deciding it is an
+   improvement.
+
+### 15.9 What stands between daemon mode and default
+
+**Nothing in the feature list, and now nothing in the instrument list either.**
+§14.8 said the first; it was true of the commands and not of the devices, and a
+DAW whose sampler is silent under its own default engine is not shippable
+whatever its command coverage says. That is closed and measured.
+
+What is left is the same release-note decision §8 step 2 always described, plus
+the five diffs §12.7 owes the UI (the banner, the browser's catalog, the
+device slot's loading/failed states, the status bar's counters, the `open()`
+rename) — every one of which is a thing the daemon path already knows and the
+screen does not yet say.
+

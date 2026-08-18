@@ -783,6 +783,75 @@ public:
         return true;
     }
 
+    // Install one device's GENERIC state (GUI-ON-DAEMON.md §15). `state` is
+    // `PluginInstance::stateString()`'s output — the PERSISTED spelling, byte
+    // for byte, with nothing appended for the wire — and `audio`, when non-null,
+    // is the decoded sample a device that plays a file needs, which the daemon
+    // cannot decode for itself (nxtaktd links no libsndfile, on purpose).
+    //
+    // `deviceGeneration` is the same stale-write guard setRackState carries and
+    // it bites the same way: a state that was in flight when a device was
+    // removed must not land on whatever took its slot.
+    //
+    // Answered by exactly one EvDeviceChanged(DeviceChangedState) or
+    // EvDeviceFailed, and BOTH blobs — the state and the sample — come back as
+    // EvBlockRetired either way. Returns false only for "could not send": no
+    // pool, no engine, ring full, pool full, or a state past kMaxDeviceState.
+    // That is a retry, exactly as it is for every other blob-carrying command.
+    //
+    // ALLOCATION ORDER IS AUDIO FIRST, and it matters: the sample is the big
+    // allocation and the one that can fail, so failing before the state blob
+    // exists means there is only one thing to unwind. The reverse order has a
+    // path that allocates a state blob, fails on the audio, and has to release
+    // a block whose command never went out.
+    bool setDeviceState(u32 deviceId, u32 deviceGeneration, const char* state,
+                        const f32* audio, i64 audioFrames, int audioChannels,
+                        f64 audioRate) {
+        if (!attached() || !state) return false;
+        if (!pool_.valid()) return false;
+        if (map_.cmds->size() >= CommandRing::capacity()) return false;
+
+        const bool haveAudio = audio && audioFrames > 0 &&
+                               (audioChannels == 1 || audioChannels == 2);
+        u64 audioRef = 0;
+        if (haveAudio) {
+            audioRef = pool_.writeSamples(audio, audioFrames, audioChannels, audioRate, 0);
+            if (!audioRef) { setErr("%s", pool_.error()); return false; }
+            pool_.markLive(audioRef);
+        }
+
+        WireDeviceState h{};
+        h.audioRef      = audioRef;
+        h.audioFrames   = haveAudio ? audioFrames : 0;
+        h.audioChannels = haveAudio ? (u32)audioChannels : 0u;
+        h.audioRate     = haveAudio ? audioRate : 0.0;
+        const u64 ref = pool_.writeDeviceState(h, state);
+        if (!ref) {
+            setErr("%s", pool_.error());
+            dropStringBlob(audioRef);
+            return false;
+        }
+        pool_.markLive(ref);
+
+        WireCommand w{};
+        w.type  = CmdSetDeviceState;
+        w.flags = deviceGeneration;
+        w.a     = (i32)deviceId;
+        w.ref   = ref;
+        if (!pushCommand(w)) {
+            dropStringBlob(ref);
+            dropStringBlob(audioRef);
+            return false;
+        }
+        // Both blobs belong to the daemon's read now. Drop our own references so
+        // the retirement echoes are the only things left to free them — the
+        // AddDevice dance, run twice, because the command names two blocks.
+        pool_.markDisplaced(ref);
+        pool_.release(ref);
+        if (audioRef) { pool_.markDisplaced(audioRef); pool_.release(audioRef); }
+        return true;
+    }
+
     // Start the catalog scan now instead of on the first addDevice().
     bool scanPlugins() {
         WireCommand w{};

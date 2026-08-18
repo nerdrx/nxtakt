@@ -118,7 +118,18 @@ inline constexpr u64 kPoolBlockMagic = 0x4C54435F424C4B31ull;  // "LTC_BLK1"
 //        the same argument for a number: a v5 daemon handed a signature blob
 //        refuses it, and a set that plays in 4/4 while its ruler draws 7/8 is
 //        precisely the silent disagreement this whole layer exists to prevent.
-inline constexpr u32 kPoolVersion = 6;
+//   v7 — GENERIC DEVICE STATE (PoolKindDeviceState, GUI-ON-DAEMON.md §15). The
+//        first pool kind that is not one payload but a HEADER plus one: a
+//        WireDeviceState followed by the device's own stateString() bytes, and
+//        the header may name a second block (PoolKindSamples) holding a decoded
+//        sample. Until it existed `nxtakt:sampler` was STRUCTURALLY SILENT in
+//        daemon mode — the state string carrying the path did not cross, and
+//        nxtaktd deliberately links no decoder, so even if it had the daemon
+//        could not have opened the file. Same argument for a number as every
+//        entry above it: a v6 daemon handed one of these refuses it as "not a
+//        string", and a sampler that is drawn full and sounds empty is exactly
+//        the silent disagreement this layer exists to prevent.
+inline constexpr u32 kPoolVersion = 7;
 
 // Every block — header and data — starts on a 64-byte line. Blocks are large
 // (a stereo bar of audio is hundreds of kilobytes) so the padding is noise,
@@ -220,6 +231,22 @@ enum : u32 {
     // and then read; a signature map is a live structure. So the daemon copies
     // it into its own heap and validates it there. See Daemon::doSetSignatures.
     PoolKindSignatures = 8,
+
+    // ONE DEVICE'S GENERIC STATE (GUI-ON-DAEMON.md §15):
+    //
+    //   [WireDeviceState][char text[textBytes]]
+    //
+    // `text` is `PluginInstance::stateString()`'s output, NUL-terminated, byte
+    // for byte what a saved set would carry — see WireDeviceState for why the
+    // wire-only fields live in the header and not in the string.
+    //
+    // A SEPARATE KIND FROM PoolKindRackState, and for once the two are NOT the
+    // same shape: a rack state is a bare string, this is a header plus a string,
+    // and a reader that took one for the other would read a length prefix as
+    // text or text as a length. They are also reached differently — a rack's
+    // contents come off RackControl::state(), a device's state off the generic
+    // stateString() virtual — which is the whole reason both channels exist.
+    PoolKindDeviceState = 9,
 };
 
 // The longest string the pool will carry. Not a buffer size — a policy: the
@@ -243,6 +270,21 @@ inline constexpr u64 kMaxPoolString = 1024;
 // trade worth making, and the pump is not realtime.
 inline constexpr u64 kMaxRackState = 65536;
 
+// The longest generic device state the pool will carry, TEXT ONLY — the
+// WireDeviceState header in front of it is not counted, because this number is
+// a bound on a peer-driven copy and the header is a fixed 48 bytes the daemon
+// reads before it trusts anything.
+//
+// The same 64 KiB as a rack's, and deliberately the same number rather than a
+// smaller one derived from today's only user: `nxtakt:sampler` writes a
+// percent-escaped path and nothing else, so its worst case is about 12 KiB —
+// but this channel is GENERIC by construction, the next device to override
+// stateString() will not ask permission, and a bound that has to be revisited
+// per device is a bound that will be discovered by a truncation. 64 KiB is
+// still a bounded copy on the daemon's pump thread, which is the property
+// kMaxPoolString was really protecting.
+inline constexpr u64 kMaxDeviceState = 65536;
+
 // Block lifecycle. See "the free-after-confirm rule" below — these four states
 // *are* the rule, written down.
 enum : u32 {
@@ -262,6 +304,7 @@ inline const char* poolKindName(u32 k) {
         case PoolKindTrackAutos:  return "track-autos";
         case PoolKindRackState:   return "rack-state";
         case PoolKindSignatures:  return "signatures";
+        case PoolKindDeviceState: return "device-state";
         default:                  return "none";
     }
 }
@@ -328,6 +371,59 @@ static_assert(offsetof(WireSig, bar)  == offsetof(RtSig, bar));
 static_assert(offsetof(WireSig, num)  == offsetof(RtSig, num));
 static_assert(offsetof(WireSig, den)  == offsetof(RtSig, den));
 static_assert(offsetof(WireSig, beat) == offsetof(RtSig, beat));
+
+// ---------------------------------------------------------------------------
+// WireDeviceState — the head of a PoolKindDeviceState blob
+// ---------------------------------------------------------------------------
+//
+// THE TWO SPELLINGS, AND HOW THEY ARE KEPT APART. This is the whole design
+// decision of §15 and it is one sentence: **`text` is the PERSISTED spelling,
+// verbatim, and everything that is wire-only lives out here in the header.**
+//
+// The alternative — appending a wire-only record to the state string itself,
+// which both the rack's and the sampler's `;`-separated, tag-per-record formats
+// invite — was rejected. A state string is written into project files by
+// `src/core/project.cpp` and read back by a device's own parser; a pool offset
+// is meaningless five seconds later and catastrophic five days later, when it
+// names whatever now lives at that offset in somebody else's pool. Keeping the
+// transient fields in a binary header makes "could this be saved?" a question
+// about which struct a field is in, rather than a question about whether every
+// writer remembers to strip a record.
+//
+// So: the daemon hands `text` to `setStateString()` unmodified, and a set saved
+// on either side of the wire produces the same bytes.
+//
+// THE SAMPLE. `audioRef` names a SECOND block — an ordinary PoolKindSamples
+// one, written by exactly the code that writes a clip's audio — because the
+// GUI decodes and the daemon deliberately does not (`nxtaktd` links no
+// libsndfile; see the weak-decoder note in src/plugin/sampler.cpp). The shape
+// is carried here as well as in the block's own header, and the daemon checks
+// them against each other: the block header is in a CLIENT-WRITABLE region, so
+// a frame count read from it is a number a peer chose, and computing the copy
+// bound from a number the command also states is one more thing a corrupt
+// writer has to get consistently wrong.
+//
+// A device with no sample sets audioRef = 0, which is every device but one.
+struct WireDeviceState {
+    u32 version;        // kDeviceStateVersion
+    u32 textBytes;      // including the NUL; <= kMaxDeviceState
+    u64 audioRef;       // 0 = none; otherwise a PoolKindSamples block
+    i64 audioFrames;
+    u32 audioChannels;  // 1 or 2
+    u32 pad;
+    f64 audioRate;
+};
+
+// Bumped when the MEANING of the fields above changes. Separate from
+// kPoolVersion because a blob is also validated by a daemon that may be newer
+// than the client in a development tree, and "I do not understand this state"
+// deserves a refusal with a reason rather than a layout-hash mismatch at
+// attach() — which is the right answer for a whole-region disagreement and the
+// wrong one for a single command.
+inline constexpr u32 kDeviceStateVersion = 1;
+
+static_assert(std::is_trivially_copyable_v<WireDeviceState>);
+static_assert(sizeof(WireDeviceState) == 40);
 
 // ---------------------------------------------------------------------------
 // PoolBlock — the inline descriptor, immediately before its data
@@ -503,6 +599,7 @@ inline bool poolValidate(const u8* base, size_t payloadBytes, const PoolHeader* 
                 : wantKind == PoolKindTrackAutos  ? "block does not hold track automation"
                 : wantKind == PoolKindRackState   ? "block does not hold a rack state"
                 : wantKind == PoolKindSignatures  ? "block does not hold a signature map"
+                : wantKind == PoolKindDeviceState ? "block does not hold a device state"
                                                   : "block is of the wrong kind");
     if (needBytes > bytes)                   return no("block is smaller than the clip claims");
     // Hand the validated extent back so callers never re-read the mutable field
@@ -743,6 +840,33 @@ public:
     // Same bytes-and-a-terminator shape as writeString and deliberately NOT the
     // same kind or the same bound — see PoolKindRackState and kMaxRackState.
     u64 writeRackState(const char* s) { return writeText(s, PoolKindRackState, kMaxRackState); }
+
+    // One device's generic state (PoolKindDeviceState): the header, then the
+    // NUL-terminated state string. `hdr.textBytes` is IGNORED and recomputed
+    // from `s`, so a header that disagrees with the string it precedes cannot be
+    // built here by accident — the same rule poolWriteArrangement applies to its
+    // counts, for the same reason.
+    //
+    // The audio the header may name is NOT written here: it is an ordinary
+    // PoolKindSamples block from writeSamples(), so a sampler's audio goes
+    // through exactly the allocator path, the validation and the free-after-
+    // confirm bookkeeping a clip's does, and there is one implementation of
+    // "audio in the pool" rather than two.
+    u64 writeDeviceState(const WireDeviceState& hdr, const char* s) {
+        if (!s) return 0;
+        const size_t len = std::strlen(s);
+        if (len + 1 > kMaxDeviceState) return 0;
+        const u64 bytes = (u64)sizeof(WireDeviceState) + (u64)len + 1;
+        const u64 ref = alloc(bytes, PoolKindDeviceState, (i64)bytes, 0, 0.0, 0);
+        if (!ref) return 0;
+        WireDeviceState h = hdr;
+        h.version   = kDeviceStateVersion;
+        h.textBytes = (u32)(len + 1);
+        std::memcpy(base_ + ref, &h, sizeof h);
+        std::memcpy(base_ + ref + sizeof h, s, len);
+        base_[ref + sizeof h + len] = '\0';
+        return ref;
+    }
 
     // The shared half. `cap` is the caller's policy bound including the NUL, and
     // it is checked BEFORE the allocation so that an over-long payload is a

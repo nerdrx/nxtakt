@@ -1012,7 +1012,7 @@ static void testArrangementClassifiers() {
           (unsigned long long)ipc::arrangementBytes(2, 1));
     CHECK(ipc::kMaxArrLanes == kMaxRtArrLanes,
           "the wire lane bound and the engine's agree (%d)", (int)ipc::kMaxArrLanes);
-    CHECK(ipc::kProtocolVersion == 9 && ipc::kPoolVersion == 6 && ipc::kShmVersion == 6,
+    CHECK(ipc::kProtocolVersion == 10 && ipc::kPoolVersion == 7 && ipc::kShmVersion == 6,
           "protocol v%u, pool v%u, shm v%u", ipc::kProtocolVersion, ipc::kPoolVersion,
           ipc::kShmVersion);
     CHECK(ipc::control::kJournal > ipc::control::kParams &&
@@ -1357,6 +1357,169 @@ static void testTakeFiles() {
 }
 
 // ---------------------------------------------------------------------------
+// 11. the device-state blob  (GUI-ON-DAEMON.md §15)
+// ---------------------------------------------------------------------------
+//
+// PoolKindDeviceState is the first pool kind that is a HEADER plus a payload,
+// and the first that names a SECOND block. Both of those are new ways to be
+// wrong, so both are tested here — in one process, with no daemon — and what
+// daemon_test then has to prove is only that the far side uses it.
+//
+// The properties a wrong answer would make silent:
+//   * the text is the PERSISTED spelling, byte for byte. If anything wire-only
+//     ever leaked into it, a saved set would carry a pool offset.
+//   * a state blob and a string blob are DIFFERENT KINDS. They are both "some
+//     bytes and a terminator", so nothing but `kind` stands between a state
+//     read as a URI and a URI read as a state.
+//   * an over-long state is REFUSED and not truncated. A truncated state string
+//     is not a shorter state, it is a different one — for a sampler, a
+//     different FILE.
+//   * CmdSetDeviceState classifies as a DEVICE command, and CmdTakeRelease
+//     still does not, after v10 renumbered it.
+
+static void testDeviceStateBlob() {
+    banner("11. the device-state blob: header, text, kind, and the classifiers");
+
+    // -- classification, first: it is what decides whether the command is even
+    //    delivered, and 8a's lesson is that a bound spelled by hand goes stale.
+    CHECK(ipc::commandIsDevice(ipc::CmdSetDeviceState),
+          "CmdSetDeviceState is a device command");
+    CHECK(ipc::commandIsKnown(ipc::CmdSetDeviceState),
+          "and this build knows it (an unknown one is answered RejectUnknownCommand)");
+    CHECK(!ipc::commandCarriesPointer(ipc::CmdSetDeviceState),
+          "and it carries no pointer: the payload is a pool offset");
+    // The renumber. CmdTakeRelease moved from +6 to +7 so the device commands
+    // stay contiguous; if it had stayed put it would now be INSIDE
+    // commandIsDevice's range and would be dispatched to the device queue.
+    CHECK(!ipc::commandIsDevice(ipc::CmdTakeRelease),
+          "CmdTakeRelease is still not a device command after the v10 renumber");
+    CHECK(ipc::commandIsTakeRelease(ipc::CmdTakeRelease) &&
+          ipc::commandIsKnown(ipc::CmdTakeRelease),
+          "and it still classifies as itself");
+    CHECK(ipc::CmdSetDeviceState != ipc::CmdTakeRelease &&
+          ipc::CmdSetDeviceState != ipc::CmdSetRackState,
+          "the three occupy distinct slots");
+
+    CHECK(sizeof(ipc::WireDeviceState) == 40 && ipc::kDeviceStateVersion == 1,
+          "WireDeviceState is %zu B at v%u",
+          sizeof(ipc::WireDeviceState), ipc::kDeviceStateVersion);
+
+    char session[48];
+    std::snprintf(session, sizeof session, "ipc-devstate-%d", (int)::getpid());
+    std::snprintf(gShmNameAlt, sizeof gShmNameAlt, "nxtakt-pool-%s", session);
+
+    ipc::EngineClient c;
+    if (!c.createPool(session, 4u << 20)) { CHECK(false, "createPool: %s", c.error()); return; }
+    ipc::SamplePool& p = c.pool();
+
+    // Validation through the READER's entry point, deliberately: poolValidate is
+    // the one function the daemon puts between an untrusted offset and a
+    // pointer, so a kind check tested through anything else would be testing a
+    // different function than the one that matters.
+    auto validates = [&](u64 r, u32 kind, u64 need, const char** why, u64* out) {
+        return ipc::poolValidate(p.base(), p.bytes(), p.header(), r, kind, need, why, out);
+    };
+
+    // A sampler's real spelling, escapes and all.
+    const char* kState = "nxsmp1;p=%2Ftmp%2Fkick%20one.wav";
+    ipc::WireDeviceState h{};
+    const u64 ref = p.writeDeviceState(h, kState);
+    CHECK(ref != 0, "a state blob at %llu", (unsigned long long)ref);
+    if (!ref) { c.closePool(); return; }
+
+    const char* why = "";
+    u64 blockBytes = 0;
+    CHECK(validates(ref, ipc::PoolKindDeviceState, sizeof(ipc::WireDeviceState),
+                    &why, &blockBytes),
+          "it validates as a device state (%s)", why);
+    CHECK(!validates(ref, ipc::PoolKindString, 1, &why, nullptr),
+          "and NOT as a string: '%s'", why);
+    CHECK(!validates(ref, ipc::PoolKindRackState, 1, &why, nullptr),
+          "and NOT as a rack state: '%s'", why);
+
+    ipc::WireDeviceState got{};
+    std::memcpy(&got, p.data<u8>(ref), sizeof got);
+    CHECK(got.version == ipc::kDeviceStateVersion, "the header says v%u", got.version);
+    CHECK(got.textBytes == std::strlen(kState) + 1,
+          "textBytes counts the terminator (%u == %zu)",
+          got.textBytes, std::strlen(kState) + 1);
+    CHECK(got.audioRef == 0, "no sample named");
+    const char* text = (const char*)p.data<u8>(ref) + sizeof(ipc::WireDeviceState);
+    CHECK(!std::strcmp(text, kState),
+          "and the TEXT IS THE PERSISTED SPELLING, byte for byte ('%s')", text);
+
+    // The header's counts are recomputed from the string, so a caller that
+    // builds a header disagreeing with what it hands over cannot publish one.
+    ipc::WireDeviceState lying{};
+    lying.textBytes = 9999;
+    lying.version   = 77;
+    const u64 ref2 = p.writeDeviceState(lying, "x");
+    CHECK(ref2 != 0, "a second blob from a header that lies about its own text");
+    if (ref2) {
+        ipc::WireDeviceState g2{};
+        std::memcpy(&g2, p.data<u8>(ref2), sizeof g2);
+        CHECK(g2.textBytes == 2 && g2.version == ipc::kDeviceStateVersion,
+              "the writer recomputes textBytes and stamps the version (%u, v%u)",
+              g2.textBytes, g2.version);
+    }
+
+    // Over-long: refused, never truncated.
+    std::string huge((size_t)ipc::kMaxDeviceState, 'z');    // + NUL is one past
+    CHECK(p.writeDeviceState(h, huge.c_str()) == 0,
+          "a state one byte past kMaxDeviceState is refused rather than truncated");
+    std::string atMax((size_t)ipc::kMaxDeviceState - 1, 'z');
+    const u64 ref3 = p.writeDeviceState(h, atMax.c_str());
+    CHECK(ref3 != 0, "and one exactly at the bound is taken");
+
+    // The second block. A sampler's audio is an ORDINARY PoolKindSamples block,
+    // so it goes through the allocator, the validation and the free-after-confirm
+    // bookkeeping a clip's does -- that is the whole reason it is not carried
+    // inside the state blob.
+    std::vector<f32> dc((size_t)512 * 2, 0.5f);
+    const u64 aref = c.poolWrite(dc.data(), 512, 2, 48000.0, 0);
+    CHECK(aref != 0, "the audio is an ordinary sample block (%llu)",
+          (unsigned long long)aref);
+    ipc::WireDeviceState wa{};
+    wa.audioRef      = aref;
+    wa.audioFrames   = 512;
+    wa.audioChannels = 2;
+    wa.audioRate     = 48000.0;
+    const u64 ref4 = p.writeDeviceState(wa, kState);
+    CHECK(ref4 != 0, "and a state that names it");
+    if (ref4) {
+        ipc::WireDeviceState g4{};
+        std::memcpy(&g4, p.data<u8>(ref4), sizeof g4);
+        CHECK(g4.audioRef == aref && g4.audioFrames == 512 && g4.audioChannels == 2,
+              "the shape crosses beside the offset, so the far side never has to "
+              "trust the block's own frame count alone");
+        CHECK(validates(g4.audioRef, ipc::PoolKindSamples,
+                        (u64)512 * 2 * sizeof(f32), &why, nullptr),
+              "and the block it names validates as samples (%s)", why);
+    }
+
+    // FREE-AFTER-CONFIRM, both blocks, the AddDevice dance run twice.
+    p.markLive(ref4); p.markLive(aref);
+    p.markDisplaced(ref4); p.release(ref4);
+    p.markDisplaced(aref); p.release(aref);
+    CHECK(p.stateOf(ref4) == ipc::BlockRetiring && p.stateOf(aref) == ipc::BlockRetiring,
+          "both blocks are Retiring while the daemon has not answered (%s, %s)",
+          ipc::poolStateName(p.stateOf(ref4)), ipc::poolStateName(p.stateOf(aref)));
+    ipc::WireEvent e{};
+    e.type = ipc::EvBlockRetired; e.ref = ref4; c.observe(e);
+    e.ref = aref;                                c.observe(e);
+    CHECK(p.stateOf(ref4) == ipc::BlockFree && p.stateOf(aref) == ipc::BlockFree,
+          "and both are freed by their own echoes (%s, %s)",
+          ipc::poolStateName(p.stateOf(ref4)), ipc::poolStateName(p.stateOf(aref)));
+
+    c.poolRelease(ref);
+    c.poolRelease(ref2);
+    c.poolRelease(ref3);
+    c.closePool();
+    CHECK(!shmExistsPool(session), "the device-state pool is unlinked");
+    gShmNameAlt[0] = '\0';
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);   // survives fork() without duplicating output
@@ -1378,8 +1541,9 @@ int main() {
     testArrangementClassifiers();
     testJournalRingCrossProcess();
     testTakeFiles();
+    testDeviceStateBlob();
 
-    banner("11. /dev/shm is clean");
+    banner("12. /dev/shm is clean");
     cleanupShm();
     const int leftover = countNxTaktShm();
     CHECK(leftover == 0, "no nxtakt region left in /dev/shm (found %d)", leftover);
