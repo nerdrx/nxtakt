@@ -40,21 +40,108 @@ static constexpr f64 kMinLoopBeats = 1.0 / 64.0;
 // ---------------------------------------------------------------------------
 // resilient critical events (RT-AUDIT §1.6)
 //
-// RecordFinished / MidiRecordFinished / ChainRetired / NotesRetired each carry a
-// heap pointer back to the GUI and are the ONLY channel that returns it: a
-// dropped RecordFinished loses a recording *and* leaks its buffer, unrecoverably
-// (the cosmetic events — ClipStarted, meters, ... — either self-heal from the
-// mirrored atomics or are re-derivable by the drain proof). The event ring is
-// SPSC and a full ring makes push() fail silently, so a failed push of one of
+// Every retirement and hand-back event — RecordFinished, MidiRecordFinished,
+// ChainRetired, NotesRetired, AutosRetired, WarpRetired, ArrangementRetired,
+// TrackAutosRetired, SigsRetired — carries a heap pointer back to its owner and
+// is the ONLY channel that returns it: a dropped RecordFinished loses a
+// recording *and* leaks its buffer, unrecoverably (the cosmetic events —
+// ClipStarted, meters, ... — either self-heal from the mirrored atomics or are
+// re-derivable by the drain proof). Ev::AutoLaneInert rides this path too and is
+// the one member carrying no pointer: it is a once-per-published-set diagnosis,
+// so losing it would silently un-explain a lane that never moves. The event ring
+// is SPSC and a full ring makes push() fail silently, so a failed push of one of
 // these is instead PARKED here, audio-thread-owned, and retried at the top of
 // every process() before the ring is touched again.
 //
-// engine.h is a frozen contract with no room for this, so — exactly like the PDC
-// state below — it lives in a side-table keyed by the Engine's address. The
-// parking buffer is fixed and audio-thread-only; overflowing it (the GUI wedged
-// for >kCap critical events) bumps a counter rather than allocating.
+// engine.h is a frozen contract with no room for this, so the parking buffer
+// lives in a side table keyed by the Engine's address — the first of four, and
+// the reason SideTable below is written once instead of four times.
 namespace {
 
+// ---------------------------------------------------------------------------
+// per-Engine side state
+//
+// engine.h is the daemon's frozen contract, so the four pieces of state the
+// engine has grown since it froze — the parked critical events below, the delay
+// compensation lines, the automation holds and the arrangement cursor — cannot
+// be members of Engine. Each lives in one of these instead, keyed by the
+// Engine's ADDRESS: prepare() (GUI thread, before the audio thread exists)
+// claims a slot and allocates, and the audio thread afterwards only ever looks
+// one up, which is a handful of pointer compares once per block.
+//
+// Four slots is three more than any process has ever needed — the app, the
+// daemon, the renderer and the tests each run exactly one Engine — and the
+// table is bounded on purpose, so a process that churned through Engines cannot
+// grow it without limit. A fifth *concurrently prepared* Engine takes the least
+// recently claimed slot over and shares its storage; what that costs is stated
+// at each table, and in none of them is it a crash or a read out of bounds. The
+// real fix is members in engine.h next time it thaws.
+//
+// The claim is deliberately two steps. `claim()` returns an INDEX and does not
+// publish the owner; the caller resets the state and then calls `publish()`. A
+// one-step acquire would let the audio thread find a slot part-way through
+// being reset — which cannot happen today, because prepare() runs before the
+// audio thread exists, but the ordering is free and the invariant is worth
+// having written down rather than inferred.
+template <class State>
+struct SideTable {
+    static constexpr int kSlots = 4;   // app, daemon, renderer, tests: one each
+    std::atomic<const Engine*> owner[kSlots];
+    State* slot[kSlots]  = {};
+    u64    stamp[kSlots] = {};
+    u64    clock = 0;
+
+    // Audio thread. Null => this Engine was never prepared, or its allocation
+    // failed; every caller reads that as "this engine has none of this state"
+    // and degrades to the behaviour it had before the state existed.
+    State* find(const Engine* e) {
+        for (int i = 0; i < kSlots; ++i)
+            if (owner[i].load(std::memory_order_acquire) == e) return slot[i];
+        return nullptr;
+    }
+
+    // GUI thread. Allocates on first use for a given Engine and reuses the same
+    // slot on every re-prepare (a sample-rate change, say), so re-preparing
+    // allocates nothing. -1 means the allocation failed. `what` names this table
+    // in the eviction warning; null asks for no warning.
+    int claim(const Engine* e, const char* what) {
+        int idx = -1;
+        for (int i = 0; i < kSlots; ++i)
+            if (owner[i].load(std::memory_order_relaxed) == e) { idx = i; break; }
+        if (idx < 0)
+            for (int i = 0; i < kSlots; ++i)
+                if (!owner[i].load(std::memory_order_relaxed)) { idx = i; break; }
+        if (idx < 0) {
+            idx = 0;
+            for (int i = 1; i < kSlots; ++i) if (stamp[i] < stamp[idx]) idx = i;
+            if (what) LOGW("%s: no free slot, taking the least recently claimed "
+                           "one over (engine %p)", what, (const void*)e);
+        }
+        if (!slot[idx]) {
+            slot[idx] = new (std::nothrow) State();
+            if (!slot[idx]) return -1;
+        }
+        return idx;
+    }
+
+    void publish(int idx, const Engine* e) {
+        stamp[idx] = ++clock;
+        owner[idx].store(e, std::memory_order_release);
+    }
+
+    // Freed at exit so a leak checker has nothing to say. By then the backend
+    // has stopped and no audio thread is inside process(); a State that owns
+    // further memory frees it in its own destructor.
+    ~SideTable() { for (auto*& p : slot) { delete p; p = nullptr; } }
+};
+
+// ---------------------------------------------------------------------------
+// resilient critical events, continued: the parking buffer itself.
+//
+// Fixed and audio-thread-only; overflowing it (the GUI wedged for >kCap critical
+// events) bumps a counter rather than allocating. Eviction costs a shared
+// parking buffer, so two engines' parked events would interleave — noise in the
+// order they arrive, never a lost pointer.
 struct PendingEv {
     static constexpr int kCap = 128;
     Event ev[kCap];
@@ -62,36 +149,19 @@ struct PendingEv {
     std::atomic<u64> dropped{0};
 };
 
-struct PendTable {
-    static constexpr int kSlots = 4;   // app, daemon, renderer, tests: one each
-    std::atomic<const Engine*> owner[kSlots];
-    PendingEv* slot[kSlots] = {};
-    ~PendTable() { for (auto* p : slot) delete p; }
-};
-PendTable gPend;
+SideTable<PendingEv> gPend;
 
-// Audio thread: a handful of pointer compares. Null => never prepared.
-PendingEv* pendFind(const Engine* e) {
-    for (int i = 0; i < PendTable::kSlots; ++i)
-        if (gPend.owner[i].load(std::memory_order_acquire) == e) return gPend.slot[i];
-    return nullptr;
-}
+PendingEv* pendFind(const Engine* e) { return gPend.find(e); }
 
-// GUI thread, from prepare(): claim a slot (allocating on first use) and clear it.
+// GUI thread, from prepare(): claim a slot (allocating on first use) and clear
+// it. Only `len` is reset — `dropped` is a lifetime counter of this parking
+// buffer, and PendingEv holds an atomic, so there is no whole-struct assignment
+// to be had here anyway.
 PendingEv* pendAcquire(const Engine* e) {
-    int idx = -1;
-    for (int i = 0; i < PendTable::kSlots; ++i)
-        if (gPend.owner[i].load(std::memory_order_relaxed) == e) { idx = i; break; }
-    if (idx < 0)
-        for (int i = 0; i < PendTable::kSlots; ++i)
-            if (!gPend.owner[i].load(std::memory_order_relaxed)) { idx = i; break; }
-    if (idx < 0) idx = 0;               // four is more than any process needs
-    if (!gPend.slot[idx]) {
-        gPend.slot[idx] = new (std::nothrow) PendingEv();
-        if (!gPend.slot[idx]) return nullptr;
-    }
+    const int idx = gPend.claim(e, nullptr);
+    if (idx < 0) return nullptr;
     gPend.slot[idx]->len = 0;
-    gPend.owner[idx].store(e, std::memory_order_release);
+    gPend.publish(idx, e);
     return gPend.slot[idx];
 }
 
@@ -955,53 +1025,20 @@ struct AutoState {
     AutoTrack t[kMaxTracks];
 };
 
-struct AutoTable {
-    static constexpr int kSlots = 4;   // app, daemon, renderer, tests: one each
-    std::atomic<const Engine*> owner[kSlots];
-    AutoState* slot[kSlots]  = {};
-    u64        stamp[kSlots] = {};
-    u64        clock = 0;
-    // Freed at exit so a leak checker has nothing to say. By then the backend
-    // has stopped and no audio thread is inside process().
-    ~AutoTable() { for (auto*& p : slot) { delete p; p = nullptr; } }
-};
-AutoTable gAuto;
+// Eviction costs the engine that held the slot its automation from that point
+// on, which is the safe degradation: its scalars are the user's own values and
+// its device parameters were restored when its clips stopped.
+SideTable<AutoState> gAuto;
 
-// Audio thread: a handful of pointer compares. Null => never prepared, which
-// every caller reads as "this engine applies no automation".
-AutoState* autoFind(const Engine* e) {
-    for (int i = 0; i < AutoTable::kSlots; ++i)
-        if (gAuto.owner[i].load(std::memory_order_acquire) == e) return gAuto.slot[i];
-    return nullptr;
-}
+// Null => never prepared, which every caller reads as "this engine applies no
+// automation".
+AutoState* autoFind(const Engine* e) { return gAuto.find(e); }
 
-// GUI thread, from prepare(). Allocates on first use and reuses the slot on
-// every re-prepare, like pdcAcquire.
 AutoState* autoAcquire(const Engine* e) {
-    int idx = -1;
-    for (int i = 0; i < AutoTable::kSlots; ++i)
-        if (gAuto.owner[i].load(std::memory_order_relaxed) == e) { idx = i; break; }
-    if (idx < 0)
-        for (int i = 0; i < AutoTable::kSlots; ++i)
-            if (!gAuto.owner[i].load(std::memory_order_relaxed)) { idx = i; break; }
-    if (idx < 0) {                      // table full: take the oldest slot over
-        idx = 0;
-        for (int i = 1; i < AutoTable::kSlots; ++i)
-            if (gAuto.stamp[i] < gAuto.stamp[idx]) idx = i;
-        // The engine that held it applies no automation from here on, which is
-        // the safe degradation: its scalars are the user's own values and its
-        // device parameters were restored when its clips stopped. A fifth
-        // *concurrently prepared* Engine has never existed in this tree; the
-        // real fix is a member in engine.h next time it thaws.
-        LOGW("auto: no free automation slot, taking the oldest (engine %p)", (const void*)e);
-    }
-    if (!gAuto.slot[idx]) {
-        gAuto.slot[idx] = new (std::nothrow) AutoState();
-        if (!gAuto.slot[idx]) return nullptr;
-    }
+    const int idx = gAuto.claim(e, "auto");
+    if (idx < 0) return nullptr;
     *gAuto.slot[idx] = AutoState{};
-    gAuto.stamp[idx] = ++gAuto.clock;
-    gAuto.owner[idx].store(e, std::memory_order_release);
+    gAuto.publish(idx, e);
     return gAuto.slot[idx];
 }
 
@@ -1141,9 +1178,13 @@ constexpr int kPdcLines = kPdcClick + 1;
 
 // Per-engine delay state. engine.h is a frozen contract with no room for any of
 // this, and the delay storage is far too fat to sit in the Engine by value
-// anyway (see the table below for where it lives and why).
+// anyway — hence SideTable, above, and 20 MB of rings on the heap beside it.
 struct Pdc {
     f32* mem = nullptr;                 // kPdcLines * 2 * kPdcCap frames
+    // The rings are calloc'd (see pdcAcquire) so they are freed, not deleted.
+    // SideTable's destructor deletes the State; owning the rings here is what
+    // lets that one destructor serve every table.
+    ~Pdc() { std::free(mem); }
 
     // Cached chain latencies, written when a chain is published and never per
     // block. maxTrackLat / maxRetLat are derived from them at the end of the
@@ -1175,72 +1216,30 @@ struct Pdc {
     }
 };
 
-// Where the state lives.
-//
-// engine.h is frozen, so the Engine cannot carry a pointer to this and the
-// association has to be made on the side, keyed by the Engine's address.
-// prepare() (GUI thread, before the audio thread exists) claims a slot and
-// allocates; the audio thread only ever looks one up, which is a handful of
-// pointer compares once per block.
-//
-// Four slots is three more than any process has ever needed — the app, the
-// daemon, the renderer and the tests each run exactly one Engine — and the
-// table is bounded on purpose so a process that churned through Engines cannot
-// grow this without limit. A fifth *concurrently prepared* Engine evicts the
-// least recently prepared slot and shares its storage, which would mean two
-// engines writing one set of delay lines: audible nonsense, but not a crash and
-// not out-of-bounds. The real fix is a member in engine.h next time it thaws.
-struct PdcTable {
-    static constexpr int kSlots = 4;
-    std::atomic<const Engine*> owner[kSlots];
-    Pdc* slot[kSlots]  = {};
-    u64  stamp[kSlots] = {};
-    u64  clock = 0;
-    // Freed at exit so a leak checker has nothing to say about 20 MB of rings.
-    // By then the backend has stopped and no audio thread is inside process().
-    ~PdcTable() {
-        for (int i = 0; i < kSlots; ++i)
-            if (slot[i]) { std::free(slot[i]->mem); delete slot[i]; slot[i] = nullptr; }
-    }
-};
-PdcTable gPdc;
+// Eviction costs two engines one set of delay lines between them: audible
+// nonsense, but not a crash and not out-of-bounds.
+SideTable<Pdc> gPdc;
 
-// Audio thread. Null means "this Engine was never prepared, or its allocation
-// failed" — every caller then behaves as if nothing on it reported latency.
-Pdc* pdcFind(const Engine* e) {
-    for (int i = 0; i < PdcTable::kSlots; ++i)
-        if (gPdc.owner[i].load(std::memory_order_acquire) == e) return gPdc.slot[i];
-    return nullptr;
-}
+// Null means "this Engine was never prepared, or its allocation failed" — every
+// caller then behaves as if nothing on it reported latency.
+Pdc* pdcFind(const Engine* e) { return gPdc.find(e); }
 
-// GUI thread, from prepare(). Allocates on first use for a given Engine and
-// reuses the slot on every re-prepare (a sample-rate change, say).
+// GUI thread, from prepare(). The 20 MB of rings is attached on first use and
+// kept across re-prepares; prepare() calls Pdc::reset() afterwards, which is
+// why nothing is zeroed here.
 Pdc* pdcAcquire(const Engine* e) {
-    int idx = -1;
-    for (int i = 0; i < PdcTable::kSlots; ++i)
-        if (gPdc.owner[i].load(std::memory_order_relaxed) == e) { idx = i; break; }
-    if (idx < 0)
-        for (int i = 0; i < PdcTable::kSlots; ++i)
-            if (!gPdc.owner[i].load(std::memory_order_relaxed)) { idx = i; break; }
-    if (idx < 0) {                                  // table full: evict the oldest
-        idx = 0;
-        for (int i = 1; i < PdcTable::kSlots; ++i)
-            if (gPdc.stamp[i] < gPdc.stamp[idx]) idx = i;
-        LOGW("pdc: no free delay-compensation slot, sharing one (engine %p)", (const void*)e);
-    }
-    if (!gPdc.slot[idx]) {
-        Pdc* p = new (std::nothrow) Pdc();
-        if (!p) return nullptr;
+    const int idx = gPdc.claim(e, "pdc");
+    if (idx < 0) return nullptr;
+    Pdc* p = gPdc.slot[idx];
+    if (!p->mem) {
         // calloc, not new[]: the pages stay untouched (and unresident) until a
         // line is actually written, which for a set with no latent device is
         // never. Zeroed anyway, so a line read before it is filled is silent.
         p->mem = (f32*)std::calloc((size_t)kPdcLines * 2 * (size_t)kPdcCap, sizeof(f32));
-        if (!p->mem) { delete p; return nullptr; }
-        gPdc.slot[idx] = p;
+        if (!p->mem) { delete p; gPdc.slot[idx] = nullptr; return nullptr; }
     }
-    gPdc.stamp[idx] = ++gPdc.clock;
-    gPdc.owner[idx].store(e, std::memory_order_release);
-    return gPdc.slot[idx];
+    gPdc.publish(idx, e);
+    return p;
 }
 
 // Send and return-volume gains. Written this way rather than with clampv so a
@@ -1319,9 +1318,8 @@ void pdcFlush(Pdc& p, int lineIdx, int n) {
 // is why that invariant is validated at the process boundary (§9.4) rather than
 // assumed.
 //
-// WHERE THE STATE LIVES. In a side table keyed by the Engine's address, exactly
-// as Pdc, PendingEv and AutoState above already do, and for exactly the reason
-// those three give: engine.h is the daemon's contract and does not thaw
+// WHERE THE STATE LIVES. In a SideTable, the fourth and last, for the reason
+// that type states: engine.h is the daemon's contract and does not thaw
 // casually. Claimed in prepare() on the GUI thread; read and written only by the
 // audio thread afterwards.
 // ---------------------------------------------------------------------------
@@ -1384,46 +1382,19 @@ struct ArrState {
     f64 seek = 0.0;
 };
 
-struct ArrTable {
-    static constexpr int kSlots = 4;   // app, daemon, renderer, tests: one each
-    std::atomic<const Engine*> owner[kSlots];
-    ArrState* slot[kSlots]  = {};
-    u64       stamp[kSlots] = {};
-    u64       clock = 0;
-    ~ArrTable() { for (auto*& p : slot) { delete p; p = nullptr; } }
-};
-ArrTable gArr;
+// Eviction costs the engine that held the slot its arrangement: it plays the
+// session and nothing else, which is what every build before wave 8 did.
+SideTable<ArrState> gArr;
 
-// Audio thread: a handful of pointer compares. Null => never prepared, which
-// every caller reads as "this engine plays no arrangement".
-ArrState* arrFind(const Engine* e) {
-    for (int i = 0; i < ArrTable::kSlots; ++i)
-        if (gArr.owner[i].load(std::memory_order_acquire) == e) return gArr.slot[i];
-    return nullptr;
-}
+// Null => never prepared, which every caller reads as "this engine plays no
+// arrangement".
+ArrState* arrFind(const Engine* e) { return gArr.find(e); }
 
-// GUI thread, from prepare(). Allocates on first use and reuses the slot on
-// every re-prepare, like pdcAcquire and autoAcquire.
 ArrState* arrAcquire(const Engine* e) {
-    int idx = -1;
-    for (int i = 0; i < ArrTable::kSlots; ++i)
-        if (gArr.owner[i].load(std::memory_order_relaxed) == e) { idx = i; break; }
-    if (idx < 0)
-        for (int i = 0; i < ArrTable::kSlots; ++i)
-            if (!gArr.owner[i].load(std::memory_order_relaxed)) { idx = i; break; }
-    if (idx < 0) {                      // table full: take the oldest slot over
-        idx = 0;
-        for (int i = 1; i < ArrTable::kSlots; ++i)
-            if (gArr.stamp[i] < gArr.stamp[idx]) idx = i;
-        LOGW("arr: no free arrangement slot, taking the oldest (engine %p)", (const void*)e);
-    }
-    if (!gArr.slot[idx]) {
-        gArr.slot[idx] = new (std::nothrow) ArrState();
-        if (!gArr.slot[idx]) return nullptr;
-    }
+    const int idx = gArr.claim(e, "arr");
+    if (idx < 0) return nullptr;
     *gArr.slot[idx] = ArrState{};
-    gArr.stamp[idx] = ++gArr.clock;
-    gArr.owner[idx].store(e, std::memory_order_release);
+    gArr.publish(idx, e);
     return gArr.slot[idx];
 }
 
@@ -1543,10 +1514,12 @@ void Engine::prepare(f64 sampleRate, int /*maxBlock*/) {
     }
     masterChain_ = nullptr;
 
-    // Delay compensation storage. This is the one allocation the engine makes,
-    // and it is made here for exactly that reason: prepare() is GUI-thread and
-    // runs before the audio thread starts (a sample-rate change re-prepares
-    // under the same rule), so process() never has to.
+    // Delay compensation storage, and the first of the four side-table claims
+    // below. Every allocation this engine ever makes happens in this function,
+    // and for exactly that reason: prepare() is GUI-thread and runs before the
+    // audio thread starts (a sample-rate change re-prepares under the same
+    // rule), so process() never has to. Each claim reuses the slot it already
+    // owns, so re-preparing allocates nothing at all.
     if (Pdc* p = pdcAcquire(this)) p->reset();
     else LOGW("pdc: delay compensation unavailable, latent chains will not be aligned");
     latencyFrames.store(0);
@@ -1923,6 +1896,25 @@ void Engine::drainCommands() {
         jrn(JournalKind::TakeStart, -1, 0, beat_);
     };
 
+    // The one-pointer retirement rule, in one place (engine.h, the RtNote
+    // comment). A displaced pointer is announced EXACTLY when it differs from
+    // the one taking its place: re-publishing the same array must announce
+    // nothing, because an entry that would never be announced must not be
+    // queued, and the owner would otherwise be told to free memory the engine
+    // still holds. Clearing passes `fresh == nullptr`, where the rule collapses
+    // to "there was one", which is why clears need no second spelling.
+    //
+    // emitCritical and not evts_.push: a lost retirement leaks the owner's
+    // memory and there is no second channel to notice it by.
+    //
+    // The three chain commands deliberately do NOT come through here — they
+    // announce whenever there was an outgoing chain at all — and Ev::SigsRetired
+    // has one caller that hands the INCOMING array back, which is a different
+    // statement and stays spelled out where it happens.
+    auto retire = [&](Ev type, const void* old, const void* fresh, i32 a, i32 b) {
+        if (old && old != fresh) emitCritical(this, evts_, {type, a, b, 0.0, (void*)old});
+    };
+
     // Retiring a lane, and the ONE place the arrangement's protocol is not
     // literally the RtNote one.
     //
@@ -2103,22 +2095,18 @@ void Engine::drainCommands() {
             if (c.a >= 0 && c.a < kMaxTracks && c.b >= 0 && c.b < kMaxScenes) {
                 Track& t = tracks_[c.a];
                 RtClip& dst = clips_[c.a][c.b];
-                const RtNote* old = dst.notes;
+                // Three borrowed arrays, all on the one-pointer rule: the notes,
+                // the envelope set (it can be edited, and recorded into, while
+                // the clip plays) and the warp map. The transient list is NOT
+                // among them on purpose — it belongs to the SampleBuffer,
+                // outlives every clip over it, and has no retirement event to
+                // miss. `changed` is kept as a named flag because the note-offs
+                // have to go out BEFORE the swap, while the announcements go out
+                // after it.
+                const RtNote*     old      = dst.notes;
+                const RtAutoSet*  oldAutos = dst.autos;
+                const WarpMarker* oldWarp  = dst.markers;
                 const bool changed = old && old != c.clip.notes;
-                // An envelope set rides the same protocol, for the same reason:
-                // it can be edited, and recorded into, while the clip plays. The
-                // "only when it differs" condition is publishNotes' — an entry
-                // that would never be announced must not be queued — and the
-                // event is critical because a lost one leaks GUI memory with no
-                // second channel to notice it by.
-                const RtAutoSet* oldAutos = dst.autos;
-                const bool autosChanged = oldAutos && oldAutos != c.clip.autos;
-                // And the warp map, third of three on the one-pointer rule. The
-                // transient list is NOT here on purpose: it belongs to the
-                // SampleBuffer, outlives every clip over it, and has no
-                // retirement event to miss.
-                const WarpMarker* oldWarp = dst.markers;
-                const bool warpChanged = oldWarp && oldWarp != c.clip.markers;
                 if (changed) {
                     if (t.voice.clip == &dst && t.voice.active) flushOffs(t, t.voice, 0);
                     if (t.prev.clip  == &dst && t.prev.active)  flushOffs(t, t.prev,  0);
@@ -2126,17 +2114,19 @@ void Engine::drainCommands() {
                 dst = c.clip;
                 if (t.voice.clip == &dst && t.voice.active) reseekNotes(t.voice, dst);
                 if (t.prev.clip  == &dst && t.prev.active)  reseekNotes(t.prev,  dst);
-                if (changed) emitCritical(this, evts_, {Ev::NotesRetired, c.a, c.b, 0.0, (void*)old});
-                if (autosChanged)
-                    emitCritical(this, evts_, {Ev::AutosRetired, c.a, c.b, 0.0, (void*)oldAutos});
-                if (warpChanged)
-                    emitCritical(this, evts_, {Ev::WarpRetired, c.a, c.b, 0.0, (void*)oldWarp});
+                retire(Ev::NotesRetired, old,      dst.notes,   c.a, c.b);
+                retire(Ev::AutosRetired, oldAutos, dst.autos,   c.a, c.b);
+                retire(Ev::WarpRetired,  oldWarp,  dst.markers, c.a, c.b);
             }
             break;
-        // A pointer swap and nothing else. The audio thread must never free a
-        // chain or a PluginInstance, so the displaced chain rides an event back
-        // to the GUI, which owns the memory and is the only side allowed to
-        // release it — and only once this event proves we are no longer in it.
+        // The audio thread must never free a chain or a PluginInstance, so the
+        // displaced chain rides an event back to the GUI, which owns the memory
+        // and is the only side allowed to release it — and only once this event
+        // proves we are no longer in it. Two things ride along with the swap and
+        // neither is optional: the automation holds this chain's instances are
+        // carrying must be written back BEFORE the pointer moves, and the
+        // chain's latency is cached here because here is the only place it can
+        // change.
         case Cmd::SetChain: {
             if (c.a < 0 || c.a >= kMaxTracks) break;
             Track& t = tracks_[c.a];
@@ -2206,13 +2196,11 @@ void Engine::drainCommands() {
                 dropVoice(t, t.prev,  c.a, false, &dst);
                 dropVoice(t, t.voice, c.a, true,  &dst);
                 dst = RtClip{};
-                if (old) emitCritical(this, evts_, {Ev::NotesRetired, c.a, c.b, 0.0, (void*)old});
-                // The cleared slot's incoming `autos` is null, so "differs from
-                // the incoming one" is simply "there was one".
-                if (oldAutos)
-                    emitCritical(this, evts_, {Ev::AutosRetired, c.a, c.b, 0.0, (void*)oldAutos});
-                if (oldWarp)
-                    emitCritical(this, evts_, {Ev::WarpRetired, c.a, c.b, 0.0, (void*)oldWarp});
+                // Every incoming pointer is null here, so the shared rule
+                // collapses to "there was one" of its own accord.
+                retire(Ev::NotesRetired, old,      dst.notes,   c.a, c.b);
+                retire(Ev::AutosRetired, oldAutos, dst.autos,   c.a, c.b);
+                retire(Ev::WarpRetired,  oldWarp,  dst.markers, c.a, c.b);
             }
             break;
 
@@ -2334,8 +2322,7 @@ void Engine::drainCommands() {
             AutoTrack& at = aut->t[c.a];
             const RtAutoSetN* old = at.arrSet;
             at.arrSet = (const RtAutoSetN*)c.p;
-            if (old && old != at.arrSet)
-                emitCritical(this, evts_, {Ev::TrackAutosRetired, c.a, 0, 0.0, (void*)old});
+            retire(Ev::TrackAutosRetired, old, at.arrSet, c.a, 0);
             break;
         }
 
@@ -2367,11 +2354,13 @@ void Engine::drainCommands() {
             } else {
                 sigs_ = nullptr;
                 sigCount_ = 0;
+                // The one hand-back that is not a retirement: the array being
+                // returned is the INCOMING one, refused, so it is spelled out
+                // rather than run through `retire`.
                 if (fresh && fresh != old)
                     emitCritical(this, evts_, {Ev::SigsRetired, 0, 0, 0.0, (void*)fresh});
             }
-            if (old && old != sigs_)
-                emitCritical(this, evts_, {Ev::SigsRetired, 0, 0, 0.0, (void*)old});
+            retire(Ev::SigsRetired, old, sigs_, 0, 0);
             break;
         }
 
@@ -2692,7 +2681,7 @@ void Engine::fireDue(f64 atBeat) {
     // crossfade overlap is ALREADY the mechanism that exists — and, when the
     // outgoing item has not itself ended yet, it keeps sounding under its own
     // fade instead of taking the 6 ms declick.
-    auto arrStart = [&](ArrTrack& a, int ti, Track& t, int idx, f64 clipBeat) {
+    auto arrStart = [&](ArrTrack& a, Track& t, int idx, f64 clipBeat) {
         const RtArrangement* arr = a.arr;
         const RtArrItem& in = arr->items[idx];
         if (!arr->clips || in.clip < 0 || in.clip >= arr->clipCount) {
@@ -2732,7 +2721,7 @@ void Engine::fireDue(f64 atBeat) {
             if (a.override_) continue;
             const int k = a.next - 1;
             if (k >= 0 && atBeat < arrItemEnd(arr->items[k]) - kEps)
-                arrStart(a, ti, t, k, arr->items[k].offset + (atBeat - arr->items[k].start));
+                arrStart(a, t, k, arr->items[k].offset + (atBeat - arr->items[k].start));
             continue;
         }
 
@@ -2793,7 +2782,7 @@ void Engine::fireDue(f64 atBeat) {
                        arr->clips && t.voice.active && t.voice.clip == &arr->clips[in.clip];
             }
             if (cont) a.playing = starting;
-            else      arrStart(a, ti, t, starting, in.offset);
+            else      arrStart(a, t, starting, in.offset);
         } else if (ended) {
             arrRelease(a, t);
         }
@@ -2801,9 +2790,11 @@ void Engine::fireDue(f64 atBeat) {
 }
 
 // Renders voices into each track's pre-fader scratch for the sub-range
-// [from, to). Only clip gain and the declick envelope are applied here: volume,
-// pan and mute/solo sit *after* the device chain, and the chain runs once over
-// the whole block, so those stages cannot live in this per-sub-block path.
+// [from, to). Three gains are applied here and no others: the clip's own gain,
+// the declick envelope, and the arrangement item fade the scheduler parked on
+// the voice (Voice::fade -> fadeTo, ramped across this sub-range). Volume, pan
+// and mute/solo sit *after* the device chain, and the chain runs once over the
+// whole block, so those stages cannot live in this per-sub-block path.
 // The metronome is the one thing that goes straight to the master, since it is
 // not on any track and must not be coloured by a track's plugins.
 void Engine::renderRange(f32* outL, f32* outR, int from, int to) {

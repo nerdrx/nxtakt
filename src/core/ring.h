@@ -28,9 +28,6 @@ public:
         r_.store((r + 1) & (N - 1), std::memory_order_release);
         return true;
     }
-    bool empty() const {
-        return r_.load(std::memory_order_acquire) == w_.load(std::memory_order_acquire);
-    }
 private:
     T buf_[N]{};
     std::atomic<u32> w_{0};

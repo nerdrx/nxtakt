@@ -1,7 +1,9 @@
-// Standalone scanner. Build:
-//   g++ -std=c++20 $(pkg-config --cflags lilv-0) tools/plugin_scan.cpp
-//       src/plugin/host.cpp src/plugin/lv2_host.cpp src/core/common.cpp
-//       -o /tmp/plugin_scan $(pkg-config --libs lilv-0)
+// Standalone scanner. Build it with `make build/plugin_scan` -- the recipe is
+// in the Makefile because the source list is not two files any more: the
+// registry reaches into the LV2 backend, the CLAP backend and the internal
+// devices, so a hand-rolled g++ line goes stale the moment a backend is added,
+// and a scanner that does not link every backend reports a short list without
+// saying so.
 //
 //   plugin_scan            list everything
 //   plugin_scan <uri>      also instantiate that plugin and dump its params

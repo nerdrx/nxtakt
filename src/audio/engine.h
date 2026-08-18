@@ -1,11 +1,23 @@
 // The realtime engine.
 //
-// Threading contract:
-//   * GUI thread  -> pushCommand()  -> lock-free ring -> audio thread
-//   * audio thread -> pushEvent()   -> lock-free ring -> popEvent() on GUI
+// Threading contract. Every crossing is a lock-free SPSC ring or an atomic, and
+// there is no lock anywhere in this file. Memory that is genuinely shared —
+// clip samples, chains, note arrays, envelope sets, arrangement lanes, the
+// signature map — is written by its owner, published once, never mutated after
+// publication, and comes home in a retirement event before the owner may free
+// it. See the RtNote comment below for the one rule all of them follow.
+//   * GUI thread  -> pushCommand()      -> audio thread
+//   * MIDI reader -> pushMidi()         -> audio thread
+//   * GUI thread  -> pushMidiFromGui()  -> audio thread   (its own ring: one
+//     producer per Ring, and two on one ring is a dropped note-off)
+//   * audio thread -> popEvent()    on the GUI thread
+//   * audio thread -> popJournal()  on the GUI thread
 //   * scalar state the GUI polls (meters, playhead, clip states) lives in
 //     std::atomic members.
-// The audio thread never allocates, locks, or touches std::string.
+// The engine has no pushEvent(): the audio thread is the only producer of
+// events, so it writes the ring from inside process() and the GUI only ever
+// pops. The audio thread never allocates, locks, or touches std::string; every
+// allocation the engine makes happens in prepare(), on the GUI thread.
 #pragma once
 #include "../core/common.h"
 #include "../core/ring.h"
@@ -333,8 +345,9 @@ struct RtClip {
 
 // ---------------------------------------------------------------------------
 // The arrangement, as the audio thread sees it. Full design: docs/ARRANGEMENT.md
-// §3. Landed here, compiled and not yet used, because engine.h is the daemon's
-// contract and exactly one wave may open it.
+// §3. These landed here compiled-and-unused for one wave, because engine.h is
+// the daemon's contract and exactly one wave may open it; the scheduler in
+// engine.cpp reads them every block now.
 // ---------------------------------------------------------------------------
 
 // One placed item.
@@ -456,8 +469,10 @@ enum class Cmd : u32 {
     // queues a quantized stop. The engine appends input into the buffer and
     // never frees it; when recording ends it comes back via Ev::RecordFinished
     // and the GUI turns it into a clip. Buffers must stay alive until then.
-    // Overdub (wave 3) will re-enter the same buffer mixing instead of
-    // appending — nothing in this contract precludes that.
+    // AUDIO overdub is still unbuilt: it would re-enter the same buffer mixing
+    // instead of appending, and nothing in this contract precludes that. (MIDI
+    // overdub does exist — see Cmd::RecordMidiSlot below — but it is a property
+    // of the take machine, not a second command.)
     RecordSlot,
 
     // MIDI take into a slot: same toggle/quantize semantics as RecordSlot,
@@ -526,11 +541,12 @@ enum class Cmd : u32 {
     // back to 4/4, which is a place the user can hear, rather than walking a
     // map whose beats do not follow from its own bars.
     //
-    // NOT YET ON THE WIRE. ipc/control.h classifies commands by value and its
-    // bound is the last enumerator it knew, so this one lands in "unknown" and
-    // the daemon answers RejectUnknownCommand -- fail-closed, exactly as
-    // Cmd::SetArrangement did for a wave before it was wired up. The daemon
-    // therefore plays every set in 4/4 until that file grows the two cases.
+    // ON THE WIRE since control.h v8: it crosses as a PoolKindSignatures blob
+    // answered by EvSignaturesAck, and commandIsKnown's bound moved to this
+    // enumerator only once the daemon genuinely honoured it. For the wave before
+    // that it landed in "unknown" and the daemon answered RejectUnknownCommand
+    // -- fail-closed, exactly as Cmd::SetArrangement did before it was wired up,
+    // so daemon mode played every set in 4/4 rather than pretending to re-bar it.
     SetSignatures,
 };
 
@@ -538,7 +554,12 @@ struct Command {
     Cmd    type = Cmd::SetPlaying;
     i32    a = 0, b = 0;
     f64    x = 0.0;
-    void*  p = nullptr;                // SetChain payload
+    // The one payload pointer, read according to `type`: an RtChain
+    // (SetChain / SetReturnChain / SetMasterChain), a capture buffer
+    // (RecordSlot / RecordMidiSlot), an RtArrangement (SetArrangement), an
+    // RtAutoSetN (SetTrackAutos), or an RtSig[] (SetSignatures). Every one of
+    // them stays the sender's to free, and comes home in the matching Ev.
+    void*  p = nullptr;
     RtClip clip{};
 };
 
@@ -680,7 +701,9 @@ private:
 
         // MIDI clip playback: position in clip beats, the next note index to
         // fire, and the note-offs owed. 32 sounding notes per clip is beyond
-        // anything a slot sequencer produces; overflow steals the oldest.
+        // anything a slot sequencer produces; overflow steals the slot whose
+        // off is due FIRST (not the oldest note-on), so the note taken is the
+        // one that had least of its length left to run.
         f64   beatPos = 0.0;
         int   nextNote = 0;
         // Which time round the loop this is, from 0 at the launch. The one

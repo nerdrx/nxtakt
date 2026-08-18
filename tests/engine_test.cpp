@@ -5175,7 +5175,12 @@ static_assert(std::is_trivially_copyable<RtArrangement>::value, "RtArrangement m
 static_assert(kMaxRtArrLanes == 32, "kMaxRtArrLanes == kMaxArrLanes");
 
 static void testArrangementTypes() {
-    banner("33. arrangement header types (compiled, unused)");
+    // The types landed here compiled-and-unused for one wave; section 34 is the
+    // scheduler that reads them. This section stays because it tests the SHAPES
+    // — defaults, trivial copyability, the one evaluator over both containers —
+    // which is what a header contract is, and none of that is reachable from a
+    // scheduler test.
+    banner("33. arrangement header types: shapes and the shared evaluator");
 
     // --- shapes -------------------------------------------------------
     {
@@ -7451,10 +7456,13 @@ int main() {
     testOverdub();
     testBuses();
     testPdc();
+    // Section 19 by its banner, so it runs where its number says: the drain
+    // counter landed after sections 20-22 in the file and the printed order
+    // read 20, 21, 22, 19.
+    testDrains();
     testTwoRingMidi();
     testEventResilience();
     testOverdubSort();
-    testDrains();
     testEvaluator();
     testAutomationClassA();
     testAutomationClassB();

@@ -13,10 +13,12 @@
 // arrangement item and the loop brace live in BEATS. Re-barring a piece must
 // move neither. §"the interaction that matters most".
 //
-// BUILD (there is no Makefile target -- this wave does not own the Makefile):
-//   tools/build_timesig_view_test.sh
-//
-// and the Makefile line it is owed is spelled out in that script.
+// BUILD: `make build/timesig_view_test`, and `make test` runs it. It has its
+// own binary rather than folding into engine_test because the property under
+// test is that two INDEPENDENT pieces of code agree, so it has to link the
+// view's time axis and the engine together; the Makefile recipe says the rest.
+// (tools/build_timesig_view_test.sh is what built it for the one wave before
+// that target existed, and is superseded.)
 #include "../src/ui/arrange.h"
 
 #include <array>
