@@ -40,6 +40,15 @@
 #define LAT_SPECTRA_IN_INTERNAL_DEVICES 1
 #include "spectra.cpp"
 
+// The Sampler, on the identical arrangement and for the identical reason. It
+// is checked rather than assumed: `grep -n spectra Makefile` finds nothing, so
+// the eight recipes that list their sources one by one still name only
+// internal_devices.cpp, and a second translation unit would break four links at
+// once. When they list these two files, both guards and both of these lines go
+// together.
+#define LAT_SAMPLER_IN_INTERNAL_DEVICES 1
+#include "sampler.cpp"
+
 namespace lat {
 namespace detail {
 namespace {
@@ -158,7 +167,7 @@ public:
     // REALTIME.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in) { passthrough(in, out, channels, nframes); return; }
 
         // Coefficients are read once per block: a knob turn lands on the next
         // block boundary, which is the same latency every other backend has.
@@ -248,7 +257,7 @@ public:
         if (channels <= 0 || nframes <= 0 || !out) return;
         // The accumulator is sized for kMaxBlock and process() may not grow it,
         // so an oversized block degrades to silence rather than a heap call.
-        if (bypassed_ || nframes > kMaxBlock) {
+        if (isBypassed() || nframes > kMaxBlock) {
             // An instrument's "input" is silence, so bypass means silence out,
             // not passthrough of whatever the chain handed us.
             passthrough(nullptr, out, channels, nframes);
@@ -504,7 +513,7 @@ public:
     // REALTIME.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in) { passthrough(in, out, channels, nframes); return; }
 
         recompute(false);
         // The parameters a project restores are written after instantiate(), so
@@ -632,7 +641,7 @@ public:
     // REALTIME.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in) { passthrough(in, out, channels, nframes); return; }
 
         const f32 thr   = clampv(p(pThresh_), -60.f, 0.f);
         const f32 ratio = clampv(p(pRatio_), 1.f, 20.f);
@@ -780,7 +789,7 @@ public:
     // REALTIME.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in || lineL_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in || lineL_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
 
         const bool sync = p(pSync_) >= 0.5f;
         const bool ping = p(pPing_) >= 0.5f;
@@ -979,7 +988,7 @@ public:
         if (channels <= 0 || nframes <= 0 || !out) return;
         // Unlike the other effects, "no input" is not "nothing to do": the tank
         // still has to ring out. A null input block is processed as silence.
-        if (bypassed_ || pre_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || pre_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
 
         dampA_.setCutoff(sr_, clampv(p(pDamp_), 500.f, 18000.f));
         dampC_.a = dampA_.a;
@@ -1214,7 +1223,7 @@ public:
     // loop below is written in terms of nframes alone.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in) { passthrough(in, out, channels, nframes); return; }
 
         const int type  = (int)clampv(p(pType_) + 0.5f, 0.f, 2.f);
         const int shape = (int)clampv(p(pShape_) + 0.5f, 0.f, 3.f);
@@ -1413,7 +1422,7 @@ public:
     // REALTIME.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in || lineL_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in || lineL_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
 
         const int v = (int)clampv(p(pVoices_) + 0.5f, 1.f, (f32)kMaxVoices);
         if (v != voices_) setVoices(v);
@@ -1611,7 +1620,7 @@ public:
     // stop.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in || lineL_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in || lineL_.buf.empty()) { passthrough(in, out, channels, nframes); return; }
 
         in_.set(dbToGain(clampv(p(pIn_), -12.f, 24.f)));
         if (first_) { in_.settle(); first_ = false; }
@@ -1769,7 +1778,7 @@ public:
     // REALTIME. Per-sample and per-channel only; any nframes is legal.
     void process(const f32* const* in, f32* const* out, int channels, int nframes) override {
         if (channels <= 0 || nframes <= 0 || !out) return;
-        if (bypassed_ || !in) { passthrough(in, out, channels, nframes); return; }
+        if (isBypassed() || !in) { passthrough(in, out, channels, nframes); return; }
 
         const bool dc = p(pDc_) >= 0.5f;
         gain_.set(dbToGain(clampv(p(pGain_), -70.f, 24.f)));
@@ -1941,7 +1950,7 @@ public:
 
         // An empty rack is a wire. A block bigger than the one we were prepared
         // for degrades to a wire too, rather than to a heap call.
-        if (bypassed_ || !L || L->n == 0 || nframes > scratchFrames_) {
+        if (isBypassed() || !L || L->n == 0 || nframes > scratchFrames_) {
             passthrough(in, out, channels, nframes);
             return;
         }
@@ -1990,7 +1999,7 @@ public:
     // rack that had been bypassed through a phrase holding voices nobody asked
     // for. A note held across the bypass edge resumes when it is lifted.
     void midi(const u8* data, int len, int frameOffset) override {
-        if (bypassed_) return;
+        if (isBypassed()) return;
         const Layout* L = live_.load(std::memory_order_acquire);
         if (!L) return;
         for (int i = 0; i < L->n; ++i)
@@ -2543,6 +2552,7 @@ void scanInternal(std::vector<PluginDesc>& out) {
     out.push_back(saturatorDesc());
     out.push_back(pulseDesc());
     out.push_back(spectraDesc());
+    out.push_back(samplerDesc());
     out.push_back(eq3Desc());
     out.push_back(compressorDesc());
     out.push_back(delayDesc());
@@ -2570,6 +2580,8 @@ std::unique_ptr<PluginInstance> instantiateInternal(const PluginDesc& d,
         inst = std::make_unique<Pulse>(pulseDesc());
     else if (d.uri == kSpectraUri)
         inst = std::make_unique<Spectra>(spectraDesc());
+    else if (d.uri == kSamplerUri)
+        inst = std::make_unique<Sampler>(samplerDesc());
     else if (d.uri == kEq3Uri)
         inst = std::make_unique<Eq3>(eq3Desc());
     else if (d.uri == kCompressorUri)

@@ -698,6 +698,9 @@ public:
 
         for (Voice& v : voices_) v = Voice{};
         nPend_    = 0;
+        ovfOff_[0] = ovfOff_[1] = ovfOff_[2] = ovfOff_[3] = 0u;
+        ovfPanic_ = 0;
+        haveOvf_  = false;
         age_      = 0;
         ctrl_     = 0;
         noteRng_  = 0x9E3779B9u;      // fixed seeds: a render must be repeatable
@@ -773,7 +776,7 @@ public:
         // block cap is belt and braces -- nothing here is sized per block -- but
         // it keeps the same promise Pulse makes, that an absurd nframes degrades
         // to silence rather than to whatever the loop counters do.
-        if (bypassed_ || nframes > kMaxBlock || !tbl_) {
+        if (isBypassed() || nframes > kMaxBlock || !tbl_) {
             passthrough(nullptr, out, channels, nframes);
             clearSchedule();
             return;
@@ -789,6 +792,10 @@ public:
         for (int n = 0; n < nframes; ++n) {
             // Note events land on the sample they were stamped for. See midi().
             while (ev < nPend_ && pend_[ev].frame <= n) { apply(pend_[ev]); ++ev; }
+            // And anything the queue could not hold, at the block's last
+            // sample — after everything above, which is the whole point. See
+            // queue() for why it is last and not first.
+            if (haveOvf_ && n == nframes - 1) applyOverflow();
 
             // The LFO value for THIS sample, read before it is advanced, so the
             // control tick and the audio path see the same number.
@@ -1036,14 +1043,82 @@ private:
     // REALTIME. One slot per event; 128 note events inside a single audio block
     // is not music, and dropping the overflow is better than growing an array
     // on the audio thread.
+    //
+    // AUDIT-3 F3, applied. It used to drop EVERYTHING once full, which is
+    // defensible for a note-on and indefensible for the other three: a note-off
+    // and the two panics exist to STOP a voice that is already sounding, and
+    // losing one leaves it on for the rest of the session. The audit's own
+    // sentence: "a flood that fills the queue with note-ons and then drops the
+    // All Notes Off behind them leaves up to 16 voices sounding until the next
+    // panic that happens to fit."
+    //
+    // Two halves, answering two different failures:
+    //
+    //  1. RESERVED CAPACITY. A note-on may fill at most kOnCap of the kPend
+    //     slots; offs and panics may use all of them. A dropped note-on costs
+    //     one note that does not sound -- inaudible in a flood this dense and
+    //     recoverable in every case. This half covers every stream that has any
+    //     relationship to music, and it keeps those events IN THE QUEUE:
+    //     stamped, ordered, applied at their own sample. Incident 6's property
+    //     is untouched below the threshold, which is the only place it was ever
+    //     meaningful.
+    //
+    //  2. AN OVERFLOW SET THAT CANNOT OVERFLOW. Past that, an off is folded
+    //     into a 128-bit note mask and a panic into a two-state flag -- both
+    //     O(1), so no flood of any length can lose one. This is the guarantee;
+    //     half 1 is the quality.
+    //
+    // WHY IT LANDS AT THE LAST SAMPLE and not at frame 0, which is what the
+    // audit sketched. Frame 0 precedes every event still in the queue, so an
+    // overflowed note-off whose note-on is queued at frame 300 would be applied
+    // to a voice that does not exist yet -- and the note would stick, which is
+    // the exact bug being fixed. The last sample is ordered after everything
+    // the queue holds, so nothing can outrun it.
+    //
+    // AND ON DETERMINISM, against incident 6 directly. Applying an overflowed
+    // event late is not block-size invariant. Nothing can be: the queue is
+    // per-block, so a block of 1 can never overflow and a block of 1024 can,
+    // which makes overflow behaviour block-size dependent BY CONSTRUCTION
+    // whatever is done with it. The gate that survives past the threshold is
+    // therefore not bit-identity -- it is "no voice is left sounding", and that
+    // one is absolute rather than approximate.
     void queue(int frame, u8 type, u8 a, u8 b) {
-        if (nPend_ >= kPend) return;
+        if (type == kEvOn) {
+            if (nPend_ >= kOnCap) return;              // droppable, by the argument above
+        } else if (nPend_ >= kPend) {
+            if (type == kEvOff) {
+                ovfOff_[(a >> 5) & 3] |= 1u << (a & 31);
+            } else if (type == kEvSoundOff) {
+                ovfPanic_ = 2;                          // the stronger of the two wins
+            } else if (ovfPanic_ == 0) {
+                ovfPanic_ = 1;
+            }
+            haveOvf_ = true;
+            return;
+        }
         PendEv& e = pend_[nPend_];
         e.frame = frame;
         e.type  = type;
         e.a     = a;
         e.b     = b;
         ++nPend_;
+    }
+
+    // REALTIME. The overflow set, drained at the block's last sample.
+    void applyOverflow() {
+        for (int w = 0; w < 4; ++w) {
+            u32 bits = ovfOff_[w];
+            while (bits) {
+                const int bit = __builtin_ctz(bits);
+                bits &= bits - 1u;
+                noteOff((u8)(w * 32 + bit));
+            }
+            ovfOff_[w] = 0u;
+        }
+        if (ovfPanic_ == 2)      allSoundOff();
+        else if (ovfPanic_ == 1) allNotesOff();
+        ovfPanic_ = 0;
+        haveOvf_  = false;
     }
 
     void apply(const PendEv& e) {
@@ -1124,7 +1199,13 @@ private:
         for (Voice& v : voices_) if (v.active && v.e1.stage != kRel) release(v);
     }
     void allSoundOff() { for (Voice& v : voices_) v = Voice{}; }
-    void clearSchedule() { nPend_ = 0; }
+
+    void clearSchedule() {
+        nPend_ = 0;
+        ovfOff_[0] = ovfOff_[1] = ovfOff_[2] = ovfOff_[3] = 0u;
+        ovfPanic_  = 0;
+        haveOvf_   = false;
+    }
 
     // Free voice inside the polyphony cap if there is one, otherwise the
     // QUIETEST -- which is what the contract asks for and is also the least bad
@@ -1316,9 +1397,19 @@ private:
 
     const SpectraTables* tbl_ = nullptr;
 
-    static constexpr int kPend = 128;
+    // 128 slots. A note-on may take at most kOnCap of them, leaving 32 that
+    // only a note-off or a panic can reach; past even that, the overflow set
+    // below catches them. See queue().
+    static constexpr int kPend  = 128;
+    static constexpr int kOnCap = 96;
     PendEv pend_[kPend]{};
     int    nPend_ = 0;
+
+    // 128 bits of note-off plus a two-state panic flag: O(1), so neither can be
+    // lost however long the flood is.
+    u32  ovfOff_[4] = {};
+    u8   ovfPanic_  = 0;
+    bool haveOvf_   = false;
 
     Voice voices_[kSpVoices];
     u32   age_ = 0;

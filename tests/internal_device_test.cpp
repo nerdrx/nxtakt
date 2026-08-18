@@ -18,6 +18,12 @@
 // Add -fsanitize=address,undefined for the sanitiser run; the whole suite is
 // clean under both.
 #include "../src/plugin/host.h"
+// The sampler takes a decoded buffer in through SamplerControl, so the suite has
+// to be able to BUILD one. sample.h is a header of plain structs -- nothing here
+// calls buildPeaks(), buildTransients() or loadSample(), so including it costs
+// this binary no link dependency at all, which is the whole reason the sampler
+// can be tested in a process that deliberately has no decoder.
+#include "../src/audio/sample.h"
 
 #include <algorithm>
 #include <cctype>
@@ -3161,10 +3167,22 @@ static void testRackLayoutUnderRender(PluginRegistry& reg) {
     // exercised below, after the join, which is where the contract puts them.
     const int kEdits = 24;
     for (int i = 0; i < kEdits; ++i) rc->setState((i & 1) ? oneDev : twoDev);
-    // Enough blocks that an edit and a render provably overlapped.
-    while (blocks.load(std::memory_order_relaxed) < 40) {
-        rc->setState(twoDev);
-        rc->setState(oneDev);
+    // Enough blocks that an edit and a render provably overlapped -- with the
+    // edits BUDGETED, which they were not.
+    //
+    // THIS SPIN USED TO BE UNBOUNDED, and it made the section fail about one
+    // run in four. Every setState() instantiates a fresh sub-device per entry
+    // and cannot reclaim the old ones while the render thread is live, so the
+    // number of edits it managed before `blocks` reached 40 -- a pure
+    // scheduling accident -- decided whether `owned_` crossed kOwnedCap (64).
+    // Past that the rack correctly refuses to add ("call reclaim() while the
+    // rack is idle"), setState leaves the chain empty, and the two assertions
+    // below fail for a reason that is the TEST's and not the rack's. The kEdits
+    // loop above already spends 36 of the 64; eight more pairs spend 24, which
+    // leaves headroom and still guarantees an edit lands inside a render.
+    for (int spare = 8; blocks.load(std::memory_order_relaxed) < 40; ) {
+        if (spare > 0) { rc->setState(twoDev); rc->setState(oneDev); --spare; }
+        else            std::this_thread::yield();
     }
     run.store(false, std::memory_order_relaxed);
     audio.join();
@@ -4558,6 +4576,1377 @@ static void testSpectraPresets(PluginRegistry& reg) {
 }
 
 // ---------------------------------------------------------------------------
+// Sampler
+//
+// The parameter list is the contract (src/plugin/sampler.cpp's table): ids are
+// indices and a saved set stores them, so this transcription is what stops a
+// careless reorder. Everything else here is measured rather than asserted --
+// the interpolation section in particular prints decibels, because "a repitching
+// sampler needs better than linear" is a claim that only means something with a
+// number attached.
+//
+// NOTE ON THIS SUITE'S BUILD. internal_device_test deliberately does NOT link
+// src/audio/sample.cpp -- no libsndfile, no libsamplerate -- so the sampler's
+// weak reference to loadSample() does not bind here and loadFile() answers
+// false for every path. That is not a gap in the coverage, it is one of the
+// cases: the device has to be silent and honest in a process with no decoder,
+// and the tests below check exactly that. Everything that needs actual audio
+// goes in through SamplerControl::adopt(), which takes a buffer the test built
+// itself and is the same door a decoded file comes through.
+// ---------------------------------------------------------------------------
+
+static const char* kSamplerParamNames[] = {
+    "Root Note", "Coarse", "Fine",
+    "Start", "End", "Loop", "Crossfade",
+    "Gate",
+    "Attack", "Decay", "Sustain", "Release",
+    "Cutoff", "Resonance", "Env>Cutoff", "Keytrack",
+    "Vel>Amp", "Glide", "Voices", "Master",
+};
+static constexpr int kSamplerContractN =
+    (int)(sizeof kSamplerParamNames / sizeof kSamplerParamNames[0]);
+
+static const char* kSamplerPresetNames[] = {
+    "Init", "One-Shot", "Pitched Loop", "303 Glide", "Soft Pad", "Drum Tight",
+};
+static constexpr int kSamplerPresetN =
+    (int)(sizeof kSamplerPresetNames / sizeof kSamplerPresetNames[0]);
+
+static int smIdx(const PluginInstance& p, const char* name) { return paramIndex(p, name); }
+
+// A pure sine, in f64 and then rounded once, so the buffer is as close to the
+// ideal signal as a float array gets. That matters: the interpolation test
+// measures the distance between what the device produced and a perfect tone,
+// and a sloppy source would put its own error into that number.
+static SampleRef smSine(f64 hz, i64 frames, int ch = 1, f32 amp = 0.5f, f64 rate = kSR) {
+    auto sb = std::make_shared<SampleBuffer>();
+    sb->channels = ch;
+    sb->frames   = frames;
+    sb->rate     = rate;
+    sb->data.assign((size_t)(frames * (i64)ch), 0.f);
+    for (i64 i = 0; i < frames; ++i) {
+        const f32 v = (f32)((f64)amp * std::sin(6.283185307179586 * hz * (f64)i / rate));
+        for (int c = 0; c < ch; ++c) sb->data[(size_t)(i * ch + c)] = v;
+    }
+    return sb;
+}
+
+// A linear ramp from 0 to `amp`. A POSITION PROBE: the value coming out names
+// the frame it was read from, so start points, end points, loop wraps and
+// polyphony can all be checked by looking at a number instead of at a spectrum.
+// The lowpass passes DC at unity, so the mean of a window is the mean position.
+static SampleRef smRamp(i64 frames, int ch = 1, f32 amp = 0.8f) {
+    auto sb = std::make_shared<SampleBuffer>();
+    sb->channels = ch;
+    sb->frames   = frames;
+    sb->rate     = kSR;
+    sb->data.assign((size_t)(frames * (i64)ch), 0.f);
+    for (i64 i = 0; i < frames; ++i) {
+        const f32 v = amp * (f32)((f64)i / (f64)(frames - 1));
+        for (int c = 0; c < ch; ++c) sb->data[(size_t)(i * ch + c)] = v;
+    }
+    return sb;
+}
+
+// The measurement patch: everything that could colour the signal is flat or
+// off, and the envelope settles to exactly 1 within a millisecond and stays
+// there. Deliberately NOT the defaults -- the defaults are a musical starting
+// point and a measurement wants a wire.
+static void smFlatPatch(PluginInstance& s) {
+    s.setParam(smIdx(s, "Root Note"), 69.f);
+    s.setParam(smIdx(s, "Attack"),    0.1f);
+    s.setParam(smIdx(s, "Decay"),     5000.f);
+    s.setParam(smIdx(s, "Sustain"),   1.f);
+    s.setParam(smIdx(s, "Release"),   5.f);
+    s.setParam(smIdx(s, "Cutoff"),    20000.f);
+    s.setParam(smIdx(s, "Resonance"), 0.f);
+    s.setParam(smIdx(s, "Vel>Amp"),   0.f);
+    s.setParam(smIdx(s, "Master"),    1.f);
+}
+
+static f64 smMean(const std::vector<f32>& x, int from, int n) {
+    f64 acc = 0.0;
+    for (int i = 0; i < n; ++i) acc += (f64)x[(size_t)(from + i)];
+    return acc / (f64)n;
+}
+
+static f64 smPeak(const std::vector<f32>& x, int from, int n) {
+    f64 m = 0.0;
+    for (int i = 0; i < n; ++i) m = std::fmax(m, std::fabs((f64)x[(size_t)(from + i)]));
+    return m;
+}
+
+// SIGNAL-TO-ERROR against the ideal tone, and the reason it is a least-squares
+// FIT rather than a subtraction of a tone the test wrote itself:
+//
+//   everything between the interpolator and the output is LINEAR and TIME
+//   INVARIANT -- the state variable filter, the settled envelope, the master
+//   gain -- so all of it can do to a sine is change its amplitude and its
+//   phase. Fitting A*cos + B*sin at the expected frequency absorbs exactly
+//   that and nothing else, so what is left in the residual is the
+//   interpolator's error and only the interpolator's error. Comparing against
+//   a fixed reference tone instead would measure the filter's phase shift and
+//   call it distortion.
+static f64 smSnrDb(const std::vector<f32>& y, int from, int n, f64 freq) {
+    const f64 w = 6.283185307179586 * freq / kSR;
+    f64 suu = 0, svv = 0, suv = 0, suy = 0, svy = 0;
+    for (int i = 0; i < n; ++i) {
+        const f64 c = std::cos(w * (f64)i), s = std::sin(w * (f64)i);
+        const f64 v = (f64)y[(size_t)(from + i)];
+        suu += c * c; svv += s * s; suv += c * s; suy += c * v; svy += s * v;
+    }
+    const f64 det = suu * svv - suv * suv;
+    if (std::fabs(det) < 1e-12) return -999.0;
+    const f64 A = (svv * suy - suv * svy) / det;
+    const f64 B = (suu * svy - suv * suy) / det;
+    f64 sig = 0, res = 0;
+    for (int i = 0; i < n; ++i) {
+        const f64 f = A * std::cos(w * (f64)i) + B * std::sin(w * (f64)i);
+        const f64 v = (f64)y[(size_t)(from + i)];
+        sig += f * f;
+        res += (v - f) * (v - f);
+    }
+    if (res <= 0.0) return 999.0;
+    return 10.0 * std::log10(sig / res);
+}
+
+// The same read the device does, with LINEAR interpolation, so the two numbers
+// in the quality section come from the same source, the same increment and the
+// same measurement. This is the thing Catmull-Rom is being compared against and
+// it is worth having in the suite rather than in a comment.
+static void smLinearRef(const SampleBuffer& sb, f64 ratio, std::vector<f32>& out, int n) {
+    out.assign((size_t)n, 0.f);
+    f64 pos = 0.0;
+    for (int i = 0; i < n; ++i) {
+        i64 k = (i64)pos;
+        if (k < 0) k = 0;
+        if (k + 1 >= sb.frames) k = sb.frames - 2;
+        const f32 t = (f32)(pos - (f64)k);
+        const f32 a = sb.data[(size_t)k], b = sb.data[(size_t)(k + 1)];
+        out[(size_t)i] = a + (b - a) * t;
+        pos += ratio;
+    }
+}
+
+// A patch with every path in the device moving at once: a loop with a
+// crossfade, a resonant envelope-swept filter, keytracking, glide, velocity
+// scaling and a polyphony cap low enough that the script below steals.
+static void smBusyPatch(PluginInstance& s) {
+    s.setParam(smIdx(s, "Root Note"),  60.f);
+    s.setParam(smIdx(s, "Coarse"),     -5.f);
+    s.setParam(smIdx(s, "Fine"),       17.f);
+    s.setParam(smIdx(s, "Start"),      0.20f);
+    s.setParam(smIdx(s, "End"),        0.70f);
+    s.setParam(smIdx(s, "Loop"),       1.f);
+    s.setParam(smIdx(s, "Crossfade"),  18.f);
+    s.setParam(smIdx(s, "Gate"),       1.f);
+    s.setParam(smIdx(s, "Attack"),     4.f);
+    s.setParam(smIdx(s, "Decay"),      600.f);
+    s.setParam(smIdx(s, "Sustain"),    0.55f);
+    s.setParam(smIdx(s, "Release"),    240.f);
+    s.setParam(smIdx(s, "Cutoff"),     900.f);
+    s.setParam(smIdx(s, "Resonance"),  0.6f);
+    s.setParam(smIdx(s, "Env>Cutoff"), 0.7f);
+    s.setParam(smIdx(s, "Keytrack"),   0.45f);
+    s.setParam(smIdx(s, "Vel>Amp"),    0.8f);
+    s.setParam(smIdx(s, "Glide"),      55.f);
+    s.setParam(smIdx(s, "Voices"),     6.f);
+    s.setParam(smIdx(s, "Master"),     0.7f);
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSamplerContract(PluginRegistry& reg) {
+    banner("Sampler: the descriptor and the frozen parameter table");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    CHECK(d != nullptr, "registry finds nxtakt:sampler");
+    if (!d) return;
+
+    CHECK(d->format == PluginFormat::Internal && d->kind == PluginKind::Instrument,
+          "descriptor: an internal INSTRUMENT");
+    CHECK(d->audioIn == 0 && d->audioOut == 2,
+          "0 in / 2 out (%d / %d) -- an instrument's input is silence",
+          d->audioIn, d->audioOut);
+    CHECK(d->hasMidiIn, "it takes MIDI");
+    CHECK(d->name == "Sampler" && d->vendor == "NxTakt" && d->category == "Instrument",
+          "name / vendor / category are what the browser groups on");
+    CHECK(d->paramCount == kSamplerContractN,
+          "the descriptor advertises %d parameters (the table says %d)",
+          d->paramCount, kSamplerContractN);
+
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    CHECK(s != nullptr, "instantiate + prepare");
+    if (!s) return;
+
+    CHECK(s->paramCount() == kSamplerContractN,
+          "the instance has %d parameters", s->paramCount());
+    CHECK(s->paramCount() <= 24,
+          "and it is inside the 24 the design budgeted for a generic knob strip");
+    if (s->paramCount() != kSamplerContractN) return;
+
+    // Names, in order. THIS is the frozen part: ids are indices, so a reorder
+    // silently mis-restores every set ever saved.
+    bool names = true;
+    for (int i = 0; i < kSamplerContractN; ++i) {
+        if (s->paramInfo(i).name != kSamplerParamNames[i]) {
+            CHECK(false, "parameter %d is \"%s\", the table says \"%s\"",
+                  i, s->paramInfo(i).name.c_str(), kSamplerParamNames[i]);
+            names = false;
+        }
+        if (s->paramInfo(i).id != (u32)i) {
+            CHECK(false, "parameter %d carries id %u -- ids ARE indices here",
+                  i, s->paramInfo(i).id);
+            names = false;
+        }
+    }
+    CHECK(names, "all %d parameters are in the table's order and carry their index "
+                 "as their id", kSamplerContractN);
+
+    // The flags a generic strip actually draws from.
+    struct Row { const char* name; const char* unit; f32 mn, mx, def; bool log, isB, isI; };
+    const Row kRows[] = {
+        { "Root Note",  "",   0.f,    127.f,   60.f,    false, false, true  },
+        { "Coarse",     "st", -24.f,  24.f,    0.f,     false, false, true  },
+        { "Fine",       "ct", -100.f, 100.f,   0.f,     false, false, false },
+        { "Start",      "",   0.f,    1.f,     0.f,     false, false, false },
+        { "End",        "",   0.f,    1.f,     1.f,     false, false, false },
+        { "Loop",       "",   0.f,    1.f,     0.f,     false, true,  false },
+        { "Crossfade",  "ms", 0.f,    50.f,    5.f,     false, false, false },
+        { "Gate",       "",   0.f,    1.f,     1.f,     false, true,  false },
+        { "Attack",     "ms", 0.1f,   5000.f,  0.5f,    true,  false, false },
+        { "Decay",      "ms", 1.f,    5000.f,  1000.f,  true,  false, false },
+        { "Sustain",    "",   0.f,    1.f,     1.f,     false, false, false },
+        { "Release",    "ms", 1.f,    8000.f,  40.f,    true,  false, false },
+        { "Cutoff",     "Hz", 20.f,   20000.f, 20000.f, true,  false, false },
+        { "Resonance",  "",   0.f,    1.f,     0.1f,    false, false, false },
+        { "Env>Cutoff", "",   -1.f,   1.f,     0.f,     false, false, false },
+        { "Keytrack",   "",   0.f,    1.f,     0.f,     false, false, false },
+        { "Vel>Amp",    "",   0.f,    1.f,     1.f,     false, false, false },
+        { "Glide",      "ms", 0.f,    500.f,   0.f,     false, false, false },
+        { "Voices",     "",   1.f,    16.f,    16.f,    false, false, true  },
+        { "Master",     "",   0.f,    2.f,     1.f,     false, false, false },
+    };
+    bool rows = true;
+    for (int i = 0; i < kSamplerContractN; ++i) {
+        const ParamInfo& pi = s->paramInfo(i);
+        const Row& r = kRows[i];
+        if (pi.unit != r.unit || pi.min != r.mn || pi.max != r.mx || pi.def != r.def ||
+            pi.isLogarithmic != r.log || pi.isBool != r.isB || pi.isInt != r.isI) {
+            CHECK(false, "%s: unit \"%s\" [%g, %g] def %g log=%d bool=%d int=%d -- "
+                         "the table says \"%s\" [%g, %g] def %g log=%d bool=%d int=%d",
+                  pi.name.c_str(), pi.unit.c_str(), (double)pi.min, (double)pi.max,
+                  (double)pi.def, (int)pi.isLogarithmic, (int)pi.isBool, (int)pi.isInt,
+                  r.unit, (double)r.mn, (double)r.mx, (double)r.def,
+                  (int)r.log, (int)r.isB, (int)r.isI);
+            rows = false;
+        }
+    }
+    CHECK(rows, "every range, default, unit and flag matches the table -- the four "
+                "envelope-ish times and the cutoff are logarithmic, Loop and Gate "
+                "are toggles, Root/Coarse/Voices are stepped");
+
+    CHECK(s->latencyFrames() == 0, "it reports no latency, because it has none");
+    CHECK(s->rack() == nullptr, "it is not a container");
+    CHECK(s->sampler() != nullptr, "and it DOES answer sampler(), which is how the "
+                                   "GUI hands it a file");
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSamplerEmpty(PluginRegistry& reg) {
+    banner("Sampler: with no sample it is silent, and says so rather than guessing");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+    SamplerControl* sc = s->sampler();
+    CHECK(sc != nullptr, "sampler() is non-null on a fresh instance");
+    if (!sc) return;
+
+    CHECK(!sc->hasSample(), "a fresh sampler has no sample");
+    CHECK(sc->samplePath().empty(), "and no path");
+    CHECK(sc->sampleFrames() == 0, "and no frames");
+    CHECK(s->stateString().empty(),
+          "so its state string is EMPTY -- which is what makes the project layer "
+          "write no `state` key and keeps a set with no sampler in it byte-identical");
+
+    // Every note in the book, into a device with nothing to play.
+    const std::vector<SpEvent> ev = {
+        { 0, 0x90, 60, 100 }, { 100, 0x90, 64, 127 }, { 200, 0x80, 60, 0 },
+        { 300, 0xB0, 123, 0 }, { 400, 0x90, 72, 1 }, { 500, 0xB0, 120, 0 },
+    };
+    std::vector<f32> L, R;
+    spRender(*s, ev, 4800, kBlock, L, R);
+    f64 pk = 0.0;
+    bool fin = true;
+    for (int i = 0; i < 4800; ++i) {
+        pk = std::fmax(pk, std::fabs((f64)L[(size_t)i]));
+        pk = std::fmax(pk, std::fabs((f64)R[(size_t)i]));
+        if (!std::isfinite(L[(size_t)i]) || !std::isfinite(R[(size_t)i])) fin = false;
+    }
+    CHECK(fin, "an empty sampler renders finite audio");
+    CHECK(pk == 0.0, "and it is EXACTLY silent (peak %.9f), not nearly", pk);
+
+    // The no-decoder case, which is this binary. See the section header.
+    CHECK(!sc->loadFile(""), "loadFile(\"\") is refused");
+    CHECK(!sc->loadFile("/nonexistent/definitely-not-here.wav"),
+          "loadFile() of a missing file is refused");
+    CHECK(!sc->hasSample() && sc->samplePath().empty(),
+          "and a refused load leaves the device empty rather than half-loaded");
+
+    // Loading, then clearing, gets back to exactly the empty state.
+    sc->adopt(smRamp(4800), "/tmp/probe.wav");
+    CHECK(sc->hasSample() && sc->sampleFrames() == 4800, "adopt() takes a buffer in");
+    sc->clearSample();
+    CHECK(!sc->hasSample() && sc->samplePath().empty() && s->stateString().empty(),
+          "clearSample() gets all the way back to empty");
+    spRender(*s, ev, 2400, kBlock, L, R);
+    CHECK(smPeak(L, 0, 2400) == 0.0, "and silent again afterwards");
+    sc->reclaim();
+    CHECK(true, "reclaim() frees the displaced buffers without touching the live one");
+
+    // A buffer this device cannot play is turned into "no buffer" at the door.
+    {
+        auto bad = std::make_shared<SampleBuffer>();
+        bad->channels = 5;
+        bad->frames   = 100;
+        bad->data.assign(500, 0.1f);
+        sc->adopt(bad, "/tmp/fivechannel.wav");
+        CHECK(!sc->hasSample(),
+              "a 5-channel buffer is refused at adopt() rather than defended against "
+              "on the audio thread");
+    }
+    {
+        auto lying = std::make_shared<SampleBuffer>();
+        lying->channels = 2;
+        lying->frames   = 100000;          // far more than `data` can back
+        lying->data.assign(64, 0.1f);
+        sc->adopt(lying, "/tmp/lying.wav");
+        CHECK(!sc->hasSample(),
+              "so is a buffer whose frame count its own data cannot back");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSamplerPlayback(PluginRegistry& reg) {
+    banner("Sampler: start, end, loop, gate, velocity and polyphony");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    if (!d) return;
+
+    const i64 kFrames = 48000;                       // one second of ramp
+    const f32 kAmp    = 0.8f;
+    // The ramp is a position probe: mean(output) tells you mean(read position).
+    auto mk = [&](f64* meanOut, void (*patch)(PluginInstance&, int),
+                  int arg, const std::vector<SpEvent>& ev, int frames,
+                  int from, int n) -> bool {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return false;
+        SamplerControl* sc = s->sampler();
+        if (!sc) return false;
+        sc->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+        smFlatPatch(*s);
+        s->setParam(smIdx(*s, "Root Note"), 60.f);
+        if (patch) patch(*s, arg);
+        std::vector<f32> L, R;
+        spRender(*s, ev, frames, kBlock, L, R);
+        *meanOut = smMean(L, from, n);
+        return true;
+    };
+
+    const std::vector<SpEvent> hold = { { 0, 0x90, 60, 127 } };
+
+    // --- 1. Start is a fraction of the file, and it lands where it says.
+    {
+        f64 m0 = 0.0, m5 = 0.0;
+        auto setStart = [](PluginInstance& s, int pct) {
+            s.setParam(smIdx(s, "Start"), (f32)pct * 0.01f);
+        };
+        const bool a = mk(&m0, setStart, 0,  hold, 8000, 2000, 1000);
+        const bool b = mk(&m5, setStart, 50, hold, 8000, 2000, 1000);
+        if (a && b) {
+            // Half the file further in is half the ramp higher, and the ramp's
+            // full travel is kAmp.
+            const f64 want = 0.5 * (f64)kAmp;
+            CHECK(std::fabs((m5 - m0) - want) < 0.01,
+                  "Start = 0.5 begins half a file later: the probe reads %.4f higher "
+                  "and half the ramp is %.4f", m5 - m0, want);
+        }
+    }
+
+    // --- 2. End stops the voice, and the 2 ms declick means it does not click.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) {
+            SamplerControl* sc = s->sampler();
+            sc->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "End"), 0.25f);      // 12000 frames
+            std::vector<f32> L, R;
+            spRender(*s, hold, 24000, kBlock, L, R);
+            CHECK(smPeak(L, 4000, 4000) > 0.05, "the voice sounds before the end point");
+            CHECK(smPeak(L, 14000, 10000) == 0.0,
+                  "and is EXACTLY silent past it: End is a stop, not a fade to nothing");
+            f64 jump = 0.0;
+            for (int i = 11000; i < 13000; ++i)
+                jump = std::fmax(jump, std::fabs((f64)L[(size_t)i] - (f64)L[(size_t)(i - 1)]));
+            CHECK(jump < 0.005,
+                  "and the 2 ms declick keeps the biggest step at the end point down to "
+                  "%.5f -- a sample that does not finish at zero must not click", jump);
+        }
+    }
+
+    // --- 3. Loop: the region repeats, and the crossfade is what makes the
+    // splice inaudible rather than merely present.
+    {
+        auto mkLoop = [&](bool loop, f32 xfade, std::vector<f32>& L) -> bool {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return false;
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Start"), 0.25f);
+            s->setParam(smIdx(*s, "End"),   0.50f);
+            s->setParam(smIdx(*s, "Loop"),  loop ? 1.f : 0.f);
+            s->setParam(smIdx(*s, "Crossfade"), xfade);
+            std::vector<f32> R;
+            spRender(*s, hold, 48000, kBlock, L, R);
+            return true;
+        };
+        std::vector<f32> off, hard, soft;
+        const bool a = mkLoop(false, 0.f, off);
+        const bool b = mkLoop(true,  0.f, hard);
+        const bool c = mkLoop(true,  20.f, soft);
+        if (a && b && c) {
+            CHECK(smPeak(off, 30000, 10000) == 0.0,
+                  "with Loop off the voice ends when the region does");
+            CHECK(smPeak(hard, 30000, 10000) > 0.05,
+                  "with Loop on it is still sounding three regions later");
+            f64 jHard = 0.0, jSoft = 0.0;
+            for (int i = 20000; i < 40000; ++i) {
+                jHard = std::fmax(jHard, std::fabs((f64)hard[(size_t)i] - (f64)hard[(size_t)(i - 1)]));
+                jSoft = std::fmax(jSoft, std::fabs((f64)soft[(size_t)i] - (f64)soft[(size_t)(i - 1)]));
+            }
+            CHECK(jSoft < jHard * 0.25,
+                  "a 20 ms crossfade cuts the biggest step at the loop point from "
+                  "%.4f to %.5f", jHard, jSoft);
+        }
+    }
+
+    // --- 4. Gate vs one-shot.
+    {
+        auto mkGate = [&](bool gate, std::vector<f32>& L) -> bool {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return false;
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Gate"), gate ? 1.f : 0.f);
+            s->setParam(smIdx(*s, "Release"), 5.f);
+            const std::vector<SpEvent> ev = { { 0, 0x90, 60, 127 }, { 4800, 0x80, 60, 0 } };
+            std::vector<f32> R;
+            spRender(*s, ev, 24000, kBlock, L, R);
+            return true;
+        };
+        std::vector<f32> g, o;
+        if (mkGate(true, g) && mkGate(false, o)) {
+            CHECK(smPeak(g, 12000, 12000) < 1e-6,
+                  "Gate on: the note-off releases the voice (tail %.2e)",
+                  smPeak(g, 12000, 12000));
+            CHECK(smPeak(o, 12000, 12000) > 0.05,
+                  "Gate off (one-shot): the same note-off is ignored and the file "
+                  "plays out");
+        }
+    }
+
+    // --- 5. One-shot ignores Loop, which is the rule that makes it impossible
+    // to build a voice nothing can stop.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) {
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Gate"), 0.f);
+            s->setParam(smIdx(*s, "Loop"), 1.f);
+            s->setParam(smIdx(*s, "End"),  0.25f);
+            std::vector<f32> L, R;
+            spRender(*s, hold, 48000, kBlock, L, R);
+            CHECK(smPeak(L, 20000, 28000) == 0.0,
+                  "a one-shot does not loop: the voice ends at the end point even with "
+                  "Loop on, so no key press can leave a voice nothing releases");
+        }
+    }
+
+    // --- 6. A panic stops a one-shot too.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) {
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Gate"), 0.f);
+            s->setParam(smIdx(*s, "Release"), 5.f);
+            const std::vector<SpEvent> ev = { { 0, 0x90, 60, 127 }, { 4800, 0xB0, 123, 0 } };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 24000, kBlock, L, R);
+            CHECK(smPeak(L, 12000, 12000) < 1e-6,
+                  "All Notes Off releases a one-shot: a mode is a statement about the "
+                  "key, not about the panic");
+        }
+    }
+
+    // --- 7. Velocity, at both ends of its depth knob.
+    {
+        auto mkVel = [&](f32 depth, u8 vel, f64* mean) -> bool {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return false;
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Vel>Amp"), depth);
+            const std::vector<SpEvent> ev = { { 0, 0x90, 60, vel } };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 8000, kBlock, L, R);
+            *mean = smMean(L, 2000, 1000);
+            return true;
+        };
+        f64 loud = 0, soft = 0, flatA = 0, flatB = 0;
+        if (mkVel(1.f, 127, &loud) && mkVel(1.f, 32, &soft) &&
+            mkVel(0.f, 127, &flatA) && mkVel(0.f, 32, &flatB)) {
+            const f64 want = 32.0 / 127.0;
+            CHECK(loud > 1e-4 && std::fabs(soft / loud - want) < 0.02,
+                  "Vel>Amp = 1: velocity 32 plays at %.3f of velocity 127, and 32/127 "
+                  "is %.3f", soft / loud, want);
+            CHECK(std::fabs(flatA - flatB) < 1e-6,
+                  "Vel>Amp = 0: velocity does nothing at all (%.6f vs %.6f)",
+                  flatA, flatB);
+        }
+    }
+
+    // --- 8. Polyphony and stealing.
+    {
+        auto mkPoly = [&](int voices, f64* mean) -> bool {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return false;
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Voices"), (f32)voices);
+            // Three notes at the SAME pitch, so the probe adds up cleanly.
+            const std::vector<SpEvent> ev = {
+                { 0, 0x90, 60, 127 }, { 1, 0x90, 60, 127 }, { 2, 0x90, 60, 127 },
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 8000, kBlock, L, R);
+            *mean = smMean(L, 3000, 1000);
+            return true;
+        };
+        f64 one = 0, three = 0;
+        if (mkPoly(1, &one) && mkPoly(3, &three)) {
+            CHECK(one > 1e-4 && std::fabs(three / one - 3.0) < 0.05,
+                  "three notes on three voices are %.2fx one note; on ONE voice they "
+                  "are 1x, because the third steals the first two", three / one);
+        }
+    }
+
+    // --- 9. A region with nothing in it is silence, not a division by zero.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) {
+            s->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/ramp.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Start"), 0.8f);
+            s->setParam(smIdx(*s, "End"),   0.2f);       // End below Start
+            std::vector<f32> L, R;
+            spRender(*s, hold, 8000, kBlock, L, R);
+            bool fin = true;
+            for (f32 v : L) if (!std::isfinite(v)) fin = false;
+            CHECK(fin && smPeak(L, 0, 8000) == 0.0,
+                  "End below Start is an empty region: exactly silent, and finite");
+        }
+    }
+
+    // --- 10. Stereo in, stereo out, and mono spread to both.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) {
+            auto sb = smRamp(kFrames, 2, kAmp);
+            // Make the right channel the negative of the left, so a device that
+            // silently played channel 0 twice would fail here.
+            for (i64 i = 0; i < kFrames; ++i) sb->data[(size_t)(i * 2 + 1)] *= -1.f;
+            s->sampler()->adopt(sb, "/tmp/stereo.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            std::vector<f32> L, R;
+            spRender(*s, hold, 8000, kBlock, L, R);
+            const f64 ml = smMean(L, 2000, 1000), mr = smMean(R, 2000, 1000);
+            CHECK(ml > 1e-4 && std::fabs(ml + mr) < 1e-4,
+                  "a stereo file keeps its channels apart (L %.4f, R %.4f)", ml, mr);
+        }
+        auto m = reg.instantiate(*d, kSR, kBlock);
+        if (m) {
+            m->sampler()->adopt(smRamp(kFrames, 1, kAmp), "/tmp/mono.wav");
+            smFlatPatch(*m);
+            m->setParam(smIdx(*m, "Root Note"), 60.f);
+            std::vector<f32> L, R;
+            spRender(*m, hold, 8000, kBlock, L, R);
+            const f64 ml = smMean(L, 2000, 1000), mr = smMean(R, 2000, 1000);
+            CHECK(ml > 1e-4 && std::fabs(ml - mr) < 1e-9,
+                  "and a mono file comes out of both sides identically");
+        }
+    }
+
+    // --- 11. Glide: the second note starts at the FIRST note's pitch.
+    {
+        auto mkGlide = [&](f32 ms, f64* at1k, f64* at2k) -> bool {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return false;
+            s->sampler()->adopt(smSine(1000.0, 480000, 1), "/tmp/sine.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Voices"), 1.f);
+            s->setParam(smIdx(*s, "Glide"), ms);
+            const std::vector<SpEvent> ev = {
+                { 0, 0x90, 60, 100 }, { 12000, 0x80, 60, 0 }, { 12000, 0x90, 72, 100 },
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 24000, kBlock, L, R);
+            // The first 20 ms of the second note: with a 200 ms glide the pitch
+            // has barely left the old note.
+            *at1k = tBinMag(L, 12200, 960, 1000.0);
+            *at2k = tBinMag(L, 12200, 960, 2000.0);
+            return true;
+        };
+        f64 g1 = 0, g2 = 0, n1 = 0, n2 = 0;
+        if (mkGlide(200.f, &g1, &g2) && mkGlide(0.f, &n1, &n2)) {
+            CHECK(n2 > n1 * 4.0,
+                  "with no glide the second note is already an octave up (2 kHz %.4f "
+                  "vs 1 kHz %.4f)", n2, n1);
+            CHECK(g1 > g2 * 4.0,
+                  "with a 200 ms glide it starts from the note it left (1 kHz %.4f vs "
+                  "2 kHz %.4f) -- the 303 preset is this and a filter", g1, g2);
+        }
+    }
+
+    // --- 12. Coarse and Fine are a pitch ratio against the root.
+    {
+        auto mkTune = [&](f32 coarse, f32 fine, f64 wantHz) -> void {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return;
+            s->sampler()->adopt(smSine(1000.0, 480000, 1), "/tmp/sine.wav");
+            smFlatPatch(*s);
+            s->setParam(smIdx(*s, "Root Note"), 60.f);
+            s->setParam(smIdx(*s, "Coarse"), coarse);
+            s->setParam(smIdx(*s, "Fine"), fine);
+            const std::vector<SpEvent> ev = { { 0, 0x90, 60, 100 } };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 24000, kBlock, L, R);
+            const f64 hit = tBinMag(L, 4000, 16000, wantHz);
+            const f64 ref = tBinMag(L, 4000, 16000, 1000.0);
+            CHECK(hit > 0.1 && (wantHz == 1000.0 || hit > ref * 4.0),
+                  "Coarse %+g st / Fine %+g ct puts the 1 kHz source at %.1f Hz "
+                  "(magnitude %.3f there, %.3f at 1 kHz)",
+                  (double)coarse, (double)fine, wantHz, hit, ref);
+        };
+        mkTune(0.f,   0.f, 1000.0);
+        mkTune(12.f,  0.f, 2000.0);
+        mkTune(-12.f, 0.f, 500.0);
+        mkTune(0.f, 100.f, 1000.0 * std::pow(2.0, 1.0 / 12.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interpolation quality
+//
+// The claim being tested: a repitching sampler on LINEAR interpolation hisses,
+// and four-point Catmull-Rom is what stops it. Both numbers are printed for
+// every ratio, from the same source and the same measurement, so the claim is a
+// margin in decibels rather than an assertion.
+// ---------------------------------------------------------------------------
+
+static void testSamplerQuality(PluginRegistry& reg) {
+    banner("Sampler: interpolation quality, measured in dB against the ideal tone");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    if (!d) return;
+
+    const i64 kSrcFrames = 480000;                   // ten seconds: never runs out
+    const int kAnalyse   = 40000;
+    const int kFrom      = 20000;
+    const int kRender    = 96000;
+
+    struct Case { f64 srcHz; f64 gate; const char* what; };
+    const Case kCases[] = {
+        { 1000.0, 60.0, "a 1 kHz tone -- the middle of where a sampled instrument lives" },
+        { 4000.0, 45.0, "a 4 kHz tone -- near the top of what a real sample carries" },
+    };
+
+    for (const Case& c : kCases) {
+        f64 worstCr = 1e9, worstLin = 1e9;
+        int worstCrSt = 0;
+        f64 crAt12 = 0.0, crAtM12 = 0.0;
+        bool ok = true;
+
+        for (int st : { -12, -7, -5, -3, -1, 1, 3, 5, 7, 12 }) {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (!s) return;
+            SampleRef src = smSine(c.srcHz, kSrcFrames, 1);
+            s->sampler()->adopt(src, "/tmp/sine.wav");
+            smFlatPatch(*s);
+            const std::vector<SpEvent> ev = { { 0, 0x90, (u8)(69 + st), 100 } };
+            std::vector<f32> L, R;
+            spRender(*s, ev, kRender, kBlock, L, R);
+
+            const f64 ratio = std::pow(2.0, (f64)st / 12.0);
+            const f64 outHz = c.srcHz * ratio;
+            const f64 cr    = smSnrDb(L, kFrom, kAnalyse, outHz);
+
+            std::vector<f32> lin;
+            smLinearRef(*src, ratio, lin, kRender);
+            const f64 li = smSnrDb(lin, kFrom, kAnalyse, outHz);
+
+            std::printf("  note  %s %+3d st (x%.5f): Catmull-Rom %6.1f dB, linear %6.1f dB\n",
+                        c.srcHz == 1000.0 ? "1 kHz" : "4 kHz", st, ratio, cr, li);
+            if (cr < worstCr) { worstCr = cr; worstCrSt = st; }
+            if (li < worstLin) worstLin = li;
+            if (st == 12)  crAt12  = cr;
+            if (st == -12) crAtM12 = cr;
+            if (cr < c.gate) ok = false;
+        }
+
+        CHECK(ok, "%s: every ratio clears %.0f dB (worst %.1f dB, at %+d semitones)",
+              c.what, c.gate, worstCr, worstCrSt);
+        CHECK(crAt12 >= 60.0 && crAtM12 >= 60.0,
+              "and the two the brief names -- +12 and -12 semitones -- are %.1f dB and "
+              "%.1f dB, both past 60", crAt12, crAtM12);
+        CHECK(worstCr > worstLin + 12.0,
+              "Catmull-Rom is %.1f dB better than linear at its own worst ratio "
+              "(%.1f vs %.1f) -- that gap is the whole reason for the four-point read",
+              worstCr - worstLin, worstCr, worstLin);
+    }
+
+    // At the root note the read lands on the sample grid at every step, and
+    // Catmull-Rom is EXACT there: c1 = 1 and the other three coefficients are
+    // 0. What comes out is the file, through a linear filter and a settled
+    // envelope and nothing else -- so the residual is the float noise floor.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->sampler()->adopt(smSine(1000.0, kSrcFrames, 1), "/tmp/sine.wav");
+        smFlatPatch(*s);
+        const std::vector<SpEvent> ev = { { 0, 0x90, 69, 100 } };
+        std::vector<f32> L, R;
+        spRender(*s, ev, kRender, kBlock, L, R);
+        const f64 snr = smSnrDb(L, kFrom, kAnalyse, 1000.0);
+        CHECK(snr > 120.0,
+              "at the root note the interpolator is exact on the grid: %.1f dB, which "
+              "is the float noise floor and not a filter", snr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSamplerDeterminism(PluginRegistry& reg) {
+    banner("Sampler: the render does not depend on the block size");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    if (!d) return;
+
+    const int kFrames = 20000;
+    // Overlapping notes, a chord, a released note and more notes than the cap,
+    // so voice allocation, stealing, glide and the loop wrap are all exercised.
+    const std::vector<SpEvent> ev = {
+        {     0, 0x90, 45,  90 },
+        {   700, 0x90, 57, 120 },
+        {  2300, 0x90, 64,  40 },
+        {  4001, 0x80, 45,   0 },
+        {  4600, 0x90, 69, 110 },
+        {  5000, 0x90, 72,  20 },
+        {  5003, 0x90, 76,  95 },
+        {  5100, 0x90, 79,  70 },
+        {  5111, 0x90, 84, 127 },     // one past the cap: steals
+        {  8000, 0x80, 57,   0 },
+        {  8100, 0x80, 64,   0 },
+        { 14000, 0xB0, 123,  0 },     // all notes off
+    };
+
+    auto build = [&]() -> std::unique_ptr<PluginInstance> {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return s;
+        // A source with structure in it, so a one-sample position slip shows.
+        s->sampler()->adopt(smSine(700.0, 96000, 2), "/tmp/busy.wav");
+        smBusyPatch(*s);
+        return s;
+    };
+
+    std::vector<f32> refL, refR, altL, altR;
+    auto ref = build();
+    if (!ref) return;
+    spRender(*ref, ev, kFrames, kBlock, refL, refR, 120.0);
+
+    CHECK(smPeak(refL, 0, kFrames) > 0.02,
+          "the reference render is not silent (peak %.4f)", smPeak(refL, 0, kFrames));
+
+    bool allSame = true;
+    for (int chunk : { 1, 7, 64, 300, 1024 }) {
+        auto alt = build();
+        if (!alt) break;
+        spRender(*alt, ev, kFrames, chunk, altL, altR, 120.0);
+        f32 diff = 0.f;
+        for (int i = 0; i < kFrames; ++i) {
+            diff = std::fmax(diff, std::fabs(refL[(size_t)i] - altL[(size_t)i]));
+            diff = std::fmax(diff, std::fabs(refR[(size_t)i] - altR[(size_t)i]));
+        }
+        if (diff != 0.f) allSame = false;
+        CHECK(diff == 0.f,
+              "blocks of %d are bit-identical to blocks of %d (max diff %.9f)",
+              chunk, kBlock, (double)diff);
+    }
+    CHECK(allSame, "six block sizes agree to the bit: the queued MIDI, the control "
+                   "tick on absolute sample time, the per-sample envelope and the "
+                   "per-sample read position all survive the boundary");
+
+    // Two fresh instances render the same file. There is no random number in
+    // this device at all, so this is a check that none arrives later -- and
+    // that nothing reads a clock.
+    {
+        auto a = build();
+        auto b = build();
+        if (a && b) {
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, ev, kFrames, kBlock, aL, aR, 120.0);
+            spRender(*b, ev, kFrames, kBlock, bL, bR, 120.0);
+            f32 diff = 0.f;
+            for (int i = 0; i < kFrames; ++i)
+                diff = std::fmax(diff, std::fabs(aL[(size_t)i] - bL[(size_t)i]));
+            CHECK(diff == 0.f, "two fresh instances render identically");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The state string
+//
+// host.h's setStateString contract, exercised against the one device that has
+// any state: an empty string is a no-op, anything that does not parse is
+// REFUSED with the device left exactly as it was, and no byte sequence may
+// crash it. The string comes out of a file a user can edit.
+// ---------------------------------------------------------------------------
+
+static void testSamplerState(PluginRegistry& reg) {
+    banner("Sampler: the state string round-trips, and refuses everything else");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    if (!d) return;
+
+    // --- 1. The shape.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->sampler()->adopt(smRamp(4800), "/home/x/kit/kick.wav");
+        CHECK(s->stateString() == "nxsmp1;p=/home/x/kit/kick.wav",
+              "an ordinary path rides verbatim behind the version tag: \"%s\"",
+              s->stateString().c_str());
+    }
+
+    // --- 2. Escaping. Every one of these is a legal Linux filename, and every
+    // one of them would break a line-oriented format if it went through raw.
+    {
+        const char* kPaths[] = {
+            "/tmp/a file with spaces.wav",
+            "/tmp/semi;colon.wav",
+            "/tmp/com,ma.wav",
+            "/tmp/co:lon.wav",
+            "/tmp/eq=uals.wav",
+            "/tmp/per%cent.wav",
+            "/tmp/new\nline.wav",
+            "/tmp/tab\there.wav",
+            "/tmp/\xC3\xA9t\xC3\xA9-2026.wav",        // UTF-8
+            "/tmp/nxsmp1;p=notapath.wav",             // looks like our own format
+            "relative/path.wav",
+            "/tmp/\xFF\xFE-not-utf8.wav",
+        };
+        bool clean = true, trip = true;
+        for (const char* p : kPaths) {
+            auto a = reg.instantiate(*d, kSR, kBlock);
+            auto b = reg.instantiate(*d, kSR, kBlock);
+            if (!a || !b) break;
+            a->sampler()->adopt(smRamp(4800), p);
+            const std::string st = a->stateString();
+            for (char ch : st) {
+                const unsigned char u = (unsigned char)ch;
+                if (u <= ' ' || u >= 0x7F) {
+                    CHECK(false, "state for \"%s\" carries byte 0x%02X -- it must be "
+                                 "printable ASCII with no whitespace", p, (unsigned)u);
+                    clean = false;
+                    break;
+                }
+            }
+            if (!b->setStateString(st) || b->sampler()->samplePath() != p ||
+                b->stateString() != st) {
+                CHECK(false, "\"%s\" did not round-trip (came back as \"%s\")",
+                      p, b->sampler()->samplePath().c_str());
+                trip = false;
+            }
+        }
+        CHECK(clean, "every escaped state string is one line of printable ASCII with "
+                     "no whitespace, so project.cpp's kv() can carry it blind");
+        CHECK(trip, "and every path -- spaces, separators, newlines, UTF-8, invalid "
+                    "UTF-8, and a path that spells out this very format -- comes back "
+                    "byte for byte");
+    }
+
+    // --- 3. A path that will not open is NOT a malformed state. The set is
+    // right and the machine is missing a file; losing the path would lose the
+    // only record of what the set names.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        const std::string st = "nxsmp1;p=/nowhere/at/all.wav";
+        CHECK(s->setStateString(st),
+              "a state naming a file this machine does not have is ACCEPTED");
+        CHECK(!s->sampler()->hasSample(),
+              "the device is silent, because it has nothing to play");
+        CHECK(s->sampler()->samplePath() == "/nowhere/at/all.wav" &&
+              s->stateString() == st,
+              "and it still writes the path back out, so the set does not forget");
+        std::vector<f32> L, R;
+        const std::vector<SpEvent> ev = { { 0, 0x90, 60, 127 } };
+        spRender(*s, ev, 4800, kBlock, L, R);
+        CHECK(smPeak(L, 0, 4800) == 0.0, "and renders exact silence meanwhile");
+    }
+
+    // --- 4. The empty string is not malformed: it is what a fresh instance
+    // answers, and it must be a no-op.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->sampler()->adopt(smRamp(4800), "/tmp/keep.wav");
+        CHECK(s->setStateString(""), "the empty string is accepted");
+        CHECK(s->sampler()->hasSample() && s->sampler()->samplePath() == "/tmp/keep.wav",
+              "and changes nothing");
+    }
+
+    // --- 5. MALFORMED. Each one must be refused AND leave the device exactly
+    // as it was -- a half-parsed state is how a corrupt file becomes a corrupt
+    // session.
+    {
+        std::string huge = "nxsmp1;p=/tmp/";
+        huge.append(6000, 'a');
+        std::string withNul = "nxsmp1;p=/tmp/a.wav";
+        withNul.push_back('\0');
+        withNul += "extra";
+
+        struct Bad { std::string s; const char* why; };
+        const Bad kBad[] = {
+            { "garbage",                       "no version record at all" },
+            { "p=/tmp/a.wav",                  "a p record with no version in front of it" },
+            { "nxsmp2;p=/tmp/a.wav",           "a version this reader does not know" },
+            { "NXSMP1;p=/tmp/a.wav",           "the version tag is case sensitive" },
+            { "nxsmp1 ;p=/tmp/a.wav",          "a space inside the version record" },
+            { "nxsmp1",                        "a version and no path" },
+            { "nxsmp1;",                       "an empty trailing record" },
+            { "nxsmp1;;p=/tmp/a.wav",          "an empty record in the middle" },
+            { "nxsmp1;p=",                     "an empty path" },
+            { "nxsmp1;p=/tmp/a.wav;p=/tmp/b.wav", "two p records: which file?" },
+            { "nxsmp1;px/tmp/a.wav",           "a record with no '='" },
+            { "nxsmp1;=/tmp/a.wav",            "a record with no tag" },
+            { "nxsmp1;p=/tmp/a%",              "a '%' with nothing after it" },
+            { "nxsmp1;p=/tmp/a%A",             "a '%' with one nibble after it" },
+            { "nxsmp1;p=/tmp/a%ZZ.wav",        "a '%' with no hex after it" },
+            { "nxsmp1;p=/tmp/a%2g.wav",        "a '%' with half a hex byte after it" },
+            { "nxsmp1;p=/tmp/a%00b.wav",       "an escaped NUL, which open(2) would truncate at" },
+            { "nxsmp1;p=%00",                  "a path that is nothing but a NUL" },
+            { "nxsmp1;p=/tmp/a%%.wav",         "a '%' whose first nibble is another '%'" },
+            { "nxsmp1;p=/tmp/a.wav;",          "a trailing empty record after a good one" },
+            { "nxsmp1;p=/tmp/a b.wav",         "a raw space where an escape belongs" },
+            { "nxsmp1;p=/tmp/a\tb.wav",        "a raw tab" },
+            { "nxsmp1;p=/tmp/a\nb.wav",        "a raw newline" },
+            { "nxsmp1;p=/tmp/\xC3\xA9.wav",    "raw UTF-8, which this writer escapes" },
+            { huge,                            "a path past the 4096-byte cap" },
+            { withNul,                         "a string with an embedded NUL byte" },
+        };
+
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        SamplerControl* sc = s->sampler();
+        sc->adopt(smRamp(4800), "/tmp/known.wav");
+        const std::string before = s->stateString();
+
+        int refused = 0, intact = 0;
+        const int nBad = (int)(sizeof kBad / sizeof kBad[0]);
+        for (const Bad& b : kBad) {
+            const bool took = s->setStateString(b.s);
+            if (!took) ++refused;
+            else CHECK(false, "\"%s\" was ACCEPTED (%s)", b.s.c_str(), b.why);
+            if (sc->hasSample() && sc->samplePath() == "/tmp/known.wav" &&
+                s->stateString() == before) ++intact;
+            else CHECK(false, "\"%s\" changed the device (%s)", b.s.c_str(), b.why);
+        }
+        CHECK(refused == nBad, "all %d malformed states are refused (%d)", nBad, refused);
+        CHECK(intact == nBad,
+              "and every one of them leaves the sample, the path and the state string "
+              "exactly as they were (%d of %d)", intact, nBad);
+    }
+
+    // --- 6. Unknown records are SKIPPED, which is what makes the format
+    // extensible: a later writer may add a record and this reader must not
+    // treat the file as corrupt.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        CHECK(s->setStateString("nxsmp1;z=whatever;p=/tmp/a.wav;q=1"),
+              "records this version does not know are skipped, not refused");
+        CHECK(s->sampler()->samplePath() == "/tmp/a.wav",
+              "and the path still arrives");
+    }
+
+    // --- 7. THE PROJECT LAYER'S SEQUENCE, walked by hand.
+    //
+    // src/ui/app_project.cpp is not linked by any suite -- it is GUI code --
+    // so what is checked here is the sequence it performs rather than the
+    // function that performs it: serializeDevices() writes (ParamInfo::id,
+    // value) pairs plus stateString(); materializeDevices() applies the
+    // parameters FIRST and setStateString() second. Doing it in that order is
+    // the rule docs/RACKS.md §Persistence derives and host.h restates, and it
+    // matters for this device: Start is a parameter and every voice is placed
+    // from it.
+    {
+        auto src = reg.instantiate(*d, kSR, kBlock);
+        if (!src) return;
+        src->sampler()->adopt(smSine(700.0, 96000, 2), "/tmp/set/loop.wav");
+        smBusyPatch(*src);
+
+        std::vector<std::pair<u32, f32>> params;
+        for (int i = 0; i < src->paramCount(); ++i)
+            params.emplace_back(src->paramInfo(i).id, src->getParam(i));
+        const std::string state = src->stateString();
+        CHECK((int)params.size() == kSamplerContractN && !state.empty(),
+              "a save takes %zu parameter pairs and one state string",
+              params.size());
+
+        auto dst = reg.instantiate(*d, kSR, kBlock);
+        if (!dst) return;
+        for (const auto& kv : params) {                    // parameters FIRST
+            int idx = -1;
+            for (int i = 0; i < dst->paramCount(); ++i)
+                if (dst->paramInfo(i).id == kv.first) { idx = i; break; }
+            if (idx >= 0) dst->setParam(idx, kv.second);
+        }
+        CHECK(dst->setStateString(state), "and the state string is applied AFTER them");
+        // The file is not on this machine (and this binary could not open it
+        // anyway), so the restored device is silent -- but it must be the same
+        // device otherwise. Hand it the same buffer and the two have to agree
+        // to the bit.
+        dst->sampler()->adopt(smSine(700.0, 96000, 2), dst->sampler()->samplePath());
+
+        bool same = true;
+        for (int i = 0; i < src->paramCount(); ++i)
+            if (src->getParam(i) != dst->getParam(i)) same = false;
+        CHECK(same, "every restored parameter is exactly the value that was saved");
+        CHECK(dst->stateString() == state,
+              "and the restored device writes back the same state string");
+
+        const std::vector<SpEvent> ev = {
+            { 0, 0x90, 45, 90 }, { 700, 0x90, 57, 120 }, { 4001, 0x80, 45, 0 },
+            { 5000, 0x90, 72, 20 }, { 9000, 0xB0, 123, 0 },
+        };
+        std::vector<f32> aL, aR, bL, bR;
+        spRender(*src, ev, 14000, kBlock, aL, aR, 120.0);
+        spRender(*dst, ev, 14000, kBlock, bL, bR, 120.0);
+        f32 diff = 0.f;
+        for (int i = 0; i < 14000; ++i) {
+            diff = std::fmax(diff, std::fabs(aL[(size_t)i] - bL[(size_t)i]));
+            diff = std::fmax(diff, std::fabs(aR[(size_t)i] - bR[(size_t)i]));
+        }
+        CHECK(smPeak(aL, 0, 14000) > 0.02, "the comparison render is not silent");
+        CHECK(diff == 0.f, "and a restored sampler renders bit-identically (max diff "
+                           "%.9f)", (double)diff);
+    }
+
+    // --- 8. Fuzz. Not a proof, a floor: nothing here may crash, and anything
+    // ACCEPTED has to round-trip, because an accepted state that does not
+    // round-trip is a set that changes every time it is opened.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        u32 rng = 0xC0FFEEu;
+        auto next = [&]() { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
+        int accepted = 0, tripped = 0;
+        bool ok = true;
+        for (int k = 0; k < 4000; ++k) {
+            std::string t;
+            if (k & 1) t = "nxsmp1;p=";              // half of them start plausibly
+            const int n = (int)(next() % 40u);
+            for (int i = 0; i < n; ++i) t.push_back((char)(next() % 256u));
+            const bool took = s->setStateString(t);
+            if (took) {
+                ++accepted;
+                const std::string round = s->stateString();
+                if (s->setStateString(round) && s->stateString() == round) ++tripped;
+                else ok = false;
+            }
+        }
+        CHECK(ok, "4000 fuzzed states: none crashed, and all %d that were accepted "
+                  "round-trip through their own spelling (%d)", accepted, tripped);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSamplerPresets(PluginRegistry& reg) {
+    banner("Sampler: factory presets");
+
+    const PluginDesc* d = reg.find("nxtakt:sampler");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    CHECK(s->presetCount() == kSamplerPresetN,
+          "presetCount() is %d (the brief asked for %d)", s->presetCount(), kSamplerPresetN);
+    CHECK(s->presetName(-1) == nullptr && s->presetName(s->presetCount()) == nullptr,
+          "presetName() is null out of range");
+
+    bool names = true;
+    for (int i = 0; i < s->presetCount() && i < kSamplerPresetN; ++i) {
+        const char* n = s->presetName(i);
+        if (!n || std::strcmp(n, kSamplerPresetNames[i]) != 0) {
+            CHECK(false, "preset %d is \"%s\", expected \"%s\"",
+                  i, n ? n : "(null)", kSamplerPresetNames[i]);
+            names = false;
+        }
+    }
+    CHECK(names, "all %d preset names match, in order", kSamplerPresetN);
+
+    // Init is the constructor's defaults, exactly.
+    {
+        auto a = reg.instantiate(*d, kSR, kBlock);
+        if (a) {
+            smBusyPatch(*a);
+            a->loadPreset(0);
+            bool def = true;
+            for (int i = 0; i < a->paramCount(); ++i)
+                if (a->getParam(i) != a->paramInfo(i).def) {
+                    CHECK(false, "Init left %s at %g, the default is %g",
+                          a->paramInfo(i).name.c_str(), (double)a->getParam(i),
+                          (double)a->paramInfo(i).def);
+                    def = false;
+                }
+            CHECK(def, "Init restores every parameter to its constructor default exactly");
+        }
+    }
+
+    // In range, integral where stepped, and self-contained.
+    {
+        bool inRange = true, complete = true;
+        for (int k = 0; k < s->presetCount(); ++k) {
+            auto fresh = reg.instantiate(*d, kSR, kBlock);
+            auto dirty = reg.instantiate(*d, kSR, kBlock);
+            if (!fresh || !dirty) break;
+            fresh->loadPreset(k);
+            for (int i = 0; i < fresh->paramCount(); ++i) {
+                const ParamInfo& pi = fresh->paramInfo(i);
+                const f32 v = fresh->getParam(i);
+                if (!std::isfinite(v) || v < pi.min || v > pi.max) {
+                    CHECK(false, "preset \"%s\" leaves %s at %g, outside [%g, %g]",
+                          kSamplerPresetNames[k], pi.name.c_str(), (double)v,
+                          (double)pi.min, (double)pi.max);
+                    inRange = false;
+                }
+                if (pi.isInt && v != std::floor(v)) {
+                    CHECK(false, "preset \"%s\" leaves the stepped %s at %g",
+                          kSamplerPresetNames[k], pi.name.c_str(), (double)v);
+                    inRange = false;
+                }
+            }
+            smBusyPatch(*dirty);
+            dirty->loadPreset((k + 3) % s->presetCount());
+            dirty->loadPreset(k);
+            for (int i = 0; i < fresh->paramCount(); ++i)
+                if (fresh->getParam(i) != dirty->getParam(i)) {
+                    CHECK(false, "preset \"%s\" is not self-contained: %s is %g from a "
+                                 "dirty state and %g from a fresh one",
+                          kSamplerPresetNames[k], fresh->paramInfo(i).name.c_str(),
+                          (double)dirty->getParam(i), (double)fresh->getParam(i));
+                    complete = false;
+                    break;
+                }
+        }
+        CHECK(inRange, "every preset leaves every parameter finite, in range, and "
+                       "integral where the table says stepped");
+        CHECK(complete, "every preset lands on the same state from any starting patch");
+    }
+
+    // NO PRESET NAMES A FILE. It is the rule that keeps the six of them from
+    // being six broken devices on every machine but the author's -- and the
+    // corollary is that loading one must not throw away the sample the user
+    // already has.
+    {
+        bool kept = true;
+        for (int k = 0; k < s->presetCount(); ++k) {
+            auto a = reg.instantiate(*d, kSR, kBlock);
+            if (!a) break;
+            a->sampler()->adopt(smRamp(4800), "/tmp/mine.wav");
+            a->loadPreset(k);
+            if (!a->sampler()->hasSample() || a->sampler()->samplePath() != "/tmp/mine.wav" ||
+                a->stateString() != "nxsmp1;p=/tmp/mine.wav")
+                kept = false;
+        }
+        CHECK(kept, "no preset touches the sample: a preset is a way of PLAYING, and "
+                    "it cannot name a file the user does not have");
+    }
+
+    // And each of the six actually does something different with the same
+    // source and the same note.
+    {
+        f64 mean[kSamplerPresetN] = {};
+        bool sounded = true;
+        for (int k = 0; k < s->presetCount() && k < kSamplerPresetN; ++k) {
+            auto a = reg.instantiate(*d, kSR, kBlock);
+            if (!a) break;
+            a->sampler()->adopt(smSine(600.0, 96000, 1), "/tmp/tone.wav");
+            a->loadPreset(k);
+            a->setParam(smIdx(*a, "Root Note"), 60.f);
+            const std::vector<SpEvent> ev = { { 0, 0x90, 60, 110 }, { 24000, 0x80, 60, 0 } };
+            std::vector<f32> L, R;
+            spRender(*a, ev, 72000, kBlock, L, R);
+            bool fin = true;
+            for (f32 v : L) if (!std::isfinite(v)) fin = false;
+            mean[k] = smPeak(L, 0, 72000);
+            if (!fin || mean[k] <= 1e-4) {
+                CHECK(false, "preset \"%s\" renders nothing (peak %.6f, finite=%d)",
+                      kSamplerPresetNames[k], mean[k], (int)fin);
+                sounded = false;
+            }
+        }
+        CHECK(sounded, "all %d presets make a finite, audible sound from the same "
+                       "source", kSamplerPresetN);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT-3 F3 — a MIDI flood must not be able to strand a voice
+//
+// Both instruments share the queue design, so both are checked here with the
+// same three floods. RED before the fix: the queue dropped everything once
+// full, so the panic behind 128 note-ons was thrown away and the voices it was
+// meant to stop sounded for the rest of the session.
+//
+// The three cases are the three ways to run out of room:
+//   a. more note-ons than the whole queue, then a panic;
+//   b. exactly enough note-ons to fill the reserve, then note-offs, then a
+//      panic -- so the panic can only be caught by the overflow set;
+//   c. more note-ons than the queue, then an OFF for each of them and no panic
+//      at all, which is what a MIDI file with a dense chord actually looks
+//      like.
+// ---------------------------------------------------------------------------
+
+static void testMidiFlood(PluginRegistry& reg, const char* uri, const char* label,
+                          void (*patch)(PluginInstance&)) {
+    banner(label);
+
+    const PluginDesc* d = reg.find(uri);
+    if (!d) return;
+
+    // Everything sustains, so a voice that is not stopped is a voice that is
+    // still audible three seconds later.
+    auto build = [&]() -> std::unique_ptr<PluginInstance> {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return s;
+        if (patch) patch(*s);
+        return s;
+    };
+
+    // One block, `nOn` note-ons in it, then `tail` bytes, then silence.
+    auto flood = [&](int nOn, int nOff, int panic, f64* tailPeak) -> bool {
+        auto s = build();
+        if (!s) return false;
+        const int kBig = 1024;
+        std::vector<f32> bl((size_t)kBig, 0.f), br((size_t)kBig, 0.f);
+        f32* o[2] = { bl.data(), br.data() };
+
+        for (int i = 0; i < nOn; ++i) {
+            const u8 m[3] = { 0x90, (u8)(24 + (i % 96)), 100 };
+            s->midi(m, 3, i % kBig);
+        }
+        for (int i = 0; i < nOff; ++i) {
+            const u8 m[3] = { 0x80, (u8)(24 + (i % 96)), 0 };
+            s->midi(m, 3, (nOn + i) % kBig);
+        }
+        if (panic) {
+            const u8 m[3] = { 0xB0, (u8)panic, 0 };
+            s->midi(m, 3, kBig - 1);
+        }
+        s->process(nullptr, o, 2, kBig);
+
+        // Four seconds of nothing. Anything still sounding at the end is stuck.
+        f64 pk = 0.0;
+        for (int blk = 0; blk < 750; ++blk) {
+            std::fill(bl.begin(), bl.end(), 0.f);
+            std::fill(br.begin(), br.end(), 0.f);
+            s->process(nullptr, o, 2, kBig);
+            if (blk >= 700)
+                for (int i = 0; i < kBig; ++i) {
+                    pk = std::fmax(pk, std::fabs((f64)bl[(size_t)i]));
+                    pk = std::fmax(pk, std::fabs((f64)br[(size_t)i]));
+                }
+        }
+        *tailPeak = pk;
+        return true;
+    };
+
+    // Sanity: without the panic the flood really does leave voices sounding,
+    // so the three checks below are measuring the panic and not the envelope.
+    f64 stuck = 0.0;
+    if (flood(200, 0, 0, &stuck))
+        CHECK(stuck > 1e-4,
+              "a flood with NO panic leaves voices sounding four seconds later (peak "
+              "%.5f) -- which is what makes the next three checks mean something",
+              stuck);
+
+    f64 a = 0.0, b = 0.0, c = 0.0, e = 0.0;
+    if (flood(200, 0, 123, &a))
+        CHECK(a < 1e-6,
+              "200 note-ons then All Notes Off: silent (peak %.2e). The panic is "
+              "behind more note-ons than the queue holds, and it still lands", a);
+    if (flood(200, 0, 120, &e))
+        CHECK(e < 1e-6, "the same with All Sound Off (peak %.2e)", e);
+    if (flood(96, 40, 123, &b))
+        CHECK(b < 1e-6,
+              "96 note-ons + 40 note-offs (which fills the reserve too) then All Notes "
+              "Off: silent (peak %.2e) -- this one can only be the overflow set", b);
+    if (flood(200, 200, 0, &c))
+        CHECK(c < 1e-6,
+              "200 note-ons then a note-off for every one of them and NO panic: silent "
+              "(peak %.2e). A note-off is never dropped, only note-ons are", c);
+}
+
+static void spFloodPatch(PluginInstance& s) {
+    s.setParam(spIdx(s, "A Level"), 0.9f);
+    s.setParam(spIdx(s, "Attack"), 1.f);
+    s.setParam(spIdx(s, "Decay"), 5000.f);
+    s.setParam(spIdx(s, "Sustain"), 1.f);
+    s.setParam(spIdx(s, "Release"), 20.f);
+}
+
+static void smFloodPatch(PluginInstance& s) {
+    s.sampler()->adopt(smSine(500.0, 96000, 1), "/tmp/flood.wav");
+    smFlatPatch(s);
+    s.setParam(smIdx(s, "Root Note"), 60.f);
+    s.setParam(smIdx(s, "Loop"), 1.f);          // so nothing ends on its own
+    s.setParam(smIdx(s, "Start"), 0.1f);
+    s.setParam(smIdx(s, "End"), 0.4f);
+    s.setParam(smIdx(s, "Crossfade"), 10.f);
+    s.setParam(smIdx(s, "Release"), 20.f);
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
     std::printf("internal device tests\n");
@@ -4571,7 +5960,7 @@ int main() {
         if (reg.plugins()[i].format == PluginFormat::Internal) ++internals;
         else if (firstNonInternal < 0) firstNonInternal = (int)i;
     }
-    CHECK(internals == 12, "scan lists every internal device (%d)", internals);
+    CHECK(internals == 13, "scan lists every internal device (%d)", internals);
     CHECK(firstNonInternal < 0 || firstNonInternal == internals,
           "internal devices sort to the front of the list");
 
@@ -4586,6 +5975,17 @@ int main() {
     testSpectraSweeps(reg);
     testSpectraState(reg);
     testSpectraPresets(reg);
+    testSamplerContract(reg);
+    testSamplerEmpty(reg);
+    testSamplerPlayback(reg);
+    testSamplerQuality(reg);
+    testSamplerDeterminism(reg);
+    testSamplerState(reg);
+    testSamplerPresets(reg);
+    testMidiFlood(reg, "nxtakt:spectra", "Spectra: a MIDI flood may not strand a voice "
+                                         "(AUDIT-3 F3)", spFloodPatch);
+    testMidiFlood(reg, "nxtakt:sampler", "Sampler: a MIDI flood may not strand a voice",
+                  smFloodPatch);
     testEffectContract(reg);
     testEq3(reg);
     testCompressor(reg);

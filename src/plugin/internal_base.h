@@ -16,14 +16,41 @@
 // construction; prepare() only recomputes coefficients; process() and midi()
 // allocate nothing, lock nothing and throw nothing.
 //
-// Parameters are plain float stores. The GUI writes them while the audio thread
-// reads them, exactly as documented on PluginInstance::setParam: a 4-byte
-// aligned float cannot tear on any target we build for, and a stale read costs
-// at most one block of latency.
+// Parameters are RELAXED ATOMIC float stores. The GUI writes them while the
+// audio thread reads them, exactly as documented on PluginInstance::setParam: a
+// value the reader sees is always one of the values that were written, never a
+// mixture, and a stale read costs at most one block of latency.
+//
+// AUDIT-3 F2, applied. They were plain `f32` until this change, with thirty
+// lines across three files arguing -- correctly, for every target in the matrix
+// -- that a 4-byte aligned store cannot tear. The argument was right about the
+// machine and wrong about the language: a plain scalar written by one thread
+// and read by another is a data race, which is undefined behaviour whatever the
+// hardware does with it, and it was the LAST thing standing between this tree
+// and a clean ThreadSanitizer run. That has real value: a clean run is a run
+// where the next race is visible.
+//
+// `memory_order_relaxed` on both sides is the whole of the fix, and it is a
+// change of spelling rather than of semantics:
+//
+//   * it compiles to the SAME instruction as the plain load and store on every
+//     target we build for -- relaxed asks for atomicity and for nothing else,
+//     so there is no fence, no lock and no barrier;
+//   * it promises exactly what the old comment promised (no tearing) and
+//     nothing the old comment did not (no ordering against anything else, so a
+//     parameter and a bypass flag written back to back may still be observed in
+//     either order, and a stale read is still possible);
+//   * every documented behaviour of every device is therefore unchanged, which
+//     is what the suite says: not one expectation moved with this commit.
+//
+// The audit's other two options were a TSan suppression file and a documented
+// expected count. Both keep the UB and one of them also suppresses the day the
+// line stops being a scalar.
 #pragma once
 #include "host.h"
 #include "internal_dsp.h"
 
+#include <atomic>
 #include <cstring>
 
 namespace lat {
@@ -40,25 +67,25 @@ public:
     const ParamInfo& paramInfo(int i) const override { return info_[(size_t)i]; }
 
     f32 getParam(int i) const override {
-        return (i >= 0 && i < n_) ? pv_[(size_t)i] : 0.f;
+        return (i >= 0 && i < n_) ? ld(i) : 0.f;
     }
 
     // GUI thread, concurrent with process(). See the file header.
     void setParam(int i, f32 v) override {
         if (i < 0 || i >= n_) return;
-        pv_[(size_t)i] = clampv(v, info_[(size_t)i].min, info_[(size_t)i].max);
+        st(i, clampv(v, info_[(size_t)i].min, info_[(size_t)i].max));
     }
 
     // REALTIME (host.h): the automation path. Literally setParam's body, and
     // that is the honest answer for this backend rather than a shortcut —
     // there is no queue to have a second producer on, only a clamp and a
-    // 4-byte aligned plain store into pv_[], which is precisely what the file
-    // header already argues is safe for the GUI-side writer. Two writers
-    // instead of one changes nothing about tearing: the value a run() reads is
-    // always one of the two that were written, never a mixture.
+    // relaxed store into pv_[], which is precisely what the file header already
+    // argues is safe for the GUI-side writer. Two writers instead of one
+    // changes nothing: the value a run() reads is always one of the values that
+    // were written, never a mixture.
     bool setParamRT(int i, f32 v) override {
         if (i < 0 || i >= n_) return true;    // out of range, not "no RT path"
-        pv_[(size_t)i] = clampv(v, info_[(size_t)i].min, info_[(size_t)i].max);
+        st(i, clampv(v, info_[(size_t)i].min, info_[(size_t)i].max));
         return true;
     }
 
@@ -88,8 +115,10 @@ public:
     // transients across every parallel path in the set.
     int latencyFrames() const override      { return 0; }
 
-    void setBypassed(bool b) override       { bypassed_ = b; }
-    bool bypassed() const override          { return bypassed_; }
+    // Same class of access as setParam and now the same spelling: the GUI
+    // writes it while the audio thread reads it at the top of process().
+    void setBypassed(bool b) override       { bypassed_.store(b, std::memory_order_relaxed); }
+    bool bypassed() const override          { return isBypassed(); }
 
     // REALTIME (host.h): the engine pushes this once per block before
     // process(). Plain stores only. Devices that sync to tempo read trBpm_ and
@@ -140,7 +169,7 @@ protected:
         pi.def  = clampv(def, mn, mx);
         pi.isLogarithmic = logarithmic;
         pi.id   = (u32)n_;
-        pv_[(size_t)n_] = pi.def;
+        st(n_, pi.def);
         return n_++;
     }
 
@@ -171,7 +200,17 @@ protected:
         return i;
     }
 
-    f32 p(int i) const { return pv_[(size_t)i]; }
+    f32 p(int i) const { return ld(i); }
+
+    // REALTIME-safe on both sides. The two lines that make the whole parameter
+    // array atomic; everything above and every device below goes through them.
+    f32  ld(int i) const   { return pv_[(size_t)i].load(std::memory_order_relaxed); }
+    void st(int i, f32 v)  { pv_[(size_t)i].store(v, std::memory_order_relaxed); }
+
+    // Devices read this once per process(); it is spelled out rather than
+    // relying on atomic<bool>'s implicit conversion, which would be a
+    // sequentially consistent load and would buy nothing here.
+    bool isBypassed() const { return bypassed_.load(std::memory_order_relaxed); }
 
     // REALTIME. An OUTPUT value the device publishes for the UI to display --
     // today only the compressor's and the limiter's gain reduction.
@@ -190,7 +229,7 @@ protected:
     // which is a host.h change and therefore not this file's to make.
     void setReadout(int i, f32 v) {
         if (i < 0 || i >= n_) return;
-        pv_[(size_t)i] = clampv(v, info_[(size_t)i].min, info_[(size_t)i].max);
+        st(i, clampv(v, info_[(size_t)i].min, info_[(size_t)i].max));
     }
 
     // These devices model a stereo pair. A chain that hands us more channels
@@ -221,9 +260,14 @@ protected:
 
     PluginDesc desc_;
     ParamInfo  info_[kMaxParams];
-    f32        pv_[kMaxParams]{};
+    // The only two members the audio thread and the GUI thread touch at the
+    // same time, and therefore the only two that are atomic. Everything else
+    // here is written at construction (info_, n_, desc_) or by prepare()
+    // (sr_, maxBlock_), both of which the contract puts before the instance is
+    // handed to the engine.
+    std::atomic<f32> pv_[kMaxParams]{};
     int        n_ = 0;
-    bool       bypassed_ = false;
+    std::atomic<bool> bypassed_{false};
     f64        sr_ = 48000.0;
     int        maxBlock_ = kMaxBlock;
 };

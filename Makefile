@@ -173,6 +173,16 @@ audio-only: $(patsubst src/%.cpp,build/obj/%.o,$(wildcard src/audio/*.cpp src/co
 # Deliberately standalone: none of these link the GUI, so they run headless in
 # CI and stay usable when the UI is mid-refactor.
 CORE_SRC  := src/core/common.cpp src/core/project.cpp src/audio/sample.cpp src/audio/engine.cpp
+
+# The instruments internal_devices.cpp INCLUDES textually rather than links.
+# They must appear as prerequisites of every target that compiles
+# internal_devices.cpp, or editing an instrument leaves every tool and test
+# binary stale -- the same class as the $(IPC_H) lesson below, and it bit
+# live: a red-proof run once reported PASSes against a binary that had never
+# seen the revert. They ride in $^ as sources too, which is harmless BY
+# CONSTRUCTION: standalone, their include guards compile them to empty
+# translation units.
+INTERNAL_INSTR := src/plugin/spectra.cpp src/plugin/sampler.cpp
 TOOL_LIBS := $(shell pkg-config --libs sndfile samplerate lilv-0) -ldl -lpthread -lm
 TOOL_CF   := -std=c++20 -O2 -w $(shell pkg-config --cflags sndfile samplerate lilv-0) -Ivendor/clap/include
 
@@ -185,13 +195,13 @@ build/gen_demo: tools/gen_demo.cpp $(CORE_SRC)
 # render materialises a project's device chains, so unlike gen_demo it needs the
 # plugin backends linked in.
 build/render: tools/render.cpp $(CORE_SRC) src/plugin/host.cpp src/plugin/lv2_host.cpp \
-              src/plugin/clap_host.cpp src/plugin/internal_devices.cpp
+              src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
 build/pitch_check: tools/pitch_check.cpp
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
-build/plugin_scan: tools/plugin_scan.cpp src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp src/plugin/internal_devices.cpp src/core/common.cpp
+build/plugin_scan: tools/plugin_scan.cpp src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
 build/engine_test: tests/engine_test.cpp src/audio/engine.cpp src/core/common.cpp
@@ -220,7 +230,7 @@ build/ipc_test: tests/ipc_test.cpp $(IPC_H)
 DAEMON_SRC := src/daemon/nxtaktd.cpp src/audio/engine.cpp src/audio/backend.cpp \
               src/core/common.cpp \
               src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-              src/plugin/internal_devices.cpp
+              src/plugin/internal_devices.cpp $(INTERNAL_INSTR)
 DAEMON_CF  := -std=c++20 -O2 $(WARN) -Ivendor/clap/include \
               $(shell pkg-config --cflags jack alsa lilv-0)
 DAEMON_LD  := $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -lm
@@ -242,7 +252,7 @@ build/daemon_test: tests/daemon_test.cpp $(IPC_H) src/audio/engine.h build/nxtak
 # plugin backends linked because host.cpp reaches into both of them.
 build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
                             src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                            src/plugin/internal_devices.cpp src/core/common.cpp
+                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(shell pkg-config --libs lilv-0) -ldl
 
@@ -256,7 +266,7 @@ build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
 build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
                          src/audio/sample.cpp src/core/common.cpp \
                          src/plugin/host.cpp src/plugin/lv2_host.cpp \
-                         src/plugin/clap_host.cpp src/plugin/internal_devices.cpp
+                         src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS) -ldl
 
@@ -285,7 +295,7 @@ build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
 build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp \
                    src/audio/backend.cpp src/audio/midi_in.cpp src/core/common.cpp \
                    src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                   src/plugin/internal_devices.cpp \
+                   src/plugin/internal_devices.cpp $(INTERNAL_INSTR) \
                    $(IPC_H) src/ui/engine_handle.h src/ui/engine_state.h \
                    src/audio/engine.h src/plugin/host.h \
                    build/nxtaktd

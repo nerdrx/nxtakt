@@ -103,11 +103,33 @@ void App::serializeDevices() {
                 sd.params.reserve((size_t)n);
                 for (int i = 0; i < n; ++i)
                     sd.params.push_back({d.inst->paramInfo(i).id, d.inst->getParam(i)});
-                // Everything the device is beyond its parameters (SavedDevice::
-                // state). A rack is the only device that has any, and its whole
-                // contents are in this one string.
+                // Everything the device is beyond its parameters
+                // (SavedDevice::state).
+                //
+                // TWO WRITERS, and the order between them is deliberate. The
+                // rack's path is FIRST and unconditional, exactly as it has
+                // always been: `rackStateToString(rc->state())` is the one
+                // canonical spelling of a rack's contents, it is what
+                // materializeDevices compares against below to decide whether a
+                // rebound rack needs restoring at all, and nothing may get
+                // between those two lines.
+                //
+                // stateString() is the GENERIC form (host.h) and fills in only
+                // where the rack path left the field empty -- which is every
+                // device that is not a rack, and today means the Sampler and
+                // the file it points at. The `if (sd.state.empty())` is what
+                // makes that "fills in" rather than "overrides": a rack whose
+                // state string is somehow empty is a rack with no devices and
+                // no macros, and asking it again through the generic call would
+                // give the same empty answer anyway.
+                //
+                // A device with nothing to say returns "" and no `state` key is
+                // written, so a set with no rack and no sampler in it stays
+                // byte-identical to what every writer since v6 produced.
                 if (RackControl* rc = d.inst->rack())
                     sd.state = rackStateToString(rc->state());
+                if (sd.state.empty())
+                    sd.state = d.inst->stateString();
             } else {
                 // A device whose plugin was missing at load time. Its saved
                 // values were parked on the model rather than thrown away, so
@@ -243,6 +265,36 @@ void App::materializeDevices(std::vector<LiveDevice>* reuse) {
                     // safe, freeing is not. reclaimRacks() (app_devices.cpp)
                     // does it once every chain we published has come home.
                 }
+            } else if (inst->stateString() != sd.state) {
+                // THE GENERIC STATE PATH (host.h::setStateString), and the same
+                // three properties as the rack branch above, one at a time.
+                //
+                // AFTER THE PARAMETERS, always. That is the ordering rule
+                // docs/RACKS.md §Persistence derives for racks, and it is
+                // written here as a property of the load path rather than of
+                // racks: a device's state may depend on its parameters (the
+                // Sampler places every voice from Start, which is a parameter),
+                // and nothing in this tree has a state that the parameters are
+                // allowed to depend on.
+                //
+                // COMPARED FIRST, for a REBOUND device, for exactly the reason
+                // the rack branch gives: an undo restore rebinds running
+                // instances, and re-applying a state string that already
+                // describes the live device would throw away everything the
+                // device holds that the string does not -- and, for a sampler,
+                // would decode the file again on every single undo. Equal means
+                // the live device really does match the snapshot, and only then
+                // is skipping correct. The comparison is against the device's
+                // OWN spelling of its state, so a writer that changes how it
+                // escapes cannot make a device look stale forever.
+                //
+                // EXCLUSIVE WITH THE RACK BRANCH. A rack's contents ride the
+                // `rack()` path they have always ridden; no rack overrides
+                // stateString(), so the two can never both be asked and the
+                // string can never be written by one and read by the other.
+                if (!inst->setStateString(sd.state))
+                    LOGW("%s: device state did not parse, contents not restored",
+                         sd.name.c_str());
             }
 
             if (!rebound) dm.desc = *found;

@@ -6,8 +6,11 @@
 //   * PluginInstance::process() is audio-thread only: no allocation, no locks,
 //     no exceptions, no std::string.
 //   * setParam()/setBypassed() are called from the GUI thread *while* the audio
-//     thread is inside process(). Both write plain scalars that the backend
-//     reads without synchronisation. See the note on PluginInstance::setParam.
+//     thread is inside process(). Both write a single scalar that the backend
+//     reads with no ordering against anything else -- a RELAXED ATOMIC, which
+//     is what "a plain scalar nothing can tear" always meant and, since
+//     AUDIT-3 F2, what it is also spelled as. See the note on
+//     PluginInstance::setParam and the header of internal_base.h.
 //
 // Only LV2 is implemented today. CLAP and VST3 slot into the same three
 // entry points in namespace detail; the dispatch in host.cpp already branches
@@ -23,6 +26,15 @@ namespace lat {
 
 class PluginRegistry;
 class RackControl;
+class SamplerControl;
+
+// src/audio/sample.h. Named here as an INCOMPLETE type on purpose: the plugin
+// layer has to be able to say "a decoded sample" (SamplerControl, below) and
+// has no business including the decoder, which pulls in sndfile and libsamplerate
+// — two libraries three of this tree's link targets deliberately do not have.
+// A std::shared_ptr may be declared, copied, moved and destroyed with its
+// element type incomplete, which is the whole of what is needed here.
+struct SampleBuffer;
 
 // Internal = NxTakt's own stock devices. They implement PluginInstance like
 // any other backend, so they inherit the browser, knobs, bypass, chains and
@@ -126,9 +138,17 @@ public:
     // envelope took it over, so it can be restored when playback stops.
 
     // GUI thread, concurrent with process(). Backends store parameters as
-    // plain floats that the plugin reads once per run(), so a torn read is
-    // impossible on every architecture we target and a stale read costs at
-    // most one block of latency. No lock is taken.
+    // single floats that the plugin reads once per run(), so a torn read is
+    // impossible and a stale read costs at most one block of latency. No lock
+    // is taken and no ordering is implied: two parameters written back to back
+    // may be observed in either order.
+    //
+    // The stock devices spell that as a `std::atomic<f32>` accessed with
+    // `memory_order_relaxed` (AUDIT-3 F2). Relaxed is the exact strength this
+    // paragraph describes -- atomicity and nothing else -- and it compiles to
+    // the same instruction a plain store did, so the contract did not change
+    // when the spelling did. A backend whose parameter path is a QUEUE rather
+    // than a store must still provide setParamRT() above; see its note.
     virtual void setParam(int i, f32 v) = 0;
 
     virtual const PluginDesc& desc() const = 0;
@@ -154,6 +174,44 @@ public:
     virtual const char* presetName(int i) const  { (void)i; return nullptr; }
     virtual void        loadPreset(int i)        { (void)i; }
 
+    // GUI thread. Everything the device is BEYOND its parameters, as one line
+    // of printable ASCII with no whitespace, no quotes and no newline — so the
+    // project layer can carry it as an opaque scalar (`SavedDevice::state`) and
+    // never learn what any particular device keeps in it.
+    //
+    // Same threading rules as the preset trio above: GUI thread only, allocates
+    // freely, never called from process().
+    //
+    // THE DEFAULT IS "NOTHING", and that is the honest answer for almost every
+    // device: a Saturator IS its three knobs. Two devices override today —
+    // `nxtakt:rack` (its whole contents; reached through rack() for historical
+    // reasons and carrying the identical string) and `nxtakt:sampler` (the path
+    // of the file it plays, which no parameter can express).
+    //
+    // Returning an EMPTY string means "I have no state", and the project layer
+    // must treat that as "write no `state` key" rather than as "write an empty
+    // one" — a set with no such device in it then stays byte-identical to what
+    // an older writer produced.
+    //
+    // setStateString() returns whether the string was UNDERSTOOD. The contract
+    // for a device that overrides it, stated once here because it is easy to
+    // get wrong:
+    //
+    //   * an empty string is not malformed. It means "no state", it is what
+    //     stateString() answers for a fresh instance, and it must be accepted
+    //     as a no-op returning true.
+    //   * anything else that does not parse must be REFUSED: return false,
+    //     change nothing, and leave the device exactly as it was. Guessing at a
+    //     half-parsed state is how a corrupt file becomes a corrupt session.
+    //   * a device may not throw and may not crash on arbitrary bytes. The
+    //     string came out of a file a user can edit and a peer can write.
+    //
+    // ORDERING, on load: parameters FIRST, then setStateString(). This is the
+    // same rule and the same trap docs/RACKS.md §Persistence documents for
+    // racks — see the note at the call site in src/ui/app_project.cpp.
+    virtual std::string stateString() const { return {}; }
+    virtual bool setStateString(const std::string& s) { (void)s; return true; }
+
     // Processing latency in frames at the prepared rate/block size. Constant
     // after prepare() and audio-thread-safe to read; the engine uses it for
     // delay compensation, so a lying plugin smears transients across parallel
@@ -177,6 +235,19 @@ public:
     // any caller can name -- and because a future CLAP/VST3 container could
     // answer the same question without being our class at all.
     virtual RackControl* rack() { return nullptr; }
+
+    // GUI thread. Non-null only for a device that plays a FILE -- today exactly
+    // one, `nxtakt:sampler`. Same shape and the same justification as rack():
+    // the sampler IS a PluginInstance, so the browser, the strip, bypass,
+    // automation, presets and persistence already work on it, and the one thing
+    // none of them can express is "and it points at a wav on disk".
+    //
+    // Persistence does NOT go through here -- it goes through the
+    // stateString()/setStateString() pair above, which is generic. This
+    // interface exists for the two things that are not persistence: handing the
+    // device a file the user just dropped on it, and handing it a buffer that
+    // was decoded somewhere else.
+    virtual SamplerControl* sampler() { return nullptr; }
 };
 
 // ---------------------------------------------------------------------------
@@ -304,6 +375,55 @@ public:
     // when the audio thread has finished with a pointer. Unlinking is safe (the
     // new topology is published atomically); deleting is not. Call this only
     // when the rack is NOT in a chain the engine is processing.
+    virtual void reclaim() = 0;
+};
+
+// ---------------------------------------------------------------------------
+// The Sampler
+//
+// The editing face of `nxtakt:sampler`. GUI THREAD ONLY, every method — the
+// same rule RackControl states, for the same reason: decoding a file allocates,
+// blocks on I/O and takes seconds, so it happens here, at edit time, and never
+// anywhere near process().
+// ---------------------------------------------------------------------------
+class SamplerControl {
+public:
+    virtual ~SamplerControl() = default;
+
+    // Decodes `path` at the rate the instance was prepared at and adopts the
+    // result. Returns false if the file could not be read — or if this
+    // executable has no decoder linked at all, which is a real case and not a
+    // hypothetical: src/audio/sample.cpp is absent from the daemon, from
+    // plugin_scan and from the device suite. See the note on the weak reference
+    // in sampler.cpp. Either way the device is left EMPTY (and therefore
+    // silent) rather than half-loaded.
+    virtual bool loadFile(const std::string& path) = 0;
+
+    // Adopts an already-decoded buffer. `path` is what stateString() will carry
+    // and what a later load will re-decode; pass "" for a buffer with no file
+    // behind it (a recorded take), which then persists as nothing at all.
+    //
+    // The buffer must be IMMUTABLE from this moment: the audio thread reads it
+    // through a raw pointer, and the shared_ptr here is what keeps it alive.
+    virtual void adopt(std::shared_ptr<SampleBuffer> s, const std::string& path) = 0;
+
+    // Back to empty: no sample, no path, silence.
+    virtual void clearSample() = 0;
+
+    virtual bool               hasSample() const   = 0;
+    virtual const std::string& samplePath() const  = 0;
+    virtual i64                sampleFrames() const = 0;
+
+    // Frees the buffers that loadFile()/adopt()/clearSample() displaced.
+    //
+    // They are retained rather than dropped for exactly the reason
+    // RackControl::reclaim() gives: a sampler can be re-pointed while it is
+    // live in the engine, and nothing inside a PluginInstance can know when the
+    // audio thread last dereferenced the pointer it published. Swapping is safe
+    // (one release store); freeing is not. Call this only when the device is
+    // NOT in a chain the engine is processing. prepare() also clears them,
+    // because prepare() is by contract called before the instance is handed
+    // over.
     virtual void reclaim() = 0;
 };
 

@@ -261,7 +261,16 @@ void App::removeDevice(int owner, int idx) {
 // Depth-first, children before their parent, so a nested rack's retired
 // devices go before the rack that owns them. Bounded by kRackMaxDepth.
 static void reclaimRackTree(PluginInstance* p) {
-    RackControl* rc = p ? p->rack() : nullptr;
+    if (!p) return;
+    // A sampler retires its displaced SampleBuffers under the same discipline
+    // a rack retires layouts and sub-devices, and this walk is the same proof
+    // at the same moment: retiring_ empty means the audio thread has
+    // acknowledged every chain this process ever published, so nothing can
+    // still be reading a buffer the instrument unlinked. Until this call
+    // existed the sampler held displaced buffers to prepare() or destruction
+    // and warned at 32 -- filed by its own author, wired here.
+    if (SamplerControl* sc = p->sampler()) sc->reclaim();
+    RackControl* rc = p->rack();
     if (!rc) return;
     for (int i = 0; i < rc->deviceCount(); ++i) reclaimRackTree(rc->device(i));
     rc->reclaim();
