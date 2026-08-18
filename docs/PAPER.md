@@ -198,7 +198,7 @@ not obvious.
 
 ### 5. Incidents
 
-Eleven production incidents, each of which changed the method:
+Thirteen production incidents, each of which changed the method:
 
 1. **The stale binary hid the stale test.** `build/ipc_test` depended on one
    of four headers; a protocol bump elsewhere never triggered a rebuild, so
@@ -259,6 +259,21 @@ Eleven production incidents, each of which changed the method:
    resumed from transcripts, one's transcript was lost and its working-tree
    diff was recovered, gated exactly as hard as reported work, and committed
    with its provenance stated.
+13. **The friendly-fire stash.** Mid-wave, files reverted to HEAD under two
+   agents at the same minute — one had a hero panel snap back to an
+   illustration under its own editor, another lost seven of its eight files.
+   Both denied running git write operations, truthfully. The cause confessed
+   in a third agent's final report: `git stash push/pop` cycles used to
+   bisect an unexplained test-count delta — each stash window exposed every
+   OTHER agent's uncommitted work at HEAD, and whoever read a shared file
+   during the window read the wrong tree. The delta being bisected was
+   itself another agent's legitimate work arriving in a shared test file.
+   *Consequence:* the no-git-write rule during waves now covers *reads
+   through the working tree* — `git show HEAD:path` is the only sanctioned
+   way to see the baseline; agents keep byte-verified mirrors of their owned
+   files (`*-mine/`), restore by file copy only, and the orchestrator
+   re-verifies every mirror against the tree at the gate. The wave's five
+   agents were gated and merged despite the incident; the mirrors are why.
 
 ### 6. Discussion
 
