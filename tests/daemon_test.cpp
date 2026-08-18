@@ -114,6 +114,19 @@ static void armCleanup() {
 // tolerated, since that is how region names are spelled everywhere else).
 // Anything counted is also printed: a leaked region is a bug report, not a
 // number.
+// Regions THIS RUN created, and no others.
+//
+// It used to count every /dev/shm entry with "nxtakt" in the name, and that is
+// a leak check with a false positive built into it: a developer's own daemon, a
+// second suite running beside this one, or another agent's test process on the
+// same machine all read as "this run leaked". It has been seen failing for
+// exactly that reason on a clean tree, and a leak check that cries wolf is one
+// that gets ignored the day it is right.
+//
+// Every session this file spawns is `gSession` or a suffix of it, and every
+// region name is that session with a prefix (nxtakt-engine-, nxtakt-pool-), so
+// the session string is both necessary and sufficient as the tag: nothing of
+// ours can escape it and nothing of anybody else's can match it.
 static int countNxTaktShm(const char* allow = nullptr) {
     const char* skip = (allow && *allow == '/') ? allow + 1 : allow;
     DIR* d = ::opendir("/dev/shm");
@@ -121,6 +134,7 @@ static int countNxTaktShm(const char* allow = nullptr) {
     int n = 0;
     while (dirent* e = ::readdir(d)) {
         if (!std::strstr(e->d_name, "nxtakt")) continue;
+        if (gSession[0] && !std::strstr(e->d_name, gSession)) continue;
         if (skip && !std::strcmp(e->d_name, skip)) continue;
         ++n;
         note("leftover /dev/shm/%s", e->d_name);
@@ -3830,6 +3844,259 @@ static void testTakeSurvivesClientDeath() {
     ipc::ShmRegion::reapIfStale(pn);
 }
 
+// ---------------------------------------------------------------------------
+// 17j. a cancel inferred while its finish event is still in flight  (audit 3)
+// ---------------------------------------------------------------------------
+//
+// THE BUG. pumpTakeCancels() infers "the engine cancelled this take in silence"
+// from three facts, one of which was written when it was true and has not been
+// true since: that a take which never STARTED has no finish event to race.
+// cancelRec() now hands the buffer back as a zero-frame Ev::RecordFinished, and
+// pumpEvents() does not always reach it on the tick it is emitted — it returns
+// the instant the CLIENT's event ring is full. The engine publishes `drains` and
+// `recState` AFTER pushing that event, so all three facts can hold with the
+// event still sitting in the engine's ring.
+//
+// The old code erased the take there, freeing Take::buf. The next take's
+// `new f32[n]()` is the same size from the same allocator and comes back at the
+// same address, so the stale finish is then matched to the NEW take by pointer:
+// a live recording announced empty and thrown away, and its buffer freed while
+// the audio thread is appending into it.
+//
+// THE OBSERVABLE. ControlHeader::takesOrphanedFinish counts finish events whose
+// buffer belongs to no take. Before the fix it reaches 1 here. After it, the
+// finish is consumed by finishTake() as it always should have been, the take is
+// committed exactly once, and the counter stays 0.
+//
+// HOW THE RING IS FILLED. Not by starving the reader of time — that is a race —
+// but by refusing to read at all while sending commands the daemon must answer.
+// Every refused command pushes one EvCommandRejected, so a few thousand
+// bad-index TrackVols fill 4096 slots with certainty.
+static void testTakeCancelRacesItsFinish() {
+    banner("17j. a cancel may not be inferred while its finish event is in flight");
+
+    TakeFixture f;
+    if (!takeFixtureUp(f, "cancelrace")) {
+        CHECK(false, "could not start a daemon on session '%s'", f.session);
+        takeFixtureDown(f);
+        return;
+    }
+    ipc::EngineClient& c = f.c;
+
+    c.pushCommand(Cmd::SetTempo, 0, 0, 30.0);      // slow, so the grid line is far
+    c.pushCommand(Cmd::SetQuantum, 4);             // 1 bar = 4 beats = 8 s at 30 BPM
+    c.pushCommand(Cmd::SetPlaying, 1);
+    sleepMs(150);
+    drainEvents(c);
+
+    const u32 committed0 = c.takesCommitted();
+    const u32 orphan0    = c.takesOrphanedFinish();
+
+    // 1. Fill the client's event ring and STOP READING IT.
+    const ipc::ControlHeader& h = c.header();
+    const u64 rejected0 = h.commandsRejected.load();
+    for (int i = 0; i < 9000; ++i) {
+        if (!c.pushCommand(Cmd::TrackVol, 30000, 0, 0.5)) { sleepMs(2); --i; }
+    }
+    const bool ringFull = waitUntil([&] {
+        return h.commandsRejected.load() >= rejected0 + 5000;
+    }, 15000, 5);
+    CHECK(ringFull, "%llu bad commands were refused with the client not reading, so "
+                    "its 4096-slot event ring is full",
+          (unsigned long long)(h.commandsRejected.load() - rejected0));
+
+    // 2. Put ORDINARY engine events in front of the finish. pumpEvents stops at
+    //    the first event it cannot forward, so the finish has to be BEHIND
+    //    something for the window to exist at all — otherwise it is at the head
+    //    of the engine's ring, finishTake() consumes it before the push that
+    //    would fail, and the bug is invisible. Two transport stops are the
+    //    cheapest scalar events an engine with no clips will emit.
+    for (int i = 0; i < 3; ++i) {
+        while (!c.pushCommand(Cmd::SetPlaying, 0)) sleepMs(2);
+        sleepMs(30);
+        while (!c.pushCommand(Cmd::SetPlaying, 1)) sleepMs(2);
+        sleepMs(30);
+    }
+    const u64 forwarded0 = h.eventsForwarded.load();
+    sleepMs(150);
+    CHECK(h.eventsForwarded.load() == forwarded0,
+          "and nothing is being forwarded (%llu): the engine's ring now holds "
+          "events the daemon cannot hand over",
+          (unsigned long long)(h.eventsForwarded.load() - forwarded0));
+
+    // 3. Arm a take and stop it before the quantized start. The engine cancels
+    //    and emits a zero-frame finish, which pumpEvents cannot reach.
+    CHECK(c.recordSlot(0, 0, 48000 * 4, /*midi*/false), "a take is armed");
+    const bool queued = waitUntil([&] {
+        return c.state().recState[0].load(std::memory_order_relaxed) == 1;
+    }, 5000, 5);
+    CHECK(queued, "and the engine has it QUEUED (recState 1), not yet capturing");
+    CHECK(c.recordSlot(0, 0, 48000 * 4, /*midi*/false),
+          "the stop lands before the grid line, so the engine cancels it");
+
+    const bool idle = waitUntil([&] {
+        return c.state().recState[0].load(std::memory_order_relaxed) == 0;
+    }, 8000, 5);
+    CHECK(idle, "the engine is idle again: cancelRec() has run and its zero-frame "
+                "finish is in the engine's event ring");
+
+    // 4. Well past any number of drains the +2 proof needs. The buggy daemon has
+    //    erased the take and announced it by now.
+    sleepMs(600);
+    const u32 committedEarly = c.takesCommitted();
+    CHECK(committedEarly == committed0,
+          "the take is NOT committed while its finish event is still in flight "
+          "(%u, was %u) — pumpTakeCancels' fourth fact",
+          committedEarly, committed0);
+
+    // 5. Start reading again, and keep reading — unconditionally, for long
+    //    enough that the daemon drains the ENGINE's ring to the bottom. Stopping
+    //    the moment the counter moves would leave the stale finish parked in the
+    //    engine and hide half of what this section is about.
+    const u64 t0 = ipc::monotonicNs();
+    long drained = 0;
+    while (ipc::monotonicNs() - t0 < 2000ull * 1000000ull) {
+        ipc::WireEvent e;
+        int n = 0;
+        while (c.popEvent(e)) { ++drained; if (++n > 8000) break; }
+        sleepMs(2);
+    }
+    note("drained %ld events; %llu forwarded, %u orphaned", drained,
+         (unsigned long long)h.eventsForwarded.load(), c.takesOrphanedFinish());
+
+    // The other half of the same tick, and a bug in its own right: pumpEvents
+    // used to POP an engine event and then discard it when the client's ring
+    // would not take it — one silently lost per tick, no counter moving, while
+    // pumpCommands one screen up parks and retries for exactly this reason.
+    // Three transport stops went into the engine while nothing could be
+    // forwarded; three have to come out.
+    CHECK(h.eventsForwarded.load() == forwarded0 + 3,
+          "and the three engine events emitted while the ring was full arrive "
+          "intact (%llu): a full ring is backpressure, not a shredder",
+          (unsigned long long)(h.eventsForwarded.load() - forwarded0));
+    CHECK(c.takesCommitted() == committed0 + 1,
+          "and once the client reads again it is committed exactly once (%u)",
+          c.takesCommitted() - committed0);
+    CHECK(c.takesOrphanedFinish() == orphan0,
+          "and NO finish event named a buffer no take owned (%u) — which is the "
+          "same fact from the daemon's side, and the one that would have been a "
+          "use-after-free on the audio thread the moment the allocator reissued "
+          "that address",
+          c.takesOrphanedFinish());
+
+    takeFixtureDown(f);
+}
+
+// ---------------------------------------------------------------------------
+// 17k. a flood of REFUSALS may not crowd out an announcement  (audit 3)
+// ---------------------------------------------------------------------------
+//
+// takeEvts_ is bounded at 64 and used to be first-come-first-served, so a client
+// that stopped draining its event ring and went on asking for takes with a bad
+// index filled it with EvTakeFailed. The next real EvTakeReady was then dropped
+// — and an EvTakeReady is the ONLY thing that frees the client's capture buffer
+// and the only thing that ever lets that take out of kMaxPendingTakes. `announced`
+// was set unconditionally and never read, so the "retried every tick" the file
+// promises did not exist either.
+static void testTakeAnnouncementSurvivesRefusalFlood() {
+    banner("17k. a flood of refused takes cannot cost a real take its announcement");
+
+    TakeFixture f;
+    if (!takeFixtureUp(f, "floodann")) {
+        CHECK(false, "could not start a daemon on session '%s'", f.session);
+        takeFixtureDown(f);
+        return;
+    }
+    ipc::EngineClient& c = f.c;
+
+    c.pushCommand(Cmd::SetTempo, 0, 0, 240.0);     // fast: the grid line is close
+    c.pushCommand(Cmd::SetQuantum, 0);             // index 0 = the shortest quantum
+    c.pushCommand(Cmd::SetPlaying, 1);
+    sleepMs(150);
+    drainEvents(c);
+
+    // The client's event ring has to be FULL first, or takeEvts_ never backs up
+    // at all — it drains into that ring every tick and the 64-slot bound is
+    // never approached. This is the same "stop reading and keep asking" shape
+    // section 17j uses, and it is what a wedged GUI actually looks like.
+    const ipc::ControlHeader& h = c.header();
+    const u64 rejected0 = h.commandsRejected.load();
+    for (int i = 0; i < 9000; ++i)
+        if (!c.pushCommand(Cmd::TrackVol, 30000, 0, 0.5)) { sleepMs(2); --i; }
+    const bool ringFull = waitUntil([&] {
+        return h.commandsRejected.load() >= rejected0 + 5000;
+    }, 15000, 5);
+    CHECK(ringFull, "the client's event ring is full and it is not reading");
+
+    const u32 failed0 = c.takesFailed();
+    // 200 take starts with a wild track index: each is an EvTakeFailed, and with
+    // nowhere to forward them they pile up in the daemon's own 64-slot queue.
+    for (int i = 0; i < 200; ++i) {
+        while (!c.recordSlot(9999, 0, 48000, false)) sleepMs(2);
+    }
+    const bool flooded = waitUntil([&] { return c.takesFailed() >= failed0 + 200; }, 8000, 5);
+    CHECK(flooded, "200 take starts refused with the client not reading (%u)",
+          c.takesFailed() - failed0);
+
+    // Now a real one, recorded and released.
+    const u32 committed0 = c.takesCommitted();
+    CHECK(c.recordSlot(1, 0, 48000, false), "a genuine take starts on track 1");
+    sleepMs(400);
+    CHECK(c.recordSlot(1, 0, 48000, false), "and stops");
+
+    // Read again and wait for the announcement. Before the fix it never comes:
+    // the queue is full of refusals and nothing retries.
+    ipc::WireEvent ready{};
+    bool got = false;
+    const u64 t0 = ipc::monotonicNs();
+    while (!got && ipc::monotonicNs() - t0 < 10000ull * 1000000ull) {
+        ipc::WireEvent e;
+        int n = 0;
+        while (c.popEvent(e)) {
+            if (e.type == ipc::EvTakeReady) { ready = e; got = true; break; }
+            if (++n > 8000) break;
+        }
+        if (!got) sleepMs(3);
+    }
+    CHECK(got, "the EvTakeReady for it arrives (uid %llu, %g frames)",
+          (unsigned long long)ready.ref, ready.x);
+    CHECK(c.takesCommitted() > committed0,
+          "and the daemon counts it committed (%u) — a take announcement has a "
+          "floor in the queue that no number of refusals may eat into",
+          c.takesCommitted() - committed0);
+    if (got && ready.ref) c.releaseTake(ready.ref, false);
+
+    takeFixtureDown(f);
+}
+
+// ---------------------------------------------------------------------------
+// 17l. a capacity that cannot survive the cast to i64  (audit 3)
+// ---------------------------------------------------------------------------
+//
+// `(i64)w.x` is undefined behaviour for a w.x past INT64_MAX, and isfinite()
+// plus `>= 1.0` admit 1e30. It only ever LOOKED safe because the cast produced
+// INT64_MIN on x86 and the byte-extent check then read that back as an enormous
+// u64. The bound now comes before the cast, so there is nothing to depend on.
+static void testTakeWildCapacity(ipc::EngineClient& c) {
+    banner("17l. a take capacity is bounded BEFORE it is cast, not after");
+
+    drainEvents(c);
+    const f64 wild[] = { 1e30, 1e300, 9.3e18, (f64)ipc::kMaxTakeBytes + 1.0,
+                         0.5, 0.0, -1.0 };
+    int refused = 0;
+    for (f64 x : wild) {
+        const u32 failed0 = c.takesFailed();
+        c.pushCommand(Cmd::RecordSlot, 0, 0, x);   // raw, past recordSlot()'s helper
+        if (waitUntil([&] { return c.takesFailed() > failed0; }, 3000, 2)) ++refused;
+    }
+    CHECK(refused == (int)(sizeof wild / sizeof wild[0]),
+          "every impossible capacity is refused with a reason (%d of %d)",
+          refused, (int)(sizeof wild / sizeof wild[0]));
+    CHECK(c.alive() && c.heartbeat() > 0,
+          "and the daemon is still beating: no take was started for any of them");
+    drainEvents(c);
+}
+
 static void testArrangementSurvival(ipc::EngineClient& c, pid_t& daemon) {
     banner("16g. SIGKILL with an arrangement playing: respawn and republish");
 
@@ -4197,6 +4464,9 @@ int main(int argc, char** argv) {
         testArrangementSharedBlocks(client);
         testJournalRing(client);
         testRecording();
+        testTakeWildCapacity(client);
+        testTakeCancelRacesItsFinish();
+        testTakeAnnouncementSurvivesRefusalFlood();
         testTakeSurvivesClientDeath();
         testArrangementSurvival(client, daemon);
         testCrashAndRespawn(client, daemon);

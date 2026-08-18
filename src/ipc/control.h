@@ -1206,7 +1206,24 @@ struct ControlHeader {
     // behaviour differs between the two.
     std::atomic<u64> engineDrains;
     std::atomic<u32> drainsExact;       // 1 = the engine counts; retirement is a proof
-    std::atomic<u32> reserved1;
+
+    // Ev::RecordFinished events naming a buffer no take of the daemon's owns.
+    //
+    // IT MUST READ 0 FOREVER, and it is here for the same reason
+    // arrOrderViolations is: the condition is structurally impossible and
+    // "structurally impossible" is what this class of bug is called until
+    // somebody weakens a guard. A non-zero value means the daemon FREED a
+    // capture buffer while the engine still had an event in flight naming it —
+    // which, once the allocator hands that address to the next take, is a
+    // finished-take event applied to the wrong recording and a use-after-free
+    // on the audio thread (audit 3, CRITICAL-1).
+    //
+    // Taken out of `reserved1` rather than appended, so ControlHeader keeps its
+    // size and every section offset stays where it was — the same move
+    // catalogCount and rackStatesApplied made. NO protocol bump rides with it,
+    // deliberately: a build that does not write this field leaves it 0, and 0
+    // is the honest answer for such a build in both directions.
+    std::atomic<u32> takesOrphanedFinish;
 
     // --- the arrangement (docs/ARRANGEMENT.md §9.5, §9.6) -------------------
     //
@@ -1365,7 +1382,7 @@ struct ControlHeader {
         if (takes && *takes) std::snprintf(takeDir, sizeof takeDir, "%s", takes);
         engineDrains.store(0, std::memory_order_relaxed);
         drainsExact.store(0, std::memory_order_relaxed);
-        reserved1.store(0, std::memory_order_relaxed);
+        takesOrphanedFinish.store(0, std::memory_order_relaxed);
         arrangementsApplied.store(0, std::memory_order_relaxed);
         arrangementsRejected.store(0, std::memory_order_relaxed);
         arrBuiltFreed.store(0, std::memory_order_relaxed);

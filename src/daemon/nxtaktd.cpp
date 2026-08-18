@@ -1808,8 +1808,10 @@ private:
     // covers the first hop; this table covers the second. A take whose
     // EvTakeReady will not fit the client's ring stays in `takes_` with its file
     // written and `announced` false, and the announcement is retried every tick
-    // for as long as it takes. There is no path here that drops a take because a
-    // reader was slow.
+    // for as long as it takes (pumpTakes step 3). There is no path here that
+    // drops a take because a reader was slow — and the queue's own floor
+    // (queueTakeEvent) is what stops a flood of REFUSALS from crowding out an
+    // announcement, which is the other way that promise can be broken.
 
     struct Take {
         enum State { Preparing, Armed, Writing, Ready };
@@ -1825,6 +1827,9 @@ private:
         bool  stopSent  = false;     // queued for the engine
         bool  started   = false;     // Ev::RecordStarted landed: the take is real
         u64   stopDue   = 0;         // drain proof for the stop, 0 = not pushed
+        // The SECOND proof pumpTakeCancels needs: the value evtRingDrains_ must
+        // reach before this take may be declared cancelled. 0 = not armed yet.
+        u64   cancelDue = 0;
         bool  announced = false;
         // Engine-visible from the moment the start command is pushed until
         // Ev::RecordFinished brings it home. Freed only after that, and only
@@ -1957,20 +1962,65 @@ private:
         return nullptr;
     }
 
-    void queueTakeEvent(const ipc::WireEvent& e) {
-        // Bounded, because everything here is. Overflowing it needs a client
-        // that has stopped draining its event ring AND gone on sending take
-        // commands, which is a client that is not running; the counter is how
-        // that is told from a daemon that lost them for its own reasons.
-        if (takeEvts_.size() >= kTakeEvtCap) {
+    // Bounded, because everything here is. Overflowing it needs a client that
+    // has stopped draining its event ring AND gone on sending take commands,
+    // which is a client that is not running; the counter beside it is how that
+    // is told from a daemon that lost them for its own reasons.
+    //
+    // `reserve` IS THE WHOLE OF THE FAIRNESS RULE, and it exists because the two
+    // things this queue carries have different consequences when they are lost.
+    //
+    //   EvTakeFailed  is a refusal. Losing one costs a log line. It is also the
+    //                 only UNBOUNDED producer here: a client may ask for a take
+    //                 with a bad index as fast as it can push commands.
+    //   EvTakeReady   is the hand-back. App frees its capture buffer on this
+    //                 event and on nothing else, so one lost is a buffer pinned
+    //                 and a slot stuck in "recording" for the rest of the
+    //                 session — and, when the take has a file, one of the eight
+    //                 kMaxPendingTakes gone for good.
+    //
+    // So a refusal may only use the queue down to a floor of kMaxPendingTakes
+    // slots. At most kMaxPendingTakes takes exist and each owes at most ONE
+    // announcement over its whole life, so that floor makes an EvTakeReady
+    // unrefusable BY CONSTRUCTION — which is what lets the announce paths below
+    // drop their take the moment they queue it.
+    bool queueTakeEvent(const ipc::WireEvent& e, size_t reserve = 0) {
+        if (takeEvts_.size() + reserve >= kTakeEvtCap) {
             ++takeEvtsDropped_;
             if (takeEvtsDropped_ == 1)
                 LOGE("the take announcement queue is full: the client is not draining "
-                     "its event ring. Announcements are being lost from here on, and "
-                     "the takes they name stay on disk.");
-            return;
+                     "its event ring. Refusals are being lost from here on; "
+                     "announcements are not (see queueTakeEvent's floor).");
+            return false;
         }
         takeEvts_.push_back(e);
+        return true;
+    }
+
+    // The one place an EvTakeReady is spelled, so the announcement a take owes
+    // is a function of the take and not of which of four call sites reached it.
+    static ipc::WireEvent readyEvent(const Take& t) {
+        ipc::WireEvent e{};
+        e.type  = ipc::EvTakeReady;
+        e.a     = t.track;
+        e.b     = t.slot;
+        e.x     = (f64)t.len;
+        e.ref   = t.uid;
+        e.flags = (t.midi ? ipc::TakeIsMidi : 0u) |
+                  (t.len <= 0 ? ipc::TakeWasEmpty : 0u) |
+                  (t.len > 0 && t.len >= t.cap ? ipc::TakeHitCeiling : 0u);
+        return e;
+    }
+
+    // Announce, and say whether it went. `announced` is what makes the retry in
+    // pumpTakes() real: before this it was written and never read, so the
+    // "retried every tick for as long as it takes" this file promises was not
+    // implemented at all.
+    bool announceTake(Take& t) {
+        if (t.announced) return true;
+        t.announced = queueTakeEvent(readyEvent(t));
+        if (t.announced) map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
+        return t.announced;
     }
 
     void failTake(int track, int slot, u64 uid, u32 reason) {
@@ -1981,7 +2031,7 @@ private:
         e.b    = slot;
         e.x    = (f64)reason;
         e.ref  = uid;
-        queueTakeEvent(e);
+        queueTakeEvent(e, ipc::kMaxPendingTakes);
     }
 
     // Cmd::RecordSlot / Cmd::RecordMidiSlot off the wire. A TOGGLE, exactly as
@@ -2038,7 +2088,19 @@ private:
             failTake(t, s, 0, ipc::RejectTakeIo);
             return;
         }
-        if (!std::isfinite(w.x) || w.x < 1.0) {
+        // THE BOUND COMES BEFORE THE CAST, and that ordering is the whole of
+        // this check. `(i64)w.x` for a w.x past INT64_MAX is undefined
+        // behaviour, not a large number — UBSan says so and an optimiser is
+        // entitled to assume it cannot happen. It used to be reached: isfinite
+        // and >= 1.0 admit 1e30, the cast produced INT64_MIN on x86, and the
+        // extent check below only rejected it because a negative i64 read back
+        // as an enormous u64. That is a fail-open one target away.
+        //
+        // kMaxTakeBytes is the right ceiling to compare against because it is
+        // the one the extent check applies anyway, and it is far below the
+        // f64 -> i64 cliff, so the cast that follows is total.
+        if (!std::isfinite(w.x) || !(w.x >= 1.0) ||
+            w.x > (f64)ipc::kMaxTakeBytes) {
             reject(w, ipc::RejectTakeTooLarge);
             failTake(t, s, 0, ipc::RejectTakeTooLarge);
             return;
@@ -2117,19 +2179,9 @@ private:
             // landed before the quantized start fired — and it still owes the
             // client a hand-back, because App frees its capture buffer on the
             // finish event and on nothing else.
-            if (!t->discard) {
-                ipc::WireEvent e{};
-                e.type  = ipc::EvTakeReady;
-                e.a     = t->track;
-                e.b     = t->slot;
-                e.x     = 0.0;
-                e.ref   = t->uid;
-                e.flags = ipc::TakeWasEmpty | (t->midi ? ipc::TakeIsMidi : 0u);
-                queueTakeEvent(e);
-                map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
-            }
+            t->len = 0;
+            if (!t->discard) announceTake(*t);
+            else             map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
             dropTake(t->uid);
             return true;
         }
@@ -2173,19 +2225,9 @@ private:
                 if (t->cancelled || t->discard) {
                     // Stopped (or reclaimed) before it was ever armed. The
                     // buffer dies here having never been seen by the engine.
-                    if (!t->discard) {
-                        ipc::WireEvent e{};
-                        e.type  = ipc::EvTakeReady;
-                        e.a     = t->track;
-                        e.b     = t->slot;
-                        e.x     = 0.0;
-                        e.ref   = t->uid;
-                        e.flags = ipc::TakeWasEmpty | (t->midi ? ipc::TakeIsMidi : 0u);
-                        queueTakeEvent(e);
-                        map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
-                    } else {
-                        map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
-                    }
+                    t->len = 0;
+                    if (!t->discard) announceTake(*t);
+                    else map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
                     dropTake(j.uid);
                     continue;
                 }
@@ -2220,17 +2262,7 @@ private:
                 continue;
             }
             t->st = Take::Ready;
-            ipc::WireEvent e{};
-            e.type  = ipc::EvTakeReady;
-            e.a     = t->track;
-            e.b     = t->slot;
-            e.x     = (f64)t->len;
-            e.ref   = t->uid;
-            e.flags = (t->midi ? ipc::TakeIsMidi : 0u) |
-                      (t->len >= t->cap ? ipc::TakeHitCeiling : 0u);
-            t->announced = true;
-            queueTakeEvent(e);
-            map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
+            announceTake(*t);
             if (t->len >= t->cap)
                 LOGW("take %llu filled its buffer (%lld %s) and stopped there",
                      (unsigned long long)t->uid, (long long)t->cap,
@@ -2255,6 +2287,16 @@ private:
         // 3. Announcements. THIS is the second hop's parking buffer: a take
         //    whose event will not fit stays here, with its file on disk, and
         //    goes out on a later tick. Nothing is dropped for a slow reader.
+        //
+        //    The retry is FIRST, and it is the half that was missing: a Ready
+        //    take whose announcement did not make it into the queue is asked
+        //    again here, every tick, for as long as it takes. Before this,
+        //    `announced` was set unconditionally and never read, so a dropped
+        //    EvTakeReady stranded its take in `takes_` for the life of the
+        //    daemon — one of eight kMaxPendingTakes gone, silently.
+        for (auto& t : takes_)
+            if (t->st == Take::Ready && !t->announced && !t->discard)
+                if (!announceTake(*t)) break;
         while (!takeEvts_.empty()) {
             if (!map_.evts->push(takeEvts_.front())) break;
             takeEvts_.pop_front();
@@ -2274,17 +2316,43 @@ private:
     // will wait for until the session ends.
     //
     // engine.h is frozen, so this side infers the cancel instead of being told,
-    // and it does so from three facts that together admit no other reading:
+    // and it does so from facts that together admit no other reading:
     //
-    //   1. the take never STARTED — no Ev::RecordStarted for it, and
-    //      Ev::RecordFinished is only ever emitted from a phase the start
-    //      creates, so there is no finish event in flight to race;
+    //   1. the take never STARTED — no Ev::RecordStarted for it;
     //   2. the stop is PROVABLY drained — drainProof(), the same primitive the
     //      clip retirements rest on, so "the engine has not looked yet" is not
     //      mistaken for "the engine cancelled it";
     //   3. the engine's own published recState for that track reads 0 — idle.
     //      A take that started and is stopping publishes 2, and a take still
-    //      queued publishes 1, so 0 after (2) is the cancel and nothing else.
+    //      queued publishes 1, so 0 after (2) is the cancel and nothing else;
+    //   4. AND THE EVENT RING HAS BEEN DRAINED TO EMPTY SINCE (2) AND (3) FIRST
+    //      HELD. This one is audit 3's CRITICAL-1 and it is not belt and braces.
+    //
+    // WHY (4) EXISTS. Fact (1) used to be stated as "…so there is no finish
+    // event in flight to race", and that sentence stopped being true the day
+    // cancelRec learned to hand the buffer back (engine.cpp: "A zero-frame
+    // RecordFinished is the honest statement"). A cancelled take now DOES emit a
+    // finish event, carrying the buffer pointer, and pumpEvents() does not
+    // always reach it on the tick it is emitted: it returns early the moment the
+    // CLIENT's event ring is full, and it stops at kEvtBudget. Facts (2) and (3)
+    // are published by the engine AFTER that push, so they can all be true with
+    // the event still sitting in the ring.
+    //
+    // Erasing the take there frees Take::buf while an event naming it is in
+    // flight. The next take's `new f32[n]()` then hands that same address back —
+    // same size, same allocator, next request — and the stale zero-frame finish
+    // is matched to the NEW take by takeByBuf(): its recording is announced
+    // empty and thrown away, and its buffer is freed while the audio thread is
+    // still appending into it. A silent take loss on top of a use-after-free on
+    // the audio thread, from a client that merely stopped reading its events.
+    //
+    // WHY (4) IS A PROOF AND NOT A DELAY. Let D be the drain that consumed the
+    // stop; cancelRec ran inside D and pushed the event inside D. drainProven()
+    // becoming true means D has COMPLETED, so the push has happened. Any drain
+    // of the engine's event ring TO EMPTY that starts after that moment must
+    // therefore observe the event. So: arm on the tick (2) and (3) first hold,
+    // and require one full drain-to-empty afterwards. If the finish never
+    // arrives across that, it was never emitted, and the inference is sound.
     //
     // Runs AFTER pumpEvents(), so a take that did finish has already been taken
     // off this table by finishTake() and cannot be declared cancelled instead.
@@ -2295,19 +2363,15 @@ private:
             if (!drainProven(t.stopDue)) continue;
             if (engine_->recState[t.track].load(std::memory_order_relaxed) != 0) continue;
 
-            if (!t.discard) {
-                ipc::WireEvent e{};
-                e.type  = ipc::EvTakeReady;
-                e.a     = t.track;
-                e.b     = t.slot;
-                e.x     = 0.0;
-                e.ref   = t.uid;
-                e.flags = ipc::TakeWasEmpty | (t.midi ? ipc::TakeIsMidi : 0u);
-                queueTakeEvent(e);
-                map_.hdr->takesCommitted.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
-            }
+            // Fact (4). Armed here, satisfied on a LATER tick: pumpEvents() has
+            // already run this tick, so the drain it may have completed could
+            // have finished before the two facts above became true.
+            if (!t.cancelDue) { t.cancelDue = evtRingDrains_ + 1; continue; }
+            if (evtRingDrains_ < t.cancelDue) continue;
+
+            t.len = 0;
+            if (!t.discard) announceTake(t);
+            else            map_.hdr->takesReclaimed.fetch_add(1, std::memory_order_relaxed);
             takes_.erase(takes_.begin() + (long)i);
         }
     }
@@ -3501,7 +3565,31 @@ private:
     // The remaining two stay unreachable, because the commands that would
     // allocate their payloads are still refused. If their counter ever moves,
     // something reached the engine that should not have.
+    // BACKPRESSURE IS BY PARKING, NOT BY DROPPING, and it is the same rule
+    // pumpCommands has had since phase 1 — "dropping would lose user intent
+    // silently". It was not the rule here, and the difference was invisible
+    // because the loss came out looking like slowness: an event popped off the
+    // ENGINE's ring that would not fit the client's was simply discarded, one
+    // per tick, with no counter moving. Ev::ClipStarted, Ev::TransportStopped
+    // and Ev::RecordStarted all went that way the moment a client stopped
+    // reading for a moment — and the journal's own note two hundred lines up
+    // says why that is the wrong half of the trade: "an event must not be lost;
+    // a journal entry must be KNOWN to be lost."
+    //
+    // Parked in `pendingEvt_`, retried at the top of the next tick, in order.
+    //
+    // Bumps evtRingDrains_ only when it reached the END of the engine's event
+    // ring — not when it gave up on the budget, and not when it returned early
+    // because the client's ring was full. That distinction is the whole value of
+    // the counter: it is pumpTakeCancels' proof that no engine event is in
+    // flight, and a counter that also moved on a PARTIAL drain would prove
+    // nothing at all. See fact (4) there.
     void pumpEvents() {
+        if (havePendingEvt_) {
+            if (!map_.evts->push(pendingEvt_)) return;
+            havePendingEvt_ = false;
+            map_.hdr->eventsForwarded.fetch_add(1, std::memory_order_relaxed);
+        }
         Event ev;
         u32 budget = kEvtBudget;                 // F7: bounded work per tick
         while (budget-- && engine_->popEvent(ev)) {
@@ -3530,6 +3618,10 @@ private:
             // allocated.
             if (ev.type == Ev::RecordFinished || ev.type == Ev::MidiRecordFinished) {
                 if (finishTake(ev)) continue;
+                // Counted, not just logged: this is the observable that says
+                // pumpTakeCancels freed a buffer out from under an event still
+                // naming it. It must stay 0 (ControlHeader::takesOrphanedFinish).
+                map_.hdr->takesOrphanedFinish.fetch_add(1, std::memory_order_relaxed);
                 LOGE("a finished take names buffer %p, which belongs to no take "
                      "this daemon started", ev.p);
             }
@@ -3554,9 +3646,20 @@ private:
             e.a    = ev.a;
             e.b    = ev.b;
             e.x    = ev.x;
-            if (!map_.evts->push(e)) return;     // client asleep; retry next tick
+            if (!map_.evts->push(e)) {
+                // Client asleep. PARKED, not dropped: `e` has already been taken
+                // off the engine's ring and there is nowhere to put it back.
+                pendingEvt_     = e;
+                havePendingEvt_ = true;
+                return;
+            }
             map_.hdr->eventsForwarded.fetch_add(1, std::memory_order_relaxed);
         }
+        // Here, and only here: popEvent() answered false, so the ring is empty
+        // and every event the engine had emitted before this call has been seen.
+        // Reaching the budget falls out of the loop WITHOUT this line, which is
+        // the point — an exhausted budget is a partial drain.
+        if (budget != (u32)-1) ++evtRingDrains_;
     }
 
     // -- the mirror ---------------------------------------------------------
@@ -3844,6 +3947,10 @@ private:
     u64                            mirrorStallUs_ = 0;
     Staged                         pending_{};
     bool                           havePending_ = false;
+    // The event equivalent, and for the same reason: an engine event popped off
+    // a ring that will not take it has nowhere to go back to. See pumpEvents().
+    ipc::WireEvent                 pendingEvt_{};
+    bool                           havePendingEvt_ = false;
     int                            rejectLogged_ = 0;
     int                            badRefLogged_ = 0;
     u64                            poolEpoch_    = 0;
@@ -3918,6 +4025,9 @@ private:
     u64                                nextTakeUid_ = 1;
     u32                                takeEvtsDropped_ = 0;
     u64                                takeAliveCheckNs_ = 0;
+    // +1 per pumpEvents() that reached the END of the engine's event ring. Not
+    // a diagnostic: it is pumpTakeCancels' fact (4).
+    u64                                evtRingDrains_ = 0;
     bool                               takeClientGone_ = false;
     char                               takeDir_[sizeof(ipc::ControlHeader::takeDir)] = {};
 

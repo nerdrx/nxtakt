@@ -673,6 +673,11 @@ public:
     u32 takesCommitted() const { return header().takesCommitted.load(std::memory_order_relaxed); }
     u32 takesFailed()    const { return header().takesFailed.load(std::memory_order_relaxed); }
     u32 takesReclaimed() const { return header().takesReclaimed.load(std::memory_order_relaxed); }
+    // Must be 0. See ControlHeader::takesOrphanedFinish — a non-zero reading is
+    // a capture buffer the daemon freed out from under an event still naming it.
+    u32 takesOrphanedFinish() const {
+        return header().takesOrphanedFinish.load(std::memory_order_relaxed);
+    }
 
     // -----------------------------------------------------------------------
     // Devices (phase 3)

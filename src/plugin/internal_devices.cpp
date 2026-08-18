@@ -1850,12 +1850,41 @@ private:
 // THREADING, in full, because a container has a problem a leaf device does not.
 // The audio thread walks a chain that the GUI thread can edit underneath it.
 // The chain and the mappings are therefore never mutated in place: an edit
-// builds a complete new Layout in a slot of a small ring and publishes it with
-// one release store, and process()/midi()/setParamRT() take one acquire load
-// and then read a structure nobody will touch again. The ring is four deep so
-// that four edits would have to land inside a single audio block before the
-// layout being read could be rewritten -- that is a user's hand against a
-// 5.3 ms block at 256 frames.
+// builds a COMPLETE NEW Layout and publishes it with one release store, and
+// process()/midi()/setParamRT() take one acquire load and then read a structure
+// nobody will ever touch again.
+//
+// A LAYOUT IS RETIRED, NEVER REWRITTEN, and that is audit 3's CRITICAL-2.
+//
+// This used to be a ring of four slots, on the argument that "four edits would
+// have to land inside a single audio block before the layout being read could
+// be rewritten -- that is a user's hand against a 5.3 ms block at 256 frames".
+// The premise was false the day setState() existed. setState() is not a user's
+// hand: it clears the chain (one republish), adds each device (one each), adds
+// each mapping (one each) and closes (one more), so restoring a rack of two
+// devices and two mappings wraps a four-slot ring TWICE, in microseconds, on
+// the pump thread, while the audio thread is holding a Layout* for the whole
+// block. ThreadSanitizer reports it as a write to Layout::n and to Layout::dev[]
+// racing process()'s reads of both -- and dev[] is an array of POINTERS to
+// sub-devices, past the torn `n`, from generations old enough that reclaim()
+// has since destroyed them.
+//
+// So a displaced Layout goes on `retired_` and is freed by reclaim(), exactly
+// as an unlinked sub-device is, at a moment the CALLER knows is quiet -- which
+// is the one thing no code inside a PluginInstance can know for itself
+// (docs/RACKS.md §2). Both callers already have that proof: the daemon rides
+// the chain-retirement drain proof, and the GUI calls reclaim() from the device
+// panel. The published Layout is heap-owned and immutable from the release
+// store on, so there is nothing left for a reader to race.
+//
+// The cost is one ~1.4 KB allocation per structural edit, on the GUI thread,
+// beside the reg_->instantiate() an edit already pays for. Growth between
+// reclaims is bounded by edits and is a LEAK if a caller never reclaims -- the
+// deliberate direction of the trade, and the same one the arrangement
+// retirement takes: a block nobody frees costs memory, a block freed under a
+// voice costs the process. kLayoutWarn names it in the log rather than
+// capping it, because refusing an edit would be a rack that silently does not
+// change.
 //
 // What that buys is safe UNLINKING. What it cannot buy is safe DELETION: no
 // code inside a PluginInstance can know when the audio thread last dereferenced
@@ -1874,10 +1903,10 @@ public:
             // normalised curve, and every mapping is a lerp of this value.
             addParam(nm, "", 0.f, 1.f, 0.f);
         }
-        // ring_[0] is the empty layout an unprepared, unfilled rack presents.
-        // It is published immediately so process() never sees a null.
-        live_.store(&ring_[0], std::memory_order_release);
-        next_ = 1;
+        // The empty layout an unprepared, unfilled rack presents, published
+        // immediately so process() never sees a null. A failed allocation here
+        // leaves live_ null, which process()/midi() already treat as a wire.
+        republish();
     }
 
     RackControl* rack() override { return this; }
@@ -2138,6 +2167,12 @@ public:
     bool setState(const RackState& s) override { return setStateDepth(s, 0); }
 
     void reclaim() override {
+        // The layouts first, and by the SAME argument that licenses the device
+        // frees below: the caller has told us the audio thread is not inside
+        // this rack. A Layout is strictly less reachable than the instances it
+        // names, so anything that makes freeing those safe makes freeing these
+        // safe. `published_` is deliberately kept -- it is the live one.
+        retired_.clear();
         for (size_t i = 0; i < owned_.size(); ) {
             PluginInstance* raw = owned_[i].get();
             if (std::find(chain_.begin(), chain_.end(), raw) == chain_.end())
@@ -2149,7 +2184,9 @@ public:
 
 private:
     static constexpr int kCh       = 2;
-    static constexpr int kRing     = 4;
+    // Not a cap: a log threshold. See the threading note on the class for why
+    // this may not refuse an edit.
+    static constexpr size_t kLayoutWarn = 64;
     static constexpr int kOwnedCap = 64;
 
     // A mapping with the id already resolved to an index, because setParamRT
@@ -2179,10 +2216,17 @@ private:
         return -1;
     }
 
-    // GUI thread. Builds the next layout from the editable master copies and
-    // swaps it in with one release store.
+    // GUI thread. Builds a FRESH layout from the editable master copies and
+    // swaps it in with one release store. The displaced one is retired, not
+    // reused -- see the threading note on the class.
     void republish() {
-        Layout& L = ring_[next_];
+        std::unique_ptr<Layout> next(new (std::nothrow) Layout());
+        if (!next) {
+            LOGE("rack: out of memory publishing a layout; the chain keeps the one "
+                 "it has (an edit will not be heard)");
+            return;
+        }
+        Layout& L = *next;
         L.n = 0;
         for (PluginInstance* d : chain_) {
             if (L.n >= kRackMaxDevices) break;
@@ -2202,8 +2246,17 @@ private:
             ++L.nMaps;
         }
 
+        // Publish, THEN retire. The old layout is not touched by this store and
+        // is not freed here: a reader that loaded it a nanosecond ago is still
+        // inside it, and only reclaim() knows when that has stopped being true.
         live_.store(&L, std::memory_order_release);
-        next_ = (next_ + 1) % kRing;
+        if (published_) retired_.push_back(std::move(published_));
+        published_ = std::move(next);
+        if (retired_.size() == kLayoutWarn)
+            LOGW("rack: %zu displaced layouts are being held; call reclaim() while "
+                 "the rack is idle (they are ~%zu B each and cannot be freed from "
+                 "here -- only the caller knows when the audio thread has let go)",
+                 retired_.size(), sizeof(Layout));
     }
 
     // THE SCALING RULE, in one line: target = min + (max - min) * macro, with
@@ -2385,9 +2438,12 @@ private:
     std::vector<PluginInstance*>                 chain_;   // processing order
     std::vector<RackMapping>                     maps_;
 
-    Layout                      ring_[kRing];
-    std::atomic<const Layout*>  live_{nullptr};
-    int                         next_ = 0;
+    // The layout the audio thread may be reading, and every one it may still be
+    // reading. Owned here so the destructor frees them; freed early by
+    // reclaim(), which is the only place that can know it is safe.
+    std::unique_ptr<Layout>              published_;
+    std::vector<std::unique_ptr<Layout>> retired_;
+    std::atomic<const Layout*>           live_{nullptr};
 
     std::vector<f32> scratch_[2][kCh];
     int              scratchFrames_ = 0;

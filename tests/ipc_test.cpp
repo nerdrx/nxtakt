@@ -159,12 +159,30 @@ static void armCleanup() {
     for (int s : {SIGINT, SIGTERM, SIGSEGV, SIGABRT, SIGBUS, SIGPIPE}) ::signal(s, fatalSignal);
 }
 
+// Regions THIS RUN created, and no others.
+//
+// It used to count every /dev/shm entry with "nxtakt" in the name, and that is
+// a leak check with a false positive built into it: a developer's own daemon, a
+// second suite running beside this one in CI, or another test process on the
+// same machine all show up as "this run leaked". It has been observed failing
+// for exactly that reason, on a clean tree, and a leak check that cries wolf is
+// one that gets ignored the day it is right.
+//
+// Every name this file creates carries this process's pid (see main()), so the
+// tag is both necessary and sufficient: nothing of ours can escape it and
+// nothing of anybody else's can match it.
+static char gRunTag[24] = {};
+
 static int countNxTaktShm() {
     DIR* d = ::opendir("/dev/shm");
     if (!d) return -1;
     int n = 0;
     while (dirent* e = ::readdir(d))
-        if (std::strstr(e->d_name, "nxtakt")) { ++n; note("leftover /dev/shm/%s", e->d_name); }
+        if (std::strstr(e->d_name, "nxtakt") && gRunTag[0] &&
+            std::strstr(e->d_name, gRunTag)) {
+            ++n;
+            note("leftover /dev/shm/%s", e->d_name);
+        }
     ::closedir(d);
     return n;
 }
@@ -1345,6 +1363,7 @@ int main() {
     std::printf("nxtakt ipc tests  (protocol v%u, %zu-byte region, %u-slot rings)\n",
                 ipc::kShmVersion, layout::kBytes, CmdRing::capacity());
 
+    std::snprintf(gRunTag, sizeof gRunTag, "-%d", (int)::getpid());
     std::snprintf(gShmName,    sizeof gShmName,    "nxtakt-ipc-test-%d",     (int)::getpid());
     std::snprintf(gShmNameAlt, sizeof gShmNameAlt, "nxtakt-ipc-test-%d-alt", (int)::getpid());
     armCleanup();

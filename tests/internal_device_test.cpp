@@ -27,6 +27,8 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
+#include <atomic>
 #include <vector>
 
 using namespace lat;
@@ -3075,6 +3077,122 @@ static void testRack(PluginRegistry& reg) {
 // own", and the first one is the one that gets a real project wrong.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Rack: an edit may not rewrite the layout the audio thread is reading
+// ---------------------------------------------------------------------------
+//
+// AUDIT 3, CRITICAL-2. The published Layout used to be a slot in a four-deep
+// ring, on the argument that four edits would have to land inside one audio
+// block for the slot being read to be rewritten. setState() alone issues six:
+// one to unlink, one per device, one per mapping, one to close -- back to back,
+// in microseconds, on whatever thread called it. So the ring wrapped INSIDE a
+// single restore while process() was holding a Layout* for the whole block, and
+// the audio thread read `n` and `dev[]` out of a structure being overwritten:
+// a torn count indexing an array of pointers to sub-devices old enough that
+// reclaim() had already destroyed them.
+//
+// This drives exactly that shape: one thread rendering, one thread restoring,
+// and reclaim() in between at the only moment a caller can promise is quiet.
+//
+// It is a THREAD-SANITIZER test first and a crash test second. Built plain it
+// asserts the audible half -- the render stays finite and the rack keeps
+// working -- and it passes either way, because a torn read of a live pointer
+// usually produces plausible audio. Built with -fsanitize=thread it is the
+// whole finding:
+//
+//   g++ -std=c++20 -O1 -g -fsanitize=thread ... tests/internal_device_test.cpp
+//
+// Before the fix that reports a data race on Layout::n and Layout::dev[]
+// between Rack::republish and Rack::process. After it, none.
+static void testRackLayoutUnderRender(PluginRegistry& reg) {
+    banner("Rack: a setState() may not rewrite the layout being rendered");
+
+    const PluginDesc* rd = reg.find("nxtakt:rack");
+    if (!rd) { CHECK(false, "registry finds nxtakt:rack"); return; }
+    auto inst = reg.instantiate(*rd, kSR, kBlock);
+    RackControl* rc = inst ? asRack(inst.get()) : nullptr;
+    CHECK(rc != nullptr, "a rack to edit under load");
+    if (!rc) return;
+
+    // Two states with DIFFERENT device counts, so a torn `n` indexes past what
+    // the other state published rather than landing on a same-shaped chain.
+    RackState twoDev, oneDev;
+    for (const char* u : { "nxtakt:saturator", "nxtakt:autofilter" }) {
+        RackState::Device d;
+        d.uri = u;
+        twoDev.devices.push_back(d);
+    }
+    { RackState::Device d; d.uri = "nxtakt:saturator"; oneDev.devices.push_back(d); }
+    for (int m = 0; m < 2; ++m) {
+        RackMapping mp;
+        mp.macro = m; mp.device = 0; mp.param = 0; mp.min = 0.f; mp.max = 1.f;
+        twoDev.mappings.push_back(mp);
+        oneDev.mappings.push_back(mp);
+    }
+    CHECK(rc->setState(twoDev), "a two-device state loads");
+
+    std::atomic<bool> run{true};
+    std::atomic<long> blocks{0};
+    std::atomic<bool> finite{true};
+
+    std::thread audio([&] {
+        std::vector<f32> l((size_t)kBlock, 0.f), r((size_t)kBlock, 0.f);
+        std::vector<f32> ol((size_t)kBlock, 0.f), orr((size_t)kBlock, 0.f);
+        for (int i = 0; i < kBlock; ++i) {
+            l[(size_t)i] = 0.25f * std::sin(0.05f * (f32)i);
+            r[(size_t)i] = -l[(size_t)i];
+        }
+        const f32* in[2]  = { l.data(), r.data() };
+        f32*       out[2] = { ol.data(), orr.data() };
+        while (run.load(std::memory_order_relaxed)) {
+            inst->process(in, out, 2, kBlock);
+            for (int i = 0; i < kBlock; ++i)
+                if (!std::isfinite(ol[(size_t)i]) || !std::isfinite(orr[(size_t)i]))
+                    finite.store(false, std::memory_order_relaxed);
+            blocks.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // The editor. NO reclaim() inside this loop, and that is not an oversight:
+    // reclaim()'s contract is "at a moment the caller knows is quiet", and this
+    // is the loudest moment there is. Calling it here would destroy sub-devices
+    // under the render thread and report a pile of races that are the TEST's
+    // fault rather than the rack's, burying the one that is not. The frees are
+    // exercised below, after the join, which is where the contract puts them.
+    const int kEdits = 24;
+    for (int i = 0; i < kEdits; ++i) rc->setState((i & 1) ? oneDev : twoDev);
+    // Enough blocks that an edit and a render provably overlapped.
+    while (blocks.load(std::memory_order_relaxed) < 40) {
+        rc->setState(twoDev);
+        rc->setState(oneDev);
+    }
+    run.store(false, std::memory_order_relaxed);
+    audio.join();
+
+    CHECK(blocks.load() > 0, "%ld blocks rendered while %d states were restored under them",
+          blocks.load(), kEdits);
+    CHECK(finite.load(), "and every sample of every one of them is finite");
+
+    // Quiet now: the render thread is joined. This is the moment reclaim() asks
+    // for, and it frees both the retired layouts and the unlinked sub-devices.
+    rc->reclaim();
+    CHECK(rc->deviceCount() == 1, "the rack ends holding the last state it was given (%d)",
+          rc->deviceCount());
+    CHECK(rc->mappingCount() == 2, "with its mappings intact (%d)", rc->mappingCount());
+
+    // And it still renders after everything has been reclaimed: the layout the
+    // audio thread ends on is the LIVE one, which reclaim() must never free.
+    std::vector<f32> l((size_t)kBlock, 0.1f), r((size_t)kBlock, 0.1f);
+    std::vector<f32> ol((size_t)kBlock, 0.f), orr((size_t)kBlock, 0.f);
+    const f32* in[2]  = { l.data(), r.data() };
+    f32*       out[2] = { ol.data(), orr.data() };
+    inst->process(in, out, 2, kBlock);
+    bool ok = true;
+    for (int i = 0; i < kBlock; ++i)
+        if (!std::isfinite(ol[(size_t)i]) || !std::isfinite(orr[(size_t)i])) ok = false;
+    CHECK(ok, "and renders finite audio after the final reclaim()");
+}
+
 static void testRackLatency(PluginRegistry& reg) {
     banner("Rack: latencyFrames is the chain sum");
 
@@ -4481,6 +4599,7 @@ int main() {
     testRack(reg);
     testInternalLatency(reg);
     testLv2Latency(reg);
+    testRackLayoutUnderRender(reg);
     testRackLatency(reg);
     testHostedInstrument(reg, PluginFormat::LV2, "LV2 instrument (real plugin, atom MIDI path)");
     testHostedInstrument(reg, PluginFormat::CLAP, "CLAP instrument (real plugin, note events)");
