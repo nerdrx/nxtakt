@@ -1742,17 +1742,19 @@ static void testClipBlobs() {
     validates(tref, ipc::PoolKindWarp, 1);
     CHECK(!ok, "and NOT as a warp map — that cast would read every second onset as a "
           "BEAT: '%s'", why);
-    // The key is asserted on the block header rather than through findByKey(),
-    // and that is not fastidiousness: findByKey's arena walk guards on the NEXT
-    // header fitting under the high-water mark, so a trailing block shorter
-    // than 128 B — which a six-onset grid is — is invisible to it. The property
-    // this test is about is that the grid CARRIES the sample's key, which is
-    // what makes two clips over one sample name one grid.
     const ipc::PoolBlock* tb = p.blockAt(tref);
     CHECK(tb != nullptr && tb->key == kKey,
           "the grid carries the SAMPLE's content key (0x%llx), because its "
           "lifetime is the sample's and not the clip's",
           (unsigned long long)(tb ? tb->key : 0));
+    // And the dedup path must SEE it. Regression: findByKey's arena walk used
+    // to guard on a further header fitting under the high-water mark, so a
+    // trailing block shorter than 128 B — which this six-onset grid is, and it
+    // is the last block in the arena right here — was invisible to the lookup,
+    // and a second clip over the same sample would allocate a duplicate grid.
+    CHECK(p.findByKey(kKey) == tref,
+          "findByKey(0x%llx) finds the grid even as a small TRAILING block (%llu)",
+          (unsigned long long)kKey, (unsigned long long)p.findByKey(kKey));
     const i64* gt = p.data<i64>(tref);
     CHECK(gt != nullptr, "the grid reads back as i64[]");
     if (gt)
