@@ -2524,6 +2524,20 @@ f64 EngineHandle::sampleRate() const {
     return engine_ ? engine_->sampleRate() : 48000.0;
 }
 
+bool EngineHandle::popJournal(ArrJournal& j) {
+    if (remote_) {
+        ipc::WireJournal w;
+        if (!remote_->cli.popJournal(w)) return false;
+        j.kind  = w.kind;
+        j.seq   = w.seq;
+        j.track = w.track;
+        j.a     = w.a;
+        j.beat  = w.beat;
+        return true;
+    }
+    return engine_ && engine_->popJournal(j);
+}
+
 u32 EngineHandle::journalDropped() const {
     if (remote_) {
         // TWO hops can lose a journal entry across the boundary — the engine's

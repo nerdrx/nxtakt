@@ -177,6 +177,13 @@ public:
     // they are named at their call sites. Every one of them must cope with null.
     Engine* local() { return engine_.get(); }
 
+    // The record journal, both modes: local pops the engine's own ring, remote
+    // pops ipc::JournalRing (the daemon's pump forwards every entry, and the
+    // structs are static_assert-mirrored). This is the mirror app.h once said
+    // there was "no reason" to build -- the reason was that without it the
+    // DEFAULT engine records arrangements into a ring nobody reads.
+    bool popJournal(ArrJournal& j);
+
     // --- the per-frame snapshot (§2.1) -------------------------------------
     //
     // Called ONCE at the top of frame(). Everything the UI draws from comes out

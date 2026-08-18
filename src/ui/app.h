@@ -21,6 +21,7 @@
 #include "widgets.h"
 #include "window.h"
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1257,16 +1258,25 @@ public:
     // unconditionally is not tidiness: the ring is what overflows, and a
     // consumer that only drains while armed would arrive at its first take with
     // the ring already full and every entry of that take refused.
-    // One of the two places that still needs the Engine itself rather than a
-    // command or a snapshot field: the journal is its own ring, and there is no
-    // reason to mirror popJournal() through the handle while the only other
-    // caller is the headless hook's private offline engine. In daemon mode
-    // local() is null and the journal comes off ipc::JournalRing instead.
-    void pumpJournal() { if (Engine* e = eng_.local()) pumpJournal(*e); }
-    // ...and the same body against any engine, which is what the headless hook
-    // drives: ONE accumulate rule, so the hook cannot verify a path the app does
-    // not take. `eng` is the app's own everywhere except there.
+    //
+    // Through the HANDLE, which pops the engine's ring or ipc::JournalRing by
+    // mode. An earlier comment here reasoned there was "no reason to mirror
+    // popJournal() through the handle" and that in daemon mode "the journal
+    // comes off ipc::JournalRing instead" -- describing a consumer that was
+    // never written. The daemon forwarded every entry into a ring nobody read,
+    // and arrangement recording under the default engine committed nothing.
+    // The comment was the bug (PAPER.md incident 9: readers plan against it).
+    void pumpJournal();
+    // ...and the same accumulate rule against any bare engine, which is what
+    // the headless hook drives with its private offline engine: ONE body
+    // (pumpJournalFrom), so the hook cannot verify a path the app does not take.
     void pumpJournal(Engine& eng);
+    // The one body both of the above delegate to: pop, live drop counter, and
+    // "is the pass still running" as callables, because those are the three
+    // things that differ between a bare Engine and the handle's two modes.
+    void pumpJournalFrom(const std::function<bool(ArrJournal&)>& pop,
+                         const std::function<u32()>& dropped,
+                         const std::function<bool()>& playing);
     // Turns the accumulated pass into items on each track's timeline, or refuses
     // it. ONE undo point, at commit (§5.4): a take in flight is not a state
     // anyone wants to undo to, and an entry per journal entry would exhaust

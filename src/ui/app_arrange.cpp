@@ -941,14 +941,28 @@ void dropSignatures() {
 // the engine launched at beat 4.0, not because a frame happened to notice.
 // ---------------------------------------------------------------------------
 
+void App::pumpJournal() {
+    pumpJournalFrom([this](ArrJournal& j) { return eng_.popJournal(j); },
+                    [this] { return eng_.journalDropped(); },
+                    [this] { return es_.playing; });
+}
+
 void App::pumpJournal(Engine& eng) {
+    pumpJournalFrom([&eng](ArrJournal& j) { return eng.popJournal(j); },
+                    [&eng] { return eng.journalDropped.load(std::memory_order_relaxed); },
+                    [&eng] { return eng.playing.load(std::memory_order_relaxed); });
+}
+
+void App::pumpJournalFrom(const std::function<bool(ArrJournal&)>& pop,
+                          const std::function<u32()>& dropped,
+                          const std::function<bool()>& playing) {
     // Read BEFORE the drain. A drop counted after we have drained belongs to
     // entries that are not in this batch, and the whole point of the counter is
     // to cover the entries a gap cannot show us.
-    const u32 droppedNow = eng.journalDropped.load(std::memory_order_relaxed);
+    const u32 droppedNow = dropped();
 
     ArrJournal j;
-    while (eng.popJournal(j)) {
+    while (pop(j)) {
         // Contiguity over the whole stream, armed or not: `seq` is monotonic per
         // engine run, so this is the cheapest and strictest place to notice a
         // jump — and noticing it here means an unarmed stretch cannot hide one
@@ -984,7 +998,7 @@ void App::pumpJournal(Engine& eng) {
         if (j.kind == (u32)JournalKind::TakeEnd ||
             j.kind == (u32)JournalKind::LoopWrap ||
             j.kind == (u32)JournalKind::Locate)
-            commitTake(eng.journalDropped.load(std::memory_order_relaxed));
+            commitTake(dropped());
     }
 
     // THE BACKSTOP, and it is not belt-and-braces: when the ring overflows it
@@ -997,8 +1011,8 @@ void App::pumpJournal(Engine& eng) {
     // not being used as the record: it carries no beat and decides no position,
     // it only answers "is the pass still running". Every number in the take
     // still came from the journal.
-    if (takeOpen_ && !eng.playing.load(std::memory_order_relaxed))
-        commitTake(eng.journalDropped.load(std::memory_order_relaxed));
+    if (takeOpen_ && !playing())
+        commitTake(dropped());
 }
 
 void App::commitTake(u32 droppedNow) {

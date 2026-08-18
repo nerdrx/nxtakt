@@ -2161,6 +2161,63 @@ int main() {
         ::setenv("NXTAKT_SESSION", session, 1);
     }
 
+    // =====================================================================
+    // The record journal crosses the wire (§5 under the default engine)
+    // =====================================================================
+    // The daemon has always FORWARDED the journal (journalForwarded counts
+    // it); this pins the half that was missing: a consumer. eng.popJournal()
+    // must deliver the engine's entries in remote mode -- delete the remote
+    // arm of EngineHandle::popJournal and every CHECK below goes red, which
+    // is this fix's removal test. Before the fix, arrangement recording under
+    // the DEFAULT engine drained nothing and committed nothing.
+    banner("the record journal crosses the wire (§5: the default engine records)");
+    {
+        char jsess[64];
+        std::snprintf(jsess, sizeof jsess, "htest-jrn-%d", (int)::getpid());
+        ::unsetenv("NXTAKT_ENGINE");
+        ::setenv("NXTAKT_SESSION", jsess, 1);
+        EngineHandle jd;
+        EngineState js;
+        CHECK(jd.open("null") && jd.remoteOpen(),
+              "an env-free open(): the default engine, a spawned daemon");
+
+        ArrJournal j{};
+        CHECK(!jd.popJournal(j), "the ring is empty before the transport moves");
+
+        // SetPlaying 1 runs armTransport() in the ENGINE, whose journal gains
+        // a TakeStart stamped with the engine's own beat. Two hops later it
+        // must come out of the handle.
+        CHECK(jd.send(Cmd::SetPlaying, 1), "start the transport");
+        bool got = false;
+        for (int i = 0; i < 300 && !(got = jd.popJournal(j)); ++i) sleepMs(10);
+        CHECK(got, "an entry crosses engine ring -> daemon pump -> wire ring -> handle");
+        CHECK(j.kind == (u32)JournalKind::TakeStart,
+              "and it is the pass's opening entry (kind %u)", j.kind);
+        const u32 seq0 = j.seq;
+
+        // A locate writes the next entry; §5.4's contiguity check runs on the
+        // ENGINE's seq, so the wire must deliver it unrenumbered.
+        CHECK(jd.send(Cmd::Locate, 0, 0, 8.0), "locate while playing");
+        ArrJournal j2{};
+        bool got2 = false;
+        for (int i = 0; i < 300; ++i) {
+            while (jd.popJournal(j2)) {
+                if (j2.kind == (u32)JournalKind::Locate) { got2 = true; break; }
+            }
+            if (got2) break;
+            sleepMs(10);
+        }
+        CHECK(got2, "the locate's entry arrives too");
+        CHECK(got2 && j2.seq > seq0,
+              "with the ENGINE's own seq, still monotonic across the wire "
+              "(%u after %u) -- the contiguity check §5.4 hangs a refusal on "
+              "works unmodified in daemon mode", j2.seq, seq0);
+
+        jd.close();
+        ::setenv("NXTAKT_ENGINE", "daemon", 1);
+        ::setenv("NXTAKT_SESSION", session, 1);
+    }
+
     std::printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
