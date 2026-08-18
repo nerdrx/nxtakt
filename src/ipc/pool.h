@@ -1011,8 +1011,13 @@ public:
     // microsecond.
     u64 findByKey(u64 key) const {
         if (!valid() || key == 0) return 0;
+        // `off` is a DATA offset (its header sits at off - sizeof(PoolBlock)),
+        // and `bump` is the end of the last block's data, so the bound must be
+        // on `off` itself — requiring room for a further header after it hides
+        // any trailing block whose data is smaller than a PoolBlock. The magic
+        // check below is the real terminator.
         for (u64 off = hdr_->arenaOffset + sizeof(PoolBlock);
-             off + sizeof(PoolBlock) <= hdr_->bump.load(std::memory_order_relaxed); ) {
+             off <= hdr_->bump.load(std::memory_order_relaxed); ) {
             const PoolBlock* b = (const PoolBlock*)(base_ + off - sizeof(PoolBlock));
             if (b->magic.load(std::memory_order_acquire) != (kPoolBlockMagic ^ off)) break;
             if (b->key == key && b->state.load(std::memory_order_relaxed) != BlockFree) return off;
