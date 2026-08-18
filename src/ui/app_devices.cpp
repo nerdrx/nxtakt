@@ -1012,26 +1012,34 @@ void App::drawDeviceStrip(const Rect& r) {
         if (refused && ui_.setHot(uiId(31, (int)i + 900), nameR) && ui_.isHot(uiId(31, (int)i + 900)))
             ui_.tip = "Engine refused this device: " + rd->error;
 
-        // The sampler names its file -- or says plainly that it wants one.
-        // Filed by the instrument's own author: the card drew only the
-        // registry name, so an empty sampler and a loaded one were
-        // indistinguishable at a glance. The chip sits under the title in the
-        // row the knobs start below; cyan basename = a live data readout,
-        // amber invitation = attention the way every empty state asks for it.
+        // The sampler names its file. Cyan basename = a live data readout,
+        // full path on hover. The empty state is a QUIET muted "no sample" --
+        // not an amber banner: an empty sampler is a fact, not an alert, and
+        // the first cut of this chip shouted in caps ("looks so goofy and
+        // unprofessional" -- the owner, correctly). The invitation appears
+        // only while a browser drag is actually in flight, where it is the
+        // answer to a question being asked; copy rides the motion the same
+        // way the light does.
+        const f32 chipH = 11 * s;
         if (smp) {
-            Rect fileR{title.x + 10 * s, title.bottom(), box.w - 20 * s, 12 * s};
-            if (smp->hasSample()) {
+            Rect fileR{title.x + 10 * s, title.bottom() + s, box.w - 20 * s, chipH};
+            const bool fileDrag = drag_.kind == DragState::Kind::BrowserFile && drag_.armed;
+            if (fileDrag) {
+                rend_.textIn(fSmall_, fileR, fileDragHere ? "drop to load" : "accepts samples",
+                             (fileDragHere ? nx::live : nx::muted).alpha(dim),
+                             Align::Left, 0);
+            } else if (smp->hasSample()) {
                 const std::string& fp = smp->samplePath();
-                const std::string base = fp.empty() ? "(recorded take)"
+                const std::string base = fp.empty() ? "recorded take"
                                         : fp.substr(fp.rfind('/') + 1);
-                microFit(ui_, fSmall_, fileR, base.c_str(),
-                         nx::live.alpha(0.85f * dim), Align::Left, 0);
+                rend_.textIn(fSmall_, fileR, base.c_str(),
+                             nx::live.alpha(0.8f * dim), Align::Left, 0);
                 if (ui_.setHot(uiId(31, (int)i + 1800), fileR) &&
                     ui_.isHot(uiId(31, (int)i + 1800)) && !fp.empty())
                     ui_.tip = fp;
             } else {
-                microFit(ui_, fSmall_, fileR, "drop a sample here",
-                         pal::meterAmber.alpha(0.8f * dim), Align::Left, 0);
+                rend_.textIn(fSmall_, fileR, "no sample",
+                             nx::muted.alpha(0.6f * dim), Align::Left, 0);
             }
         }
 
@@ -1068,8 +1076,11 @@ void App::drawDeviceStrip(const Rect& r) {
         }
         if (hotBox && in.pressed[0]) { selDevice_ = (int)i; paramScroll_ = 0.f; }
 
-        Rect body{box.x + 4 * s, title.bottom() + 2 * s, box.w - 8 * s,
-                  box.bottom() - title.bottom() - 6 * s};
+        // Sampler cards carry the file chip between title and knobs; the body
+        // yields the band so the chip is not stamped over the first knob row.
+        const f32 bodyTop = title.bottom() + 2 * s + (smp ? chipH + s : 0.f);
+        Rect body{box.x + 4 * s, bodyTop, box.w - 8 * s,
+                  box.bottom() - bodyTop - 4 * s};
         if (!d.inst) {
             // A device restored from a set whose plugin is not installed here.
             // It holds its place and its saved values (see DeviceModel), so the
