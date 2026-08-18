@@ -588,7 +588,29 @@ void App::drawControlBar(const Rect& r) {
         // no glass fill would make it.
         Rect posR{x, cy, 92 * s, h};
         ctlWell(rend_, posR, s, true);
-        ui_.drawTextIn(fBig_, posR, buf, playing ? nx::cyan : nx::text, Align::Center);
+        // Tabular figures, synthesised (§7): the system font's digits are
+        // proportional, and a centred proportional counter breathes four times
+        // a beat while playing. Every digit sits centred in its own fixed cell
+        // -- the widest digit's advance -- separators in theirs, the group
+        // centred in the well. The readout is optically still while the
+        // numbers run; only a change in digit COUNT moves anything.
+        {
+            f32 dig = 0.f;
+            for (char d = '0'; d <= '9'; ++d)
+                dig = std::max(dig, fBig_.glyph((u32)d).advance);
+            const f32 dotW = fBig_.glyph((u32)'.').advance;
+            f32 wsum = 0.f;
+            for (const char* p = buf; *p; ++p) wsum += (*p == '.') ? dotW : dig;
+            f32 px = std::round(posR.cx() - wsum * 0.5f);
+            const Col ink = playing ? nx::cyan : nx::text;
+            for (const char* p = buf; *p; ++p) {
+                const f32 cw = (*p == '.') ? dotW : dig;
+                const char one[2] = {*p, 0};
+                ui_.drawTextIn(fBig_, {px, posR.y, cw, posR.h}, one, ink,
+                               Align::Center, 0.f);
+                px += cw;
+            }
+        }
         x += posR.w + sep;
     }
 
@@ -631,10 +653,16 @@ void App::drawControlBar(const Rect& r) {
         rx = cr.x - gap;
     }
     {
-        Rect br{rx - 60 * s, cy, 60 * s, h};
         const char* drv = eng_.driverName();
-        ui_.microIn(fSmall_, br, drv ? drv : "no audio",
-                    drv ? pal::textFaint : nx::danger, Align::Right, 0);
+        const char* lbl = drv ? drv : "no audio";
+        // Sized to the measured micro-label, not to a guess: "DAEMON:JACK"
+        // with 0.12em tracking is wider than the 60px this box used to be,
+        // and the overflow landed inside the velocity well's breathing room.
+        // §7: everything sits on the 8px grid -- including the gap this label
+        // was quietly eating.
+        const f32 bw = std::max(60.f * s, ui_.microWidth(fSmall_, lbl) + nx::sp1 * s);
+        Rect br{rx - bw, cy, bw, h};
+        ui_.microIn(fSmall_, br, lbl, drv ? pal::textFaint : nx::danger, Align::Right, 0);
         rx = br.x - sep;
         ctlSeam(rend_, rx + sep * 0.5f, r, s);
     }

@@ -199,6 +199,19 @@ void main() {
         float bright = 0.30 + 0.70 * fract(h * 3.0);
         float dd = length(sp - (cell + jit) * cs);
         float sa = keep * bright * (1.0 - smoothstep(0.0, 0.55 + bright * 0.75, dd)) * vCol.a;
+        // A second size class on a coarser, offset lattice: rarer, larger,
+        // dimmer. Two shells instead of one is what makes a starfield read as
+        // deep rather than as noise -- and it costs one extra hash in the same
+        // pass, no quads, no texture. As static as the first class, so reduced
+        // motion changes nothing here.
+        float cs2 = cs * 2.6;
+        vec2 cell2 = floor(sp / cs2 + 31.7);
+        float h2 = hash1(cell2);
+        float keep2 = step(0.90, fract(h2 * 41.0));
+        vec2 jit2 = vec2(0.2) + 0.6 * vec2(fract(h2 * 7.0), fract(h2 * 17.0));
+        float br2 = 0.18 + 0.30 * fract(h2 * 3.0);
+        float dd2 = length(sp - (cell2 - 31.7 + jit2) * cs2);
+        sa = max(sa, keep2 * br2 * (1.0 - smoothstep(0.0, 1.5 + br2 * 2.0, dd2)) * vCol.a);
         // Vignette, over the stars: edges stay darker than centre (§3).
         vec2 q = vLocal.xy / max(vLocal.zw, vec2(1.0));
         float va = vUV.y * smoothstep(0.30, 1.02, length(q) / 1.24);

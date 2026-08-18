@@ -605,7 +605,11 @@ void Ui::drawBadge(Renderer& rr, Font& f) const {
 
 void Ui::meterV(const Rect& b, f32 lvl, f32 peak) {
     if (!r || b.w <= 0.f || b.h <= 0.f) return;
-    r->rect(b, pal::appBg);
+    // The trough is a WellDeep, by name: §4's tier table assigns that tier to
+    // "waveform troughs, meters", and a flat appBg rect was reading as a hole
+    // in the strip rather than as a recessed instrument slot. Radius 0 -- this
+    // is a working surface, not a chip.
+    r->well(b, 0.f, true);
 
     auto mapped = [](f32 g) {
         return clampv((gainToDb(clampv(g, 0.f, 8.f)) + 60.f) / 66.f, 0.f, 1.f);
@@ -623,7 +627,21 @@ void Ui::meterV(const Rect& b, f32 lvl, f32 peak) {
             if (to > from) {
                 const f32 y0 = b.bottom() - to * b.h;
                 const f32 y1 = b.bottom() - from * b.h;
-                r->rect({b.x, y0, b.w, y1 - y0}, cols[i]);
+                if (i == 0) {
+                    // The decay gradient, anchored to the SCALE rather than to
+                    // the bar: luminance is a function of trough position, so
+                    // the visible top edge brightens as the level rises --
+                    // §1's light-rides-motion, with the level itself as the
+                    // driver. The hue ladder is untouched (see color.h: a
+                    // meter is a measurement instrument, not a branding
+                    // surface); only the green body gets depth. Amber and red
+                    // stay flat -- a signal colour must be unambiguous.
+                    auto lum = [](f32 p) { return 0.62f + 0.38f * (p / 0.75f); };
+                    r->vgrad({b.x, y0, b.w, y1 - y0},
+                             cols[0].scale(lum(to)), cols[0].scale(lum(from)));
+                } else {
+                    r->rect({b.x, y0, b.w, y1 - y0}, cols[i]);
+                }
             }
             from = bands[i];
             if (n <= bands[i]) break;
@@ -1180,7 +1198,11 @@ bool Ui::selector(u64 id, const Rect& b, int* idx, const char* const* options, i
     const bool held = (active == id) && over;
     const UiMotion m = motion(id, hotNow, held);
     const Rect br = liftPress(b, m);
-    pillRect(br, br.h * 0.5f, Pill::Secondary, pal::accent, m);
+    // The control radius TOKEN, not a capsule. h*0.5 was the one stadium left
+    // in the program after the de-pilling -- §2 bans the shape outright, and
+    // every sibling control already clamps to nx::pill exactly like this.
+    pillRect(br, std::min(nx::pill * std::max(1.f, r->dpiScale()), br.h * 0.5f),
+             Pill::Secondary, pal::accent, m);
 
     *idx = clampv(*idx, 0, count - 1);
     const char* label = options[*idx] ? options[*idx] : "";
