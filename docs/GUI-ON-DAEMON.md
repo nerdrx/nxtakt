@@ -699,7 +699,9 @@ default and the daemon path advertises itself as preview.
 
 ## 8. The fallback story
 
-**Transitional, not forever — with one exception.**
+**Transitional, not forever — with one exception.** *Step 2's flip is taken —
+§16 records the policy, the failure matrix and the reasoning; point (4) below
+is the failure mode of the DEFAULT now, not only of an explicit `=daemon`.*
 
 Keeping both paths alive indefinitely costs more than it looks. It is not one
 `if`: it is two representations of a clip (`SampleRef` vs `poolRef`), two of a
@@ -2303,4 +2305,141 @@ the five diffs §12.7 owes the UI (the banner, the browser's catalog, the
 device slot's loading/failed states, the status bar's counters, the `open()`
 rename) — every one of which is a thing the daemon path already knows and the
 screen does not yet say.
+
+---
+
+## 16. The flip — the daemon is the default
+
+§8 step 2, taken. `EngineHandle::open()` with `NXTAKT_ENGINE` unset now
+attaches to (or spawns) `nxtaktd`; `NXTAKT_ENGINE=local` — plus `inproc`, the
+ship plan's older spelling — selects the in-process engine explicitly, and
+`daemon`/`remote` keep working as explicit names for what is now the default.
+`make` builds `build/nxtaktd` as part of `all` for the same reason in the
+other direction: a fresh `make && ./build/nxtakt` must be able to spawn the
+engine it defaults to, or every first run opens degraded.
+
+### 16.1 The failure policy, and why the default does not fall back
+
+The question this section exists to answer in writing: when the **default**
+(not an explicit `=daemon`) cannot attach or spawn a daemon, what happens?
+
+**Answer: the same thing as for an explicit `=daemon` — §8(4)'s engine-free
+degraded mode.** The GUI opens, loads, edits and saves; every `send()` is a
+no-op; the link is `Detached`, which the chrome's banner draws ("No audio
+engine. The set can still be edited and saved.") with a Restart button; and
+the log says loudly what was tried (`daemonPath()`'s answer), that
+`NXTAKT_ENGINE=local` selects the in-process engine instead, and that Restart
+retries. **There is no silent fallback to a local engine, named or unnamed.**
+
+The tempting alternative — default falls back to the in-process engine with a
+warning, on the theory that a fresh-build user with no audio at all is worse
+than a fallback — was considered and rejected on the document's own logic:
+
+1. **The failure branch cannot prove there is no daemon.** `openDaemon()`
+   fails when nothing could be attached *or* spawned — which includes a LIVE
+   daemon this build cannot attach (a protocol-version mismatch across an
+   upgrade; a wedged child that survived `spawnAndAttach()`'s SIGTERM and
+   still holds the audio device). Starting a local engine under one of those
+   is precisely §4.4's "a second daemon under a live one is the worst
+   available outcome", and §8's own words: *two engines is worse than none*.
+   A missing binary and an unreachable live daemon are indistinguishable from
+   this branch, so neither may fall back.
+2. **§8(3) deletes the landing zone.** One release after the flip, the
+   in-process path leaves `App`. A default whose failure mode is "fall back
+   to the local engine" is a policy with nowhere to fall the release after it
+   ships; the engine-free mode is the one failure behaviour that survives
+   §8's own schedule. Designing the durable policy now costs one release of
+   the harsher behaviour and saves a policy change later.
+3. **The fresh-build user is fixed at the root, not at the symptom.** The
+   population the fallback was for — `make` produced only `build/nxtakt` —
+   no longer exists: `all` builds the daemon (§16.4). What remains is broken
+   installs and exotic environments, for whom an honest banner plus a log
+   line naming the expected path is §4.4's answer, and:
+4. **Recovery is one click, not a relaunch.** `restartEngine()` now also
+   works from the Detached-with-intent state: a handle that *wanted* a daemon
+   and never reached one retries the full reap → spawn → attach on the
+   Restart click the banner already offers (`engineLinkOffersRestart()` is
+   already true for `Detached`). Fix the install, click Restart, play. While
+   the binary is still absent the same click fails honestly.
+5. **Honesty of the surface.** `Detached` has banner text; a local fallback
+   reports `Live` and is invisible on the one surface the chrome draws
+   (`engineLinkBanner(es_.link)`). A fallback that wanted to be visible would
+   need a new link state for an engine that is, in fact, live — a state that
+   lies about the thing it names.
+
+One platform carve-out, compile-time and not policy: on the Windows port
+(`_WIN32`) the default stays the in-process engine, because PORTING.md's
+`src/ipc` is failing stubs there — `shm_open`/`fork` cannot succeed — so a
+daemon is structurally unreachable, not merely absent. An explicit `=daemon`
+still gets to try, fail, and say so.
+
+An unrecognised `NXTAKT_ENGINE` value is warned about and takes the default:
+a typo'd `daemon` quietly landing on a *different* engine than the default
+would be the dishonesty §4.4 is about.
+
+### 16.2 The selection matrix, as tested
+
+`handle_test`'s closing section pins every row; `main()`'s whole top is the
+`=daemon`-with-live-daemon row.
+
+| `NXTAKT_ENGINE` | daemon reachable? | result | link | tested by |
+|---|---|---|---|---|
+| unset | yes (spawn) | **daemon**, `local()` null | Live | "and it is the DAEMON" — **the flip line** |
+| unset | no (`NXTAKT_DAEMON` nonexistent) | **no engine**, no fallback | Detached, banner + Restart | "does NOT fall back" |
+| unset, then Restart clicked | binary appears later | daemon, via `restartEngine()` from Detached | Live again | "the banner's Restart recovers a failed startup" |
+| `daemon` | yes | daemon | Live | top of `main()` |
+| `daemon` | no | no engine (§8, unchanged) | Detached | "no silent local fallback when … asked for by name" |
+| `local` / `inproc` | — | in-process engine | Live | "=local opens the in-process engine" |
+| `sideways` (typo) | yes | warned, then the default: daemon | Live | "warned, and the default … is what opens" |
+
+**Red proof for the flip line.** The flip reverted by file copy — one line,
+`if (explicitLocal)` back to the pre-flip `if (!explicitDaemon)` — and
+`handle_test` rebuilt: **9 checks go red**, headlined by *"and it is the
+DAEMON: the unnamed default spawns nxtaktd (remote 0, local 0x…)"* — the
+in-process engine opened where the daemon should have. Restored (again by
+file copy), all green.
+
+### 16.3 What the flip does not touch
+
+`tools/render.cpp` and `tools/gen_demo.cpp` construct an `Engine` directly
+and never pass through `EngineHandle::open()` — §8(3) names them as `Engine`'s
+permanent direct users — so offline renders stay in-process and bit-identical;
+the four demo-render `cmp`s are part of this wave's gate. `engine_test`,
+`ipc_test`, `daemon_test` likewise never dispatch on the env var.
+
+### 16.4 `make` builds the daemon
+
+`all` (and `debug`) now depend on `build/nxtaktd`. `dist` already shipped it
+beside the GUI — daemon mode finds it next to `/proc/self/exe` — and the test
+binaries already depended on it; this closes the one gap the flip would have
+turned into a first-run failure.
+
+### 16.5 What still stands between this and v0.7.0
+
+The flip itself is complete and tested. Around it, in shipping order:
+
+* **The §12.7 UI diffs**, of which the banner is the one the flip leans on:
+  Detached/Lost must be *drawn*, not only reachable. In this same wave a
+  sibling change is putting `engineLinkBanner(es_.link)` on screen; the
+  browser catalog, device slot states and status-bar counters remain.
+* **The release note** §8(2) asks for: the flip, `NXTAKT_ENGINE=local` as the
+  escape hatch, and §12.7's honest sentence that a second GUI on one session
+  fights over the chains (§4.3's reattach is still unreachable).
+* **§8(3)'s deletion** of the in-process path from `App` is *not* this
+  release: the flip soaks first, `local` stays a supported spelling, and the
+  degraded-mode policy above is what makes that deletion safe to take later.
+* §14.8's and §15.8's undrawn counters (`takesFailed`, `takesLost`,
+  `deviceStatesRefused`) and `tools/render.cpp`'s non-rack state line
+  (§15.8(1)) are unchanged by the flip and still owed.
+
+### 16.6 Evidence
+
+Recorded with the wave: `make -j` from clean produces both binaries with zero
+warnings; full `make test` from clean binaries green with `handle_test` grown
+by the matrix (205 → 226); the four demo renders `cmp`-identical to the
+baseline; and, in headless gamescope, the *default* GUI (no `NXTAKT_ENGINE`
+in its environment) spawns `nxtaktd`, plays the selftest set audibly — a
+non-zero track peak read by an independent `EngineClient` — and survives
+`kill -9` of that daemon with the link `Lost`, which is a state the banner
+draws.
 

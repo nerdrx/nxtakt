@@ -111,8 +111,13 @@ DEP := $(OBJ:.o=.d)
 
 .PHONY: all debug run clean audio-only config
 
-all: $(BIN)
-debug: $(BIN)
+# The daemon is part of `all` since the default engine became nxtaktd
+# (GUI-ON-DAEMON.md §16): a fresh `make && ./build/nxtakt` must be able to
+# spawn the engine it defaults to, or every first run opens in degraded mode.
+# `debug` gets the same treatment — a debug GUI still wants an engine to talk
+# to, and the daemon keeps its own flags (it is a separate program).
+all: $(BIN) build/nxtaktd
+debug: $(BIN) build/nxtaktd
 
 config:
 	@echo "wayland backend : $(HAVE_WAYLAND)"

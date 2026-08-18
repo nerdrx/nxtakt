@@ -2027,6 +2027,140 @@ int main() {
         loc.close();
     }
 
+    // =====================================================================
+    // The selection matrix — the daemon is the default (§16)
+    // =====================================================================
+    // Every row of GUI-ON-DAEMON.md §16's table, pinned. The env is the whole
+    // input to open()'s dispatch, so each block sets exactly the row it means
+    // and uses a fresh session name so nothing attaches to a leftover.
+    banner("the selection matrix: the daemon is the default (§16)");
+    {
+        // --- unset -> daemon, when one can be spawned ----------------------
+        // THE FLIP LINE. Reverting open()'s default (the pre-flip dispatch:
+        // "anything but =daemon gives the in-process engine") turns exactly
+        // the second CHECK red: an env-free open() then builds an Engine in
+        // this process, local() stops answering null and remoteOpen() reads
+        // false. Proven red once by file-copy revert; see §16.
+        char dsess[64];
+        std::snprintf(dsess, sizeof dsess, "htest-def-%d", (int)::getpid());
+        ::unsetenv("NXTAKT_ENGINE");
+        ::unsetenv("LATTICE_ENGINE");
+        ::setenv("NXTAKT_SESSION", dsess, 1);
+        EngineHandle def;
+        CHECK(def.open("null"), "open() with NXTAKT_ENGINE unset opened something");
+        CHECK(def.remoteOpen() && def.local() == nullptr,
+              "and it is the DAEMON: the unnamed default spawns nxtaktd "
+              "(remote %d, local %p)", (int)def.remoteOpen(), (void*)def.local());
+        CHECK(def.enginePid() > 0, "a real one (pid %d)", def.enginePid());
+        def.close();
+        sleepMs(400);
+        CHECK(countShm(dsess) == 0,
+              "close() stopped the daemon the default spawned (%d regions left)",
+              countShm(dsess));
+
+        // --- unset + no spawnable daemon -> NO engine, not a local one -----
+        // §8(4)'s degraded mode, kept deliberately over a fallback: this
+        // branch cannot tell a missing binary from a live daemon it merely
+        // could not attach (§16), and §8(3) deletes the path a fallback would
+        // land on one release after the flip.
+        char nsess[64];
+        std::snprintf(nsess, sizeof nsess, "htest-none-%d", (int)::getpid());
+        ::setenv("NXTAKT_SESSION", nsess, 1);
+        ::setenv("NXTAKT_DAEMON", "/nonexistent/flp-no-such-nxtaktd", 1);
+        EngineHandle none2;
+        EngineState ns;
+        CHECK(none2.open("null"),
+              "open() with the default unreachable still opens (degraded mode)");
+        CHECK(!none2.remoteOpen() && !none2.localOpen() && none2.local() == nullptr,
+              "with NO engine of either kind: the default does NOT fall back to "
+              "an in-process engine");
+        none2.poll(ns);
+        CHECK(none2.link() == EngineLink::Detached && ns.link == EngineLink::Detached,
+              "the link is Detached in the accessor and the snapshot");
+        CHECK(engineLinkBanner(ns.link) != nullptr && engineLinkOffersRestart(ns.link),
+              "so the chrome draws '%s' and offers Restart", engineLinkBanner(ns.link));
+        CHECK(!none2.send(Cmd::SetPlaying, 1), "and every send() is a no-op");
+
+        // --- the Restart button is the recovery path (§16) -----------------
+        // The binary appears (an install is fixed, a build finishes) and the
+        // click the Detached banner already offers retries the first spawn —
+        // no relaunch. While it is still absent, the same click fails
+        // honestly rather than pretending.
+        CHECK(!none2.restartEngine(),
+              "restartEngine() while the binary is still absent fails honestly");
+        ::setenv("NXTAKT_DAEMON", "build/nxtaktd", 1);
+        CHECK(none2.restartEngine(),
+              "and succeeds from Detached once it exists: the banner's Restart "
+              "recovers a failed startup");
+        CHECK(none2.remoteOpen() && none2.enginePid() > 0,
+              "with a real daemon behind it (pid %d)", none2.enginePid());
+        bool liveAgain = false;
+        for (int i = 0; i < 200 && !liveAgain; ++i) {
+            none2.poll(ns);
+            if (ns.link == EngineLink::Live) liveAgain = true;
+            sleepMs(10);
+        }
+        CHECK(liveAgain, "and the link comes back Live");
+        none2.close();
+        sleepMs(400);
+        CHECK(countShm(nsess) == 0,
+              "close() stopped that daemon too (%d regions left)", countShm(nsess));
+
+        // --- explicit =daemon + no spawnable daemon -> §8's no-fallback ----
+        // Same observable state as the default row above, on purpose: one
+        // failure policy, not two (§16). What the explicitness changes is
+        // only the log line.
+        char esess[64];
+        std::snprintf(esess, sizeof esess, "htest-exp-%d", (int)::getpid());
+        ::setenv("NXTAKT_ENGINE", "daemon", 1);
+        ::setenv("NXTAKT_SESSION", esess, 1);
+        ::setenv("NXTAKT_DAEMON", "/nonexistent/flp-no-such-nxtaktd", 1);
+        EngineHandle exp;
+        CHECK(exp.open("null") && !exp.remoteOpen() && !exp.localOpen(),
+              "NXTAKT_ENGINE=daemon with no reachable daemon opens engine-free: "
+              "no silent local fallback when the daemon was asked for by name");
+        CHECK(exp.link() == EngineLink::Detached, "and is Detached");
+        exp.close();
+        ::setenv("NXTAKT_DAEMON", "build/nxtaktd", 1);
+
+        // --- explicit =local (and the doc's =inproc) -> in-process ---------
+        ::setenv("NXTAKT_ENGINE", "local", 1);
+        EngineHandle l1;
+        CHECK(l1.open("null") && l1.localOpen() && l1.local() != nullptr &&
+              !l1.remoteOpen(),
+              "NXTAKT_ENGINE=local opens the in-process engine");
+        CHECK(l1.link() == EngineLink::Live, "which is Live");
+        l1.close();
+        ::setenv("NXTAKT_ENGINE", "inproc", 1);
+        EngineHandle l2;
+        CHECK(l2.open("null") && l2.localOpen() && !l2.remoteOpen(),
+              "and =inproc, the ship plan's older spelling, still means the same");
+        l2.close();
+
+        // --- an unrecognised value -> warned, then the default -------------
+        // A typo'd mode must not quietly select a DIFFERENT engine than the
+        // default would have (§4.4): it is logged and the default (daemon)
+        // is taken.
+        char tsess[64];
+        std::snprintf(tsess, sizeof tsess, "htest-typo-%d", (int)::getpid());
+        ::setenv("NXTAKT_ENGINE", "sideways", 1);
+        ::setenv("NXTAKT_SESSION", tsess, 1);
+        EngineHandle typo;
+        CHECK(typo.open("null") && typo.remoteOpen() && !typo.localOpen(),
+              "NXTAKT_ENGINE=sideways is not a mode: warned, and the default "
+              "(the daemon) is what opens");
+        typo.close();
+        sleepMs(400);
+        CHECK(countShm(tsess) == 0,
+              "and its daemon is stopped with it (%d regions left)", countShm(tsess));
+
+        // The rows that follow in this file ran first: unset/absent binary is
+        // above, =daemon with a live daemon is the whole top of main(). Put
+        // the env back the way the top of main() left it all the same.
+        ::setenv("NXTAKT_ENGINE", "daemon", 1);
+        ::setenv("NXTAKT_SESSION", session, 1);
+    }
+
     std::printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

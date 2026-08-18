@@ -2182,22 +2182,69 @@ EngineHandle::EngineHandle()  = default;
 EngineHandle::~EngineHandle() = default;
 
 bool EngineHandle::open(const char* driver) {
+    // THE DEFAULT IS THE DAEMON — §8 step 2's flip, policy in §16. `local`
+    // (and the doc's older spelling `inproc`) selects the in-process engine
+    // explicitly; `daemon`/`remote` keep working and now merely name the
+    // default. An unrecognised value is a typo and takes the default LOUDLY,
+    // because a misspelled "daemon" quietly landing on a different engine is
+    // exactly the dishonesty §4.4 is about.
     const char* which = env("ENGINE");
-    if (which && (!std::strcmp(which, "daemon") || !std::strcmp(which, "remote"))) {
-        const char* sess = env("SESSION");
-        if (openDaemon(sess, driver)) return true;
-        // §8's exception, and the reason this does not silently fall back to a
-        // local engine: two engines is worse than none. A GUI that cannot reach
-        // a daemon opens anyway, loads the project, edits and saves — with every
-        // send() a no-op and a log line saying so — because the case a fallback
-        // is actually for is a broken audio setup on somebody else's machine,
-        // and quietly starting a second engine under a wedged one is §4.4's
-        // worst available outcome.
+    bool explicitDaemon = false, explicitLocal = false;
+    if (which && *which) {
+        if      (!std::strcmp(which, "daemon") || !std::strcmp(which, "remote"))
+            explicitDaemon = true;
+        else if (!std::strcmp(which, "local")  || !std::strcmp(which, "inproc"))
+            explicitLocal = true;
+        else
+            LOGW("NXTAKT_ENGINE='%s' is not a mode this build knows "
+                 "(daemon, local; remote and inproc are their older spellings): "
+                 "taking the default, which is the daemon", which);
+    }
+#ifdef _WIN32
+    // PORTING.md: on the Windows port src/ipc compiles via failing stubs —
+    // shm_open/fork cannot succeed — so a daemon is structurally unreachable
+    // and the flip does not apply. The in-process engine stays the default
+    // there; an explicit =daemon still gets to try, fail, and say so.
+    if (!explicitDaemon) explicitLocal = true;
+#endif
+    if (explicitLocal) return openLocalEngine(driver);
+
+    const char* sess = env("SESSION");
+    // Remembered so a later restartEngine() from Detached can retry with the
+    // same configuration — the banner's Restart button is the recovery path
+    // for a spawn that failed at startup (§16).
+    wantDaemon_ = true;
+    session_ = sess   ? sess   : "";
+    driver_  = driver ? driver : "";
+    if (openDaemon(sess, driver)) return true;
+
+    // NO ENGINE AT ALL, whether the daemon was named or defaulted — §8(4)'s
+    // degraded mode, and deliberately NOT a fallback to a local engine (§16).
+    // Two reasons, both the document's own:
+    //
+    //   * This branch is reachable while a LIVE daemon holds the audio device
+    //     — a protocol mismatch attach() refuses, a wedged child that survived
+    //     spawnAndAttach()'s SIGTERM — and a local engine started under it is
+    //     "a second engine under a live one", §4.4's worst available outcome.
+    //     The two failures cannot be told apart from here, so neither may
+    //     fall back.
+    //   * §8(3) deletes the in-process path from App one release after the
+    //     flip. A default that falls back to a local engine is a policy with
+    //     nowhere to fall the release after this one; the engine-free mode is
+    //     the failure behaviour that survives it.
+    //
+    // The GUI opens anyway, loads the project, edits and saves — every send()
+    // a no-op — the link is Detached, which the banner draws with a Restart
+    // button, and restartEngine() below retries the spawn on that click.
+    if (explicitDaemon)
         LOGE("NXTAKT_ENGINE=daemon but no engine could be reached: "
              "running with no engine at all (the set can still be edited and saved)");
-        return true;
-    }
-    return openLocalEngine(driver);
+    else
+        LOGE("the audio engine (nxtaktd, expected at %s) could not be attached "
+             "or started: running with NO engine — the set can still be edited "
+             "and saved. Restart engine retries; NXTAKT_ENGINE=local selects "
+             "the in-process engine instead", daemonPath().c_str());
+    return true;
 }
 
 bool EngineHandle::openLocalEngine(const char* driver) {
@@ -2601,7 +2648,18 @@ i32 EngineHandle::enginePid() const {
 }
 
 bool EngineHandle::restartEngine() {
-    if (!remote_) return false;
+    if (!remote_) {
+        // §16: a handle that WANTED a daemon and never reached one is Detached
+        // with intent, and the banner's Restart button is its recovery path —
+        // fix the install (or the wedged daemon), click, and the first spawn
+        // is retried with the configuration open() recorded. No lock: the
+        // reader thread this mutex guards against does not exist yet, because
+        // openDaemon() only starts it on success. A handle that never asked
+        // for a daemon (unopened, or local mode) still answers false.
+        if (!wantDaemon_ || engine_) return false;
+        return openDaemon(session_.empty() ? nullptr : session_.c_str(),
+                          driver_.empty()  ? nullptr : driver_.c_str());
+    }
     // Under the MIDI lock: restart() detaches the client and re-attaches it, and
     // the hardware reader thread is pushing into that same client from its own
     // thread. Without this, a note arriving during the respawn dereferences a

@@ -24,6 +24,8 @@ static void usage() {
         "Environment:\n"
         "  NXTAKT_BACKEND=wayland|x11    force a window backend\n"
         "  NXTAKT_AUDIO=jack|alsa        force an audio backend\n"
+        "  NXTAKT_ENGINE=daemon|local    daemon (default) runs the engine as nxtaktd;\n"
+        "                                local keeps it in-process\n"
         "  NXTAKT_SCALE=1.5              override UI scale\n"
         "  (the pre-rename LATTICE_* spellings are still read; NXTAKT_* wins)\n"
         "\n"

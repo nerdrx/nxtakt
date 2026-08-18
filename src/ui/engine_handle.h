@@ -13,10 +13,13 @@
 // TWO BACKINGS, AS OF STEPS 2 AND 3
 // ---------------------------------
 //   local    an Engine, an audio backend and the ALSA MIDI reader, all in this
-//            process. What step 1 shipped and still the default.
+//            process. What step 1 shipped. NXTAKT_ENGINE=local (or the doc's
+//            older spelling, inproc) selects it.
 //   daemon   an ipc::EngineClient talking to nxtaktd over the control region,
 //            with the GUI's samples living in an ipc::SamplePool it owns.
-//            NXTAKT_ENGINE=daemon (or LATTICE_ENGINE=daemon) selects it.
+//            THE DEFAULT since §8 step 2's flip (GUI-ON-DAEMON.md §16);
+//            NXTAKT_ENGINE=daemon (or LATTICE_ENGINE=daemon) names it
+//            explicitly, which changes the failure policy — see open().
 //
 // `local()` answers null in daemon mode and that is the load-bearing test: no
 // caller may assume there is an in-process Engine to reach.
@@ -115,11 +118,13 @@ public:
 
     // --- lifecycle ---------------------------------------------------------
 
-    // Opens the engine this run is configured for: `NXTAKT_ENGINE=daemon`
-    // (falling back to `LATTICE_ENGINE`) gives the remote path, anything else
-    // — including unset — gives the in-process one. `NXTAKT_SESSION` names the
-    // session; it defaults to "default".
-    //
+    // Opens the engine this run is configured for. THE DEFAULT IS THE DAEMON
+    // (§8 step 2's flip; policy in GUI-ON-DAEMON.md §16): unset, `daemon` and
+    // `remote` all give the remote path, `NXTAKT_ENGINE=local` (or the doc's
+    // older `inproc`) gives the in-process one, and an unrecognised value is
+    // warned about and takes the default. `NXTAKT_SESSION` names the session;
+    // it defaults to "default". On the Windows port the default stays local:
+    // src/ipc is failing stubs there (PORTING.md) and a daemon cannot exist.
     //
     // `driver` is "jack", "alsa" or null for auto, i.e. NXTAKT_AUDIO. In daemon
     // mode it is forwarded to a daemon we spawn and ignored for one we merely
@@ -129,7 +134,10 @@ public:
     // backend is not an error (local mode prepares the engine anyway and the set
     // is silent), missing MIDI hardware is not an error, and neither is a daemon
     // that will not start: §8's degraded mode says a GUI with no engine should
-    // still open, load, edit and save rather than refuse to run.
+    // still open, load, edit and save rather than refuse to run. A daemon that
+    // could not be reached NEVER falls back to a local engine — named or
+    // defaulted, the answer is the engine-free mode, the Detached banner and a
+    // Restart button that retries (§16 has the two-paragraph why).
     bool open(const char* driver);
 
     // The pre-rename spelling, kept because tests call it and a deprecation
@@ -406,6 +414,11 @@ public:
     //
     // False if nothing could be started; the handle is then Detached and the
     // set is still editable and saveable.
+    //
+    // §16: it also works from that Detached state, when open() wanted a daemon
+    // and could not reach one — the same click retries the first spawn with
+    // the configuration open() recorded. That is the recovery path for a
+    // missing or broken nxtaktd fixed after startup, without relaunching.
     bool restartEngine();
     u64  resyncs() const;      // completed restartEngine()s
 
@@ -459,6 +472,14 @@ private:
     // Null unless openDaemon() succeeded. Exactly one of engine_ and remote_ is
     // ever set; both null is §8's degraded mode and is a supported state.
     std::unique_ptr<RemoteEngine> remote_;
+
+    // What open() recorded on the daemon path, so restartEngine() can retry a
+    // spawn that failed at startup (§16). wantDaemon_ distinguishes "asked for
+    // a daemon and got nothing" — where Restart should try again — from a
+    // handle that never asked (unopened, or local mode), where it must keep
+    // answering false.
+    bool wantDaemon_ = false;
+    std::string session_, driver_;
 };
 
 } // namespace lat

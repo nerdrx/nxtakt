@@ -127,11 +127,13 @@ Audio comes up on JACK if it is running — playback *and* capture auto-connecte
 ## Not done yet
 
 - VST3 is not started (licensing).
-- The in-process engine is still the default, but no longer for a feature
-  reason: `NXTAKT_ENGINE=daemon` now carries everything — clips, devices,
-  racks with their contents, arrangements, signature maps, hardware MIDI and
-  recording, with kill -9 tested in both directions. It stays opt-in for one
-  release to soak before the default flips.
+- The engine now runs as its own process by default: the GUI spawns (or
+  attaches to) `nxtaktd`, which carries everything — clips, devices, racks
+  with their contents, arrangements, signature maps, hardware MIDI and
+  recording, with kill -9 tested in both directions. `NXTAKT_ENGINE=local`
+  selects the old in-process engine. If the daemon cannot be started the GUI
+  opens anyway — editable and saveable, with a banner and a Restart button,
+  deliberately not a silent second engine (`docs/GUI-ON-DAEMON.md` §16).
 - The Windows GUI has reached first light — the full interface drawn by a
   Windows binary under Wine, WGL context, WASAPI endpoint — but has never run
   on real Windows hardware, and most input paths are unexercised. Scope in
@@ -170,6 +172,8 @@ gamescope exposes its own Wayland socket. Both paths are worth testing.
 |---|---|
 | `NXTAKT_BACKEND` | `wayland` or `x11` — force a window backend |
 | `NXTAKT_AUDIO` | `jack` or `alsa` — force an audio backend |
+| `NXTAKT_ENGINE` | `daemon` (the default: the engine runs as `nxtaktd`) or `local` (in-process) |
+| `NXTAKT_SESSION` | engine session name, for attaching several tools to one daemon |
 | `NXTAKT_SCALE` | override UI scale, e.g. `1.5` |
 | `CLAP_PATH` | extra CLAP search paths |
 
