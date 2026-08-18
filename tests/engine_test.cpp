@@ -1093,6 +1093,297 @@ static void recCancelAndMonitor() {
     }
 }
 
+// f. AUDIT-3 F1: every path that displaces or abandons a buffer the caller
+//    handed over must give it back, exactly once, the way cancelRec does.
+//
+// The illness is the one PAPER incident #10 describes and this is one organ
+// over: recBuf and pendBuf are GUI-heap pointers lent to the engine under the
+// Cmd::RecordSlot contract, and a zero-frame finish is the ONLY channel that
+// returns them. Nulling or overwriting one without an event strands it in
+// App::pendingRecs_ for the life of the process. Four paths did that:
+//
+//   1. a RETARGET while the take is still queued (recPhase 1) overwrote recBuf;
+//   2. a SECOND hand-over while one is already queued (recPhase 3) overwrote
+//      pendBuf;
+//   3. stopping the transport nulled pendBuf outright;
+//   4. a take that hit CAPACITY with a hand-over queued left pendBuf behind —
+//      finishRec returns the track to idle, and fireDue only looks at pendBuf
+//      from phase 3, so the buffer was not just stranded, it was live bait: the
+//      next take on that track resurrected it at its own stop boundary and
+//      started recording into a buffer whose owner had never been told.
+//
+// Every assertion below counts hand-backs and demands EXACTLY ONE per
+// hand-over: a buffer returned twice is the double-free half of the same bug.
+static int countHandBacks(const std::vector<Event>& v, const void* p, Ev want) {
+    int n = 0;
+    for (const Event& e : v) if (e.type == want && e.p == p) ++n;
+    return n;
+}
+
+static void recDisplacedBufferComesBack() {
+    // 1. retarget while queued: the displaced buffer comes home, zero frames.
+    {
+        Host h; h.init();
+        feedCapture(h);
+        std::vector<f32> recA((size_t)100000 * 2, 0.f), recB((size_t)100000 * 2, 0.f);
+        h.push(Cmd::SetTempo, 0, 0, 120.0);
+        h.push(Cmd::SetQuantum, 4);              // 1 Bar, so the arm stays queued
+        h.push(Cmd::SetPlaying, 1);
+        h.run(kBeat120);                         // mid-bar
+        h.pushRec(0, 0, recA.data(), 100000);    // queued for the bar line
+        h.runBlocks(1);
+        drainEvents(h.e);
+        CHECK(h.e.recState[0].load() == 1, "the arm is queued (recState %d)",
+              h.e.recState[0].load());
+
+        h.pushRec(0, 1, recB.data(), 100000);    // retarget before it ever begins
+        h.runBlocks(1);
+        std::vector<Event> evs = drainEvents(h.e);
+        int backA = countHandBacks(evs, recA.data(), Ev::RecordFinished);
+        CHECK(backA == 1,
+              "a retarget hands the displaced buffer back exactly once (%d)", backA);
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished)
+                CHECK(ev.p == (void*)recA.data() && ev.x == 0.0 && ev.b == 0,
+                      "the hand-back is zero frames, slot 0, and the caller's own "
+                      "pointer (%p, %.1f, %d)", ev.p, ev.x, ev.b);
+        CHECK(countEvents(evs, Ev::RecordStarted) == 0,
+              "and nothing was started by a retarget (%d)",
+              countEvents(evs, Ev::RecordStarted));
+        CHECK(h.e.recSlotIdx[0].load() == 1 && h.e.recState[0].load() == 1,
+              "the retargeted take is queued on slot 1 (%d, state %d)",
+              h.e.recSlotIdx[0].load(), h.e.recState[0].load());
+
+        // The retargeted take still runs, and the displaced buffer is not
+        // returned a second time when it does.
+        h.run(kBar120);                          // it starts on the bar line
+        h.pushRec(0, 1, recB.data(), 100000);    // toggle: stops on the next one
+        h.run(kBar120 + kBeat120);
+        evs = drainEvents(h.e);
+        backA += countHandBacks(evs, recA.data(), Ev::RecordFinished);
+        CHECK(backA == 1, "still exactly one hand-back for the displaced buffer (%d)",
+              backA);
+        CHECK(countHandBacks(evs, recB.data(), Ev::RecordFinished) == 1,
+              "and the take that displaced it returns its own buffer once (%d)",
+              countHandBacks(evs, recB.data(), Ev::RecordFinished));
+        const Event* fin = findEvent(evs, Ev::RecordFinished);
+        CHECK(fin && fin->x > 0.0 && fin->b == 1,
+              "that one is a real take: slot %d, %lld frames",
+              fin ? fin->b : -1, fin ? (long long)fin->x : -1);
+    }
+
+    // 2. a second hand-over displaces the queued one.
+    {
+        Host h; h.init();
+        feedCapture(h);
+        std::vector<f32> recA((size_t)300000 * 2, 0.f), recB((size_t)300000 * 2, 0.f),
+                         recC((size_t)300000 * 2, 0.f);
+        h.push(Cmd::SetTempo, 0, 0, 120.0);
+        h.push(Cmd::SetQuantum, 4);              // 1 Bar
+        h.pushRec(0, 0, recA.data(), 300000);    // starts at beat 0
+        h.run(kBeat120 * 2);                     // recording, mid-bar
+        drainEvents(h.e);
+
+        h.pushRec(0, 1, recB.data(), 300000);    // hand-over queued for the bar line
+        h.runBlocks(1);
+        CHECK(h.e.recState[0].load() == 2 && drainEvents(h.e).empty(),
+              "the hand-over only schedules: the take is still running (%d)",
+              h.e.recState[0].load());
+
+        h.pushRec(0, 2, recC.data(), 300000);    // a SECOND hand-over displaces it
+        h.runBlocks(1);
+        std::vector<Event> evs = drainEvents(h.e);
+        int backB = countHandBacks(evs, recB.data(), Ev::RecordFinished);
+        CHECK(backB == 1,
+              "the displaced hand-over buffer comes back exactly once (%d)", backB);
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished)
+                CHECK(ev.p == (void*)recB.data() && ev.x == 0.0 && ev.b == 1,
+                      "zero frames, slot 1, the caller's pointer (%p, %.1f, %d)",
+                      ev.p, ev.x, ev.b);
+        CHECK(countHandBacks(evs, recA.data(), Ev::RecordFinished) == 0,
+              "and the take that is still running was not touched (%d)",
+              countHandBacks(evs, recA.data(), Ev::RecordFinished));
+
+        h.run(kBar120);                          // the boundary: A ends, C begins
+        evs = drainEvents(h.e);
+        backB += countHandBacks(evs, recB.data(), Ev::RecordFinished);
+        CHECK(backB == 1, "and never a second time (%d)", backB);
+        CHECK(countHandBacks(evs, recA.data(), Ev::RecordFinished) == 1,
+              "the running take finishes into its own buffer (%d)",
+              countHandBacks(evs, recA.data(), Ev::RecordFinished));
+        CHECK(countEvents(evs, Ev::RecordStarted) == 1 &&
+              h.e.recSlotIdx[0].load() == 2 && h.e.recState[0].load() == 2,
+              "the LAST hand-over is the one that takes over: slot %d, state %d",
+              h.e.recSlotIdx[0].load(), h.e.recState[0].load());
+    }
+
+    // 3. stopping the transport with a hand-over queued.
+    {
+        Host h; h.init();
+        feedCapture(h);
+        std::vector<f32> recA((size_t)300000 * 2, 0.f), recB((size_t)300000 * 2, 0.f);
+        h.push(Cmd::SetTempo, 0, 0, 120.0);
+        h.push(Cmd::SetQuantum, 4);              // 1 Bar
+        h.pushRec(0, 0, recA.data(), 300000);
+        h.run(kBeat120 * 2);
+        drainEvents(h.e);
+        h.pushRec(0, 1, recB.data(), 300000);    // queued for a bar line that never comes
+        h.runBlocks(1);
+
+        h.push(Cmd::SetPlaying, 0);
+        h.runBlocks(1);
+        std::vector<Event> evs = drainEvents(h.e);
+        const int backB = countHandBacks(evs, recB.data(), Ev::RecordFinished);
+        CHECK(backB == 1,
+              "stopping the transport returns the queued hand-over's buffer (%d)",
+              backB);
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished && ev.p == (void*)recB.data())
+                CHECK(ev.x == 0.0 && ev.b == 1,
+                      "zero frames and slot 1: it never started (%.1f, %d)", ev.x, ev.b);
+        CHECK(countHandBacks(evs, recA.data(), Ev::RecordFinished) == 1,
+              "the running take is finished by the same stop (%d)",
+              countHandBacks(evs, recA.data(), Ev::RecordFinished));
+        CHECK(h.e.recState[0].load() == 0, "and the track is idle (%d)",
+              h.e.recState[0].load());
+
+        h.run(kBar120 * 2);                      // nothing may surface later
+        evs = drainEvents(h.e);
+        CHECK(countHandBacks(evs, recB.data(), Ev::RecordFinished) == 0 &&
+              countEvents(evs, Ev::RecordStarted) == 0,
+              "and no take rises from the stopped transport (%d/%d)",
+              countHandBacks(evs, recB.data(), Ev::RecordFinished),
+              countEvents(evs, Ev::RecordStarted));
+    }
+
+    // 4. the take hits capacity with a hand-over queued: the queued buffer is
+    //    returned, and the NEXT take cannot resurrect it.
+    {
+        Host h; h.init();
+        feedCapture(h);
+        std::vector<f32> recA(1000 * 2, 0.f), recB((size_t)300000 * 2, 0.f),
+                         recD((size_t)300000 * 2, 0.f);
+        h.push(Cmd::SetTempo, 0, 0, 120.0);
+        h.push(Cmd::SetQuantum, 0);              // None: A starts at once
+        h.pushRec(0, 0, recA.data(), 1000);
+        h.runBlocks(1);
+        h.push(Cmd::SetQuantum, 4);              // 1 Bar: the hand-over waits
+        h.pushRec(0, 1, recB.data(), 300000);
+        h.runBlocks(8);                          // 2048 frames: A fills long before
+
+        std::vector<Event> evs = drainEvents(h.e);
+        const int backB = countHandBacks(evs, recB.data(), Ev::RecordFinished);
+        CHECK(backB == 1,
+              "a take that fills its buffer returns the queued hand-over's too (%d)",
+              backB);
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished && ev.p == (void*)recB.data())
+                CHECK(ev.x == 0.0 && ev.b == 1,
+                      "zero frames, slot 1, never started (%.1f, %d)", ev.x, ev.b);
+        CHECK(countHandBacks(evs, recA.data(), Ev::RecordFinished) == 1,
+              "the filled take comes back once (%d)",
+              countHandBacks(evs, recA.data(), Ev::RecordFinished));
+        CHECK(h.e.recState[0].load() == 0, "and the track is idle (%d)",
+              h.e.recState[0].load());
+
+        // The resurrection: a later take on the same track must not adopt a
+        // hand-over the GUI has already been given back.
+        h.pushRec(0, 3, recD.data(), 300000);    // arms on the next bar line
+        h.run(kBar120);
+        h.pushRec(0, 3, recD.data(), 300000);    // toggle: stops on the one after
+        h.run(kBar120 * 2);
+        evs = drainEvents(h.e);
+        CHECK(countHandBacks(evs, recB.data(), Ev::RecordFinished) == 0,
+              "the returned buffer is never named again (%d)",
+              countHandBacks(evs, recB.data(), Ev::RecordFinished));
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordStarted)
+                CHECK(ev.b == 3, "and no take starts on a slot nobody asked for (%d)",
+                      ev.b);
+        CHECK(countHandBacks(evs, recD.data(), Ev::RecordFinished) == 1 &&
+              h.e.recState[0].load() == 0,
+              "the later take runs and ends on its own terms (%d, state %d)",
+              countHandBacks(evs, recD.data(), Ev::RecordFinished),
+              h.e.recState[0].load());
+        bool untouched = true;
+        for (size_t i = 0; i < recB.size(); ++i) if (recB[i] != 0.f) untouched = false;
+        CHECK(untouched, "and nothing was ever written into the returned buffer");
+    }
+}
+
+// g. re-preparing the engine mid-take is not a licence to keep the buffer.
+//
+// The fifth path of the same illness, and the only one that is not a user
+// action: prepare() wipes every Track, and recBuf/pendBuf went with it. JACK's
+// bufSizeCb re-prepares a LIVE engine (PipeWire renegotiates the buffer size on
+// its own), so a take running when that happens lost its buffer with nothing
+// said — the GUI's pendingRecs_ entry stranded, and across the daemon boundary
+// one of eight take slots gone with its capture buffer never freed. Clips and
+// chains are republishable and a capture buffer is not.
+static void recPrepareHandsBack() {
+    // A take that is RUNNING: what was captured comes home.
+    {
+        Host h; h.init();
+        feedCapture(h);
+        std::vector<f32> rec((size_t)100000 * 2, 0.f);
+        h.push(Cmd::SetTempo, 0, 0, 120.0);
+        h.push(Cmd::SetQuantum, 0);              // None: starts at once
+        h.pushRec(0, 0, rec.data(), 100000);
+        h.runBlocks(4);
+        drainEvents(h.e);
+
+        h.e.prepare(kSR, kBlock);                // JACK renegotiated the block
+        const std::vector<Event> evs = drainEvents(h.e);
+        const int back = countHandBacks(evs, rec.data(), Ev::RecordFinished);
+        CHECK(back == 1,
+              "re-preparing mid-take hands the capture buffer back exactly once (%d)",
+              back);
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished)
+                CHECK(ev.p == (void*)rec.data() && (i64)ev.x == 4 * kBlock,
+                      "carrying what was captured: %lld frames (expected %d)",
+                      (long long)ev.x, 4 * kBlock);
+        CHECK(h.e.recState[0].load() == 0, "and the track is idle (%d)",
+              h.e.recState[0].load());
+    }
+    // A take still QUEUED, and a hand-over queued behind a running one: both are
+    // the caller's, both come back, neither twice.
+    {
+        Host h; h.init();
+        feedCapture(h);
+        std::vector<f32> recQ((size_t)100000 * 2, 0.f);
+        std::vector<f32> recA((size_t)100000 * 2, 0.f), recB((size_t)100000 * 2, 0.f);
+        h.push(Cmd::SetTempo, 0, 0, 120.0);
+        h.push(Cmd::SetQuantum, 4);              // 1 Bar
+        h.pushRec(0, 0, recA.data(), 100000);    // track 0: starts on the beat-0 bar line
+        h.run(kBeat120 * 2);                     // mid-bar, so the next two only queue
+        h.pushRec(1, 0, recQ.data(), 100000);    // track 1: queued, never begins
+        h.pushRec(0, 1, recB.data(), 100000);    // and a hand-over queued behind track 0
+        h.runBlocks(1);
+        drainEvents(h.e);
+
+        h.e.prepare(kSR, kBlock);
+        const std::vector<Event> evs = drainEvents(h.e);
+        CHECK(countHandBacks(evs, recQ.data(), Ev::RecordFinished) == 1,
+              "the queued take's buffer comes back once (%d)",
+              countHandBacks(evs, recQ.data(), Ev::RecordFinished));
+        CHECK(countHandBacks(evs, recA.data(), Ev::RecordFinished) == 1,
+              "the running take's buffer comes back once (%d)",
+              countHandBacks(evs, recA.data(), Ev::RecordFinished));
+        CHECK(countHandBacks(evs, recB.data(), Ev::RecordFinished) == 1,
+              "and the queued hand-over's buffer comes back once (%d)",
+              countHandBacks(evs, recB.data(), Ev::RecordFinished));
+        for (const Event& ev : evs)
+            if (ev.type == Ev::RecordFinished &&
+                (ev.p == (void*)recQ.data() || ev.p == (void*)recB.data()))
+                CHECK(ev.x == 0.0, "the two that never began are zero frames (%.1f)", ev.x);
+        CHECK(h.e.recState[0].load() == 0 && h.e.recState[1].load() == 0,
+              "and both tracks are idle (%d, %d)",
+              h.e.recState[0].load(), h.e.recState[1].load());
+    }
+}
+
 static void testRecording() {
     banner("10. recording");
     note("RecordSlot toggles: first send queues a quantized start, the second a");
@@ -1102,6 +1393,8 @@ static void testRecording() {
     recTransportStop();
     recSlotHandover();
     recCancelAndMonitor();
+    recDisplacedBufferComesBack();
+    recPrepareHandsBack();
 }
 
 // ---------------------------------------------------------------------------
@@ -2322,6 +2615,68 @@ static void midiRecHandoverAndCancel() {
     }
 }
 
+// c2. AUDIT-3 F1, the MIDI arm: a displaced note buffer comes home too, and it
+//     comes home as a MidiRecordFinished — the pend* fields carry their own
+//     recMidi flag precisely so a hand-over displaced by another hand-over is
+//     announced as what it was, not as what the track is now.
+static void midiRecDisplacedBufferComesBack() {
+    Host h; h.init();
+    std::vector<RtNote> takeA(64), takeB(64), takeC(64);
+    h.push(Cmd::SetTempo, 0, 0, 120.0);
+    h.push(Cmd::SetQuantum, 4);                  // 1 Bar
+    h.push(Cmd::TrackArm, 0, 1);
+    h.push(Cmd::SetPlaying, 1);
+    h.run(kBeat120);                             // mid-bar
+    h.pushRecMidi(0, 0, takeA.data(), 64);       // queued for the bar line
+    h.runBlocks(1);
+    drainEvents(h.e);
+
+    h.pushRecMidi(0, 1, takeB.data(), 64);       // retarget before it begins
+    h.runBlocks(1);
+    std::vector<Event> evs = drainEvents(h.e);
+    const int backA = countHandBacks(evs, takeA.data(), Ev::MidiRecordFinished);
+    CHECK(backA == 1,
+          "a MIDI retarget hands the displaced note buffer back exactly once (%d)",
+          backA);
+    CHECK(countEvents(evs, Ev::RecordFinished) == 0,
+          "as a MidiRecordFinished, not an audio one (%d)",
+          countEvents(evs, Ev::RecordFinished));
+    for (const Event& ev : evs)
+        if (ev.type == Ev::MidiRecordFinished)
+            CHECK(ev.x == 0.0 && ev.p == (void*)takeA.data() && ev.b == 0,
+                  "zero notes, slot 0, the caller's pointer (%.1f, %p, %d)",
+                  ev.x, ev.p, ev.b);
+
+    // Now let the retargeted take run, queue a hand-over behind it, and stop
+    // the transport before the boundary arrives.
+    h.run(kBar120);                              // takeB starts on the bar line
+    h.pushMidi(0x90, 60, 100);
+    h.run(kBeat120 / 2);
+    h.pushMidi(0x80, 60, 0);
+    h.run(kBeat120 / 2);
+    drainEvents(h.e);
+    h.pushRecMidi(0, 2, takeC.data(), 64);       // queued for the next bar line
+    h.runBlocks(1);
+    h.push(Cmd::SetPlaying, 0);
+    h.runBlocks(1);
+    evs = drainEvents(h.e);
+    CHECK(countHandBacks(evs, takeC.data(), Ev::MidiRecordFinished) == 1,
+          "the stop returns the queued MIDI hand-over's buffer once (%d)",
+          countHandBacks(evs, takeC.data(), Ev::MidiRecordFinished));
+    for (const Event& ev : evs)
+        if (ev.type == Ev::MidiRecordFinished && ev.p == (void*)takeC.data())
+            CHECK(ev.x == 0.0 && ev.b == 2, "zero notes, slot 2 (%.1f, %d)", ev.x, ev.b);
+    const int backB = countHandBacks(evs, takeB.data(), Ev::MidiRecordFinished);
+    CHECK(backB == 1, "and the take that was running comes back once (%d)", backB);
+    for (const Event& ev : evs)
+        if (ev.type == Ev::MidiRecordFinished && ev.p == (void*)takeB.data())
+            CHECK((int)ev.x == 1 && ev.b == 1,
+                  "carrying the note it captured (%d notes, slot %d)",
+                  (int)ev.x, ev.b);
+    CHECK(h.e.recState[0].load() == 0, "and the track is idle (%d)",
+          h.e.recState[0].load());
+}
+
 // d. monitoring keeps working while a take runs
 static void midiRecMonitors() {
     Host h; h.init();
@@ -2357,6 +2712,7 @@ static void testMidiRecording() {
     midiRecTake();
     midiRecCapacity();
     midiRecHandoverAndCancel();
+    midiRecDisplacedBufferComesBack();
     midiRecMonitors();
 }
 

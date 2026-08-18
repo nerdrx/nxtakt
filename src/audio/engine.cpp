@@ -497,6 +497,32 @@ static bool appendNote(RtNote* buf, i64& len, i64 cap, const RtNote& n) {
     return true;
 }
 
+// Gives a QUEUED HAND-OVER's buffer back and empties the pend slot. AUDIT-3 F1:
+// pendBuf is the same kind of pointer as recBuf -- the caller's, lent under the
+// Cmd::RecordSlot contract -- so every path that drops or replaces one owes the
+// caller the same zero-frame finish cancelRec pays for recBuf, and for the same
+// reason: an abandoned pointer sits in App::pendingRecs_ (or a daemon Take)
+// until the process ends, and nothing anywhere reports it.
+//
+// It carries pendMidi and pendSlot, not the track's current ones: a hand-over
+// displaced before it ever ran is announced as what IT was, which is what the
+// receiving side matches on.
+//
+// The `!= recBuf` guard is the retirement protocol's rule, verbatim: a pointer
+// that is about to be handed back through the take's own finish must not also
+// be handed back here, or the caller frees it twice. Every path routes through
+// this function so there is exactly ONE hand-back per hand-over.
+template <class TrackT, class EvRing>
+static void returnPend(const Engine* eng, int ti, TrackT& t, EvRing& evts) {
+    if (t.pendBuf && t.pendBuf != t.recBuf)
+        emitCritical(eng, evts, {t.pendMidi ? Ev::MidiRecordFinished : Ev::RecordFinished,
+                                 ti, t.pendSlot, 0.0, t.pendBuf});
+    t.pendBuf = nullptr;
+    t.pendCap = 0;
+    t.pendSlot = -1;
+    t.pendMidi = false;
+}
+
 // Cancels a take that has not begun. "There is no buffer to hand back" was
 // this function's comment for six waves, and it was wrong both times it could
 // be: recBuf (the armed take) and pendBuf (a queued hand-over) are GUI-heap
@@ -513,9 +539,7 @@ static void cancelRec(const Engine* eng, int ti, TrackT& t, EvRing& evts) {
     if (t.recBuf)
         emitCritical(eng, evts, {t.recMidi ? Ev::MidiRecordFinished : Ev::RecordFinished,
                                  ti, t.recSlot, 0.0, t.recBuf});
-    if (t.pendBuf && t.pendBuf != t.recBuf)
-        emitCritical(eng, evts, {t.pendMidi ? Ev::MidiRecordFinished : Ev::RecordFinished,
-                                 ti, t.pendSlot, 0.0, t.pendBuf});
+    returnPend(eng, ti, t, evts);       // before recBuf is nulled: the guard needs it
     t.recBuf = nullptr;
     t.recCap = 0;
     t.recLen = 0;
@@ -525,10 +549,6 @@ static void cancelRec(const Engine* eng, int ti, TrackT& t, EvRing& evts) {
     t.recMidi = false;
     t.recStartBeat = 0.0;
     for (auto& o : t.recOpen) o.used = false;
-    t.pendBuf = nullptr;
-    t.pendCap = 0;
-    t.pendSlot = -1;
-    t.pendMidi = false;
 }
 
 // Hands a finished take back to the GUI and returns the track to idle. Track is
@@ -542,9 +562,20 @@ static void cancelRec(const Engine* eng, int ti, TrackT& t, EvRing& evts) {
 // position *inside the clip's loop*, not a take-relative beat, and the notes
 // still held close against it the same way they would have closed against a
 // note-off — wrap and over-long hold clamped to the loop end.
+//
+// `keepPend` is the hand-over's exemption and it defaults to FALSE on purpose
+// (AUDIT-3 F1). A take can end with a hand-over still queued in pend*, and that
+// buffer is the caller's: exactly one call site — fireDue's grid boundary — goes
+// on to adopt it as the next take, and every other one owes it back. Defaulting
+// to "give it back" means a call site added later leaks nothing by omission; the
+// one that must keep it says so at the call. Before this, finishRec ignored
+// pend* entirely, so a take that hit CAPACITY with a hand-over queued left the
+// track idle with pendBuf still set: stranded, and worse than stranded, because
+// the next take on that track adopted it at its own stop boundary and recorded
+// into a buffer whose owner had long since been told nothing.
 template <class TrackT, class EvRing>
 static void finishRec(const Engine* eng, int ti, TrackT& t, EvRing& evts, f64 endBeat,
-                      f64 loopLen = 0.0) {
+                      f64 loopLen = 0.0, bool keepPend = false) {
     if (t.recMidi) {
         // recBuf is the f32* the Cmd contract gives us; a MIDI take stores
         // RtNote through it and recCap/recLen count notes. See the note on
@@ -575,6 +606,11 @@ static void finishRec(const Engine* eng, int ti, TrackT& t, EvRing& evts, f64 en
         emitCritical(eng, evts, {Ev::RecordFinished, ti, t.recSlot, (f64)t.recLen,
                                  (void*)t.recBuf});
     }
+    // After the take's own finish, so the two events reach the caller in the
+    // order they happened — the take that ran ends, then the one that never
+    // started is given back — and before recBuf is nulled, because that is what
+    // returnPend's aliasing guard reads.
+    if (!keepPend) returnPend(eng, ti, t, evts);
     t.recBuf = nullptr;
     t.recCap = 0;
     t.recLen = 0;
@@ -1490,7 +1526,39 @@ inline void journalPush(Ring<ArrJournal, 4096>& ring, u32& seq,
 // we want anyway. engine.h is frozen, so a dedicated member was not an option.
 void Engine::prepare(f64 sampleRate, int /*maxBlock*/) {
     sr_ = sampleRate;
+    // FIRST, before anything can emit: claim (and clear) the parking buffer for
+    // resilient critical events. Same discipline as the PDC state below — GUI
+    // thread, no audio thread inside process() — and it has to come before the
+    // track loop rather than after it, because clearing the park AFTER a
+    // hand-back had been parked there would destroy the very event the loop
+    // below exists to send.
+    if (!pendAcquire(this))
+        LOGW("engine: no slot for resilient events; a full ring may drop a take");
+
     for (int t = 0; t < kMaxTracks; ++t) {
+        // A re-prepare drops clips and chains on the floor and expects the owner
+        // to republish (see the returns note below) — but a capture buffer is
+        // not republishable and it is not the engine's. It was LENT, under the
+        // Cmd::RecordSlot contract, and wiping the Track wiped recBuf and
+        // pendBuf with no event: the same strand AUDIT-3 F1 is about, in the one
+        // path that is not a user action at all. JACK (and PipeWire on its own
+        // initiative) re-prepares this engine from bufSizeCb while a take is
+        // running, so this is live, not latent — a renegotiated buffer size lost
+        // the take, the GUI's pendingRecs_ entry and, across the boundary, one
+        // of the daemon's eight take slots, silently and for good.
+        //
+        // Same rule as Cmd::SetPlaying(0) applies in drainCommands: whatever was
+        // captured goes home, a take that never began comes back at zero frames,
+        // and a queued hand-over comes back with it (cancelRec/finishRec both
+        // route pend* through returnPend).
+        Track& tr = tracks_[t];
+        if (tr.recPhase == 2 || tr.recPhase == 3) {
+            const RtClip* oc = overdubVoice(clips_[t], tr);
+            if (oc) finishRec(this, t, tr, evts_, tr.voice.beatPos, oc->lengthBeats);
+            else    finishRec(this, t, tr, evts_, beat_ - tr.recStartBeat);
+        } else if (tr.recPhase == 1 || tr.pendBuf) {
+            cancelRec(this, t, tr, evts_);
+        }
         tracks_[t] = Track{};
         tracks_[t].fireBeat = kNoFollow;
         activeSlot[t].store(-1);
@@ -1524,10 +1592,8 @@ void Engine::prepare(f64 sampleRate, int /*maxBlock*/) {
     else LOGW("pdc: delay compensation unavailable, latent chains will not be aligned");
     latencyFrames.store(0);
 
-    // Claim (and clear) the parking buffer for resilient critical events. Same
-    // discipline as the PDC state: GUI thread, before the audio thread exists.
-    if (!pendAcquire(this))
-        LOGW("engine: no slot for resilient events; a full ring may drop a take");
+    // (The parking buffer is claimed at the TOP of this function, not here: the
+    // track loop hands capture buffers back through it.)
 
     // Automation state, on the same discipline again. Without it the engine
     // simply applies no envelopes, which is the correct degradation: the sound
@@ -2001,8 +2067,15 @@ void Engine::drainCommands() {
                     // any take on the spot rather than at some boundary that is
                     // never going to arrive. The GUI still gets whatever was
                     // captured; a short take beats a lost one.
-                    t.pendBuf = nullptr; t.pendCap = 0;
-                    t.pendSlot = -1; t.pendMidi = false;
+                    //
+                    // A queued hand-over dies with the transport too, and this
+                    // is where it used to die BADLY (AUDIT-3 F1): the four
+                    // pend* fields were cleared right here, in the open, with
+                    // no event — the buffer the caller lent us for a take that
+                    // would now never start, dropped exactly the way cancelRec
+                    // used to drop its own. finishRec and cancelRec both return
+                    // it now (returnPend), after the running take's finish, so
+                    // there is no raw nulling left to forget an event.
                     if (t.recPhase == 2 || t.recPhase == 3) {
                         // An overdub pass closes its held notes against where
                         // the clip *was*, not against the take's own elapsed
@@ -2242,7 +2315,19 @@ void Engine::drainCommands() {
             } else {
                 if (!buf || cap <= 0) break;
                 if (t.recPhase == 1) {
-                    // Nothing captured yet, so this is just a retarget.
+                    // Nothing captured yet, so this is just a retarget — but the
+                    // buffer being displaced is the caller's, and only an event
+                    // gives it back (AUDIT-3 F1). Same rule as cancelRec, and the
+                    // same event: nothing was ever captured into it, so the
+                    // honest statement is a zero-frame finish naming the slot it
+                    // was armed for and the kind it was armed as. Guarded on the
+                    // pointer, because re-arming the SAME buffer at another slot
+                    // displaces nothing and an event that would announce a
+                    // buffer the engine still holds must not be sent.
+                    if (t.recBuf && t.recBuf != buf)
+                        emitCritical(this, evts_,
+                                     {t.recMidi ? Ev::MidiRecordFinished : Ev::RecordFinished,
+                                      c.a, t.recSlot, 0.0, t.recBuf});
                     t.recBuf = buf; t.recCap = cap; t.recSlot = c.b; t.recMidi = midi;
                     t.recFireBeat = nextQuantum(beat_, -1);
                 } else {
@@ -2250,6 +2335,13 @@ void Engine::drainCommands() {
                     // the new one begins, so the two are gapless and both land
                     // on the beat. Track carries one set of recording fields, so
                     // the incoming request waits in pend* until the boundary.
+                    //
+                    // Reaching here a SECOND time before that boundary displaces
+                    // the hand-over already queued, and that one is the caller's
+                    // buffer too: returnPend gives it back (its own slot, its own
+                    // kind, zero frames) instead of overwriting it. Guarded on
+                    // the pointer for the same reason as the retarget above.
+                    if (t.pendBuf != buf) returnPend(this, c.a, t, evts_);
                     t.recPhase = 3;
                     t.recFireBeat = nextQuantum(beat_, -1);
                     t.pendBuf = buf; t.pendCap = cap;
@@ -2551,8 +2643,11 @@ void Engine::fireDue(f64 atBeat) {
             // position inside the loop — what an overdub's held notes close
             // against. The clip keeps playing; only the take ends here.
             const RtClip* oc = overdubVoice(clips_[ti], t);
-            if (oc) finishRec(this, ti, t, evts_, t.voice.beatPos, oc->lengthBeats);
-            else    finishRec(this, ti, t, evts_, boundary - t.recStartBeat);
+            // keepPend: THIS is the one call site that goes on to adopt pend*
+            // rather than hand it back — the hand-over below is the whole reason
+            // the exemption exists (see finishRec).
+            if (oc) finishRec(this, ti, t, evts_, t.voice.beatPos, oc->lengthBeats, true);
+            else    finishRec(this, ti, t, evts_, boundary - t.recStartBeat, 0.0, true);
             // A take displaced by a Record*Slot into another slot hands over
             // here, on the very same grid line it stopped on.
             if (t.pendBuf) {
@@ -3524,7 +3619,10 @@ void Engine::process(const f32* inL, const f32* inR, f32* outL, f32* outR, int n
                 ++t.recLen;
             }
             // The engine cannot grow a GUI-owned buffer and must not write past
-            // it, so a full buffer ends the take here and now.
+            // it, so a full buffer ends the take here and now. This is one of
+            // the ends that can arrive with a hand-over still queued for a grid
+            // line the take will never reach: finishRec's default hands that
+            // buffer back rather than leaving it in pend* on an idle track.
             if (t.recLen >= t.recCap) finishRec(this, ti, t, evts_, 0.0);
         }
     };
