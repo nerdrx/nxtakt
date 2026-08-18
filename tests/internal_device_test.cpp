@@ -4927,6 +4927,47 @@ static void testSamplerEmpty(PluginRegistry& reg) {
         CHECK(!sc->hasSample(),
               "so is a buffer whose frame count its own data cannot back");
     }
+
+    // -- sampleBuffer(): the read-back half of adopt() (GUI-ON-DAEMON.md §15) --
+    //
+    // It exists for one caller with one problem: `src/ui/engine_handle.cpp` has
+    // to put a sampler's audio into the sample pool so a daemon that links no
+    // decoder can play it, and the state string names only a PATH. Everything
+    // here is about the two properties that caller depends on.
+    sc->clearSample();
+    CHECK(sc->sampleBuffer() == nullptr,
+          "an empty sampler hands back no buffer, so a caller cannot publish "
+          "audio for a device that has none");
+    {
+        SampleRef mine = smRamp(4800, 2, 0.25f);
+        sc->adopt(mine, "/tmp/readback.wav");
+        SampleRef got = sc->sampleBuffer();
+        CHECK(got.get() == mine.get(),
+              "and a loaded one hands back the buffer it was given, not a copy");
+        CHECK(got && got->frames == 4800 && got->channels == 2,
+              "with its shape intact (%lld frames x %d)",
+              got ? (long long)got->frames : -1, got ? got->channels : -1);
+
+        // THE LIFETIME PROPERTY, and it is the whole reason the accessor returns
+        // a shared_ptr rather than a raw pointer. The pool write on the handle's
+        // side is a memcpy of every sample; a sampler re-pointed DURING it — a
+        // second file drop, a project load — moves the old buffer into `retired_`
+        // and reclaim() then frees it. A caller holding a reference is reading
+        // memory that is still there; a caller holding a raw pointer is not.
+        mine.reset();                       // the test drops its own reference
+        sc->adopt(smRamp(1200, 2, 0.1f), "/tmp/other.wav");
+        sc->reclaim();                      // frees what adopt() displaced
+        CHECK(got && got->frames == 4800 && got->data.size() == 9600 &&
+              got->data[0] == 0.f,
+              "the reference taken BEFORE a re-point and a reclaim still reads "
+              "its own buffer (%lld frames, %zu samples)",
+              got ? (long long)got->frames : -1, got ? got->data.size() : 0u);
+        CHECK(sc->sampleBuffer().get() != got.get(),
+              "while the device itself has moved on to the new one");
+    }
+    sc->clearSample();
+    sc->reclaim();
+    CHECK(sc->sampleBuffer() == nullptr, "and clearSample() empties it again");
 }
 
 // ---------------------------------------------------------------------------
@@ -5948,6 +5989,1329 @@ static void smFloodPatch(PluginInstance& s) {
 
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// Shimmer, Bloom and Tape — the suite sections, for splicing into
+// tests/internal_device_test.cpp VERBATIM.
+//
+// HOW TO MERGE
+//
+//   1. paste this whole file into tests/internal_device_test.cpp, anywhere
+//      after the `Noise` helper (it needs Buf, Noise, CHECK, banner, note,
+//      paramIndex, kSR and kBlock, and nothing else the suite defines);
+//   2. add these eight calls to main(), next to the other effect sections:
+//
+//          testFxContract(reg);
+//          testShimmerClimb(reg);
+//          testShimmerStability(reg);
+//          testBloomCrossover(reg);
+//          testBloomDynamics(reg);
+//          testTape(reg);
+//          testFxBlockInvariance(reg);
+//          testFxPresets(reg);
+//
+//   3. bump the registry count: `CHECK(internals == 13, ...)` becomes 16.
+//
+// Everything else this file needs it brings with it: its own single-bin DFT,
+// its own chunked renderer, its own second-order allpass reference. That is
+// deliberate — nothing here depends on WHERE in the file it lands.
+//
+// LAT_FX_LOCAL_REGISTRY is defined only by the scratchpad harness, which runs
+// these same sections against a local factory so they could be proven before
+// the devices were registered. In the merged suite it is never defined and the
+// two adapters below are the whole of the difference.
+// ===========================================================================
+
+#ifndef LAT_FX_LOCAL_REGISTRY
+static const PluginDesc* fxFind(PluginRegistry& reg, const char* uri) {
+    return reg.find(uri);
+}
+static std::unique_ptr<PluginInstance> fxMake(PluginRegistry& reg, const PluginDesc& d) {
+    return reg.instantiate(d, kSR, kBlock);
+}
+#endif
+
+static const char* kFxUris[] = { "nxtakt:shimmer", "nxtakt:bloom", "nxtakt:tape" };
+
+// ---------------------------------------------------------------------------
+// Measurement helpers
+//
+// Everything below MEASURES. A single-bin DFT over a whole window is exact for
+// a steady sinusoid and needs no window function and no FFT; for the reverb
+// tail, where nothing is steady, it is a Hann-windowed bin, which is what
+// "FFT the tail at t seconds" means in practice with one bin instead of 2048.
+// ---------------------------------------------------------------------------
+
+// Magnitude at `freq`, in dBFS, of x[from .. from+n). Hann-windowed and
+// corrected for the window's coherent gain, so a full-scale sine reads 0 dB.
+static f64 fxBinDb(const std::vector<f32>& x, size_t from, size_t n, f64 freq) {
+    if (from + n > x.size() || n < 8) return -300.0;
+    const f64 w = 6.283185307179586 * freq / kSR;
+    f64 re = 0.0, im = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const f64 win = 0.5 - 0.5 * std::cos(6.283185307179586 * (f64)i / (f64)n);
+        const f64 ph  = w * (f64)i;
+        const f64 v   = (f64)x[from + i] * win;
+        re += v * std::cos(ph);
+        im += v * std::sin(ph);
+    }
+    const f64 mag = 4.0 * std::sqrt(re * re + im * im) / (f64)n;   // 4 = 2 / 0.5
+    return (mag <= 1e-15) ? -300.0 : 20.0 * std::log10(mag);
+}
+
+// Steady-state output/input magnitude at `freq`, in dB. Settles first, then
+// integrates a whole number of cycles.
+static f64 fxProbeDb(PluginInstance& p, f64 freq, f32 amp, int cycles, int settleBlocks = 60) {
+    Buf in, out;
+    const f64 w = 6.283185307179586 * freq / kSR;
+    u64 n = 0;
+    auto fill = [&](int k) {
+        for (int i = 0; i < k; ++i)
+            in.l[(size_t)i] = in.r[(size_t)i] = amp * (f32)std::sin(w * (f64)(n + (u64)i));
+    };
+    for (int b = 0; b < settleBlocks; ++b) {
+        fill(kBlock); out.clear(); p.process(in.p, out.p, 2, kBlock); n += (u64)kBlock;
+    }
+    const int N = (int)std::llround((f64)cycles * kSR / freq);
+    f64 re = 0.0, im = 0.0;
+    int done = 0;
+    while (done < N) {
+        const int k = (N - done) < kBlock ? (N - done) : kBlock;
+        fill(k); out.clear(); p.process(in.p, out.p, 2, k);
+        for (int i = 0; i < k; ++i) {
+            const f64 ph = w * (f64)(n + (u64)i);
+            re += (f64)out.l[(size_t)i] * std::cos(ph);
+            im += (f64)out.l[(size_t)i] * std::sin(ph);
+        }
+        n += (u64)k;
+        done += k;
+    }
+    const f64 mag = 2.0 * std::sqrt(re * re + im * im) / (f64)N;
+    if (mag <= 1e-14 || amp <= 0.f) return -300.0;
+    return 20.0 * std::log10(mag / (f64)amp);
+}
+
+// Feeds a whole signal through a device in blocks of `chunk`, IN PLACE, which
+// is how the engine calls a device on a track.
+static void fxRender(PluginInstance& p, const std::vector<f32>& inL,
+                     const std::vector<f32>& inR, int chunk,
+                     std::vector<f32>& oL, std::vector<f32>& oR) {
+    const int frames = (int)inL.size();
+    oL.assign((size_t)frames, 0.f);
+    oR.assign((size_t)frames, 0.f);
+    std::vector<f32> bl((size_t)chunk, 0.f), br((size_t)chunk, 0.f);
+    for (int i = 0; i < frames; i += chunk) {
+        const int k = (frames - i) < chunk ? (frames - i) : chunk;
+        for (int j = 0; j < k; ++j) {
+            bl[(size_t)j] = inL[(size_t)(i + j)];
+            br[(size_t)j] = inR[(size_t)(i + j)];
+        }
+        const f32* cin[2]  = { bl.data(), br.data() };
+        f32*       cout[2] = { bl.data(), br.data() };
+        p.process(cin, cout, 2, k);
+        for (int j = 0; j < k; ++j) {
+            oL[(size_t)(i + j)] = bl[(size_t)j];
+            oR[(size_t)(i + j)] = br[(size_t)j];
+        }
+    }
+}
+
+// Sets a parameter by NAME and says so if the name has moved. Ids are frozen,
+// but a test that silently sets nothing is worse than one that fails.
+static bool fxSet(PluginInstance& p, const char* name, f32 v) {
+    const int i = paramIndex(p, name);
+    if (i < 0) { CHECK(false, "parameter \"%s\" is missing", name); return false; }
+    p.setParam(i, v);
+    return true;
+}
+
+// A second-order allpass, written from the RBJ cookbook independently of the
+// device's own copy. This is the reference the Bloom crossover nulls against —
+// see that section for why nulling against the raw input is impossible for any
+// IIR crossover and what the honest gate is instead.
+struct FxAp2 {
+    f64 b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    f64 z1 = 0, z2 = 0;
+    void set(f64 sr, f64 hz, f64 q) {
+        const f64 w = 6.283185307179586 * hz / sr;
+        const f64 c = std::cos(w), s = std::sin(w);
+        const f64 al = s / (2.0 * q);
+        const f64 a0 = 1.0 + al;
+        b0 = (1.0 - al) / a0; b1 = (-2.0 * c) / a0; b2 = (1.0 + al) / a0;
+        a1 = (-2.0 * c) / a0; a2 = (1.0 - al) / a0;
+        z1 = z2 = 0;
+    }
+    f64 tick(f64 x) {                       // transposed direct form II
+        const f64 y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The three new effects: the common contract
+//
+// The same four properties testEffectContract() checks for every older stock
+// effect, checked here for the three new ones so that this file can be proven
+// on its own. If the merge also appends these URIs to kEffectUris[], the
+// duplicate coverage is harmless.
+// ---------------------------------------------------------------------------
+
+static void testFxContract(PluginRegistry& reg) {
+    banner("Shimmer / Bloom / Tape: the common contract");
+
+    for (const char* uri : kFxUris) {
+        const PluginDesc* d = fxFind(reg, uri);
+        CHECK(d != nullptr, "%s: in the registry", uri);
+        if (!d) continue;
+        CHECK(d->format == PluginFormat::Internal && d->kind == PluginKind::Effect &&
+              d->audioIn == 2 && d->audioOut == 2 && !d->hasMidiIn,
+              "%s: stereo effect descriptor", uri);
+
+        auto fx = fxMake(reg, *d);
+        CHECK(fx != nullptr, "%s: instantiate + prepare", uri);
+        if (!fx) continue;
+
+        CHECK(fx->paramCount() == d->paramCount,
+              "%s: descriptor param count matches the instance (%d)", uri, fx->paramCount());
+
+        bool rtOk = true;
+        for (int i = 0; i < fx->paramCount(); ++i)
+            if (!fx->setParamRT(i, fx->paramInfo(i).def)) rtOk = false;
+        CHECK(rtOk, "%s: every parameter accepts a realtime write", uri);
+
+        // 1. Silence in, silence out — an EXACT zero, including the Tape's
+        //    hiss generator, which at its default is not attenuated but absent.
+        Buf in, out;
+        f32 residue = 0.f;
+        for (int b = 0; b < 8; ++b) {
+            out.clear();
+            fx->process(in.p, out.p, 2, kBlock);
+            residue = std::fmax(residue, out.peak());
+        }
+        CHECK(residue == 0.f, "%s: silence in -> silence out, exactly (%.9f)", uri, (double)residue);
+
+        // 2. A sine sweeping 20 Hz -> 18 kHz stays finite and bounded.
+        bool fin = true;
+        f32 peak = 0.f;
+        f64 ph = 0.0;
+        for (int b = 0; b < 400; ++b) {
+            const f64 t = (f64)b / 400.0;
+            const f64 f = 20.0 * std::pow(900.0, t);
+            for (int i = 0; i < kBlock; ++i) {
+                ph += 6.283185307179586 * f / kSR;
+                in.l[(size_t)i] = in.r[(size_t)i] = 0.5f * (f32)std::sin(ph);
+            }
+            out.clear();
+            fx->process(in.p, out.p, 2, kBlock);
+            if (!out.finite()) { fin = false; break; }
+            peak = std::fmax(peak, out.peak());
+        }
+        CHECK(fin, "%s: swept sine stays finite", uri);
+        CHECK(peak < 8.f, "%s: swept sine stays bounded (peak %.3f)", uri, (double)peak);
+
+        // 3. Every parameter swept end to end, both directions, while
+        //    processing. One pass each so a fault is attributable.
+        Noise ns;
+        bool sweepOk = true;
+        const char* badParam = "";
+        for (int pi = 0; pi < fx->paramCount() && sweepOk; ++pi) {
+            const ParamInfo& info = fx->paramInfo(pi);
+            for (int b = 0; b < 120; ++b) {
+                f32 t = (f32)b / 60.f;
+                if (t > 1.f) t = 2.f - t;
+                fx->setParam(pi, lerpf(info.min, info.max, t));
+                for (int i = 0; i < kBlock; ++i)
+                    in.l[(size_t)i] = in.r[(size_t)i] = 0.25f * ns.next();
+                out.clear();
+                fx->process(in.p, out.p, 2, kBlock);
+                if (!out.finite() || out.peak() > 32.f) {
+                    sweepOk = false;
+                    badParam = info.name.c_str();
+                    break;
+                }
+            }
+            fx->setParam(pi, info.def);
+        }
+        CHECK(sweepOk, "%s: every parameter sweeps during processing without NaN%s%s",
+              uri, sweepOk ? "" : " -- failed on ", badParam);
+
+        // 4. ...and it is still a working device afterwards.
+        for (int i = 0; i < kBlock; ++i)
+            in.l[(size_t)i] = in.r[(size_t)i] = 0.25f * (f32)std::sin(6.2831853 * 440.0 * i / kSR);
+        f32 after = 0.f;
+        for (int b = 0; b < 16; ++b) {
+            out.clear();
+            fx->process(in.p, out.p, 2, kBlock);
+            after = std::fmax(after, out.peak());
+        }
+        CHECK(after > 0.01f, "%s: still passes audio after the sweep (peak %.4f)",
+              uri, (double)after);
+
+        // 5. Bypass is a true wire, sample for sample.
+        fx->setBypassed(true);
+        Buf bin, bout;
+        Noise bn;
+        bool wire = true;
+        for (int b = 0; b < 4 && wire; ++b) {
+            for (int i = 0; i < kBlock; ++i) {
+                bin.l[(size_t)i] = 0.4f * bn.next();
+                bin.r[(size_t)i] = 0.4f * bn.next();
+            }
+            bout.clear();
+            fx->process(bin.p, bout.p, 2, kBlock);
+            for (int i = 0; i < kBlock; ++i)
+                if (bout.l[(size_t)i] != bin.l[(size_t)i] || bout.r[(size_t)i] != bin.r[(size_t)i])
+                    wire = false;
+        }
+        CHECK(wire, "%s: bypass is a bit-exact wire", uri);
+        fx->setBypassed(false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shimmer: the climb
+//
+// THE SIGNATURE. A 440 Hz burst at Shift = +12 with the shifter carrying the
+// whole feedback has to leave a tail whose energy WALKS UP the octaves — 880,
+// then 1760, then 3520 — in that order, and ends up above where it started.
+// A reverb that merely gets brighter is not a shimmer.
+//
+// The measurement is a Hann-windowed single bin at each octave, taken every
+// 100 ms of the tail, and the assertions are about the ORDER in which each bin
+// takes the lead. The absolute timing is a property of the tank's traversal
+// time (Size), not of the effect existing, so the gate is the sequence and the
+// table below is what says how fast.
+// ---------------------------------------------------------------------------
+
+static void testShimmerClimb(PluginRegistry& reg) {
+    banner("Shimmer: the octave climb is measurable");
+
+    const PluginDesc* d = fxFind(reg, "nxtakt:shimmer");
+    CHECK(d != nullptr, "nxtakt:shimmer: in the registry");
+    if (!d) return;
+    auto p = fxMake(reg, *d);
+    if (!p) return;
+
+    fxSet(*p, "Decay", 20.f);
+    fxSet(*p, "Size", 0.5f);
+    fxSet(*p, "Shift", 3.f);            // +12
+    fxSet(*p, "Shift Amount", 1.f);
+    fxSet(*p, "Damping", 18000.f);
+    fxSet(*p, "Low Cut", 60.f);
+    fxSet(*p, "Mod Depth", 0.f);
+    fxSet(*p, "Dry/Wet", 1.f);
+
+    // 500 ms of 440 Hz, then eight seconds of nothing.
+    const int burst  = (int)(0.5 * kSR);
+    const int frames = (int)(8.5 * kSR);
+    std::vector<f32> inL((size_t)frames, 0.f), inR((size_t)frames, 0.f);
+    for (int i = 0; i < burst; ++i) {
+        const f32 s = 0.5f * (f32)std::sin(6.283185307179586 * 440.0 * (f64)i / kSR);
+        inL[(size_t)i] = inR[(size_t)i] = s;
+    }
+    std::vector<f32> oL, oR;
+    fxRender(*p, inL, inR, kBlock, oL, oR);
+
+    const f64 bins[5] = { 440.0, 880.0, 1760.0, 3520.0, 7040.0 };
+    const size_t win = 4096;
+    std::printf("  note  tail spectrum, dBFS per octave bin (window %zu = %.0f ms)\n",
+                win, 1000.0 * (f64)win / kSR);
+    std::printf("  note      t(s)     440     880    1760    3520    7040\n");
+
+    // WHEN each rung PEAKS, which is the honest way to say "in sequence".
+    //
+    // The naive version -- the first moment each bin overtakes the one below it
+    // -- is not a sequence at all: bins that are still 100 dB down cross each
+    // other in whatever order the noise floor puts them, and a rung that is
+    // climbing can pass the rung above it on the way up. The energy PEAK is
+    // unambiguous: it is the moment that octave holds the most of what the tank
+    // contains, and a shifter that transposes upward has to reach them in
+    // order or it is not transposing upward.
+    f64 peakT[5] = { -1, -1, -1, -1, -1 };
+    f64 peakDb[5] = { -400, -400, -400, -400, -400 };
+    const int steps = 120;
+    for (int k = 0; k < steps; ++k) {
+        const f64 t = 0.50 + 0.025 * (f64)k;
+        const size_t at = (size_t)(t * kSR);
+        if (at + win > oL.size()) break;
+        f64 db[5];
+        for (int b = 0; b < 5; ++b) {
+            db[b] = fxBinDb(oL, at, win, bins[b]);
+            if (db[b] > peakDb[b]) { peakDb[b] = db[b]; peakT[b] = t; }
+        }
+        if (k % 8 == 0)
+            std::printf("  note    %6.3f  %6.1f  %6.1f  %6.1f  %6.1f  %6.1f\n",
+                        t, db[0], db[1], db[2], db[3], db[4]);
+    }
+
+    std::printf("  note  peak of each octave: 440 at %.3f s (%.1f dB), 880 at %.3f s (%.1f dB), "
+                "1760 at %.3f s (%.1f dB), 3520 at %.3f s (%.1f dB), 7040 at %.3f s (%.1f dB)\n",
+                peakT[0], peakDb[0], peakT[1], peakDb[1], peakT[2], peakDb[2],
+                peakT[3], peakDb[3], peakT[4], peakDb[4]);
+
+    CHECK(peakDb[1] > -80.0 && peakDb[2] > -80.0 && peakDb[3] > -80.0,
+          "the tail contains real energy at 880, 1760 and 3520 Hz (%.1f, %.1f, %.1f dB) — "
+          "none of which the 440 Hz burst put there", peakDb[1], peakDb[2], peakDb[3]);
+    CHECK(peakT[1] > peakT[0] && peakT[2] > peakT[1] && peakT[3] > peakT[2],
+          "and each octave peaks AFTER the one below it: 440 at %.3f, 880 at %.3f, "
+          "1760 at %.3f, 3520 at %.3f s. That ordering is the signature — a reverb "
+          "that merely brightens has no order to it",
+          peakT[0], peakT[1], peakT[2], peakT[3]);
+    CHECK(peakT[4] > peakT[3],
+          "the fourth rung too: 7040 peaks at %.3f s, after 3520 at %.3f s",
+          peakT[4], peakT[3]);
+
+    // The headline: at the moment 3520 is loudest, it is louder than 440 was
+    // ever going to be from here on — two octaves of energy above a note the
+    // tank was only ever fed at 440 Hz.
+    {
+        const size_t at = (size_t)(peakT[3] * kSR);
+        const f64 f440  = fxBinDb(oL, at, win, 440.0);
+        const f64 f3520 = fxBinDb(oL, at, win, 3520.0);
+        CHECK(f3520 > f440,
+              "at %.3f s the 3520 Hz bin (%.1f dB) exceeds the 440 Hz bin (%.1f dB) "
+              "by %.1f dB — energy the input never contained",
+              peakT[3], f3520, f440, f3520 - f440);
+    }
+
+    // The level check, which is what stops a reverb from being one people turn
+    // up and then turn back down. Fully wet, at the defaults, against the same
+    // noise fed straight through.
+    {
+        auto q = fxMake(reg, *d);
+        if (q) {
+            fxSet(*q, "Dry/Wet", 1.f);
+            const int n = (int)(4.0 * kSR);
+            std::vector<f32> nl((size_t)n), nr((size_t)n), wl, wr;
+            Noise ns;
+            for (int i = 0; i < n; ++i) { nl[(size_t)i] = 0.3f * ns.next(); nr[(size_t)i] = 0.3f * ns.next(); }
+            fxRender(*q, nl, nr, kBlock, wl, wr);
+            f64 dryE = 0.0, wetE = 0.0;
+            for (int i = (int)(1.0 * kSR); i < n; ++i) {
+                dryE += (f64)nl[(size_t)i] * nl[(size_t)i];
+                wetE += (f64)wl[(size_t)i] * wl[(size_t)i];
+            }
+            const f64 rel = 10.0 * std::log10(wetE / (dryE > 0 ? dryE : 1.0));
+            CHECK(rel > -10.0 && rel < 6.0,
+                  "fully wet at the defaults, the tail sits %+.1f dB against the dry signal "
+                  "— a wet path nobody has to make up for on the fader", rel);
+        }
+    }
+
+    // THE CONTROL. The same tank with the shifter taken out of the loop
+    // (Shift Amount 0) has to leave the tail exactly where the burst put it.
+    // Without this the section would be measuring nothing but a reverb that
+    // gets brighter, which is what any modulated tank does.
+    {
+        auto q = fxMake(reg, *d);
+        if (q) {
+            fxSet(*q, "Decay", 20.f);
+            fxSet(*q, "Size", 0.5f);
+            fxSet(*q, "Shift", 3.f);
+            fxSet(*q, "Shift Amount", 0.f);      // the shifter is not in the loop
+            fxSet(*q, "Damping", 18000.f);
+            fxSet(*q, "Low Cut", 60.f);
+            fxSet(*q, "Mod Depth", 0.f);
+            fxSet(*q, "Dry/Wet", 1.f);
+            std::vector<f32> qL, qR;
+            fxRender(*q, inL, inR, kBlock, qL, qR);
+            const size_t at = (size_t)(1.5 * kSR);
+            const f64 f440  = fxBinDb(qL, at, win, 440.0);
+            const f64 f3520 = fxBinDb(qL, at, win, 3520.0);
+            std::printf("  note  control (Shift Amount 0) at 1.5 s: 440 %.1f dB, 3520 %.1f dB\n",
+                        f440, f3520);
+            CHECK(f440 > f3520 + 30.0,
+                  "with Shift Amount at 0 the tail stays at 440 Hz (%.1f dB) and 3520 has "
+                  "nothing in it (%.1f dB, %.1f dB down) — the ladder is the shifter and "
+                  "not the tank", f440, f3520, f440 - f3520);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shimmer: stability and the tail
+//
+// A pitch shifter in a feedback loop is the classic way to build an oscillator
+// by accident. Three things are checked, and the first two are the ones that
+// decide whether this device can be shipped:
+//
+//   1. thirty seconds of full-scale noise with every knob at its most
+//      dangerous setting cannot drive the output past +3 dBFS. The bound is
+//      arithmetic — the soft clipper on every delay-line input caps the tank
+//      contents at 1.35 and the output taps are averages of two lines — so
+//      this test is checking the code, not hoping about the signal.
+//   2. when the input stops, it decays. -60 dB, and how long it took.
+//   3. the tail reaches TRUE ZERO and not a denormal asymptote.
+// ---------------------------------------------------------------------------
+
+static void testShimmerStability(PluginRegistry& reg) {
+    banner("Shimmer: 30 s at maximum everything, then silence");
+
+    const PluginDesc* d = fxFind(reg, "nxtakt:shimmer");
+    if (!d) return;
+    auto p = fxMake(reg, *d);
+    if (!p) return;
+
+    // Maximum everything that can add energy: longest decay, biggest tank,
+    // widest shift, all of the feedback through the shifter, no damping, no
+    // low cut, fastest and deepest modulation, fully wet.
+    for (int i = 0; i < p->paramCount(); ++i) p->setParam(i, p->paramInfo(i).max);
+    // ...and then the two that are LEAST safe at their minimum rather than
+    // their maximum: no low cut and no damping is the setting that lets the
+    // loop accumulate whatever the shifter cannot move.
+    fxSet(*p, "Low Cut", 20.f);
+    fxSet(*p, "Damping", 18000.f);
+    fxSet(*p, "Shift", 4.f);
+    fxSet(*p, "Dry/Wet", 1.f);
+    const int decayIdx = paramIndex(*p, "Decay");
+    const f32 decaySec = decayIdx >= 0 ? p->getParam(decayIdx) : 30.f;
+
+    Buf in, out;
+    Noise ns;
+    f32 worst = 0.f;
+    bool finite = true;
+    const int blocks = (int)(30.0 * kSR / kBlock);
+    for (int b = 0; b < blocks; ++b) {
+        for (int i = 0; i < kBlock; ++i) {
+            in.l[(size_t)i] = ns.next();            // full scale
+            in.r[(size_t)i] = ns.next();
+        }
+        out.clear();
+        p->process(in.p, out.p, 2, kBlock);
+        if (!out.finite()) { finite = false; break; }
+        worst = std::fmax(worst, out.peak());
+    }
+    const f64 worstDb = worst > 0.f ? 20.0 * std::log10((f64)worst) : -300.0;
+    CHECK(finite, "30 s of full-scale noise stays finite");
+    CHECK(worst <= 1.4125f,
+          "and never exceeds +3 dBFS (peak %.4f = %+.2f dBFS, decay %.1f s)",
+          (double)worst, worstDb, (double)decaySec);
+
+    // Input stops. How long until -60 dB?
+    f64 minus60 = -1.0;
+    const int tailBlocks = (int)(2.0 * (f64)decaySec * kSR / kBlock) + 64;
+    Buf sil;
+    for (int b = 0; b < tailBlocks; ++b) {
+        out.clear();
+        p->process(sil.p, out.p, 2, kBlock);
+        const f32 pk = out.peak();
+        const f64 t  = (f64)(b + 1) * (f64)kBlock / kSR;
+        if (pk < 1e-3f) { minus60 = t; break; }
+    }
+    CHECK(minus60 > 0.0, "the tail falls below -60 dBFS after %.2f s (decay is set to %.1f s)",
+          minus60, (double)decaySec);
+    CHECK(minus60 > 0.0 && minus60 <= (f64)decaySec * 1.5,
+          "which is inside 1.5x the requested decay — no runaway (%.2f s vs %.1f s)",
+          minus60, (double)decaySec);
+
+    // --- and the tail reaches TRUE ZERO ------------------------------------
+    // A separate instance at the SHORTEST decay and smallest tank, because the
+    // property under test is "every state variable in the loop is flushed" and
+    // not "how long 30 seconds of reverb takes to fall 700 dB". At the longest
+    // decay it gets there too; it just takes four minutes of wall clock to
+    // prove, which is not a thing to put in a suite that runs on every commit.
+    {
+        auto q = fxMake(reg, *d);
+        if (q) {
+            fxSet(*q, "Decay", 0.3f);
+            fxSet(*q, "Size", 0.f);
+            fxSet(*q, "Shift", 3.f);
+            fxSet(*q, "Shift Amount", 0.5f);
+            fxSet(*q, "Dry/Wet", 1.f);
+            Buf in, out2;
+            Noise ns2;
+            for (int b = 0; b < 40; ++b) {
+                for (int i = 0; i < kBlock; ++i) {
+                    in.l[(size_t)i] = 0.8f * ns2.next();
+                    in.r[(size_t)i] = 0.8f * ns2.next();
+                }
+                out2.clear();
+                q->process(in.p, out2.p, 2, kBlock);
+            }
+            f64 zeroAt = -1.0;
+            Buf sil2;
+            for (int b = 0; b < (int)(20.0 * kSR / kBlock); ++b) {
+                out2.clear();
+                q->process(sil2.p, out2.p, 2, kBlock);
+                if (out2.peak() == 0.f) { zeroAt = (f64)(b + 1) * (f64)kBlock / kSR; break; }
+            }
+            CHECK(zeroAt > 0.0,
+                  "the tail reaches TRUE ZERO at %.2f s and stays there — not a denormal "
+                  "asymptote the FPU spends the rest of the session maintaining", zeroAt);
+            // ...and stays there, which is the half that a device with an
+            // ungrounded modulator or a stuck LFO would fail.
+            f32 after = 0.f;
+            for (int b = 0; b < 400; ++b) {
+                out2.clear();
+                q->process(sil2.p, out2.p, 2, kBlock);
+                after = std::fmax(after, out2.peak());
+            }
+            CHECK(after == 0.f, "and two more seconds of silence produce exactly zero (%.9f)",
+                  (double)after);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bloom: the crossover
+//
+// THE GATE FOR ANY MULTIBAND. If the three bands do not recombine into what
+// went in, every other measurement in this section is measuring the crossover
+// rather than the compressor.
+//
+// WHAT "SUMS FLAT" CAN AND CANNOT MEAN FOR AN IIR CROSSOVER, stated once,
+// because it is the thing multiband devices are usually dishonest about: an
+// LR4 pair sums to a second-order ALLPASS, never to unity. That is not a
+// defect of this implementation, it is what Linkwitz-Riley IS; the magnitude
+// is flat and the phase is not. So a null against the raw input is
+// mathematically impossible for any device that does not buy linear phase with
+// latency, and the strongest true statement is the pair below:
+//
+//   * the split-and-sum nulls below -80 dB against the input passed through an
+//     INDEPENDENTLY WRITTEN AP2(fLow) -> AP2(fHigh) — which proves both the LR4
+//     identity and, crucially, that the low band carries its AP2(fHigh)
+//     compensation. Remove that one filter and this test fails by 6 dB.
+//   * the magnitude of the split-and-sum is flat across the audio band.
+//
+// The dynamics are made inert by setting both ratios to 1, which makes every
+// band gain exactly 1.0f — not nearly — so what is measured is the crossover.
+// ---------------------------------------------------------------------------
+
+static void testBloomCrossover(PluginRegistry& reg) {
+    banner("Bloom: the crossover sums flat (the multiband gate)");
+
+    const PluginDesc* d = fxFind(reg, "nxtakt:bloom");
+    CHECK(d != nullptr, "nxtakt:bloom: in the registry");
+    if (!d) return;
+    auto p = fxMake(reg, *d);
+    if (!p) return;
+
+    const f32 fLow = 250.f, fHigh = 2500.f;
+    fxSet(*p, "Low Split", fLow);
+    fxSet(*p, "High Split", fHigh);
+    fxSet(*p, "Depth", 1.f);            // NOT the wire path
+    fxSet(*p, "Up Ratio", 1.f);         // ...but the dynamics are inert
+    fxSet(*p, "Down Ratio", 1.f);
+    fxSet(*p, "Dry/Wet", 1.f);
+
+    // Pink-ish noise: white through a -3 dB/octave ladder. A crossover null is
+    // a broadband claim and white noise under-weights the bottom two octaves
+    // where an uncompensated allpass does its damage.
+    const int frames = 1 << 17;
+    std::vector<f32> inL((size_t)frames), inR((size_t)frames);
+    {
+        Noise ns;
+        f32 b0 = 0.f, b1 = 0.f, b2 = 0.f;
+        for (int i = 0; i < frames; ++i) {
+            const f32 w = ns.next();
+            b0 = 0.99765f * b0 + w * 0.0990460f;
+            b1 = 0.96300f * b1 + w * 0.2965164f;
+            b2 = 0.57000f * b2 + w * 1.0526913f;
+            const f32 v = clampv((b0 + b1 + b2 + w * 0.1848f) * 0.20f, -1.f, 1.f);
+            inL[(size_t)i] = inR[(size_t)i] = v;
+        }
+    }
+
+    std::vector<f32> oL, oR;
+    fxRender(*p, inL, inR, kBlock, oL, oR);
+
+    // The reference: the same input through two independently written
+    // second-order allpasses at the same two corners.
+    FxAp2 a1, a2;
+    a1.set(kSR, (f64)fLow, 0.70710678118654752);
+    a2.set(kSR, (f64)fHigh, 0.70710678118654752);
+    std::vector<f64> ref((size_t)frames);
+    for (int i = 0; i < frames; ++i) ref[(size_t)i] = a2.tick(a1.tick((f64)inL[(size_t)i]));
+
+    // Skip the first 20000 frames: the device's coefficient glide and both
+    // filter states have to settle before a null means anything.
+    const int from = 20000;
+    f64 sigE = 0.0, errE = 0.0, worst = 0.0;
+    for (int i = from; i < frames; ++i) {
+        const f64 e = (f64)oL[(size_t)i] - ref[(size_t)i];
+        errE += e * e;
+        sigE += ref[(size_t)i] * ref[(size_t)i];
+        worst = std::fmax(worst, std::fabs(e));
+    }
+    const f64 nullDb = (errE <= 0.0 || sigE <= 0.0)
+                           ? -300.0 : 10.0 * std::log10(errE / sigE);
+    std::printf("  note  residual %.1f dB, worst sample error %.3e\n", nullDb, worst);
+    CHECK(nullDb < -80.0,
+          "the three bands recombine into AP2(%.0f) o AP2(%.0f) applied to the input, "
+          "to %.1f dB — the low band's allpass compensation is present and correct",
+          (double)fLow, (double)fHigh, nullDb);
+
+    // ...and the magnitude of that sum is flat, which is the half of "sums
+    // flat" that a listener actually hears.
+    {
+        auto q = fxMake(reg, *d);
+        if (q) {
+            fxSet(*q, "Low Split", fLow);
+            fxSet(*q, "High Split", fHigh);
+            fxSet(*q, "Depth", 1.f);
+            fxSet(*q, "Up Ratio", 1.f);
+            fxSet(*q, "Down Ratio", 1.f);
+            fxSet(*q, "Dry/Wet", 1.f);
+            f64 worstDev = 0.0, atF = 0.0;
+            for (int k = 0; k < 25; ++k) {
+                const f64 f = 30.0 * std::pow(18000.0 / 30.0, (f64)k / 24.0);
+                const f64 g = fxProbeDb(*q, f, 0.25f, 40);
+                if (std::fabs(g) > worstDev) { worstDev = std::fabs(g); atF = f; }
+            }
+            CHECK(worstDev < 0.05,
+                  "and its magnitude is flat to %.4f dB across 30 Hz - 18 kHz "
+                  "(worst at %.0f Hz)", worstDev, atF);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bloom: both directions, per band
+//
+// Downward compression is what every compressor does. UPWARD is the signature,
+// and it is checked per band because a multiband that only works in the middle
+// is a single-band with extra filters.
+//
+// The arithmetic being asserted, once:
+//
+//     down:  out = thrDown + (in - thrDown) / ratio      for in > thrDown
+//     up:    out = thrUp   - (thrUp - in)  / ratio       for in < thrUp
+//
+// with thrDown = -15 dBFS and thrUp = -25 dBFS, both fixed by the device. The
+// two bands that are not under test have their gain pulled to the floor so
+// their crossover leakage cannot contaminate the number.
+// ---------------------------------------------------------------------------
+
+static void testBloomDynamics(PluginRegistry& reg) {
+    banner("Bloom: downward and UPWARD compression, per band");
+
+    const PluginDesc* d = fxFind(reg, "nxtakt:bloom");
+    if (!d) return;
+
+    const char* gains[3] = { "Low Gain", "Mid Gain", "High Gain" };
+    const char* names[3] = { "low", "mid", "high" };
+    const f64   probe[3] = { 80.0, 800.0, 6000.0 };
+    const f32   kThrDown = -15.f, kThrUp = -25.f;
+
+    // --- downward -----------------------------------------------------------
+    for (int b = 0; b < 3; ++b) {
+        auto p = fxMake(reg, *d);
+        if (!p) continue;
+        fxSet(*p, "Low Split", 250.f);
+        fxSet(*p, "High Split", 2500.f);
+        fxSet(*p, "Depth", 1.f);
+        fxSet(*p, "Up Ratio", 1.f);           // downward only
+        fxSet(*p, "Down Ratio", 4.f);
+        fxSet(*p, "Attack", 1.f);
+        fxSet(*p, "Release", 1000.f);
+        for (int k = 0; k < 3; ++k) if (k != b) fxSet(*p, gains[k], -24.f);
+
+        const f64 g = fxProbeDb(*p, probe[b], 1.f, 60, 400);
+        const f64 want = (f64)kThrDown + (0.0 - (f64)kThrDown) / 4.0;   // -3.75 dB out
+        CHECK(std::fabs(g - want) < 1.0,
+              "%s band: 0 dBFS in comes out at %+.2f dB, the 4:1 math says %+.2f dB "
+              "(%.2f dB of gain reduction)", names[b], g, want, -g);
+    }
+
+    // --- UPWARD -------------------------------------------------------------
+    for (int b = 0; b < 3; ++b) {
+        auto p = fxMake(reg, *d);
+        if (!p) continue;
+        fxSet(*p, "Low Split", 250.f);
+        fxSet(*p, "High Split", 2500.f);
+        fxSet(*p, "Depth", 1.f);
+        fxSet(*p, "Up Ratio", 4.f);
+        fxSet(*p, "Down Ratio", 1.f);         // upward only
+        fxSet(*p, "Attack", 1.f);
+        fxSet(*p, "Release", 1000.f);
+        for (int k = 0; k < 3; ++k) if (k != b) fxSet(*p, gains[k], -24.f);
+
+        const f32 amp = 0.01f;                                  // -40 dBFS
+        const f64 g   = fxProbeDb(*p, probe[b], amp, 60, 400);
+        const f64 want = ((f64)kThrUp - (-40.0)) * (1.0 - 1.0 / 4.0);   // +11.25 dB
+        CHECK(std::fabs(g - want) < 1.0,
+              "%s band: -40 dBFS in RISES by %+.2f dB, the 1:4 upward math says %+.2f dB "
+              "(out at %.2f dBFS) — this is the signature",
+              names[b], g, want, -40.0 + g);
+    }
+
+    // --- Depth scales both, and Depth 0 is a wire ---------------------------
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            fxSet(*p, "Depth", 0.5f);
+            fxSet(*p, "Up Ratio", 4.f);
+            fxSet(*p, "Down Ratio", 1.f);
+            fxSet(*p, "Attack", 1.f);
+            fxSet(*p, "Release", 1000.f);
+            fxSet(*p, "Low Gain", -24.f);
+            fxSet(*p, "High Gain", -24.f);
+            const f64 g = fxProbeDb(*p, 800.0, 0.01f, 60, 400);
+            CHECK(std::fabs(g - 11.25 * 0.5) < 1.0,
+                  "Depth 0.5 gives half the upward action in dB (%+.2f, half of %+.2f)",
+                  g, 11.25);
+        }
+    }
+
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            // Depth 0, every gain at unity, fully wet: the documented wire.
+            Buf in, out;
+            Noise ns;
+            bool wire = true;
+            f32 worst = 0.f;
+            for (int b = 0; b < 40 && wire; ++b) {
+                for (int i = 0; i < kBlock; ++i) {
+                    in.l[(size_t)i] = 0.5f * ns.next();
+                    in.r[(size_t)i] = 0.5f * ns.next();
+                }
+                out.clear();
+                p->process(in.p, out.p, 2, kBlock);
+                for (int i = 0; i < kBlock; ++i) {
+                    worst = std::fmax(worst, std::fabs(out.l[(size_t)i] - in.l[(size_t)i]));
+                    if (out.l[(size_t)i] != in.l[(size_t)i] ||
+                        out.r[(size_t)i] != in.r[(size_t)i]) wire = false;
+                }
+            }
+            CHECK(wire, "Depth 0 with unity gains is a BIT-EXACT wire (worst diff %.9f) — "
+                        "the crossover keeps running underneath so that automating Depth "
+                        "off zero does not click, but nothing it computes reaches the output",
+                  (double)worst);
+        }
+    }
+
+    // Depth 0 is a wire on the OUTPUT and not a bypass of the filters: raising
+    // Depth off zero must produce a band split that is already tracking.
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            fxSet(*p, "Depth", 0.f);
+            fxSet(*p, "Up Ratio", 6.f);
+            fxSet(*p, "Down Ratio", 6.f);
+            Buf in, out;
+            Noise ns;
+            for (int b = 0; b < 60; ++b) {
+                for (int i = 0; i < kBlock; ++i) {
+                    in.l[(size_t)i] = 0.3f * ns.next();
+                    in.r[(size_t)i] = 0.3f * ns.next();
+                }
+                out.clear();
+                p->process(in.p, out.p, 2, kBlock);
+            }
+            fxSet(*p, "Depth", 1.f);
+            for (int i = 0; i < kBlock; ++i) {
+                in.l[(size_t)i] = 0.3f * ns.next();
+                in.r[(size_t)i] = 0.3f * ns.next();
+            }
+            out.clear();
+            p->process(in.p, out.p, 2, kBlock);
+            // A cold crossover would put a transient of several times the
+            // signal level into the first block. A warm one cannot.
+            CHECK(out.peak() < 4.f * 0.3f,
+                  "and Depth 0 -> 1 in one block does not spike (peak %.3f on a 0.3 signal)",
+                  (double)out.peak());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tape
+//
+// Four gates, each of which is the thing the corresponding knob claims to be:
+//
+//   1. WOW is a pitch deviation of a stated size, measured by timing the zero
+//      crossings of a 1 kHz tone and converting to cents. The device defines
+//      Wow Depth IN CENTS and solves the delay excursion for it, so this test
+//      asserts a number rather than "it wobbles".
+//   2. the THD curve rises monotonically with Drive, H2 is present when Bias
+//      is up and ABSENT (below -100 dB) when Bias is zero, because the shaper
+//      is exactly odd there.
+//   3. the Speed switch moves the head bump.
+//   4. Hiss at its default is zero. Not quiet. Zero.
+// ---------------------------------------------------------------------------
+
+// Every upward zero crossing of x, linearly interpolated, as a fractional
+// sample index. Exact enough for cents at 1 kHz: the interpolation error on a
+// full-scale sine is a few parts per million of a period.
+static void fxZeroCross(const std::vector<f32>& x, size_t from, size_t to,
+                        std::vector<f64>& out) {
+    out.clear();
+    for (size_t i = from + 1; i < to && i < x.size(); ++i) {
+        if (x[i - 1] <= 0.f && x[i] > 0.f) {
+            const f64 a = (f64)x[i - 1], b = (f64)x[i];
+            out.push_back((f64)(i - 1) + (b != a ? (-a / (b - a)) : 0.0));
+        }
+    }
+}
+
+static void testTape(PluginRegistry& reg) {
+    banner("Tape: wow in cents, the THD curve, the speed switch, and silence");
+
+    const PluginDesc* d = fxFind(reg, "nxtakt:tape");
+    CHECK(d != nullptr, "nxtakt:tape: in the registry");
+    if (!d) return;
+
+    // --- latency is real and reported --------------------------------------
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            const int lat = p->latencyFrames();
+            CHECK(lat > 0, "latencyFrames() reports the record-to-repro gap (%d frames = %.2f ms)",
+                  lat, 1000.0 * (f64)lat / kSR);
+            // ...and it is the truth: an impulse comes out exactly there.
+            fxSet(*p, "Wow Depth", 0.f);
+            fxSet(*p, "Flutter", 0.f);
+            fxSet(*p, "Drive", 0.f);
+            fxSet(*p, "Bias", 0.f);
+            fxSet(*p, "Head Bump", 0.f);
+            fxSet(*p, "HF Rolloff", 0.f);
+            fxSet(*p, "Crosstalk", 0.f);
+            fxSet(*p, "Dry/Wet", 0.f);          // the dry path: an integer tap
+            const int n = lat + 2048;
+            std::vector<f32> inL((size_t)n, 0.f), inR((size_t)n, 0.f), oL, oR;
+            inL[0] = inR[0] = 1.f;
+            fxRender(*p, inL, inR, kBlock, oL, oR);
+            int at = -1;
+            f32 pk = 0.f;
+            for (int i = 0; i < n; ++i)
+                if (std::fabs(oL[(size_t)i]) > pk) { pk = std::fabs(oL[(size_t)i]); at = i; }
+            CHECK(at == lat,
+                  "and an impulse arrives at frame %d, which is exactly what it said (%d)",
+                  at, lat);
+        }
+    }
+
+    // --- 1. wow, in cents ---------------------------------------------------
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            fxSet(*p, "Drive", 0.f);
+            fxSet(*p, "Bias", 0.f);
+            fxSet(*p, "Head Bump", 0.f);
+            fxSet(*p, "HF Rolloff", 0.f);
+            fxSet(*p, "Crosstalk", 0.f);
+            fxSet(*p, "Flutter", 0.f);
+            fxSet(*p, "Wow Rate", 1.f);
+            fxSet(*p, "Wow Depth", 1.f);
+            fxSet(*p, "Dry/Wet", 1.f);
+
+            const int frames = (int)(6.0 * kSR);
+            std::vector<f32> inL((size_t)frames), inR((size_t)frames), oL, oR;
+            for (int i = 0; i < frames; ++i)
+                inL[(size_t)i] = inR[(size_t)i] =
+                    0.7f * (f32)std::sin(6.283185307179586 * 1000.0 * (f64)i / kSR);
+            fxRender(*p, inL, inR, kBlock, oL, oR);
+
+            std::vector<f64> zc;
+            fxZeroCross(oL, (size_t)(1.0 * kSR), (size_t)(5.5 * kSR), zc);
+            // Average over 10 periods: 10 ms, which is 1% of a 1 Hz wow cycle,
+            // so the smoothing costs a fraction of a cent and buys immunity to
+            // interpolation noise.
+            f64 hi = -1e9, lo = 1e9;
+            for (size_t i = 10; i < zc.size(); ++i) {
+                const f64 per  = (zc[i] - zc[i - 10]) / 10.0;
+                const f64 cents = 1200.0 * std::log2((kSR / 1000.0) / per);
+                hi = std::fmax(hi, cents);
+                lo = std::fmin(lo, cents);
+            }
+            const f64 dev = 0.5 * (hi - lo);
+            std::printf("  note  wow at full depth, 1 Hz: %+.2f / %+.2f cents (+-%.2f)\n",
+                        hi, lo, dev);
+            CHECK(zc.size() > 1000, "the 1 kHz tone gave %zu zero crossings to time", zc.size());
+            CHECK(dev >= 5.0 && dev <= 32.0,
+                  "full Wow Depth is +-%.2f cents at 1 Hz, which is in the range a machine "
+                  "wobbles by", dev);
+            // The knob is defined in cents and the excursion is SOLVED for it,
+            // so the upward deviation is not "about right", it is the number.
+            CHECK(std::fabs(hi - 30.0) < 1.0,
+                  "and the UPWARD deviation is %+.2f cents against the 30.00 the knob "
+                  "promises — the excursion is solved from the cents, not tuned to it", hi);
+            // The two halves are not equal and cannot be: a delay modulation of
+            // +-d gives a pitch ratio of 1+k one way and 1-k the other, and
+            // 1200*log2(1-k) is further from zero than 1200*log2(1+k). 0.5
+            // cents of asymmetry at 30 cents of depth is exactly that, and NOT
+            // a read pointer that ran out of line.
+            CHECK(std::fabs(hi + lo) < 3.0,
+                  "the two halves differ by %.2f cents, which is the arithmetic of pitch "
+                  "ratios (%+.2f up, %+.2f down) and not a transport out of headroom",
+                  std::fabs(hi + lo), hi, lo);
+        }
+    }
+    {
+        // Wow at zero is a machine that does not wobble at all.
+        auto p = fxMake(reg, *d);
+        if (p) {
+            fxSet(*p, "Drive", 0.f); fxSet(*p, "Bias", 0.f);
+            fxSet(*p, "Head Bump", 0.f); fxSet(*p, "HF Rolloff", 0.f);
+            fxSet(*p, "Crosstalk", 0.f); fxSet(*p, "Flutter", 0.f);
+            fxSet(*p, "Wow Depth", 0.f); fxSet(*p, "Dry/Wet", 1.f);
+            const int frames = (int)(3.0 * kSR);
+            std::vector<f32> inL((size_t)frames), inR((size_t)frames), oL, oR;
+            for (int i = 0; i < frames; ++i)
+                inL[(size_t)i] = inR[(size_t)i] =
+                    0.7f * (f32)std::sin(6.283185307179586 * 1000.0 * (f64)i / kSR);
+            fxRender(*p, inL, inR, kBlock, oL, oR);
+            std::vector<f64> zc;
+            fxZeroCross(oL, (size_t)(1.0 * kSR), (size_t)(2.8 * kSR), zc);
+            f64 worst = 0.0;
+            for (size_t i = 10; i < zc.size(); ++i) {
+                const f64 per = (zc[i] - zc[i - 10]) / 10.0;
+                worst = std::fmax(worst, std::fabs(1200.0 * std::log2((kSR / 1000.0) / per)));
+            }
+            CHECK(worst < 0.5, "Wow Depth 0 leaves %.3f cents of deviation", worst);
+        }
+    }
+
+    // --- 2. the THD curve ---------------------------------------------------
+    {
+        const f32 drives[6] = { 0.f, 3.f, 6.f, 12.f, 18.f, 24.f };
+        f64 h2b[6], h3b[6], h2n[6], h3n[6];
+        for (int bias = 0; bias < 2; ++bias) {
+            for (int k = 0; k < 6; ++k) {
+                auto p = fxMake(reg, *d);
+                if (!p) continue;
+                fxSet(*p, "Drive", drives[k]);
+                fxSet(*p, "Bias", bias ? 0.5f : 0.f);
+                fxSet(*p, "Speed", 2.f);
+                fxSet(*p, "Wow Depth", 0.f);
+                fxSet(*p, "Flutter", 0.f);
+                fxSet(*p, "Head Bump", 0.f);
+                fxSet(*p, "HF Rolloff", 0.f);
+                fxSet(*p, "Crosstalk", 0.f);
+                fxSet(*p, "Dry/Wet", 1.f);
+
+                const int frames = 1 << 16;
+                std::vector<f32> inL((size_t)frames), inR((size_t)frames), oL, oR;
+                for (int i = 0; i < frames; ++i)
+                    inL[(size_t)i] = inR[(size_t)i] =
+                        0.5f * (f32)std::sin(6.283185307179586 * 1000.0 * (f64)i / kSR);
+                fxRender(*p, inL, inR, kBlock, oL, oR);
+                const size_t at = (size_t)(0.2 * kSR), win = 32768;
+                const f64 f1 = fxBinDb(oL, at, win, 1000.0);
+                const f64 f2 = fxBinDb(oL, at, win, 2000.0);
+                const f64 f3 = fxBinDb(oL, at, win, 3000.0);
+                if (bias) { h2b[k] = f2 - f1; h3b[k] = f3 - f1; }
+                else      { h2n[k] = f2 - f1; h3n[k] = f3 - f1; }
+            }
+        }
+        std::printf("  note  THD vs Drive at -6 dBFS in, 1 kHz (dB relative to H1)\n");
+        std::printf("  note    Drive     H2(bias 0)  H3(bias 0)  H2(bias .5) H3(bias .5)\n");
+        for (int k = 0; k < 6; ++k)
+            std::printf("  note    %5.1f dB   %8.1f    %8.1f    %8.1f    %8.1f\n",
+                        (double)drives[k], h2n[k], h3n[k], h2b[k], h3b[k]);
+
+        bool mono3 = true, mono3b = true, mono2 = true;
+        for (int k = 1; k < 6; ++k) {
+            if (h3n[k] <= h3n[k - 1]) mono3 = false;
+            if (h3b[k] <= h3b[k - 1]) mono3b = false;
+        }
+        // H2 rises to the knee and then falls back, because a hard-driven
+        // tanh(g*x + b) stops caring about b. See the device header; the gate
+        // is the rise up to +12 dB, and PRESENCE above it.
+        for (int k = 1; k < 4; ++k) if (h2b[k] <= h2b[k - 1]) mono2 = false;
+        CHECK(mono3, "H3 rises monotonically with Drive at Bias 0 (%.1f dB -> %.1f dB over 0..24)",
+              h3n[0], h3n[5]);
+        CHECK(mono3b, "and at Bias 0.5 too (%.1f -> %.1f dB) — the THD curve is monotone in Drive",
+              h3b[0], h3b[5]);
+        CHECK(mono2, "H2 rises with Drive up to the knee (%.1f dB at 0 -> %.1f dB at 12)",
+              h2b[0], h2b[3]);
+        {
+            bool present = true;
+            for (int k = 0; k < 6; ++k) if (h2b[k] <= -40.0) present = false;
+            CHECK(present, "and stays present past it (%.1f dB at 24 dB of drive, where the "
+                           "shaper has converged on an odd limiter)", h2b[5]);
+        }
+
+        bool h2gone = true;
+        for (int k = 0; k < 6; ++k) if (h2n[k] > -100.0) h2gone = false;
+        CHECK(h2gone,
+              "at Bias 0 the shaper is exactly odd and H2 is ABSENT at every drive "
+              "(worst %.1f dB)", *std::max_element(h2n, h2n + 6));
+        CHECK(h2b[3] > -60.0 && h2b[3] > h2n[3] + 40.0,
+              "at Bias 0.5 the even harmonic is there: H2 is %.1f dB at 12 dB of drive, "
+              "%.1f dB above where an odd shaper leaves it", h2b[3], h2b[3] - h2n[3]);
+    }
+
+    // --- 3. the speed switch moves the head bump ----------------------------
+    {
+        f64 peakAt[3] = { 0, 0, 0 }, peakDb[3] = { -300, -300, -300 };
+        for (int s = 0; s < 3; ++s) {
+            auto p = fxMake(reg, *d);
+            if (!p) continue;
+            fxSet(*p, "Drive", 0.f);
+            fxSet(*p, "Bias", 0.f);
+            fxSet(*p, "Speed", (f32)s);
+            fxSet(*p, "Wow Depth", 0.f);
+            fxSet(*p, "Flutter", 0.f);
+            fxSet(*p, "Head Bump", 9.f);
+            fxSet(*p, "HF Rolloff", 0.f);
+            fxSet(*p, "Crosstalk", 0.f);
+            fxSet(*p, "Dry/Wet", 1.f);
+            for (int k = 0; k < 40; ++k) {
+                const f64 f = 25.0 * std::pow(400.0 / 25.0, (f64)k / 39.0);
+                const f64 g = fxProbeDb(*p, f, 0.2f, 30, 120);
+                if (g > peakDb[s]) { peakDb[s] = g; peakAt[s] = f; }
+            }
+        }
+        std::printf("  note  head bump centre: 7.5 ips %.0f Hz (%+.1f dB), "
+                    "15 ips %.0f Hz (%+.1f dB), 30 ips %.0f Hz (%+.1f dB)\n",
+                    peakAt[0], peakDb[0], peakAt[1], peakDb[1], peakAt[2], peakDb[2]);
+        CHECK(peakAt[0] < peakAt[1] && peakAt[1] < peakAt[2],
+              "the Speed switch moves the head bump up with the transport "
+              "(%.0f -> %.0f -> %.0f Hz)", peakAt[0], peakAt[1], peakAt[2]);
+        CHECK(peakAt[2] / peakAt[0] > 1.5,
+              "and it moves it far enough to hear (%.2fx from 7.5 to 30 ips)",
+              peakAt[2] / peakAt[0]);
+        CHECK(peakDb[1] > 6.0, "with 9 dB asked for, %.1f dB arrives at the centre", peakDb[1]);
+    }
+
+    // --- 3b. and the HF rolloff tracks it too -------------------------------
+    {
+        f64 hf[3];
+        for (int s = 0; s < 3; ++s) {
+            auto p = fxMake(reg, *d);
+            if (!p) continue;
+            fxSet(*p, "Drive", 0.f); fxSet(*p, "Bias", 0.f);
+            fxSet(*p, "Speed", (f32)s);
+            fxSet(*p, "Wow Depth", 0.f); fxSet(*p, "Flutter", 0.f);
+            fxSet(*p, "Head Bump", 0.f); fxSet(*p, "HF Rolloff", 1.f);
+            fxSet(*p, "Crosstalk", 0.f); fxSet(*p, "Dry/Wet", 1.f);
+            hf[s] = fxProbeDb(*p, 12000.0, 0.2f, 240, 120);
+        }
+        std::printf("  note  response at 12 kHz: 7.5 ips %+.2f dB, 15 ips %+.2f dB, "
+                    "30 ips %+.2f dB\n", hf[0], hf[1], hf[2]);
+        CHECK(hf[0] < hf[1] && hf[1] < hf[2],
+              "the HF loss tracks the speed as well: a slower machine is darker");
+    }
+
+    // --- 4. hiss at the default is exactly zero -----------------------------
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            // Everything else busy; only the input is silent.
+            fxSet(*p, "Drive", 18.f);
+            fxSet(*p, "Bias", 0.8f);
+            fxSet(*p, "Wow Depth", 1.f);
+            fxSet(*p, "Flutter", 1.f);
+            fxSet(*p, "Head Bump", 9.f);
+            fxSet(*p, "Crosstalk", 1.f);
+            fxSet(*p, "Dry/Wet", 1.f);
+            Buf in, out;
+            f32 worst = 0.f;
+            for (int b = 0; b < 200; ++b) {
+                out.clear();
+                p->process(in.p, out.p, 2, kBlock);
+                worst = std::fmax(worst, out.peak());
+            }
+            CHECK(worst == 0.f,
+                  "Hiss at its default puts EXACTLY zero into a silent channel (%.9f) — "
+                  "not -90 dBFS, not a denormal: the term is not added", (double)worst);
+        }
+    }
+    {
+        auto p = fxMake(reg, *d);
+        if (p) {
+            fxSet(*p, "Hiss", -50.f);
+            Buf in, out;
+            f32 worst = 0.f;
+            for (int b = 0; b < 40; ++b) {
+                out.clear();
+                p->process(in.p, out.p, 2, kBlock);
+                worst = std::fmax(worst, out.peak());
+            }
+            const f64 db = worst > 0.f ? 20.0 * std::log10((f64)worst) : -300.0;
+            CHECK(worst > 0.f && db > -70.0 && db < -30.0,
+                  "and asking for hiss produces it, at about the level asked for "
+                  "(%.1f dBFS peak for a -50 dB setting)", db);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block-size invariance for the three
+//
+// The bar is BIT-IDENTICAL, not close. Every LFO phase, every grain phase and
+// every noise counter in these three devices advances exactly once per SAMPLE
+// and never once per block, and both new devices with biquads take their
+// coefficient-snap decision per sample for the same reason. This is the test
+// that says whether that is true rather than intended.
+//
+// 1024 is in the list on purpose: it is four times the prepared block size, so
+// this also says the devices PROCESS an oversized block rather than degrading
+// to passthrough the way Pulse and the Rack must.
+// ---------------------------------------------------------------------------
+
+static void testFxBlockInvariance(PluginRegistry& reg) {
+    banner("Shimmer / Bloom / Tape: the output does not depend on the block size");
+
+    const int kFrames = 24000;
+    std::vector<f32> inL((size_t)kFrames), inR((size_t)kFrames);
+    Noise ns;
+    for (int i = 0; i < kFrames; ++i) {
+        inL[(size_t)i] = 0.3f * ns.next();
+        inR[(size_t)i] = 0.3f * ns.next();
+    }
+
+    for (const char* uri : kFxUris) {
+        const PluginDesc* d = fxFind(reg, uri);
+        if (!d) continue;
+        const std::string u = uri;
+
+        // Settings that make every modulator, detector and counter move.
+        auto build = [&]() -> std::unique_ptr<PluginInstance> {
+            auto p = fxMake(reg, *d);
+            if (!p) return p;
+            if (u == "nxtakt:shimmer") {
+                fxSet(*p, "Decay", 8.f);
+                fxSet(*p, "Size", 0.7f);
+                fxSet(*p, "Shift", 3.f);
+                fxSet(*p, "Shift Amount", 0.6f);
+                fxSet(*p, "Mod Rate", 3.f);
+                fxSet(*p, "Mod Depth", 1.f);
+                fxSet(*p, "Pre-Delay", 37.f);
+                fxSet(*p, "Dry/Wet", 0.8f);
+            } else if (u == "nxtakt:bloom") {
+                fxSet(*p, "Depth", 1.f);
+                fxSet(*p, "Up Ratio", 8.f);
+                fxSet(*p, "Down Ratio", 6.f);
+                fxSet(*p, "Attack", 0.5f);
+                fxSet(*p, "Release", 40.f);
+                fxSet(*p, "Low Gain", 3.f);
+                fxSet(*p, "High Gain", -2.f);
+                fxSet(*p, "Input", 6.f);
+                fxSet(*p, "Dry/Wet", 0.7f);
+            } else {
+                fxSet(*p, "Drive", 12.f);
+                fxSet(*p, "Bias", 0.6f);
+                fxSet(*p, "Speed", 0.f);
+                fxSet(*p, "Wow Rate", 3.3f);
+                fxSet(*p, "Wow Depth", 0.8f);
+                fxSet(*p, "Flutter", 0.9f);
+                fxSet(*p, "Head Bump", 6.f);
+                fxSet(*p, "Hiss", -55.f);
+                fxSet(*p, "Crosstalk", 0.6f);
+                fxSet(*p, "Dry/Wet", 0.75f);
+            }
+            return p;
+        };
+
+        std::vector<f32> refL, refR, altL, altR;
+        auto ref = build();
+        if (!ref) continue;
+        fxRender(*ref, inL, inR, kBlock, refL, refR);
+
+        f32 worst = 0.f;
+        for (int chunk : { 1, 7, 64, 300, 1024 }) {
+            auto alt = build();
+            if (!alt) break;
+            fxRender(*alt, inL, inR, chunk, altL, altR);
+            f32 diff = 0.f;
+            for (int i = 0; i < kFrames; ++i) {
+                diff = std::fmax(diff, std::fabs(refL[(size_t)i] - altL[(size_t)i]));
+                diff = std::fmax(diff, std::fabs(refR[(size_t)i] - altR[(size_t)i]));
+            }
+            CHECK(diff == 0.f,
+                  "%s: blocks of %d are bit-identical to blocks of %d (max diff %.9f)",
+                  uri, chunk, kBlock, (double)diff);
+            worst = std::fmax(worst, diff);
+        }
+        CHECK(worst == 0.f, "%s: an oversized block is processed, not degraded", uri);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factory presets
+//
+// The same three properties Spectra's preset section checks: Init is exactly
+// the constructor, every preset stays inside every declared range, and loading
+// one from any other state lands on the same place as loading it into a fresh
+// instance.
+// ---------------------------------------------------------------------------
+
+static void testFxPresets(PluginRegistry& reg) {
+    banner("Shimmer / Bloom / Tape: factory presets");
+
+    for (const char* uri : kFxUris) {
+        const PluginDesc* d = fxFind(reg, uri);
+        if (!d) continue;
+        auto p = fxMake(reg, *d);
+        if (!p) continue;
+
+        CHECK(p->presetCount() >= 4 && p->presetCount() <= 12,
+              "%s: ships %d factory presets", uri, p->presetCount());
+        CHECK(p->presetName(-1) == nullptr && p->presetName(p->presetCount()) == nullptr,
+              "%s: presetName() is null out of range", uri);
+
+        bool named = true;
+        for (int i = 0; i < p->presetCount(); ++i) {
+            const char* n = p->presetName(i);
+            if (!n || !*n) named = false;
+        }
+        CHECK(named, "%s: every preset has a name", uri);
+        if (p->presetCount() > 0)
+            CHECK(std::strcmp(p->presetName(0), "Init") == 0,
+                  "%s: preset 0 is Init", uri);
+
+        // Init restores the constructor exactly, from any state.
+        {
+            auto a = fxMake(reg, *d);
+            if (a) {
+                for (int i = 0; i < a->paramCount(); ++i)
+                    a->setParam(i, a->paramInfo(i).max);
+                a->loadPreset(0);
+                bool def = true;
+                for (int i = 0; i < a->paramCount(); ++i)
+                    if (a->getParam(i) != a->paramInfo(i).def) def = false;
+                CHECK(def, "%s: Init restores every parameter to its constructor default exactly",
+                      uri);
+            }
+        }
+
+        // Every preset, every parameter, inside its declared range; and a
+        // preset loaded over a busy state equals the same preset loaded fresh.
+        bool inRange = true, stable = true;
+        for (int k = 0; k < p->presetCount(); ++k) {
+            auto a = fxMake(reg, *d);
+            auto b = fxMake(reg, *d);
+            if (!a || !b) continue;
+            for (int i = 0; i < b->paramCount(); ++i) b->setParam(i, b->paramInfo(i).min);
+            a->loadPreset(k);
+            b->loadPreset(k);
+            for (int i = 0; i < a->paramCount(); ++i) {
+                const ParamInfo& pi = a->paramInfo(i);
+                const f32 v = a->getParam(i);
+                if (!(v >= pi.min && v <= pi.max)) inRange = false;
+                if (a->getParam(i) != b->getParam(i)) stable = false;
+            }
+        }
+        CHECK(inRange, "%s: every preset value is inside its parameter's declared range", uri);
+        CHECK(stable, "%s: a preset lands on the same state from anywhere", uri);
+
+        // ...and every preset actually runs.
+        bool fine = true;
+        for (int k = 0; k < p->presetCount(); ++k) {
+            auto a = fxMake(reg, *d);
+            if (!a) continue;
+            a->loadPreset(k);
+            Buf in, out;
+            Noise ns;
+            for (int b = 0; b < 24; ++b) {
+                for (int i = 0; i < kBlock; ++i) {
+                    in.l[(size_t)i] = 0.4f * ns.next();
+                    in.r[(size_t)i] = 0.4f * ns.next();
+                }
+                out.clear();
+                a->process(in.p, out.p, 2, kBlock);
+                if (!out.finite() || out.peak() > 8.f) fine = false;
+            }
+        }
+        CHECK(fine, "%s: every preset processes noise finitely and in range", uri);
+    }
+}
+
+
 int main() {
     std::printf("internal device tests\n");
 
@@ -5960,7 +7324,7 @@ int main() {
         if (reg.plugins()[i].format == PluginFormat::Internal) ++internals;
         else if (firstNonInternal < 0) firstNonInternal = (int)i;
     }
-    CHECK(internals == 13, "scan lists every internal device (%d)", internals);
+    CHECK(internals == 16, "scan lists every internal device (%d)", internals);
     CHECK(firstNonInternal < 0 || firstNonInternal == internals,
           "internal devices sort to the front of the list");
 
@@ -6001,6 +7365,14 @@ int main() {
     testLv2Latency(reg);
     testRackLayoutUnderRender(reg);
     testRackLatency(reg);
+    testFxContract(reg);
+    testShimmerClimb(reg);
+    testShimmerStability(reg);
+    testBloomCrossover(reg);
+    testBloomDynamics(reg);
+    testTape(reg);
+    testFxBlockInvariance(reg);
+    testFxPresets(reg);
     testHostedInstrument(reg, PluginFormat::LV2, "LV2 instrument (real plugin, atom MIDI path)");
     testHostedInstrument(reg, PluginFormat::CLAP, "CLAP instrument (real plugin, note events)");
 

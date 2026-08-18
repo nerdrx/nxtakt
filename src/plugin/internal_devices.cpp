@@ -49,6 +49,13 @@
 #define LAT_SAMPLER_IN_INTERNAL_DEVICES 1
 #include "sampler.cpp"
 
+#define LAT_FX_SHIMMER_IN_INTERNAL_DEVICES 1
+#include "fx_shimmer.cpp"
+#define LAT_FX_BLOOM_IN_INTERNAL_DEVICES 1
+#include "fx_bloom.cpp"
+#define LAT_FX_TAPE_IN_INTERNAL_DEVICES 1
+#include "fx_tape.cpp"
+
 namespace lat {
 namespace detail {
 namespace {
@@ -2561,6 +2568,9 @@ void scanInternal(std::vector<PluginDesc>& out) {
     out.push_back(chorusDesc());
     out.push_back(limiterDesc());
     out.push_back(utilityDesc());
+    out.push_back(shimmerDesc());
+    out.push_back(bloomDesc());
+    out.push_back(tapeDesc());
     out.push_back(rackDesc());
     // Counted rather than spelled out: a device added without touching this
     // line would otherwise make the log quietly wrong.
@@ -2598,6 +2608,12 @@ std::unique_ptr<PluginInstance> instantiateInternal(const PluginDesc& d,
         inst = std::make_unique<Limiter>(limiterDesc());
     else if (d.uri == kUtilityUri)
         inst = std::make_unique<Utility>(utilityDesc());
+    else if (d.uri == kShimmerUri)
+        inst = std::make_unique<Shimmer>(shimmerDesc());
+    else if (d.uri == kBloomUri)
+        inst = std::make_unique<Bloom>(bloomDesc());
+    else if (d.uri == kTapeUri)
+        inst = std::make_unique<Tape>(tapeDesc());
     else if (d.uri == kRackUri)
         // The one device that is handed the registry: it has to be able to
         // instantiate the devices it contains, and PluginRegistry::instantiate

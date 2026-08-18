@@ -182,7 +182,8 @@ CORE_SRC  := src/core/common.cpp src/core/project.cpp src/audio/sample.cpp src/a
 # seen the revert. They ride in $^ as sources too, which is harmless BY
 # CONSTRUCTION: standalone, their include guards compile them to empty
 # translation units.
-INTERNAL_INSTR := src/plugin/spectra.cpp src/plugin/sampler.cpp
+INTERNAL_INSTR := src/plugin/spectra.cpp src/plugin/sampler.cpp \
+                  src/plugin/fx_shimmer.cpp src/plugin/fx_bloom.cpp src/plugin/fx_tape.cpp
 TOOL_LIBS := $(shell pkg-config --libs sndfile samplerate lilv-0) -ldl -lpthread -lm
 TOOL_CF   := -std=c++20 -O2 -w $(shell pkg-config --cflags sndfile samplerate lilv-0) -Ivendor/clap/include
 
@@ -235,7 +236,12 @@ DAEMON_CF  := -std=c++20 -O2 $(WARN) -Ivendor/clap/include \
               $(shell pkg-config --cflags jack alsa lilv-0)
 DAEMON_LD  := $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -lm
 
-build/nxtaktd: $(DAEMON_SRC) $(IPC_H) src/audio/engine.h src/audio/backend.h src/plugin/host.h
+# src/audio/sample.h joined the list with generic device state (v10): the daemon
+# builds a SampleBuffer from bytes the GUI decoded, so it now depends on that
+# struct's LAYOUT while still linking none of sample.cpp. A header it compiles
+# against and does not list is the $(IPC_H) lesson with a different filename.
+build/nxtaktd: $(DAEMON_SRC) $(IPC_H) src/audio/engine.h src/audio/backend.h \
+               src/plugin/host.h src/audio/sample.h
 	@mkdir -p build
 	$(CXX) $(DAEMON_CF) $(DAEMON_SRC) -o $@ $(DAEMON_LD)
 
@@ -250,11 +256,18 @@ build/daemon_test: tests/daemon_test.cpp $(IPC_H) src/audio/engine.h build/nxtak
 # header said "built by hand" -- which meant several hundred assertions that CI
 # had never once run, and a suite nobody runs is a suite that rots. It needs the
 # plugin backends linked because host.cpp reaches into both of them.
+#
+# The header list is the $(IPC_H) lesson again: this recipe had none, so a change
+# to the PluginInstance/SamplerControl contract in host.h left the binary stale
+# and every local run tested yesterday's devices against today's interface. The
+# recipe filters %.cpp out of $^ for the same reason handle_test's does — a .h
+# handed to g++ is compiled as a precompiled header, not ignored.
 build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
                             src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR)
+                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) \
+                            src/plugin/host.h src/audio/sample.h
 	@mkdir -p build
-	$(CXX) $(TOOL_CF) $^ -o $@ $(shell pkg-config --libs lilv-0) -ldl
+	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(shell pkg-config --libs lilv-0) -ldl
 
 # The view's bar grid against the engine's own bar arithmetic. Worth its own
 # binary rather than folding into engine_test: the property under test is that
@@ -297,7 +310,7 @@ build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engi
                    src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
                    src/plugin/internal_devices.cpp $(INTERNAL_INSTR) \
                    $(IPC_H) src/ui/engine_handle.h src/ui/engine_state.h \
-                   src/audio/engine.h src/plugin/host.h \
+                   src/audio/engine.h src/plugin/host.h src/audio/sample.h \
                    build/nxtaktd
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 $(WARN) -I. -Ivendor/clap/include \
