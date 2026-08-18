@@ -1542,7 +1542,6 @@ private:
     }
 
     void ackSignatures(u32 generation, u32 reason, bool wasClear, bool refused) {
-        if (refused) map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
         ipc::WireEvent e{};
         e.type  = ipc::EvSignaturesAck;
         e.ref   = generation;
@@ -1550,6 +1549,8 @@ private:
         e.flags = (refused  ? ipc::SigAckRefused  : 0u) |
                   (wasClear ? ipc::SigAckWasClear : 0u);
         map_.evts->push(e);
+        // Counter after the event it promises (see reject()).
+        if (refused) map_.hdr->commandsRejected.fetch_add(1, std::memory_order_release);
     }
 
     // Ev::SigsRetired names the exact array and is pushed from inside
@@ -2473,7 +2474,6 @@ private:
     }
 
     void reject(const ipc::WireCommand& w, u32 reason) {
-        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
         // Rate-limited by default: a GUI that has not been ported yet will send
         // SetClip on every project load, and a log line per clip would bury
         // everything else. --verbose logs them all.
@@ -2490,6 +2490,12 @@ private:
         e.ref  = w.ref;
         map_.evts->push(e);              // a full event ring means the client is
                                          // not draining; nothing useful to do
+        // The counter AFTER the event, with release: commandsRejected is
+        // documented as "refused, with an EvCommandRejected", so a client that
+        // syncs on the counter must find the event already in the ring. The
+        // v0.7.0 release gate lost exactly that race (daemon_test.cpp 17c) on
+        // a runner where every other machine had always won it.
+        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_release);
     }
 
     void pumpMidi() {
@@ -2848,8 +2854,6 @@ private:
     }
 
     void failDevice(const ipc::WireCommand& w, u32 reason) {
-        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_relaxed);
-        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
         ipc::WireEvent e{};
         e.type = ipc::EvDeviceFailed;
         e.a    = (i32)w.flags;
@@ -2857,6 +2861,9 @@ private:
         e.x    = (f64)w.type;
         e.ref  = w.ref;
         map_.evts->push(e);
+        // Counters after the event they promise (see reject()).
+        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_release);
+        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_release);
     }
 
     // -- RemoveDevice / MoveDevice / SetBypass ------------------------------
@@ -3048,8 +3055,6 @@ private:
     // could not attribute would either be retried sixty times a second forever
     // or silently attributed to the wrong rack.
     void failRack(const ipc::WireCommand& w, u32 id, u32 reason) {
-        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_relaxed);
-        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
         ipc::WireEvent e{};
         e.type = ipc::EvDeviceFailed;
         e.a    = (i32)id;
@@ -3057,6 +3062,9 @@ private:
         e.x    = (f64)w.type;
         e.ref  = w.ref;
         map_.evts->push(e);
+        // Counters after the event they promise (see reject()).
+        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_release);
+        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_release);
         LOGW("device %u: rack state refused (%s)", id, ipc::rejectReasonName(reason));
     }
 
@@ -3326,8 +3334,6 @@ private:
     // a failure it could not attribute would either be re-sent sixty times a
     // second forever or blamed on the wrong device.
     void failDeviceState(const ipc::WireCommand& w, u32 id, u32 reason) {
-        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_relaxed);
-        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_relaxed);
         ipc::WireEvent e{};
         e.type = ipc::EvDeviceFailed;
         e.a    = (i32)id;
@@ -3335,6 +3341,9 @@ private:
         e.x    = (f64)w.type;
         e.ref  = w.ref;
         map_.evts->push(e);
+        // Counters after the event they promise (see reject()).
+        map_.hdr->devicesFailed.fetch_add(1, std::memory_order_release);
+        map_.hdr->commandsRejected.fetch_add(1, std::memory_order_release);
         LOGW("device %u: state refused (%s)", id, ipc::rejectReasonName(reason));
     }
 
