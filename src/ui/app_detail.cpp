@@ -150,11 +150,15 @@ void App::drawDetailPanel(const Rect& r) {
             // disagree with the grid it is describing.
             if (it) snprintf(buf, sizeof buf, "%s  -  bar %.2f",
                              it->src.name.c_str(), ses_.barOfBeat(it->start) + 1.0);
-            else    snprintf(buf, sizeof buf, "no item selected");
+            else    snprintf(buf, sizeof buf, "No item selected");
         } else if (detailTab_ == DetailTab::Clip) {
             const ClipModel& m = ses_.tracks[selTrack_].slots[selSlot_];
             // ASCII only: the glyph atlas has no dashes or middots.
-            snprintf(buf, sizeof buf, "%s  -  scene %d", m.valid() ? m.name.c_str() : "no clip",
+            // Sentence case (§9), and the same words the empty panel below uses:
+            // the label used to say "no clip" while the panel said "No clip
+            // selected", which is two spellings of one state on one screen.
+            snprintf(buf, sizeof buf, "%s  -  scene %d",
+                     m.valid() ? m.name.c_str() : "No clip selected",
                      selSlot_ + 1);
         } else {
             ChainOwner co = chainOwner(devOwner_);
@@ -217,9 +221,14 @@ void App::drawArrangeClipDetail(const Rect& r) {
     Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
     f32 y = ctrl.y;
     const f32 rowH = 20 * s, lblW = 62 * s;
-    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking.
+    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking -- and
+    // they sit on the VALUE's baseline, not on their own centre. See
+    // baselineRow(): the label and the widget beside it are two different fonts
+    // in one row, and centring each of them independently left the small one a
+    // pixel high all the way down the column.
     auto label = [&](const char* tx, const Rect& row) {
-        ui_.microIn(fSmall_, {row.x, row.y, lblW, row.h}, tx, nx::muted, Align::Left, 0);
+        ui_.microIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
+                    tx, nx::muted, Align::Left, 0);
     };
     // Every one of these is a placement field, so every one of them goes through
     // the same commit: repair the lane, republish that track, one undo entry per
@@ -477,9 +486,12 @@ void App::drawClipDetail(const Rect& r) {
     Rect ctrl2{ctrl.right() + 10 * s, ctrl.y, panelW, ctrl.h};
     f32 y2 = ctrl2.y;
 
-    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking.
+    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking, sitting
+    // on the value column's baseline rather than on their own centre
+    // (baselineRow, and the same reason as the arrangement panel's).
     auto label = [&](const char* t, const Rect& row) {
-        ui_.microIn(fSmall_, {row.x, row.y, lblW, row.h}, t, nx::muted, Align::Left, 0);
+        ui_.microIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
+                    t, nx::muted, Align::Left, 0);
     };
 
     {   // Warp mode (audio only) + loop, which both kinds have
@@ -639,11 +651,11 @@ void App::drawClipDetail(const Rect& r) {
         }
         if (ui_.hovered(nr))
             ui_.tip = ses_.scale.active()
-                          ? (ses_.scale.snap ? "edits are pulled onto the nearest note of "
+                          ? (ses_.scale.snap ? "Edits are pulled onto the nearest note of "
                                                + ses_.scale.label()
-                                             : "click to pull every edit onto the nearest note of "
+                                             : "Click to pull every edit onto the nearest note of "
                                                + ses_.scale.label())
-                          : std::string("pick a scale first - there is nothing to snap to in "
+                          : std::string("Pick a scale first - there is nothing to snap to in "
                                         "Chromatic");
         y2 += rowH + 4 * s;
     }
@@ -688,8 +700,8 @@ void App::drawClipDetail(const Rect& r) {
                 }
             }
             if (ui_.hovered(qb))
-                ui_.tip = roll_->hasSelection(m) ? "quantize the selected notes"
-                                                 : "quantize every note in the clip";
+                ui_.tip = roll_->hasSelection(m) ? "Quantize the selected notes"
+                                                 : "Quantize every note in the clip";
             y2 += rowH + 4 * s;
         }
         {
@@ -712,7 +724,7 @@ void App::drawClipDetail(const Rect& r) {
                 }
             }
             if (ui_.hovered(lg))
-                ui_.tip = "stretch each note to where the next one begins";
+                ui_.tip = "Stretch each note to where the next one begins";
             if (ui_.button(uiId(25, 4), dp, "DUP")) {
                 const ClipModel was = m;
                 if (roll_->duplicateSelected(m)) {
@@ -721,7 +733,7 @@ void App::drawClipDetail(const Rect& r) {
                 }
             }
             if (ui_.hovered(dp))
-                ui_.tip = "copy the notes one selection-width later (Ctrl+U doubles "
+                ui_.tip = "Copy the notes one selection-width later (Ctrl+U doubles "
                           "the whole loop instead)";
             // Transpose by a semitone each way. An octave is Shift+Up/Down on the
             // keyboard already, so the buttons cover what the keyboard does not.
@@ -743,20 +755,26 @@ void App::drawClipDetail(const Rect& r) {
             ui_.microIn(fSmall_, ui_.lastRect, "+", nx::muted, Align::Center);
             if (ui_.hovered(dn) || ui_.hovered(up))
                 ui_.tip = ses_.scale.snap && ses_.scale.active()
-                              ? "transpose by one step of " + ses_.scale.label()
-                              : std::string("transpose by a semitone");
+                              ? "Transpose by one step of " + ses_.scale.label()
+                              : std::string("Transpose by a semitone");
             y2 += rowH + 4 * s;
         }
     }
     {   // Read-out of what the engine will actually do
         Rect row{ctrl.x, y, ctrl.w, rowH};
         char buf[96];
+        // ASCII ONLY. The glyph atlas is 32..126 (gfx/font.h), so the U+00B7
+        // this line used to separate its fields with rendered as the invalid
+        // glyph -- an invisible hole two bytes wide, which is why the read-out
+        // came out as "8.00 beats    rate 0.984x    1 ch" with two ragged gaps
+        // and no separator at all. The same "  -  " the context label above
+        // uses, which is the spelling the rest of the panel already had.
         if (midi) {
-            snprintf(buf, sizeof buf, "%.2f beats  ·  %zu note%s", m.lengthBeats,
+            snprintf(buf, sizeof buf, "%.2f beats  -  %zu note%s", m.lengthBeats,
                      m.notes.size(), m.notes.size() == 1 ? "" : "s");
         } else {
             const f64 rate = (m.warp == Warp::Off) ? 1.0 : m.clipBpm / ses_.tempo;
-            snprintf(buf, sizeof buf, "%.2f beats  ·  rate %.3fx  ·  %d ch",
+            snprintf(buf, sizeof buf, "%.2f beats  -  rate %.3fx  -  %d ch",
                      m.lengthBeats, rate, m.sample->channels);
         }
         rend_.textIn(fSmall_, row, buf, nx::muted.alpha(0.8f), Align::Left, 0);

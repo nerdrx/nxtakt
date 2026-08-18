@@ -118,6 +118,58 @@ void pushSlotLabel(const Rect& box, const char* s, const Col& ink,
     g_slotText.push_back(l);
 }
 
+// ---------------------------------------------------------------------------
+// The chain a bus shows where a track shows its clips.
+//
+// ONE function, because the return strips and the master strip drew the same
+// list twice with a 3px inset and a 4px inset, and put "no fx" at body.y + 6
+// against a first device row at body.y + 4. Across the five columns of a busy
+// session that reads as a wobble -- the labels of the empty buses sit a couple
+// of pixels below the device names beside them, which is precisely the kind of
+// thing §11 says is invisible in a diff and obvious in a screenshot.
+//
+// Geometry is now stated once: rows are 12px tall on a 14px pitch, inset 4px,
+// starting 4px down -- and the empty label occupies exactly the rect the first
+// row would have, so it lands on that row's baseline by construction rather
+// than by two numbers agreeing.
+//
+// Returns the name that wants a tooltip (a device whose name the column had to
+// cut), or an empty string.
+// ---------------------------------------------------------------------------
+
+constexpr f32 kChainRowH   = 12.f;
+constexpr f32 kChainRowPitch = 14.f;
+constexpr f32 kChainInset  = 4.f;
+
+std::string drawChainList(Renderer& r, Ui& ui, const Font& fSmall, const Rect& body,
+                          const std::vector<DeviceModel>& devices, f32 s, f32 rad) {
+    const Rect first{body.x + kChainInset * s, body.y + kChainInset * s,
+                     body.w - kChainInset * 2.f * s, kChainRowH * s};
+    if (devices.empty()) {
+        // A micro-label chip, in the first row's own rect: inert, and §5's
+        // "muted = inert" is the whole of what it has room to say.
+        ui.microIn(fSmall, first, "no fx", nx::muted.alpha(0.7f), Align::Center, 0);
+        return {};
+    }
+    std::string tip;
+    f32 dy = first.y;
+    for (const DeviceModel& d : devices) {
+        if (dy + kChainRowH * s > body.bottom()) break;
+        const Rect row{first.x, dy, first.w, kChainRowH * s};
+        r.well(row, rad);
+        r.pushClip(row);
+        r.textIn(fSmall, row, d.desc.name.c_str(),
+                 d.inst ? nx::muted : nx::danger, Align::Left, 3 * s);
+        r.popClip();
+        // "EQ Three" in a 54px return strip becomes "EQ Thr..." -- a name the
+        // user cannot read and, until now, had no way to.
+        if (ui.hovered(row) && textTruncated(fSmall, d.desc.name.c_str(), row.w - 6 * s))
+            tip = d.desc.name;
+        dy += kChainRowPitch * s;
+    }
+    return tip;
+}
+
 } // namespace
 
 // One decoded file, as a clip. Factored out of loadClipInto because the
@@ -369,6 +421,13 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
         if (ui_.textField(nameId, cell, &t.name,
                           Col(0, 0, 0, 0), sel ? nx::text : nx::muted, Align::Left))
             undoPointWith("rename track", t.name, wasName);
+        // A 94px header cuts most real track names, and a cut name with no way
+        // to read it is the §11 defect this fixes: the status bar has the room
+        // the header does not. Suppressed while the field is being edited --
+        // the caret is already showing the whole string.
+        if (hot && ui_.editId != nameId &&
+            textTruncated(fBody_, t.name.c_str(), cell.w - 8 * s))
+            ui_.tip = t.name;
         if (hot && in.pressed[0]) selectTrack((int)i);
     }
 
@@ -663,15 +722,45 @@ void App::drawSceneColumn(const Rect& r) {
 
         Rect btn{cell.x, cell.y, 14 * s, cell.h};
         ui_.playTriangle(btn.insetXY(4.5f * s, 4.5f * s), sel ? nx::text : nx::muted);
+        // A scene may carry a TEMPO, and a scene that does changes the transport
+        // the moment it is launched. Nothing on this column used to say so: the
+        // number was in the set, in the file and in the engine, and invisible.
+        // It is a data read-out, so it gets the live ink cyan carries elsewhere
+        // for "this is what will happen", right-aligned in its own socket with
+        // the name field ending where the socket begins.
+        //
+        // Locale-independent by construction (§7): "%g" on a value the model has
+        // already clamped to 20..999, never a formatter that reads LC_NUMERIC.
+        char bpm[16] = "";
+        f32 bpmW = 0.f;
+        if (ses_.scenes[si].tempo > 0.0) {
+            snprintf(bpm, sizeof bpm, "%g", ses_.scenes[si].tempo);
+            bpmW = fSmall_.measure(bpm) + 6 * s;
+        }
+        const Rect nameR{cell.x + 14 * s, cell.y, cell.w - 16 * s - bpmW, cell.h};
         const u64 nameId = uiId(5, 1000 + si);
         std::string wasName;                     // see drawTrackHeaders
         if (ui_.editId == nameId) wasName = ses_.scenes[si].name;
-        if (ui_.textField(nameId, {cell.x + 14 * s, cell.y, cell.w - 16 * s, cell.h},
-                          &ses_.scenes[si].name, Col(0, 0, 0, 0),
+        if (ui_.textField(nameId, nameR, &ses_.scenes[si].name, Col(0, 0, 0, 0),
                           sel ? nx::text : nx::muted, Align::Left))
             undoPointWith("rename scene", ses_.scenes[si].name, wasName);
+        if (bpm[0])
+            rend_.textIn(fSmall_, {nameR.right(), cell.y, bpmW, cell.h}, bpm,
+                         nx::live.alpha(sel ? 0.95f : 0.75f), Align::Right, 2 * s);
 
         if (hot) ui_.cursor = Cursor::Hand;
+        // A scene name wide enough to be cut is a name the column cannot show,
+        // so the status bar says it in full (§11: no truncated name without a
+        // tip). The tempo is named too -- a bare number beside a scene is only
+        // obvious once you already know what it does.
+        if (hot && ui_.editId != nameId) {
+            const bool cut = textTruncated(fBody_, ses_.scenes[si].name.c_str(),
+                                           nameR.w - 4 * s);
+            if (cut || bpm[0]) {
+                ui_.tip = ses_.scenes[si].name;
+                if (bpm[0]) ui_.tip += std::string(" - launches at ") + bpm + " BPM";
+            }
+        }
         if (hot && in.pressed[0]) { selSlot_ = si; send(Cmd::LaunchScene, si); }
     }
 
@@ -680,9 +769,13 @@ void App::drawSceneColumn(const Rect& r) {
         if (ui_.button(uiId(5, 900), stopAll, "STOP ALL")) send(Cmd::StopAll);
     }
 
+    // "+ SCENE", not "+ Scene": it sits directly under STOP ALL, and two chrome
+    // actions in one cluster spelled two different ways is exactly the
+    // inconsistent capitalisation §9 rules out. Uppercase is the spelling every
+    // other action chip in the program uses (LOOP, APPLY, MAP, STOP ALL).
     Rect add{r.x + 2 * s, stopAll.bottom() + 4 * s, r.w - 4 * s, 18 * s};
     if (add.bottom() <= r.bottom() - lay::mixerH * s) {
-        if (ui_.button(uiId(5, 901), add, "+ Scene")) { undoPoint("add scene"); addScene(); }
+        if (ui_.button(uiId(5, 901), add, "+ SCENE")) { undoPoint("add scene"); addScene(); }
     }
 }
 
@@ -884,22 +977,7 @@ void App::drawReturnStrips(const Rect& r) {
         // column the user has no reason to click on.
         Rect body{col.x, head.bottom(), col.w, top - head.bottom()};
         rend_.pushClip(body);
-        if (rt.devices.empty()) {
-            ui_.microIn(fSmall_, {body.x, body.y + 6 * s, body.w, 12 * s}, "no fx",
-                        nx::muted.alpha(0.55f), Align::Center, 0);
-        } else {
-            f32 dy = body.y + 4 * s;
-            for (const DeviceModel& d : rt.devices) {
-                if (dy + 12 * s > body.bottom()) break;
-                Rect row{body.x + 3 * s, dy, body.w - 6 * s, 12 * s};
-                rend_.well(row, rad);
-                rend_.pushClip(row);
-                rend_.textIn(fSmall_, row, d.desc.name.c_str(),
-                             d.inst ? nx::muted : nx::danger, Align::Left, 3 * s);
-                rend_.popClip();
-                dy += 14 * s;
-            }
-        }
+        const std::string devTip = drawChainList(rend_, ui_, fSmall_, body, rt.devices, s, rad);
         rend_.popClip();
 
         Rect mix{col.x, top, col.w, r.bottom() - top};
@@ -926,7 +1004,19 @@ void App::drawReturnStrips(const Rect& r) {
                                         nx::violet);
         if (hot) {
             ui_.cursor = Cursor::Hand;
+            // The strip is 54px wide: both the bus name and its device names are
+            // routinely cut. The tip says whichever the pointer is actually on,
+            // the device winning because it is the narrower target.
+            if (!devTip.empty()) {
+                ui_.tip = devTip;
+            } else if (rt.name != kReturnPlaceholder &&
+                       textTruncated(fBody_, rt.name.c_str(), head.w - 15 * s) &&
+                       ui_.editId != nameId) {
+                ui_.tip = rt.name;
+            }
             if (in.pressed[0]) selectChainOwner(owner);
+        } else if (!devTip.empty()) {
+            ui_.tip = devTip;
         }
     }
 }
@@ -958,23 +1048,11 @@ void App::drawMasterStrip(const Rect& r) {
 
     // The master chain, where a return lists its own: this is where a bus
     // compressor or a saturator across the whole mix lives.
+    std::string devTip;
     {
         Rect body{r.x, head.bottom(), r.w, top - head.bottom()};
         rend_.pushClip(body);
-        f32 dy = body.y + 4 * s;
-        for (const DeviceModel& d : ses_.masterDevices) {
-            if (dy + 12 * s > body.bottom()) break;
-            Rect row{body.x + 4 * s, dy, body.w - 8 * s, 12 * s};
-            rend_.well(row, rad);
-            rend_.pushClip(row);
-            rend_.textIn(fSmall_, row, d.desc.name.c_str(),
-                         d.inst ? nx::muted : nx::danger, Align::Left, 3 * s);
-            rend_.popClip();
-            dy += 14 * s;
-        }
-        if (ses_.masterDevices.empty())
-            ui_.microIn(fSmall_, {body.x, body.y + 6 * s, body.w, 12 * s}, "no fx",
-                        nx::muted.alpha(0.55f), Align::Center, 0);
+        devTip = drawChainList(rend_, ui_, fSmall_, body, ses_.masterDevices, s, rad);
         rend_.popClip();
     }
 
@@ -997,6 +1075,7 @@ void App::drawMasterStrip(const Rect& r) {
     ui_.meterV(meterR, rr, peakHoldM_[1]);
 
     if (sel) rend_.roundRectOutline(snapRect(r), rad, std::max(1.f, nx::snapPx(s)), nx::violet);
+    if (!devTip.empty()) ui_.tip = devTip;
     if (hot) {
         ui_.cursor = Cursor::Hand;
         if (in.pressed[0]) selectChainOwner(kOwnMaster);

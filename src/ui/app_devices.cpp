@@ -735,11 +735,23 @@ void App::drawDeviceStrip(const Rect& r) {
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s},
                tc);                                       // owner identity chip
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
-    rend_.textIn(fBold_, {head.x + 10 * s, head.y, 220 * s, head.h},
-                 ownerName(devOwner_).c_str(), nx::text, Align::Left, 0);
-    rend_.textIn(fSmall_, head,
-                 rackOpenUid_ ? "A rack is open - a double-click adds the plugin inside it"
-                              : "Double-click a plugin to add it to this chain",
+    // The hint claims its space first and the NAME takes what is left, bounded
+    // by 220 as before. Both used to be drawn against the whole head rect --
+    // one left, one right -- which is fine for "Kick" and overprints the moment
+    // the chain belongs to "Strings Section Ensemble Legato Sustain" on a strip
+    // the file browser has narrowed. A name that has to be cut says itself in
+    // full in the status bar (§11: no truncated name without a tip).
+    const char* const hint = rackOpenUid_
+        ? "A rack is open - a double-click adds the plugin inside it"
+        : "Double-click a plugin to add it to this chain";
+    const f32 hintW = fSmall_.measure(hint) + 16 * s;
+    const std::string owner = ownerName(devOwner_);
+    const Rect nameR{head.x + 10 * s, head.y,
+                     std::max(40 * s, std::min(220 * s, head.w - hintW - 18 * s)), head.h};
+    rend_.textIn(fBold_, nameR, owner.c_str(), nx::text, Align::Left, 0);
+    if (ui_.hovered(nameR) && textTruncated(fBold_, owner.c_str(), nameR.w))
+        ui_.tip = owner;
+    rend_.textIn(fSmall_, head, hint,
                  rackOpenUid_ ? nx::violetSoft : nx::muted.alpha(0.7f), Align::Right, 8 * s);
 
     Rect area{r.x, head.bottom(), r.w, r.bottom() - head.bottom()};
@@ -867,9 +879,13 @@ void App::drawDeviceStrip(const Rect& r) {
         // second virtual for one device would be the larger change. When
         // another instrument grows one, this is the line that becomes a lookup.
         const bool isSpec = isSpectra(d.inst.get());
+        // 38, not 34: "CHAIN" at §5's 0.12em tracking is five glyphs and four
+        // gaps, and 34 left it with nothing on either side. The box is 150 wide
+        // and the name beside it is a micro-label that already fits itself, so
+        // the four pixels come out of slack rather than out of the name.
         Rect kr{br.x, title.y, 0, title.h};
-        if (isRack)      kr = Rect{br.x - 34 * s, title.y + 2 * s, 34 * s, 12 * s};
-        else if (isSpec) kr = Rect{br.x - 30 * s, title.y + 2 * s, 30 * s, 12 * s};
+        if (isRack)      kr = Rect{br.x - 38 * s, title.y + 2 * s, 38 * s, 12 * s};
+        else if (isSpec) kr = Rect{br.x - 32 * s, title.y + 2 * s, 32 * s, 12 * s};
         const bool hasPanel = isRack || isSpec;
 
         // The card's controls are ONE cluster, not two or three little capsules
@@ -879,8 +895,15 @@ void App::drawDeviceStrip(const Rect& r) {
         const Rect ctrls{hasPanel ? kr.x : br.x, br.y,
                          xr.right() - (hasPanel ? kr.x : br.x), br.h};
         ui_.segCluster(ctrls);
-        rend_.hairlineV(br.x, ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
-        if (hasPanel) rend_.hairlineV(kr.right(), ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
+        // ONE seam per boundary, and a seam at EVERY boundary. kr.right() and
+        // br.x are the same coordinate by construction, so the old pair drew the
+        // chain/edit seam twice -- a hairline at double alpha, brighter than
+        // every other seam in the strip -- while the bypass/remove boundary at
+        // xr.x had none at all. Three segments, two seams; a cluster whose
+        // dividers do not match is the "misaligned by a pixel that reads as
+        // sloppiness" case, at the one place two of them sit side by side.
+        if (hasPanel) rend_.hairlineV(br.x, ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
+        rend_.hairlineV(xr.x, ctrls.y + 2 * s, ctrls.bottom() - 2 * s);
 
         if (isRack) {
             const bool open = (int)i == openIdx;
@@ -888,8 +911,14 @@ void App::drawDeviceStrip(const Rect& r) {
             // and remove are universal, "there is a chain in here" is not, and
             // the word is the only thing that says so without being clicked.
             const bool tog = ui_.segButton(uiId(11, (int)i, 3), kr, open, nx::violet);
-            ui_.microIn(fSmall_, ui_.lastRect, "chain",
-                        open ? nx::text : nx::muted, Align::Center);
+            // microFIT, like the Spectra chip beside it. Plain microIn draws
+            // glyph by glyph with §5's tracking and no idea how wide its box is,
+            // so "CHAIN" ran flush into both borders of its 34px cell -- the
+            // letters touching the seam, with nothing between them and the
+            // enable dot. Fit-with-a-pad is what the "edit" chip already did,
+            // and two chips a pixel apart should not be drawn two ways.
+            microFit(ui_, fSmall_, ui_.lastRect, "chain",
+                     open ? nx::text : nx::muted, Align::Center, 2 * s);
             if (tog) {
                 if (open) { rackOpenUid_ = 0; rackPath_.clear(); }
                 else {
@@ -925,7 +954,7 @@ void App::drawDeviceStrip(const Rect& r) {
                 return;                   // the strip's layout just changed width
             }
             microFit(ui_, fSmall_, ui_.lastRect, "edit",
-                     open ? nx::text : nx::muted, Align::Center);
+                     open ? nx::text : nx::muted, Align::Center, 2 * s);
             if (ui_.hovered(kr))
                 ui_.tip = open ? "Close the Spectra panel"
                                : "Open Spectra's editor: the wavetable, the oscillators, "
@@ -1112,7 +1141,7 @@ void App::drawDeviceStrip(const Rect& r) {
                 if (overCell) {
                     ui_.tip = learning ? "MIDI learn: move a control on your surface "
                                          "(right-click again to cancel)"
-                            : bound    ? "MIDI-mapped — right-click to clear the mapping"
+                            : bound    ? "MIDI-mapped - right-click to clear the mapping"
                                        : "Right-click to MIDI-learn this parameter";
                     if (in.pressed[2]) cycleMidiLearn(pa);
                 }
@@ -1300,7 +1329,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         if (hot && in.pressed[0]) rackSel_ = i;
         if (hot && in.dblClick && nested) { rackPath_.push_back(i); rackSel_ = -1; return; }
         if (hot) ui_.tip = nested ? "Double-click to open this rack"
-                                  : "Select; ^ v reorder, x removes";
+                                  : "Select it; the arrows reorder, the cross removes";
     }
 
     // The add row. It uses the plugin browser's selection, and the browser's
@@ -1314,7 +1343,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         char label[80];
         if (full)       snprintf(label, sizeof label, "Rack is full");
         else if (have)  snprintf(label, sizeof label, "+ %s", all[pluginSel_].name.c_str());
-        else            snprintf(label, sizeof label, "+ pick a plugin on the left");
+        else            snprintf(label, sizeof label, "+ Pick a plugin on the left");
         if (ui_.button(uiId(13, 5, 0), addR, label, false, nx::violet) && have && !full) {
             undoPoint("add device to rack");
             if (rc.addDevice(all[pluginSel_])) {
@@ -1471,12 +1500,16 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     int shown = 0;
     for (int i = 0; i < rc.mappingCount(); ++i) if (rc.mapping(i).macro == rackMacro_) ++shown;
 
-    Rect clr{list.right() - 44 * s, list.y, 44 * s, 11 * s};
+    // "CLEAR", not "clear": it sits directly under MAP, does the opposite of
+    // it, and the two were spelled two different ways -- the one place in the
+    // panel where an inconsistent capitalisation is a pixel from its own
+    // counter-example. Widened by 4 so the longer word keeps its padding.
+    Rect clr{list.right() - 48 * s, list.y, 48 * s, 11 * s};
     char cap[48];
     snprintf(cap, sizeof cap, "MACRO %d DRIVES %d", rackMacro_ + 1, shown);
-    microFit(ui_, fSmall_, {list.x, list.y, list.w - 48 * s, 11 * s}, cap,
+    microFit(ui_, fSmall_, {list.x, list.y, list.w - 52 * s, 11 * s}, cap,
              nx::muted, Align::Left, 0);
-    if (shown > 0 && ui_.button(uiId(13, 11, 0), clr, "clear")) {
+    if (shown > 0 && ui_.button(uiId(13, 11, 0), clr, "CLEAR")) {
         undoPoint("clear macro");
         rc.clearMacro(rackMacro_);
         status_ = "Macro cleared";

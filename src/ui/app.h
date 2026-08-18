@@ -1246,4 +1246,38 @@ private:
     // === end arrangement recording block ===================================
 };
 
+// ---------------------------------------------------------------------------
+// Two typographic helpers the panels share. Free functions rather than members
+// because they are about a Font and a Rect and nothing else, and because three
+// files want them.
+// ---------------------------------------------------------------------------
+
+// A micro-label's row, adjusted so its BASELINE lands on the baseline of body
+// text centred in the same row.
+//
+// Renderer::textIn and Ui::microIn both centre the font's LINE BOX in the rect
+// they are given, which is the right default for a label alone in a box and the
+// wrong one for a label beside a value: two fonts of different sizes centred in
+// the same row sit on two different baselines, and the eye reads the 1px step
+// as a wobble down a column of fields. §7's rhythm is about the baseline grid,
+// so this puts the small font back on it.
+//
+// The shift is the difference between the two baselines measured from row.y --
+// pure geometry, no constants, so it stays correct at any DPI scale and for any
+// system font the machine happens to have.
+inline Rect baselineRow(const Rect& row, const Font& small, const Font& body) {
+    const f32 bBody  = (row.h - body.height()) * 0.5f + body.ascent();
+    const f32 bSmall = (row.h - small.height()) * 0.5f + small.ascent();
+    return {row.x, row.y + (bBody - bSmall), row.w, row.h};
+}
+
+// Does `s` need an ellipsis to fit `avail` in this font? The panels use it to
+// decide whether a truncated name deserves a tooltip: §11's "truncated names
+// with no tip" is only a defect when the name is ACTUALLY cut, and a tip that
+// repeats a fully visible label is noise.
+inline bool textTruncated(const Font& f, const char* s, f32 avail) {
+    if (!s || !*s || avail <= 0.f) return false;
+    return f.measure(s) > avail;
+}
+
 } // namespace lat

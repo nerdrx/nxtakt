@@ -712,9 +712,9 @@ void App::drawControlBar(const Rect& r) {
 
         if (hot) {
             char tip[320];
-            char oscPart[96] = " · OSC off";
+            char oscPart[96] = "  -  OSC off";
             if (osc_.running())
-                snprintf(oscPart, sizeof oscPart, " · OSC %s:%d%s", osc_.addr().c_str(),
+                snprintf(oscPart, sizeof oscPart, "  -  OSC %s:%d%s", osc_.addr().c_str(),
                          osc_.port(), osc_.wide() ? " (OPEN TO THE NETWORK)" : "");
             // The one failure mode a user could never guess at: the mapping
             // table is fine, the controller is connected, and nothing moves
@@ -725,10 +725,10 @@ void App::drawControlBar(const Rect& r) {
                          midiMap_.learnAddress().c_str());
             else if (untapped)
                 snprintf(tip, sizeof tip,
-                         "%zu MIDI bindings%s — but MIDI input is not tapped, so nothing is routed",
+                         "%zu MIDI bindings%s  -  but MIDI input is not tapped, so nothing is routed",
                          nb, oscPart);
             else
-                snprintf(tip, sizeof tip, "%zu MIDI bindings · %llu applied, %llu inert%s",
+                snprintf(tip, sizeof tip, "%zu MIDI bindings  -  %llu applied, %llu inert%s",
                          nb, (unsigned long long)ctlApplied_, (unsigned long long)ctlInert_,
                          oscPart);
             ui_.tip = tip;
@@ -758,9 +758,16 @@ void App::drawBrowser(const Rect& r) {
     rend_.hairlineV(r.right() - 1 * s, r.y, r.bottom(), nx::hairlineInk, 1 * s);
 
     const f32 rowH = 19 * s;
+    // The header was a painted shelf -- a flat panelAlt rectangle with a hard
+    // edge along the bottom -- while SCENES, MASTER, CHAIN, MACRO and every
+    // other column head in the program is a micro-label over a hairline that
+    // fades at both ends. §11 rules out the solid rule; the inconsistency was
+    // the more visible half of it, since the browser sits beside the scene
+    // column that does it the other way.
     Rect head{r.x, r.y, r.w, 22 * s};
-    rend_.rect(head, pal::panelAlt);
-    rend_.textIn(fBold_, head, "BROWSER", pal::textDim, Align::Left, 8 * s);
+    ui_.microIn(fSmall_, {head.x + 8 * s, head.y, head.w - 16 * s, head.h}, "BROWSER",
+                nx::muted, Align::Left, 0);
+    rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
     // Places
     f32 y = head.bottom();
@@ -782,9 +789,37 @@ void App::drawBrowser(const Rect& r) {
     rend_.hairlineH(r.x + 6 * s, r.right() - 6 * s, y + 3 * s, nx::hairlineInk, 1 * s);
     y += nx::sp1 * s;
 
-    // Current directory label
+    // Current directory label, cut from the FRONT rather than the back.
+    //
+    // textIn ellipsises on the right, which on a path keeps the half nobody
+    // needs: "/tmp/claude-1000/-run-media-nerdrx-L..." says nothing about which
+    // folder is open, and the folder is the entire question the line answers.
+    // A leading "..." and the tail says it in the same 200px.
     Rect dirRow{r.x, y, r.w, rowH};
-    rend_.textIn(fSmall_, dirRow, browserDir_.c_str(), pal::textFaint, Align::Left, 8 * s);
+    {
+        const f32 avail = dirRow.w - 16 * s;
+        std::string shown = browserDir_;
+        if (fSmall_.measure(shown.c_str()) > avail) {
+            const f32 lead = fSmall_.measure("...");
+            size_t cut = 0;
+            while (cut < shown.size() &&
+                   fSmall_.measure(shown.c_str() + cut) + lead > avail) ++cut;
+            // Land on a separator where there is one nearby, so the tail starts
+            // at a folder name and not in the middle of one.
+            const size_t slash = shown.find('/', cut);
+            if (slash != std::string::npos && slash - cut < 12) cut = slash;
+            shown = "..." + shown.substr(cut);
+        }
+        // pal::textFaint samples at 3.2:1 over pal::panel -- the same measured
+        // failure the status bar's idle ink already carries a note about, and
+        // the same repair: half a step towards textDim puts it at 4.8:1 and it
+        // still reads as subordinate to the entries under it. §11 asks for
+        // comfortable contrast over every fill, and "where am I" is not a line
+        // to make people squint at.
+        static const Col kPathInk = pal::textFaint.mix(pal::textDim, 0.5f);
+        rend_.textIn(fSmall_, dirRow, shown.c_str(), kPathInk, Align::Left, 8 * s);
+        if (ui_.hovered(dirRow) && shown != browserDir_) ui_.tip = browserDir_;
+    }
     y += rowH;
 
     // File list
@@ -794,6 +829,30 @@ void App::drawBrowser(const Rect& r) {
         browserScroll_ -= in.wheel * rowH * 3.f;
         const f32 maxScroll = std::max(0.f, browserItems_.size() * rowH - list.h);
         browserScroll_ = clampv(browserScroll_, 0.f, maxScroll);
+    }
+
+    // §5's empty state, which this panel simply did not have: a folder with no
+    // audio in it drew ".." and then nothing at all, and a folder that could not
+    // be opened drew nothing whatsoever -- a blank column with no word about
+    // why. One short bold line, one muted sentence that invites the next action
+    // rather than apologising for the last one (§9), and the two cases said
+    // apart because the answers are different: change folder, or check the path.
+    //
+    // The ".." row is not content, so a listing that is only ".." is empty.
+    const bool onlyUp = browserItems_.size() == 1 && browserItems_[0].name == "..";
+    if (browserItems_.empty() || onlyUp) {
+        const f32 lh = fBody_.height();
+        const f32 top = list.y + (onlyUp ? rowH : 0.f) + nx::sp4 * s;
+        rend_.textIn(fBold_, {list.x + nx::sp2 * s, top, list.w - nx::sp3 * s, lh},
+                     browserItems_.empty() ? "Folder unavailable" : "No audio here",
+                     nx::text, Align::Center);
+        // One line, and it has to FIT: the column is 200 logical pixels and the
+        // first draft of this ("Open a folder above, or drop samples into this
+        // one.") came out as "Open a folder above, or drop samp..." -- an empty
+        // state whose invitation is itself truncated is worse than none.
+        rend_.textIn(fSmall_, {list.x + nx::sp2 * s, top + lh + nx::sp1 * s,
+                               list.w - nx::sp3 * s, lh},
+                     "Pick another place above.", nx::muted, Align::Center);
     }
 
     f32 iy = list.y - browserScroll_;
@@ -1686,20 +1745,25 @@ void App::drawStatusBar(const Rect& r) {
     // draw. "Quiet" is not the same thing as "hard to read".
     static const Col kIdleInk = pal::textFaint.mix(pal::textDim, 0.5f);
     const bool tip = !ui_.tip.empty();
-    rend_.textIn(fSmall_, r, tip ? ui_.tip.c_str() : status_.c_str(),
-                 tip ? pal::textDim : kIdleInk, Align::Left, nx::sp1 * s);
 
     // The MIDI tag carries the sequencer client id: nothing is auto-connected,
     // so the number is what the user needs to hand aconnect or qpwgraph.
+    //
+    // ASCII ONLY, here and in every tag below. The glyph atlas is 32..126
+    // (gfx/font.h), so the U+00B7 these separators used to be rendered as the
+    // invalid glyph -- three invisible bytes -- and the bar read
+    // "X11/GLX  JACK 48000 Hz / 512 fr  PDC 480  MIDI 128:0" with four ragged
+    // holes where the separators should have been. Two spaces and a hyphen is
+    // the same separator the detail panel and the device strip already use.
     char midiTag[32] = "";
-    if (eng_.midiRunning()) snprintf(midiTag, sizeof midiTag, " · MIDI %d:0", eng_.midiClientId());
+    if (eng_.midiRunning()) snprintf(midiTag, sizeof midiTag, "  -  MIDI %d:0", eng_.midiClientId());
 
     // Delay compensation, when the engine is applying any. It is latency the
     // user did not ask for and cannot see anywhere else, and it moves when a
     // plugin is added to a chain, so it belongs beside the buffer size.
     char pdcTag[24] = "";
     const int pdc = es_.latencyFrames;
-    if (pdc > 0) snprintf(pdcTag, sizeof pdcTag, " · PDC %d", pdc);
+    if (pdc > 0) snprintf(pdcTag, sizeof pdcTag, "  -  PDC %d", pdc);
 
     // Devices the daemon has been asked for and has not confirmed. Zero in
     // local mode by construction, so the tag only ever appears when it means
@@ -1707,7 +1771,7 @@ void App::drawStatusBar(const Rect& r) {
     // yet, and this is the one honest word about it.
     char syncTag[28] = "";
     if (es_.devicesPending > 0)
-        snprintf(syncTag, sizeof syncTag, " · syncing %u", es_.devicesPending);
+        snprintf(syncTag, sizeof syncTag, "  -  syncing %u", es_.devicesPending);
 
     // Refusals the daemon has answered with. Each non-zero is a specific
     // audible lie somewhere on screen -- a timeline drawn but not playing, a
@@ -1715,7 +1779,12 @@ void App::drawStatusBar(const Rect& r) {
     // and drawn nowhere. Amber, because it is attention and not damage: the
     // model is intact, the engine's copy is behind. One tag, total count; the
     // log has the per-command reasons.
-    char refuseTag[36] = "";
+    // The separator is stripped off again when the tag is drawn on its own, so
+    // its LENGTH is spelled once here rather than as a magic 3 at the call site
+    // -- which is what the old " · " (four bytes, skipped with +3) got wrong.
+    static const char* const kSep = "  -  ";
+    const int kSepLen = (int)strlen(kSep);
+    char refuseTag[40] = "";
     // takesFailed/takesLost join the family: each is a performance that
     // happened and was not kept, which is the most expensive kind of loss
     // this program can have. takesEmpty is deliberately NOT counted -- an
@@ -1726,25 +1795,40 @@ void App::drawStatusBar(const Rect& r) {
                        + eng_.takesFailed()
                        + eng_.takesLost();
     if (refusals > 0)
-        snprintf(refuseTag, sizeof refuseTag, " · %llu refused",
+        snprintf(refuseTag, sizeof refuseTag, "%s%llu refused", kSep,
                  (unsigned long long)refusals);
 
     char buf[224];
-    snprintf(buf, sizeof buf, "%s · %s %.0f Hz / %d fr%s%s%s · %.0f fps · %d draws",
-             win_.backendName(),
+    snprintf(buf, sizeof buf, "%s%s%s %.0f Hz / %d fr%s%s%s%s%.0f fps  -  %d draws",
+             win_.backendName(), kSep,
              eng_.driverName() ? eng_.driverName() : "silent",
              eng_.driverSampleRate(),
              eng_.driverBufferSize(),
              pdcTag,
              syncTag,
              midiTag,
+             kSep,
              fps_, rend_.drawCalls());
     rend_.textIn(fSmall_, r, buf, kIdleInk, Align::Right, nx::sp1 * s);
     // The refusal tag is its own draw so it can be amber -- attention, not
     // damage -- instead of vanishing into the faint utility text beside it.
+    const f32 diagW = fSmall_.measure(buf) +
+                      (refuseTag[0] ? fSmall_.measure(refuseTag) : 0.f);
     if (refuseTag[0])
         rend_.textIn(fSmall_, {r.x, r.y, r.w - fSmall_.measure(buf) - 12 * s, r.h},
-                     refuseTag + 3, pal::meterAmber, Align::Right, nx::sp1 * s);
+                     refuseTag + kSepLen, pal::meterAmber, Align::Right, nx::sp1 * s);
+
+    // The message goes down LAST and inside the room the diagnostics left, not
+    // over the whole bar. Both halves used to be drawn against the full rect,
+    // which is fine at 1360px with "Ready" on the left and false the moment a
+    // tooltip is long or the window is narrow: the two runs simply overprinted
+    // each other in the middle. textIn ellipsises to its rect, so the message
+    // now stops with "..." where the diagnostics begin -- and it is the message
+    // that yields, because the diagnostics are a fixed-width readout and the
+    // message is prose that survives being cut.
+    const f32 msgW = std::max(0.f, r.w - diagW - nx::sp3 * s);
+    rend_.textIn(fSmall_, {r.x, r.y, msgW, r.h}, tip ? ui_.tip.c_str() : status_.c_str(),
+                 tip ? pal::textDim : kIdleInk, Align::Left, nx::sp1 * s);
 }
 
 
@@ -2172,7 +2256,7 @@ void App::debugMidiMapSelfTest() {
 
 void App::ctlSaveMap() {
     if (!ctlMapReadable_) {
-        status_ = "MIDI map not saved — " + ctlMapPath_ + " could not be read";
+        status_ = "MIDI map not saved - " + ctlMapPath_ + " could not be read";
         return;
     }
     std::string err;
@@ -2201,9 +2285,9 @@ void App::cycleMidiLearn(const std::string& address) {
     status_ = "MIDI learn: move a control to map " + address;
     // Say so HERE rather than leaving the user turning knobs at a chip that
     // never changes: both of these are states nothing else in the UI reports.
-    if (!eng_.midiRunning()) status_ += " — but no MIDI input is open";
+    if (!eng_.midiRunning()) status_ += " - but no MIDI input is open";
     else if (ctl::midiTapCount() == 0 && eng_.midiReceived() > 0)
-        status_ += " — but MIDI input is not tapped";
+        status_ += " - but MIDI input is not tapped";
 }
 
 
