@@ -859,7 +859,32 @@ void App::drawDeviceStrip(const Rect& r) {
         // a bypassed device is not doing anything, and it says so at 40%.
         const f32 dim = d.bypass ? 0.4f : 1.f;
         const f32 rad = nx::radiusSm * s;
+        // A sampler card is a DROP TARGET for a browser file -- the missing
+        // half of the instrument: v0.5.0 shipped a sampler that state strings
+        // could feed and a user could not. The drag machinery already exists
+        // for slots and the timeline; this is the same gesture landing on the
+        // device that plays the file chromatically instead of the slot that
+        // plays it as a clip.
+        SamplerControl* smp = d.inst ? d.inst->sampler() : nullptr;
+        const bool fileDragHere = smp && drag_.kind == DragState::Kind::BrowserFile &&
+                                  drag_.armed && box.contains(in.mx, in.my);
         rend_.gradRect(box, rad, nx::glass1, (sel ? 1.f : 0.8f) * (d.bypass ? 0.55f : 1.f));
+        if (fileDragHere) {
+            // The drop affordance is the lit edge arriving early, plus the
+            // add badge -- the same two words every other drop target says.
+            rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
+            ui_.badge = Badge::Add;
+            ui_.tip = "Drop to load into the sampler";
+            if (in.released[0]) {
+                undoPoint("load sample");
+                if (smp->loadFile(drag_.path)) {
+                    status_ = "Loaded " + drag_.path.substr(drag_.path.rfind('/') + 1);
+                } else {
+                    status_ = "Could not load " + drag_.path + " - the sampler is unchanged";
+                }
+                drag_ = DragState{};
+            }
+        }
         if (sel) {
             rend_.gradStroke(box, rad, s, nx::edgeLit, 0.9f);
             rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)),
@@ -986,6 +1011,29 @@ void App::drawDeviceStrip(const Rect& r) {
                  Align::Left, 0);
         if (refused && ui_.setHot(uiId(31, (int)i + 900), nameR) && ui_.isHot(uiId(31, (int)i + 900)))
             ui_.tip = "Engine refused this device: " + rd->error;
+
+        // The sampler names its file -- or says plainly that it wants one.
+        // Filed by the instrument's own author: the card drew only the
+        // registry name, so an empty sampler and a loaded one were
+        // indistinguishable at a glance. The chip sits under the title in the
+        // row the knobs start below; cyan basename = a live data readout,
+        // amber invitation = attention the way every empty state asks for it.
+        if (smp) {
+            Rect fileR{title.x + 10 * s, title.bottom(), box.w - 20 * s, 12 * s};
+            if (smp->hasSample()) {
+                const std::string& fp = smp->samplePath();
+                const std::string base = fp.empty() ? "(recorded take)"
+                                        : fp.substr(fp.rfind('/') + 1);
+                microFit(ui_, fSmall_, fileR, base.c_str(),
+                         nx::live.alpha(0.85f * dim), Align::Left, 0);
+                if (ui_.setHot(uiId(31, (int)i + 1800), fileR) &&
+                    ui_.isHot(uiId(31, (int)i + 1800)) && !fp.empty())
+                    ui_.tip = fp;
+            } else {
+                microFit(ui_, fSmall_, fileR, "drop a sample here",
+                         pal::meterAmber.alpha(0.8f * dim), Align::Left, 0);
+            }
+        }
 
         // Bypass lives on the instance, so the chain does not have to be
         // republished; setBypassed() is GUI-safe per the host contract.
