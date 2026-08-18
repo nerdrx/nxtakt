@@ -1432,10 +1432,13 @@ static void testDeviceStateBlob() {
     CHECK(validates(ref, ipc::PoolKindDeviceState, sizeof(ipc::WireDeviceState),
                     &why, &blockBytes),
           "it validates as a device state (%s)", why);
-    CHECK(!validates(ref, ipc::PoolKindString, 1, &why, nullptr),
-          "and NOT as a string: '%s'", why);
-    CHECK(!validates(ref, ipc::PoolKindRackState, 1, &why, nullptr),
-          "and NOT as a rack state: '%s'", why);
+    // Evaluate BEFORE the CHECK: `why` is an out-parameter of the call, and a
+    // CHECK argument is not sequenced against the call in its condition -- the
+    // message would quote the PREVIOUS reason (section 12 hit this first).
+    const bool notString = !validates(ref, ipc::PoolKindString, 1, &why, nullptr);
+    CHECK(notString, "and NOT as a string: %s", why);
+    const bool notRack = !validates(ref, ipc::PoolKindRackState, 1, &why, nullptr);
+    CHECK(notRack, "and NOT as a rack state: %s", why);
 
     ipc::WireDeviceState got{};
     std::memcpy(&got, p.data<u8>(ref), sizeof got);
