@@ -726,7 +726,11 @@ One line of printable ASCII with no whitespace, no quotes and no newline —
 the sampler's shape and the rack's shape, because this tree has one spelling
 of "an opaque device state" and not three. Version-tagged first record;
 `;`-separated records; each record is `<key>=<value>` with `key` matching
-`[a-z][a-z0-9]*`. A record whose key this build does not know is **skipped**
+`[A-Za-z][A-Za-z0-9]*`. (It was written `[a-z][a-z0-9]*` here first, which
+this document's own key table contradicts three lines later: `wtA`, `wtB`,
+`wtpathA` and `wtpathB` carry an oscillator letter. The REGEX was the typo, not
+the keys — the keys are already in shipped files.) A record whose key this build
+does not know is **skipped**
 (forward compatibility); a record with no `=`, or an empty record, is
 **refused** — skipping those would make `nxspc1;;;;` a valid way of saying
 nothing. A duplicate key is refused: choosing one of two is guessing.
@@ -845,6 +849,45 @@ the sampler's file is the material the user brought, while a wavetable and a
 drawn grid are sound design, and sound design is what a preset replaces.
 
 ---
+
+## The `.nxwt` cache file, cited rather than re-specified
+
+A resolved custom table is cached — and a *factory* table is shipped — as a
+`.nxwt` file. The format is defined in `src/plugin/wavetable_io.h`; it is
+repeated here so a preset author or a packager never has to open a header to
+know what they are handling:
+
+```
+char magic[4]   "NXWT"
+u32  version    kNxwtVersion (1)
+u32  frames     1..kMaxFrames
+u32  cycle      kCycle (2048)
+u64  hash       the content hash, which readNxwt RECOMPUTES and compares
+```
+
+…followed by `frames × cycle` little-endian `f32`. **Mips are not in the file
+and never will be**: they are derived and they rebuild at load, which is also
+why this is a cache and not an interchange format. The stored hash is a check,
+not the authority — a file whose bytes do not fold to its own name is refused,
+so a corrupt or hand-edited entry can never play as the table its name claims.
+
+Factory tables live beside the binary (`<exeDir>/wavetables`, with
+`$NXTAKT_WAVETABLES` and `<exeDir>/../share/nxtakt/wavetables` the other rungs
+of `wt::factoryDir()`'s ladder); `make` copies them there and `make dist` ships
+them there. A preset naming a factory table is unplayable without its file,
+which makes those tables a build output rather than an asset lying beside one.
+
+## What the matrix does NOT do
+
+It **sums**; it never scales. Every slot adds its contribution to a
+destination's base value — no slot multiplies, attenuates or otherwise modifies
+another slot's routing. So a patch idea of the form "the mod wheel deepens the
+vibrato" is not expressible: the wheel cannot scale an LFO's existing depth.
+What it CAN do is raise a floor, add a second source to the same destination,
+or drive that LFO's rate. This is written down because it is the first thing a
+preset author tries and the second thing they discover — and because a
+VCA-style scaling matrix would be a different feature with a different cost,
+not an oversight in this one.
 
 # The user-preset contract (host.h) — CONTRACT, not a Spectra feature
 
@@ -1006,10 +1049,24 @@ the one v1 wrote and v2 restated: the same input renders the same audio, in
 blocks of 1 and of 1024, in the daemon and in process.
 
 1. **The step-LFO index derives from the transport beat (synced) or from
-   accumulated phase (free), and NEVER from wall time.** A Loop LFO's phase is
-   what v2 made it: `frac(beat / beatsPerCycle)` when synced, an
-   instance-wide accumulator at Rate Hz from prepare() when free. `floor(p·16)`
-   is a projection of that phase and adds no new state and no new clock.
+   accumulated phase (free), and NEVER from wall time.**
+
+   *Corrected during the wave, and the correction matters.* The sentence here
+   first said a Loop LFO's synced phase "is what v2 made it: `frac(beat /
+   beatsPerCycle)`". That is not what v2 made it and never was: spectra.cpp
+   RATE-syncs — the accumulator advances at a beat-derived rate and is not
+   phase-locked to the transport — as its own header has said since v1.
+   Implementing the sentence literally would have moved every existing synced
+   LFO and broken the bit-identity gate, which outranks it. So:
+
+   * shapes 0..4 in Loop mode keep the shipped rate-sync behaviour, bit-identical;
+   * the NEW Custom shape derives its STEP INDEX from the transport beat when
+     synced — which is what makes a step sequencer lock to the grid, and carries
+     no bit-identity debt because the shape did not exist to be identical to —
+     falling back to accumulated phase when no transport is running, because a
+     bank authored at a fixed tempo with the transport stopped must still play.
+
+   Either way the clock is the engine's, never the wall's.
 2. **A One-shot LFO's phase resets at the note-on's stamped sample**, inside
    the per-sample event loop, not at the top of the block — the same rule and
    the same reason note-ons themselves have it. Its phase then accumulates in
