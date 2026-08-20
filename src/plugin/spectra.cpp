@@ -129,6 +129,79 @@
 // last sample's taps, then both write this sample's, so A<->B has no
 // evaluation order and block boundaries cannot move it.
 //
+// ---------------------------------------------------------------------------
+// V3 — HANDS ON THE MODULATION (ids 100..110, the spent reserved ids 60/61/99,
+// three widened enums and the state string this device never had)
+//
+// The contract's gate is v2's with one named exception: a v1 or v2 state fed a
+// stream a v1/v2 build could act on renders BIT-IDENTICAL, and the exception is
+// PITCH BEND, whose bytes older builds discarded unread and which now moves
+// pitch through Bend Range (id 99, default 2 st). Everything else v3 adds is
+// selected by a parameter whose default is the v2 behaviour or by a state block
+// whose absence is the v2 behaviour, so the same discipline v2 wrote holds here:
+// where v3 adds arithmetic the v2 EXPRESSION is kept on its own branch and the
+// new one is only taken when a v3 feature has actually left its default —
+// matrix curve 0 is SELECTED and not a multiply by 1; a smooth of 0 is a
+// no-filter branch and not a coefficient of 1; a bend of 0 semitones is not
+// added to the pitch, it is branched around.
+//
+// The four things v3 grows, and the one sentence each that is load-bearing:
+//
+//   * DRAWABLE LFOs (shape 5). A 16-step UNIPOLAR grid with a per-LFO smooth,
+//     both in the state string rather than in parameters. Unipolar because
+//     sixteen levels cannot be symmetric about an exact zero and this document's
+//     spine is that a default of zero means no effect: an all-zero grid must be
+//     silence. The step index is floor(p*16) of the SAME phase the other five
+//     shapes read, so which cycle the LFO is in and how it got there is
+//     unchanged by this shape existing.
+//   * ONE-SHOT LFOs (ids 60/61/100). Loop is v2, verbatim and instance-wide.
+//     One-shot makes the LFO PER VOICE: phase 0 at the note-on's stamped sample,
+//     clamped at 1.0, retriggered exactly when ENV1 is and never otherwise. Sync
+//     sets the SPEED in one-shot and not the alignment — a one-shot locked to
+//     the bar line would not be an envelope.
+//   * MIDI AS A SOURCE. Mod wheel (CC 1), pitch bend, and one learned CC whose
+//     number is state. All three are QUEUED and applied at their stamped sample,
+//     through the same queue as notes and channel pressure and for the identical
+//     reason: applying them when midi() is called would make the same MIDI in
+//     blocks of 1 and of 1024 produce different audio.
+//   * PER-SLOT MATRIX CURVES (ids 101..108). x, x*x and x*x*(3-2x) — multiplies,
+//     never a pow or an exp, so there is no libm version in a modulation path.
+//     Applied symmetrically about zero, so a bipolar source stays bipolar.
+//
+// THE TRANSPORT AND THE STEP INDEX — the orchestrator's ruling, recorded here
+// because the contract's obligation 1 OVERSTATES the shipped behaviour and this
+// file is where a reader will look for the truth.
+//
+// The obligation says a synced Loop LFO's phase is `frac(beat / beatsPerCycle)`.
+// spectra.cpp does not do that and never has: it RATE-syncs — the LFO
+// accumulates at a beat-derived rate — which the DETERMINISM section above has
+// documented since v1, because the transport arrives once per block and a phase
+// read straight from it quantises to the block boundary. The ruling, in four
+// lines:
+//
+//   1. shapes 0..4 in Loop keep the shipped rate-sync, bit-identical. They are
+//      not phase-locked, and nothing here may make them so.
+//   2. the NEW Custom shape (5) DOES derive its step index from the transport
+//      beat when synced — a step sequencer that does not lock to the grid is
+//      not a step sequencer, and a shape that did not exist yesterday carries
+//      no bit-identity constraint.
+//   3. with no transport running it falls back to accumulated phase, so a
+//      preset authored at 120 BPM with no transport still runs.
+//   4. One-shot is per voice and phase-0-at-note-on, untouched by all of it.
+//
+// HOW (2) STAYS BLOCK-SIZE INVARIANT, which is the reason the plain reading is
+// unbuildable. `beatAcc_` is an f64 beat counter advanced ONE SAMPLE AT A TIME
+// at the pushed tempo — absolute-timed, exactly like ctrl_ and like every LFO
+// phase in this file — and it is ANCHORED to the pushed transport beat, not
+// driven by it. It anchors when the transport starts, and again whenever a host
+// that is demonstrably advancing its beat (the pushed value changed since the
+// last block) disagrees with the counter by more than 1/64 of a beat, which is
+// a locate or a loop wrap and nothing else. A truthful host therefore locks the
+// grid to its bar line and never re-anchors again; a host that pushes a
+// constant beat — an offline render, a test harness — anchors once and free
+// runs, which is case (3). The beat sets the ORIGIN, the tempo sets the RATE,
+// and neither of them is read at a block boundary.
+//
 // REALTIME. process() and midi() allocate nothing, lock nothing, throw nothing
 // and call nothing that could. The only allocation in the device is the shared
 // table set, built on the GUI thread at the first prepare() in the process.
@@ -167,6 +240,54 @@ namespace {
 // table wave and a voice wave can own one each; its header says why it is an
 // include and not a translation unit.
 #include "spectra_tables.inc"
+
+// ---------------------------------------------------------------------------
+// THE CUSTOM-WAVETABLE SEAM (docs/SPECTRA-PARAMS.md, "Custom wavetable slots")
+//
+// spectra_tables.inc, above, owns the table pipeline and hands this file six
+// functions and one handle allocator. This file only ever CALLS them; it never
+// defines them, which is the whole of the two waves' file split.
+//
+//   spTableBase(slot, osc)   audio thread; slot 0..7 factory, 8 this
+//                            oscillator's import, nullptr = unresolved
+//   spTableFor(slot, osc)    the same with the refusal contract's fallback
+//                            already applied — factory table 0 on a null
+//   spResolveCustom / spImportWavetable / spCustomHash / spCustomPath /
+//   spClearCustom            GUI thread; identity, import and teardown
+//   spAcquireOsc / spReleaseOsc   the OSCILLATOR HANDLE, below
+//
+// `osc` IS A HANDLE, NOT 0-OR-1, and that is the one thing a reader of this
+// file has to carry across the seam: a custom table belongs to one oscillator
+// of ONE device, so two Spectras in a set that import two different files onto
+// their A oscillators must not overwrite each other. This device takes a pair
+// at construction and gives them back at destruction; oscH_[0] is A's and
+// oscH_[1] is B's, and -1 means the process ran out and this instance plays
+// factory tables only.
+//
+// THE RECORD IS THE SEAM'S. spResolveCustom() stores the hash and the path it
+// was given BEFORE it tries to find the file and keeps them whatever happens,
+// so `spCustomHash(h)` answers "what does this oscillator NAME" and not "what
+// did it manage to load". That is what lets stateString() re-emit a missing
+// file's name verbatim, which is the refusal contract's own requirement.
+//
+// ---------------------------------------------------------------------------
+// THE PATH ESCAPER IS THE SAMPLER'S, SHARED AND NOT COPIED.
+//
+// The contract says the escaping is "verbatim the sampler's" and that the
+// implementation is "expected to share the sampler's helpers rather than write
+// a second escaper". Verbatim IS the same function, so these are declarations
+// and not definitions: internal_devices.cpp includes this file and then
+// sampler.cpp into ONE translation unit, and both open the same
+// `lat::detail::{anonymous}`, so the definitions arrive a few hundred lines
+// below and the linker never sees a second one. A copy would be a second
+// definition of what a path is, and the two would drift on the day one of them
+// is fixed.
+// ---------------------------------------------------------------------------
+
+bool smNeedsEsc(unsigned char c);
+void smEsc(std::string& o, const std::string& s);
+bool smUnesc(const std::string& s, std::string& out);
+std::vector<std::string> smSplit(const std::string& s, char sep);
 
 // ---------------------------------------------------------------------------
 // Small realtime helpers
@@ -243,14 +364,52 @@ enum : int {
     kPM1Src = 68,                    // slot k: ids 68+3k / 69+3k / 70+3k
     kPMacro1 = 94, kPMacro2, kPMacro3, kPMacro4,
     kPVoiceMode = 98,
-    kSpParamCount = 100
+
+    // --- v3. Three of v2's reserved ids become functional and the block
+    // appends 100..110 (docs/SPECTRA-PARAMS.md, "v3 — hands on the
+    // modulation"). L2/L3 Mode land on 60/61 because those two reserved ids sit
+    // inside the block that owns those LFOs; L1 Mode cannot join them, because
+    // LFO1's parameters have lived outside that block since v1, so it opens the
+    // append instead. The per-slot curves could not fit in 92/93 — an id ARRAY
+    // must be contiguous and two ids cannot hold eight — so 92/93 stay reserved.
+    kPL2Mode = 60, kPL3Mode = 61,
+    kPBendRange = 99,
+    kPL1Mode = 100,
+    kPM1Curve = 101,                 // slot k: id 101 + k
+    kSpParamCount = 111
 };
 
 // The matrix enums, verbatim from the contract's source and destination lists.
+// v3 appends three MIDI sources; the destination enum does NOT widen (nothing
+// v3 adds is a modulatable target — a drawn grid is a shape, a bend range is a
+// performance calibration, and a curve is the slot's own response).
 enum : int {
     kSOff = 0, kSLfo1, kSLfo2, kSLfo3, kSEnv2, kSEnv3, kSVel, kSKey, kSAft,
-    kSMac1, kSMac2, kSMac3, kSMac4, kSRandom
+    kSMac1, kSMac2, kSMac3, kSMac4, kSRandom,
+    kSWheel, kSBend, kSCC, kSrcCount
 };
+
+// The three matrix response curves (ids 101..108). f(0) = 0 and f(1) = 1 for
+// all three, so a curve can never make an idle source contribute and never
+// changes a full-scale source's reach. Linear is a SELECTED branch and never
+// reaches here — that is what makes the bit-identity gate hold.
+enum : int { kCvLinear = 0, kCvExp, kCvS };
+
+// `u` in its source's own domain. A unipolar source has u >= 0, for which
+// sign(u)*f(|u|) IS f(u), so the contract's two rules are one expression.
+inline f32 spCurve(int c, f32 u) {
+    const f32 x = u < 0.f ? -u : u;
+    const f32 f = (c == kCvExp) ? x * x : x * x * (3.f - 2.f * x);
+    return u < 0.f ? -f : f;
+}
+
+// The LFO mode enum (ids 60/61/100).
+enum : int { kLfoLoop = 0, kLfoOneShot };
+
+// The drawn grid: 16 steps, one hex digit each, level d/15 — digit 0 is exactly
+// 0.0 and digit 15 is exactly 1.0.
+constexpr int kSpSteps = 16;
+inline f32 spStepLevel(u8 d) { return (f32)d * (1.f / 15.f); }
 enum : int {
     kDOff = 0, kDAPos, kDBPos, kDAWAmt, kDBWAmt, kDALvl, kDBLvl, kDAPitch,
     kDBPitch, kDSub, kDNoise, kDCut, kDRes, kDDrive, kDADet, kDBDet, kDPan,
@@ -276,6 +435,110 @@ constexpr f32 kSpSyncBeats[kSpSyncCount] = {
 };
 
 // ---------------------------------------------------------------------------
+// THE STATE STRING (docs/SPECTRA-PARAMS.md, "The state string")
+//
+//   nxspc1;<key>=<value>;<key>=<value>;...
+//
+// One line of printable ASCII with no whitespace, no quotes and no newline —
+// the sampler's shape and the rack's shape, because this tree has one spelling
+// of "an opaque device state" and not three.
+//
+// EMPTY IS THE DEFAULT AND IS A GATE. Spectra had no state string at all before
+// v3; stateString() returned {} and the project layer wrote no `state` key.
+// That stays true for every set that uses no v3 state, so a v2 project round
+// trips through a v3 build BYTE-identically. Nothing below is emitted unless a
+// grid is drawn, a smooth is turned up, a CC is learned or a table is imported.
+//
+// Every number in it is either hex or a plain integer, and that is deliberate:
+// smooth is stored in THOUSANDTHS rather than as `0.5` because a decimal point
+// is a locale hazard (a de_DE writer emits `0,5`) and a state string that
+// depends on the writer's locale is not a state string.
+// ---------------------------------------------------------------------------
+
+constexpr const char* kSpTag = "nxspc1";
+
+// Hex, LOWERCASE ONLY on read as well as on write — strict, so that write and
+// read are exact inverses and a round trip never normalises anything.
+inline int spHexLo(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+// Exactly 16 lowercase hex digits -> u64. False means "not a value this writer
+// could have produced", and the caller must then change nothing at all.
+inline bool spParseHex64(const std::string& s, u64& out) {
+    if (s.size() != 16) return false;
+    u64 v = 0;
+    for (char c : s) {
+        const int d = spHexLo(c);
+        if (d < 0) return false;
+        v = (v << 4) | (u64)d;
+    }
+    out = v;
+    return true;
+}
+
+inline std::string spFmtHex64(u64 v) {
+    static const char kHex[] = "0123456789abcdef";
+    std::string o(16, '0');
+    for (int i = 15; i >= 0; --i) { o[(size_t)i] = kHex[v & 15u]; v >>= 4; }
+    return o;
+}
+
+// 1..`maxDigits` decimal digits, 0..`hi`, NO LEADING ZEROS (`0` itself
+// excepted). The leading-zero rule is what makes the encoding canonical: two
+// spellings of the same number would make a round trip normalise.
+inline bool spParseUInt(const std::string& s, int maxDigits, int hi, int& out) {
+    if (s.empty() || (int)s.size() > maxDigits) return false;
+    if (s.size() > 1 && s[0] == '0') return false;
+    int v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+    }
+    if (v > hi) return false;
+    out = v;
+    return true;
+}
+
+// A record key is a letter followed by letters and digits. The contract's own
+// key list contains `wtA` and `wtpathB`, so the charset is the ASCII alphabet
+// in BOTH cases and not the `[a-z][a-z0-9]*` its prose says — see the note in
+// setStateString(). Unknown keys are skipped; a record with no `=` is refused.
+inline bool spKeyOk(const std::string& k) {
+    if (k.empty()) return false;
+    for (size_t i = 0; i < k.size(); ++i) {
+        const char c = k[i];
+        const bool alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        const bool digit = c >= '0' && c <= '9';
+        if (!alpha && !(digit && i > 0)) return false;
+    }
+    return true;
+}
+
+// The whole of Spectra's v3 state, in one struct so that "reset the state to
+// its default" is an assignment and a parse that refuses can be thrown away
+// without having touched the device.
+struct SpState {
+    u8  grid[3][kSpSteps] = {};      // 0..15 per step; all zero = no grid drawn
+    i16 smooth[3] = { 0, 0, 0 };     // thousandths, 0..1000
+    i16 cc = -1;                     // learned controller, -1 = none learned
+    u64 wt[2] = { 0, 0 };            // custom table content hash per osc
+    std::string wtPath[2];           // recovery hint only, never identity
+
+    bool gridDrawn(int n) const {
+        for (int i = 0; i < kSpSteps; ++i) if (grid[n][i]) return true;
+        return false;
+    }
+    // "Emit nothing when no v3 feature is in use" — the round-trip gate.
+    bool inUse() const {
+        for (int n = 0; n < 3; ++n) if (gridDrawn(n) || smooth[n] != 0) return true;
+        return cc >= 0 || wt[0] != 0 || wt[1] != 0;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Factory presets
 //
 // A preset is a name and a list of (parameter id, value). loadPreset() resets
@@ -295,19 +558,92 @@ struct SpPreset {
 };
 
 // The factory bank lives in spectra_presets.inc — a textual include of
-// nothing but SP_PRESET/SP/SP_END rows, so its author needs the contract
-// document and no C++. The macros exist only across the include.
+// nothing but SP_PRESET/SP/SP_END rows plus v3's three state macros, so its
+// author needs the contract document and no C++. The macros exist only across
+// the include.
+//
+// THE FILE IS INCLUDED TWICE, and that is the whole trick. A row's parameters
+// are an aggregate initialiser and its state macros may appear ANYWHERE between
+// SP_PRESET and SP_END, in any order relative to the SP rows (the contract says
+// so, and the bank's convention of "parameters first, state after" is a
+// convention and not a rule). One aggregate cannot be written out of order, so
+// pass 1 builds the parameter arrays with the state macros expanding to
+// nothing, and pass 2 builds the state with SP expanding to nothing. Two
+// cheap passes over one file beats a row format the author has to count.
 #define SP_PRESET(nm) { nm, {
 #define SP(id, v)     { (id), (f32)(v) },
 #define SP_END()      { -1, 0.f } } },
+#define SPLFO(n, g, s)
+#define SPWTA(h)
+#define SPWTB(h)
+#define SPCC(n)
 const SpPreset kSpPresets[] = {
 #include "spectra_presets.inc"
 };
 #undef SP_PRESET
 #undef SP
 #undef SP_END
+#undef SPLFO
+#undef SPWTA
+#undef SPWTB
+#undef SPCC
 
 constexpr int kSpPresetCount = (int)(sizeof kSpPresets / sizeof kSpPresets[0]);
+
+// Pass 2: the same rows read for their state. A row that carries none produces
+// a default-constructed SpState, which is what "loadPreset resets state too"
+// needs — a preset is COMPLETE however short it is written, and v3 extends that
+// rule from parameters to state.
+//
+// A malformed macro argument is a BUILD-time fact about the bank file and not a
+// run-time one, so it is asserted rather than handled: an SPLFO grid that is not
+// sixteen lowercase hex digits, or an out-of-range n, leaves that field at its
+// default and the bank's own range checker is what says so.
+inline void spPresetGrid(SpState& st, int n, const char* g, f32 smooth) {
+    if (n < 1 || n > 3 || !g) return;
+    const int j = n - 1;
+    std::string s(g);
+    if (s.size() != kSpSteps) return;
+    for (int i = 0; i < kSpSteps; ++i) {
+        const int d = spHexLo(s[(size_t)i]);
+        if (d < 0) return;
+        st.grid[j][i] = (u8)d;
+    }
+    // Quantized to thousandths when the row is written out as a state string,
+    // so quantize it HERE and never carry a float the state cannot express.
+    const f32 c = clampv(smooth, 0.f, 1.f);
+    st.smooth[j] = (i16)(int)(c * 1000.f + 0.5f);
+}
+
+inline void spPresetHash(SpState& st, int osc, const char* h) {
+    u64 v = 0;
+    if (h && spParseHex64(std::string(h), v)) st.wt[osc] = v;
+}
+
+const std::vector<SpState>& spPresetStates() {
+    static const std::vector<SpState> v = [] {
+        std::vector<SpState> o;
+        o.reserve((size_t)kSpPresetCount);
+        SpState cur;
+#define SP_PRESET(nm)   cur = SpState{};
+#define SP(id, v)
+#define SP_END()        o.push_back(cur);
+#define SPLFO(n, g, s)  spPresetGrid(cur, (n), (g), (f32)(s));
+#define SPWTA(h)        spPresetHash(cur, 0, (h));
+#define SPWTB(h)        spPresetHash(cur, 1, (h));
+#define SPCC(n)         cur.cc = (i16)(n);
+#include "spectra_presets.inc"
+#undef SP_PRESET
+#undef SP
+#undef SP_END
+#undef SPLFO
+#undef SPWTA
+#undef SPWTB
+#undef SPCC
+        return o;
+    }();
+    return v;
+}
 
 // ---------------------------------------------------------------------------
 // The device
@@ -319,7 +655,14 @@ public:
         // ORDER IS THE CONTRACT. Every addParam() below is an id, the ids are
         // indices, and a saved set stores them. docs/SPECTRA-PARAMS.md is the
         // frozen list; entries may be appended and never moved.
-        addIntParam("A Table",  "",   0, 7, 0);
+        // Widened 0..7 -> 0..8 by the v3 contract. 0..7 are the eight
+        // procedural factory tables, frozen; 8 is THIS oscillator's imported
+        // custom table, named by the state string's wtA/wtB record. Custom
+        // space begins at 8 and grows upward, so a later revision widens again
+        // and every stored value keeps its meaning. v3 registers no dead slots:
+        // a knob the user can turn to a value that refuses is worse than a knob
+        // that stops.
+        addIntParam("A Table",  "",   0, 8, 0);
         addParam   ("A Position", "", 0.f, 1.f, 0.f);
         addIntParam("A Coarse", "st", -24, 24, 0);
         addParam   ("A Fine",   "ct", -100.f, 100.f, 0.f);
@@ -328,7 +671,7 @@ public:
         addParam   ("A Detune", "ct", 0.f, 100.f, 15.f);
         addParam   ("A Spread", "",   0.f, 1.f, 0.5f);
 
-        addIntParam("B Table",  "",   0, 7, 1);
+        addIntParam("B Table",  "",   0, 8, 1);              // widened by v3
         addParam   ("B Position", "", 0.f, 1.f, 0.f);
         addIntParam("B Coarse", "st", -24, 24, 0);
         addParam   ("B Fine",   "ct", -100.f, 100.f, 0.f);
@@ -366,7 +709,11 @@ public:
         addParam   ("LFO>Position", "",  -1.f, 1.f, 0.f);
         addParam   ("LFO>Cutoff",   "",  -1.f, 1.f, 0.f);
         addParam   ("LFO>Pitch",    "ct", 0.f, 100.f, 0.f);
-        addIntParam("LFO Shape",    "",   0, 4, 0);
+        // Widened 0..4 -> 0..5 by the v3 contract: 5 is Custom, the drawable
+        // 16-step grid. The grid itself is state and not a parameter — which is
+        // what keeps three drawable LFOs from costing 51 ids, and what makes a
+        // drawn grid unautomatable. It is shape, like a table is shape.
+        addIntParam("LFO Shape",    "",   0, 5, 0);
 
         // Widened 0..500 -> 0..2000 ms by the v2 contract (still lin, still
         // constant-time, 0 = off; every stored plain-ms value keeps meaning).
@@ -392,12 +739,14 @@ public:
         addReserved();                                                // 53
         addParam   ("L2 Rate",     "Hz",  0.01f, 40.f, 2.f, true);    // 54
         addIntParam("L2 Sync",     "",    0, kSpSyncCount - 1, 0);    // 55
-        addIntParam("L2 Shape",    "",    0, 4, 0);                   // 56
+        addIntParam("L2 Shape",    "",    0, 5, 0);                   // 56 (v3)
         addParam   ("L3 Rate",     "Hz",  0.01f, 40.f, 2.f, true);    // 57
         addIntParam("L3 Sync",     "",    0, kSpSyncCount - 1, 0);    // 58
-        addIntParam("L3 Shape",    "",    0, 4, 0);                   // 59
-        addReserved();                                                // 60
-        addReserved();                                                // 61
+        addIntParam("L3 Shape",    "",    0, 5, 0);                   // 59 (v3)
+        // v3 spends this block's two reserved ids on the LFOs the block owns:
+        // 0 Loop is v2 verbatim, 1 One-shot makes the LFO an envelope.
+        addIntParam("L2 Mode",     "",    0, 1, 0);                   // 60 (v3)
+        addIntParam("L3 Mode",     "",    0, 1, 0);                   // 61 (v3)
         addParam("E3 Attack",  "ms", 0.1f, 5000.f, 2.f,   true);      // 62
         addParam("E3 Decay",   "ms", 1.f,  5000.f, 300.f, true);      // 63
         addParam("E3 Sustain", "",   0.f,  1.f,    0.f);              // 64
@@ -405,9 +754,12 @@ public:
         addReserved();                                                // 66
         addReserved();                                                // 67
         for (int k = 0; k < 8; ++k) {                                 // 68..91
-            char nm[8];
+            char nm[12];
+            // Src widened 0..13 -> 0..16 by v3: 14 Mod Wheel, 15 Pitch Bend,
+            // 16 MIDI CC (the one learned slot). The DESTINATION enum does not
+            // widen — nothing v3 adds is a modulatable target.
             std::snprintf(nm, sizeof nm, "M%d Src", k + 1);
-            addIntParam(nm, "", 0, 13, 0);
+            addIntParam(nm, "", 0, kSrcCount - 1, 0);
             std::snprintf(nm, sizeof nm, "M%d Dst", k + 1);
             addIntParam(nm, "", 0, 19, 0);
             std::snprintf(nm, sizeof nm, "M%d Amt", k + 1);
@@ -420,7 +772,33 @@ public:
         addParam("Macro 3", "", 0.f, 1.f, 0.f);                       // 96
         addParam("Macro 4", "", 0.f, 1.f, 0.f);                       // 97
         addIntParam("Voice Mode", "", 0, 2, 0);                       // 98
-        addReserved();                                                // 99
+        // --- v3, the last spent reserved id and the 100..110 append.
+        //
+        // BEND RANGE IS THE REVISION'S ONE STATED EXCEPTION to "every default
+        // does what v2 did", and it is named in the contract rather than left
+        // to be discovered: it defaults to 2 semitones and not to 0. A build
+        // that ignored the pitch wheel is a broken instrument, and this is the
+        // revision that stops ignoring it. 0 is inert and bit-identical to v2.
+        addIntParam("Bend Range", "st", 0, 24, 2);                    // 99 (v3)
+        addIntParam("L1 Mode", "", 0, 1, 0);                          // 100
+        for (int k = 0; k < 8; ++k) {                                 // 101..108
+            char nm[12];
+            std::snprintf(nm, sizeof nm, "M%d Curve", k + 1);
+            addIntParam(nm, "", 0, 2, 0);
+        }
+        addReserved();                                                // 109
+        addReserved();                                                // 110
+
+        // The pair of oscillator handles this instance owns for the life of it.
+        // See the seam's note: they are handles and not indices, so two devices
+        // that import two files onto their A oscillators do not collide.
+        oscH_[0] = spAcquireOsc();
+        oscH_[1] = spAcquireOsc();
+    }
+
+    ~Spectra() override {
+        spReleaseOsc(oscH_[0]);
+        spReleaseOsc(oscH_[1]);
     }
 
     // A reserved id IS registered (contract rule: the addParam() sequence
@@ -463,25 +841,279 @@ public:
         after_    = 0.f;
         absPos_   = 0;
         nHeld_    = 0;
+        // v3, same rules again. The three MIDI sources are 0 after prepare()
+        // by the contract — bend meaning CENTRE, not "wherever the wheel was
+        // left". A render must not depend on the performance before it.
+        wheel_    = 0.f;
+        bend_     = 0.f;
+        ccVal_    = 0.f;
+        ovfCCNum_ = -1;
+        ovfCCVal_ = 0;
+        ovfBend_  = -1;
+        // The drawn grid's lag is initialised at the PHASE ORIGIN, which for a
+        // Loop LFO is prepare(); it never carries across renders.
+        publishStateToAudio();
+        for (int j = 0; j < 3; ++j) {
+            smY_[j] = gridAt(j, 0.f);
+            smA_[j] = 1.f;
+        }
+        beatAcc_    = 0.0;
+        beatInc_    = 0.0;
+        trBeatWas_  = 0.0;
+        trBeatSeen_ = false;
+        trPlayWas_  = false;
+        resolveTables();
         return true;
     }
 
     // --- presets (host.h) --------------------------------------------------
-    int presetCount() const override { return kSpPresetCount; }
+    //
+    // The bank is factory THEN user, and factoryPresetCount() is the boundary
+    // the editor's popover draws its "User" header at. Everything behind the
+    // forwarding is generic and lives on PluginInstance (host.cpp): it writes
+    // every parameter AND this device's own stateString() into an `nxp1` file,
+    // atomically, keeping one generation of `.nxp.bak`. A device opts in by
+    // forwarding, which is the whole of what the contract asks of it.
+    int presetCount() const override { return kSpPresetCount + userPresetCount(); }
+    int factoryPresetCount() const override { return kSpPresetCount; }
 
     const char* presetName(int i) const override {
-        return (i >= 0 && i < kSpPresetCount) ? kSpPresets[i].name : nullptr;
+        if (i < 0) return nullptr;
+        if (i < kSpPresetCount) return kSpPresets[i].name;
+        return userPresetName(i - kSpPresetCount);
     }
+
+    bool savePreset(const char* name) override { return saveUserPreset(name); }
 
     // GUI thread. Writes through setParam and does nothing else, so the whole
     // program sees a preset as a handful of ordinary knob moves.
     void loadPreset(int i) override {
-        if (i < 0 || i >= kSpPresetCount) return;
+        if (i >= kSpPresetCount) { loadUserPreset(i - kSpPresetCount); return; }
+        if (i < 0) return;
         for (int k = 0; k < n_; ++k) setParam(k, info_[(size_t)k].def);
         const SpPreset& p = kSpPresets[i];
         for (int k = 0; k < 64 && p.set[k].id >= 0; ++k)
             setParam(p.set[k].id, p.set[k].v);
+        // v3: LOADPRESET RESETS STATE TOO. A preset is COMPLETE however short
+        // it is written — v1's rule — and v3 extends it from parameters to
+        // state, so switching from a patch with a drawn grid and an imported
+        // table to a preset that mentions neither lands on exactly the state a
+        // fresh instance would have. Deliberately UNLIKE the sampler, which
+        // keeps its file across a preset change: the sampler's file is the
+        // material the user brought, while a wavetable and a drawn grid are
+        // sound design, and sound design is what a preset replaces.
+        adoptState(spPresetStates()[(size_t)i]);
     }
+
+    // --- state (host.h) ----------------------------------------------------
+    //
+    // GUI thread. EMPTY WHEN NO V3 FEATURE IS IN USE, so the project layer
+    // writes no `state` key at all and a v2 set round-trips through a v3 build
+    // byte-identically. That is a gate and not a nicety: Spectra had no state
+    // string before this revision, and every set written by every older build
+    // must keep loading and saving to the same bytes.
+    std::string stateString() const override {
+        if (!v3InUse()) return {};
+        static const char kHex[] = "0123456789abcdef";
+        std::string o = kSpTag;
+        char buf[32];
+        for (int n = 0; n < 3; ++n) {
+            if (!st_.gridDrawn(n)) continue;
+            std::snprintf(buf, sizeof buf, ";lfo%d=", n + 1);
+            o += buf;
+            for (int i = 0; i < kSpSteps; ++i) o += kHex[st_.grid[n][i] & 15u];
+        }
+        for (int n = 0; n < 3; ++n) {
+            if (st_.smooth[n] == 0) continue;
+            std::snprintf(buf, sizeof buf, ";smooth%d=%d", n + 1, (int)st_.smooth[n]);
+            o += buf;
+        }
+        if (st_.cc >= 0) {
+            std::snprintf(buf, sizeof buf, ";cc=%d", (int)st_.cc);
+            o += buf;
+        }
+        // The hash is the identity and the path is only a recovery hint, so the
+        // hashes come first and a path is never written without one. Both are
+        // read from the SEAM and not from st_, because the editor imports
+        // through WavetableControl and never touches this object; the seam
+        // keeps the record it was given whether or not the file was found, so
+        // this re-emits a missing file's name verbatim — which is exactly what
+        // the refusal contract asks for.
+        for (int osc = 0; osc < 2; ++osc) {
+            if (!wtHashOf(osc)) continue;
+            std::snprintf(buf, sizeof buf, ";wt%c=", osc ? 'B' : 'A');
+            o += buf;
+            o += spFmtHex64(wtHashOf(osc));
+        }
+        for (int osc = 0; osc < 2; ++osc) {
+            const std::string pth = wtPathOf(osc);
+            if (!wtHashOf(osc) || pth.empty()) continue;
+            std::snprintf(buf, sizeof buf, ";wtpath%c=", osc ? 'B' : 'A');
+            o += buf;
+            smEsc(o, pth);
+        }
+        return o;
+    }
+
+    // What this oscillator NAMES — the seam's record when this instance owns a
+    // handle, and the parsed record when the process ran out of handles and
+    // there is nowhere else for it to live.
+    u64 wtHashOf(int osc) const {
+        return oscH_[osc] >= 0 ? spCustomHash(oscH_[osc]) : st_.wt[osc];
+    }
+    std::string wtPathOf(int osc) const {
+        if (oscH_[osc] < 0) return st_.wtPath[osc];
+        const char* p2 = spCustomPath(oscH_[osc]);
+        return p2 ? std::string(p2) : std::string();
+    }
+    // The round-trip gate: nothing is written unless a v3 feature is in use.
+    bool v3InUse() const {
+        return st_.inUse() || wtHashOf(0) != 0 || wtHashOf(1) != 0;
+    }
+
+    // GUI thread. Parses into a FRESH SpState and only then acts: nothing here
+    // touches the device until the whole string has been accepted, so a refusal
+    // leaves the instrument exactly as it was.
+    //
+    // ON THE KEY CHARSET, because it is the one place this file reads the
+    // contract's prose against the contract's own table and picks the table.
+    // The prose says a key matches `[a-z][a-z0-9]*`; the record list then names
+    // `wtA`, `wtB`, `wtpathA` and `wtpathB`, which that pattern rejects. The
+    // KEYS are what the preset macros (SPWTA/SPWTB) and the editor spell, so
+    // the pattern is the loose statement and the accepted charset here is
+    // `[A-Za-z][A-Za-z0-9]*` — a strict superset of the prose, so every key the
+    // prose allows is still a key, and the four the table names parse.
+    bool setStateString(const std::string& s) override {
+        if (s.empty()) return true;                 // "no state" -- not malformed
+
+        const std::vector<std::string> recs = smSplit(s, ';');
+        if (recs.empty() || recs[0] != kSpTag) return badState(s);
+
+        SpState st;
+        std::vector<std::string> seen;
+        seen.reserve(recs.size());
+        for (size_t r = 1; r < recs.size(); ++r) {
+            const std::string& rec = recs[r];
+            const size_t eq = rec.find('=');
+            // An empty record, or one with no `key=`, is not something this
+            // writer can produce. Refuse rather than skip: skipping would make
+            // "nxspc1;;;;" a valid way of saying nothing.
+            if (eq == std::string::npos || eq == 0) return badState(s);
+            const std::string key = rec.substr(0, eq);
+            if (!spKeyOk(key)) return badState(s);
+            // Two records with one key are ambiguous, and choosing one of them
+            // is guessing.
+            for (const std::string& k : seen) if (k == key) return badState(s);
+            seen.push_back(key);
+            if (!readRecord(st, key, rec.substr(eq + 1))) return badState(s);
+        }
+
+        // Accepted. From here the only thing that can still go wrong is a
+        // custom table this machine does not have, and A MISSING FILE IS NOT A
+        // MALFORMED STATE: the set is correct and the machine is incomplete.
+        // The records are kept either way, so saving on a machine that is
+        // missing the file does not lose the file's name. This is the sampler's
+        // rule and the reason for it is the sampler's reason.
+        adoptState(st);
+        return true;
+    }
+
+    // --- WavetableControl (host.h) -----------------------------------------
+    //
+    // THE OVERRIDE POINT, and it is exactly here: between setStateString()
+    // above and the three accessors below. The table wave already owns the
+    // control's BODY — `SpWavetableControl` is defined at the end of
+    // spectra_tables.inc — so its diff against this file is two lines and no
+    // rearrangement:
+    //
+    //     WavetableControl* wavetable() override {
+    //         wtc_.bind(oscH_[0], oscH_[1]);      // or oscHandle(0/1)
+    //         return &wtc_;
+    //     }
+    //     ... and `SpWavetableControl wtc_;` beside the members.
+    //
+    // The handles are already acquired (the constructor) and released (the
+    // destructor), so binding is all that is left. The one thing that side must
+    // NOT do is write st_: this file owns what the STATE says and that file
+    // owns what the table IS, and stateString() reads the seam's record rather
+    // than a copy precisely so an import made through WavetableControl needs no
+    // notification to reach the next save. If a caller ever does want to name a
+    // table from this side, adoptCustom() below is the door.
+
+    // GUI thread. Records that this oscillator now names a custom table, or
+    // (hash 0) that it names none. Idempotent, and it is the ONLY writer of the
+    // wt records outside setStateString().
+    void adoptCustom(int osc, u64 hash, const char* path) {
+        if (osc < 0 || osc > 1) return;
+        if (st_.wt[osc] != hash) warnedTable_[osc] = false;
+        st_.wt[osc] = hash;
+        st_.wtPath[osc] = path ? path : "";
+        resolveTables();
+    }
+
+    // The oscillator handles, for the table wave's WavetableControl to bind.
+    int oscHandle(int osc) const { return (osc == 0 || osc == 1) ? oscH_[osc] : -1; }
+    bool customResolved(int osc) const { return (osc == 0 || osc == 1) && wtOk_[osc]; }
+
+    // --- WavetableControl (host.h) -----------------------------------------
+    //
+    // The editor's door onto the seam. GUI THREAD ONLY, every method: reading a
+    // WAV, resampling it and building ten mip levels per frame allocates and
+    // takes tens of milliseconds.
+    //
+    // `osc` here is the oscillator INDEX — 0 for A, 1 for B — translated to the
+    // seam's HANDLE by oscHandle(). That translation is the whole reason this
+    // class exists rather than the seam being the contract: host.h speaks about
+    // a device's oscillators, the seam speaks about a process's.
+    //
+    // hasCustom() is true as soon as a table is NAMED and customFrames() is 0
+    // until it is RESOLVED — exactly the pair the panel needs to draw the amber
+    // refusal over a chip that still says which file is missing.
+    class Wavetables final : public WavetableControl {
+    public:
+        explicit Wavetables(Spectra& s) : d_(s) {}
+
+        bool importFile(int osc, const char* path) override {
+            const int h = d_.oscHandle(osc);
+            if (h < 0) { err_ = "this instance has no oscillator slot for a custom table"; return false; }
+            std::string e;
+            const u64 hash = spImportWavetable(h, path, e);
+            if (!hash) { err_ = e.empty() ? std::string("import failed") : e; return false; }
+            // The seam owns what the table IS; this call is what makes the
+            // DEVICE say so, so stateString() names it and the wire ships it.
+            d_.adoptCustom(osc, hash, path);
+            err_.clear();
+            return true;
+        }
+        bool hasCustom(int osc) const override {
+            const int h = d_.oscHandle(osc);
+            return h >= 0 && spCustomHash(h) != 0;
+        }
+        const char* customName(int osc) const override {
+            const int h = d_.oscHandle(osc);
+            if (h < 0) return "";
+            const char* p = spCustomPath(h);
+            if (!p || !*p) return "";                 // a preset names a hash and no path
+            const char* slash = std::strrchr(p, '/');
+            return slash ? slash + 1 : p;
+        }
+        int customFrames(int osc) const override {
+            const int h = d_.oscHandle(osc);
+            return h >= 0 && d_.customResolved(osc) ? spCustomFrames(h) : 0;
+        }
+        void clearCustom(int osc) override {
+            d_.adoptCustom(osc, 0, nullptr);          // this calls spClearCustom()
+            err_.clear();
+        }
+        const char* lastError() const override { return err_.c_str(); }
+
+    private:
+        Spectra&            d_;
+        mutable std::string err_;
+    };
+
+    WavetableControl* wavetable() override { return &wtctl_; }
+    Wavetables wtctl_{*this};
 
     // REALTIME. Called before process() for the same block; voice state is
     // therefore plain members with no synchronisation, exactly as Pulse's is.
@@ -515,10 +1147,30 @@ public:
                 if (len >= 2) queue(off, kEvOff, data[1], 0, chan);
                 return;
             case 0xB0:
-                // 120 = all sound off, 123 = all notes off. Anything else is a
-                // controller we do not map; ignoring it is the honest answer.
-                if (len >= 2 && data[1] == 120) queue(off, kEvSoundOff, 0, 0, chan);
-                else if (len >= 2 && data[1] == 123) queue(off, kEvNotesOff, 0, 0, chan);
+                // 120 = all sound off, 123 = all notes off, and they keep the
+                // meanings v1 gave them: they are panics and they do NOT feed
+                // the mod wheel, the bend or the learned CC, even if 120 or 123
+                // is what somebody learned.
+                if (len < 2) return;
+                if (data[1] == 120) { queue(off, kEvSoundOff, 0, 0, chan); return; }
+                if (data[1] == 123) { queue(off, kEvNotesOff, 0, 0, chan); return; }
+                // v3: CC 1 is the Mod Wheel source, and one other number is the
+                // learned MIDI CC source. Every other controller is one we do
+                // not map, and ignoring it is still the honest answer — the
+                // filter is HERE rather than in apply() so that a controller
+                // flood cannot push note-ons out of the queue.
+                if (len >= 3) {
+                    const int learn = ccNum_.load(std::memory_order_relaxed);
+                    if (data[1] == 1 || (int)data[1] == learn)
+                        queue(off, kEvCC, data[1], (u8)(data[2] & 0x7Fu), chan);
+                }
+                return;
+            case 0xE0:
+                // Pitch bend. `v14 = lsb | (msb << 7)`; the two halves ride the
+                // event as they arrived and are folded in apply(), so the queue
+                // stays five bytes wide.
+                if (len >= 3) queue(off, kEvBend, (u8)(data[1] & 0x7Fu),
+                                    (u8)(data[2] & 0x7Fu), chan);
                 return;
             case 0xD0:
                 // Channel pressure — the matrix's Aftertouch source. Queued
@@ -563,10 +1215,16 @@ public:
 
             // The LFO values for THIS sample, read before they are advanced,
             // so the control tick and the audio path see the same numbers.
-            const Glob g = { lfoValue(lfo_,  b.lfoShape, shVal_),
-                             lfoValue(lfo2_, b.l2Shape,  shVal2_),
-                             lfoValue(lfo3_, b.l3Shape,  shVal3_),
-                             after_ };
+            const Glob g = { globLfo(0, lfo_,  b, shVal_),
+                             globLfo(1, lfo2_, b, shVal2_),
+                             globLfo(2, lfo3_, b, shVal3_),
+                             after_, wheel_, bend_, ccVal_ };
+
+            // v3: a One-shot LFO is PER VOICE, so this sample's value is
+            // gathered for every sounding voice here — before the control tick
+            // and before any voice renders, so both read the same number.
+            if (b.anyOneShot)
+                for (Voice& v : voices_) { if (v.active) voiceLfoRead(v, b); }
 
             // Control tick on ABSOLUTE sample time (the Auto Filter's rule):
             // the counter is a member and survives the block boundary, which is
@@ -581,6 +1239,8 @@ public:
             }
 
             lfoTicks();
+            if (b.anyOneShot)
+                for (Voice& v : voices_) { if (v.active) voiceLfoTick(v, b); }
 
             const f32 l = accL * b.master;
             const f32 r = accR * b.master;
@@ -653,18 +1313,41 @@ private:
         f32  lastA = 0.f, lastB = 0.f;   // FM/RM taps, one sample late
         f32  nzL = 0.f, nzR = 0.f;   // Noise Color one-pole state
         f32  nzCoef = 1.f;
+
+        // --- v3: the per-voice half of a One-shot LFO (ids 60/61/100).
+        // A one-shot LFO IS an envelope, so it lives where the envelopes live.
+        // osPh is 0 at the note-on's stamped sample and clamps at 1.0; osVal is
+        // this sample's value, computed once before any voice renders so that
+        // the control tick and the audio path see the same number (exactly the
+        // rule the instance-wide LFOs already follow). osY is the drawn-grid
+        // smoothing lag, initialised to L(d_0) at the phase origin.
+        f32  osPh[3]  = {};
+        f32  osVal[3] = {};
+        f32  osY[3]   = {};
+        f32  osSh[3]  = {};          // S&H, drawn once at note-on from the
+                                     // note's identity hash salted by the LFO
+        f32  osInc[3] = {};          // only owned here when a rate slot drives
+        f32  osA[3]   = {};          // this LFO; otherwise the block owns both
+        bool osSnap = true;          // "take the block's inc/coef on my first
+                                     // sample" — a note-on has no Blk to read
     };
 
-    // The per-sample globals every voice reads: the three LFO values and the
-    // channel pressure, gathered once so retarget() and renderVoice() see the
-    // same numbers.
-    struct Glob { f32 l1, l2, l3, after; };
+    // The per-sample globals every voice reads: the three LFO values, the
+    // channel pressure and v3's three MIDI sources, gathered once so retarget()
+    // and renderVoice() see the same numbers.
+    struct Glob { f32 l1, l2, l3, after, wheel, bend, cc; };
 
     // A queued note event. Five bytes of payload and a frame stamp; nothing in
     // here allocates and the queue is a fixed array, so midi() stays realtime.
     // The channel rides along because it is part of the note's stable identity
     // (the matrix's Random source hashes it).
-    enum : u8 { kEvOn = 0, kEvOff, kEvNotesOff, kEvSoundOff, kEvPressure };
+    //
+    // v3 adds two: a controller (number in `a`, value in `b`) and a pitch bend
+    // (the two 7-bit halves in `a` and `b`). Both are queued for the reason
+    // every other event is — applying them when midi() is called would make the
+    // same MIDI in blocks of 1 and of 1024 produce different audio.
+    enum : u8 { kEvOn = 0, kEvOff, kEvNotesOff, kEvSoundOff, kEvPressure,
+                kEvCC, kEvBend };
     struct PendEv { int frame; u8 type, a, b, ch; };
 
     // Everything read from the parameters once per block. Reading them once is
@@ -687,7 +1370,6 @@ private:
         f32 a1, d1, s1, r1;
         f32 a2, d2, s2, r2;
         f32 lfoPos, lfoPitch, env2Pos;
-        int lfoShape;
         f32 master;
         f32 incScale;                        // 440/sr
 
@@ -696,13 +1378,30 @@ private:
         bool nzBypass, nzTrack; f32 nzFc;
         int  warpA, warpB; f32 warpAmtA, warpAmtB;
         bool needTapA, needTapB;             // "compute osc X's voice-0 tap"
-        int  l2Shape, l3Shape;
         bool lfree[3];                       // Sync == 0 per LFO
         f32  lRateNorm[3];                   // rate knob on its log scale, 0..1
         f32  a3, d3, s3, r3;
-        struct Slot { u8 src, dst; f32 amt; };
+        // `curve` is v3's per-slot response (ids 101..108). Linear is 0 and the
+        // value is TESTED and not applied: a slot at Linear runs the v2
+        // expression untouched, which is what makes the bit-identity gate hold.
+        struct Slot { u8 src, dst, curve; f32 amt; };
         Slot slot[kMods]; int mN; u32 dstMask;
         f32  macro[4];
+
+        // --- v3 ---
+        int  lmode[3];                       // 0 Loop (instance) · 1 One-shot
+        bool anyOneShot;                     // any of the three, this block
+        int  lshape[3];                      // 0..5; 5 = the drawn grid
+        bool anyCustom;                      // any LFO on shape 5
+        bool beatStep[3];                    // shape 5, Loop, synced, transport
+                                             // running: the step index comes
+                                             // from the beat (the ruling above)
+        f32  lBeats[3];                       // beats per cycle, 0 when free
+        f32  lInc[3];                        // the LFO's increment this block
+        f32  smA[3];                         // drawn-grid smooth coefficient
+        bool rateSlot[3];                    // a matrix slot drives this free
+                                             // LFO's rate: the tick owns it
+        f32  bendRange;                      // semitones at full wheel travel
         f32  driveDb;
         f32  cutNorm, resNorm;               // matrix base positions
         f32  detA, detB;
@@ -720,12 +1419,15 @@ private:
         b.mN = 0;
         b.dstMask = 0;
         for (int k = 0; k < kMods; ++k) {
-            const int src = (int)clampv(p(kPM1Src + 3 * k) + 0.5f, 0.f, 13.f);
+            const int src = (int)clampv(p(kPM1Src + 3 * k) + 0.5f, 0.f, (f32)(kSrcCount - 1));
             const int dst = (int)clampv(p(kPM1Src + 3 * k + 1) + 0.5f, 0.f, 19.f);
             const f32 amt = clampv(p(kPM1Src + 3 * k + 2), -1.f, 1.f);
             if (src == kSOff || dst == kDOff || amt == 0.f) continue;
             b.slot[b.mN].src = (u8)src;
             b.slot[b.mN].dst = (u8)dst;
+            // v3, ids 101..108: slot k's curve is id 101 + k, an id ARRAY and
+            // therefore contiguous — which is why 92/93 could not hold it.
+            b.slot[b.mN].curve = (u8)(int)clampv(p(kPM1Curve + k) + 0.5f, 0.f, 2.f);
             b.slot[b.mN].amt = amt;
             ++b.mN;
             b.dstMask |= 1u << dst;
@@ -733,10 +1435,27 @@ private:
         for (int j = 0; j < 4; ++j)
             b.macro[j] = clampv(p(kPMacro1 + j), 0.f, 1.f);
 
-        const int ta = (int)clampv(p(kPATable) + 0.5f, 0.f, 7.f);
-        const int tb = (int)clampv(p(kPBTable) + 0.5f, 0.f, 7.f);
-        b.tblA = tbl_->frame(ta, 0);
-        b.tblB = tbl_->frame(tb, 0);
+        // Table selection, widened to 0..8 by v3. Slot 8 is this oscillator's
+        // import and comes from the table wave's seam; a nullptr is an
+        // unresolvable slot 8, and the refusal contract says what happens then:
+        // the PARAMETER keeps its value (the set's intent is not edited by the
+        // machine that could not honour it), the state records are kept and
+        // re-emitted verbatim, and the oscillator renders FACTORY TABLE 0 for as
+        // long as the resolution fails — silence would be a worse lie than the
+        // wrong table, and the editor's amber badge says which it is. The log
+        // line is not here: resolution is decided on the GUI thread, in
+        // setStateString(), and that is where the once-per-instance warning is.
+        const int ta = (int)clampv(p(kPATable) + 0.5f, 0.f, (f32)kSpCustomSlot);
+        const int tb = (int)clampv(p(kPBTable) + 0.5f, 0.f, (f32)kSpCustomSlot);
+        // spTableBase and not spTableFor: the seam offers a wrapper with the
+        // fallback already applied, but the refusal is THIS file's contract and
+        // is spelled out here so it is one branch a reader can find and a test
+        // can break. tbl_->frame(0, 0) is also the one answer that survives the
+        // set not being published yet, which the wrapper cannot give.
+        b.tblA = spTableBase(ta, oscH_[0]);
+        b.tblB = spTableBase(tb, oscH_[1]);
+        if (!b.tblA) b.tblA = tbl_->frame(0, 0);
+        if (!b.tblB) b.tblB = tbl_->frame(0, 0);
         b.posA = clampv(p(kPAPos), 0.f, 1.f);
         b.posB = clampv(p(kPBPos), 0.f, 1.f);
 
@@ -797,7 +1516,6 @@ private:
         b.s3 = clampv(p(kPE3Sustain), 0.f, 1.f);
         b.r3 = decCoef(clampv(p(kPE3Release), 1.f, 8000.f));
 
-        b.lfoShape = (int)clampv(p(kPLfoShape) + 0.5f, 0.f, 4.f);
         b.lfoPos   = clampv(p(kPLfoPos), -1.f, 1.f);
         b.lfoPitch = clampv(p(kPLfoPitch), 0.f, 100.f);
         b.env2Pos  = clampv(p(kPE2Pos), -1.f, 1.f);
@@ -821,8 +1539,6 @@ private:
 
         // LFO2/3 — the same block, three times (contract: same division
         // table, same shapes, same behaviour; no fixed routings).
-        b.l2Shape = (int)clampv(p(kPL2Shape) + 0.5f, 0.f, 4.f);
-        b.l3Shape = (int)clampv(p(kPL3Shape) + 0.5f, 0.f, 4.f);
         {
             dsp::Lfo* ls[2] = { &lfo2_, &lfo3_ };
             const int syncIds[2]  = { kPL2Sync, kPL3Sync };
@@ -839,6 +1555,39 @@ private:
                 }
             }
         }
+
+        // --- v3: shapes (widened to 0..5), modes, and the drawn grid's
+        // smoothing coefficient.
+        b.lshape[0] = (int)clampv(p(kPLfoShape) + 0.5f, 0.f, 5.f);
+        b.lshape[1] = (int)clampv(p(kPL2Shape)  + 0.5f, 0.f, 5.f);
+        b.lshape[2] = (int)clampv(p(kPL3Shape)  + 0.5f, 0.f, 5.f);
+        b.lmode[0]  = (int)clampv(p(kPL1Mode) + 0.5f, 0.f, 1.f);
+        b.lmode[1]  = (int)clampv(p(kPL2Mode) + 0.5f, 0.f, 1.f);
+        b.lmode[2]  = (int)clampv(p(kPL3Mode) + 0.5f, 0.f, 1.f);
+        b.anyOneShot = b.lmode[0] || b.lmode[1] || b.lmode[2];
+        b.anyCustom  = b.lshape[0] == 5 || b.lshape[1] == 5 || b.lshape[2] == 5;
+        {
+            const dsp::Lfo* ls[3] = { &lfo_, &lfo2_, &lfo3_ };
+            const int rateDst[3] = { kDL1Rate, kDL2Rate, kDL3Rate };
+            const int syncOf[3]  = { kPLfoSync, kPL2Sync, kPL3Sync };
+            // "A transport is running" is the ruling's own condition for the
+            // beat-derived step index; a host that never pushed one, or that
+            // pushed one and stopped, falls back to accumulated phase.
+            const bool running = trPlaying_ && trBpm_ > 0.0;
+            for (int j = 0; j < 3; ++j) {
+                b.lInc[j]    = ls[j]->inc;
+                b.rateSlot[j] = b.lfree[j] && (b.dstMask & (1u << rateDst[j])) != 0;
+                b.smA[j]     = smoothCoef(b.lInc[j], j);
+                const int sy = (int)clampv(p(syncOf[j]) + 0.5f, 0.f,
+                                           (f32)(kSpSyncCount - 1));
+                b.lBeats[j]  = sy > 0 ? kSpSyncBeats[sy] : 0.f;
+                b.beatStep[j] = b.lshape[j] == 5 && b.lmode[j] == kLfoLoop &&
+                                b.lBeats[j] > 0.f && running;
+            }
+        }
+        syncBeat();
+        // v3's one stated exception to "every default does what v2 did".
+        b.bendRange = (f32)(int)clampv(p(kPBendRange) + 0.5f, 0.f, 24.f);
         // Rate-knob positions on the log scale, for the matrix's rate
         // destinations. Only meaningful when a slot targets them.
         b.lRateNorm[0] = (f32)(std::log2((f64)clampv(p(kPLfoRate), 0.01f, 40.f) / 0.01) / (f64)kRateOct);
@@ -906,15 +1655,147 @@ private:
     // --- LFO ---------------------------------------------------------------
 
     // One shape read, shared by all three LFOs — the shape list is the
-    // contract's id 37 list, verbatim for id 56 and 59 too.
-    static f32 lfoValue(const dsp::Lfo& l, int shape, f32 sh) {
-        const f32 ph = l.phase;
+    // contract's id 37 list, verbatim for id 56 and 59 too. Taking the phase as
+    // an argument rather than the Lfo is v3's only change to it, because a
+    // One-shot LFO's phase lives in a voice and not in the generator; every
+    // expression below is v1's, character for character.
+    //
+    // Shape 5 (Custom) is NOT here. It reads a grid and a filter state that
+    // belong to an instance or to a voice, so it has its own two readers below.
+    static f32 lfoShapeAt(int shape, f32 ph, f32 sh) {
         switch (shape) {
             case 1:  return ph < 0.5f ? (4.f * ph - 1.f) : (3.f - 4.f * ph);   // triangle
             case 2:  return 2.f * ph - 1.f;                                    // saw up
             case 3:  return ph < 0.5f ? 1.f : -1.f;                            // square
             case 4:  return sh;                                                // sample & hold
             default: return std::sin(dsp::kTwoPi * ph);
+        }
+    }
+
+    static f32 lfoValue(const dsp::Lfo& l, int shape, f32 sh) {
+        return lfoShapeAt(shape, l.phase, sh);
+    }
+
+    // --- v3: the drawn grid (shape 5) --------------------------------------
+
+    // The step in effect at phase `ph`. `i = clamp(floor(p*16), 0, 15)` of the
+    // SAME phase the other five shapes read, so which cycle the LFO is in and
+    // how it got there is unchanged by this shape existing — and the clamp is
+    // what makes a One-shot's phase of exactly 1.0 land on step 15 rather than
+    // off the end. The division is the length of the WHOLE cycle: sync 5 (1/4)
+    // runs all sixteen steps inside one quarter note.
+    // ONE atomic load per call: a grid can never be observed half-updated.
+    f32 gridAt(int j, f32 ph) const {
+        int i = (int)(ph * (f32)kSpSteps);
+        if (i < 0) i = 0;
+        if (i > kSpSteps - 1) i = kSpSteps - 1;
+        const u64 bits = gridBits_[j].load(std::memory_order_relaxed);
+        return spStepLevel((u8)((bits >> (4 * i)) & 15u));
+    }
+
+    // The smoothing one-pole's coefficient, `a = 1 - exp(-1 / (s * T_step *
+    // sr))`. T_step is the cycle period over sixteen, so `T_step * sr` is
+    // `1 / (16 * inc)` samples and the whole coefficient collapses to
+    // `1 - exp(-16 * inc / s)` — A PURE FUNCTION OF THE LFO'S INCREMENT AND s,
+    // with no clock, no elapsed time and nothing a block boundary can move.
+    // As s -> 0 it tends to 1 and the filter tends to the s = 0 branch, so the
+    // control is continuous across its own default.
+    f32 smoothCoef(f32 inc, int j) const {
+        const int sm = smoothQ_[j].load(std::memory_order_relaxed);
+        if (sm <= 0) return 1.f;             // the s = 0 branch never reads this
+        const f32 s = (f32)sm * (1.f / 1000.f);
+        return clampv(1.f - std::exp(-(f32)kSpSteps * inc / s), 0.f, 1.f);
+    }
+
+    // The instance-wide (Loop mode) read, once per sample per LFO. A smooth of
+    // 0 selects the no-filter branch OUTRIGHT — a hard staircase, bit-exact —
+    // rather than trusting a coefficient of 1 to be neutral, which is the same
+    // discipline Warp Amt 0 and Noise Color 1.0 already follow.
+    f32 globLfo(int j, const dsp::Lfo& l, const Blk& b, f32 sh) {
+        const int shape = b.lshape[j];
+        if (shape != 5) return lfoShapeAt(shape, l.phase, sh);
+        // The ruling: SYNCED and with a transport running, the step index comes
+        // from the beat, so the sequence locks to the bar line. Free, or with
+        // no transport, it is the LFO's own accumulated phase — the same phase
+        // the other five shapes read. Neither is a clock: see the file header
+        // for why beatAcc_ is anchored to the transport rather than driven by
+        // it, which is what keeps blocks of 1 and of 1024 identical.
+        f32 ph;
+        if (b.beatStep[j]) {
+            f64 q = beatAcc_ / (f64)b.lBeats[j];
+            q -= std::floor(q);
+            ph = (f32)q;
+            if (!(ph >= 0.f && ph < 1.f)) ph = 0.f;
+        } else {
+            ph = l.phase;
+        }
+        const f32 lv = gridAt(j, ph);
+        if (smoothQ_[j].load(std::memory_order_relaxed) <= 0) return lv;
+        smY_[j] += (lv - smY_[j]) * smA_[j];
+        return smY_[j];
+    }
+
+    // Once per process(), before the sample loop. See the file header: the beat
+    // counter is ANCHORED to the transport, never driven by it, so it advances
+    // on absolute sample time like everything else in this device.
+    void syncBeat() {
+        const f64 bpm = trBpm_ > 0.0 ? (f64)clampv((f32)trBpm_, 20.f, 999.f) : 120.0;
+        beatInc_ = bpm / (60.0 * sr_);
+        const bool started   = trPlaying_ && !trPlayWas_;
+        // "Demonstrably advancing": a host that pushes the same beat every
+        // block is not telling us the time, and re-anchoring to it would make a
+        // render depend on its own block size. This is the check that makes the
+        // fallback in the ruling's point 3 automatic rather than a mode.
+        const bool advancing = trBeatSeen_ && trBeat_ != trBeatWas_;
+        if (trPlaying_ &&
+            (started || (advancing && std::fabs(trBeat_ - beatAcc_) > (1.0 / 64.0))))
+            beatAcc_ = trBeat_;
+        trBeatWas_  = trBeat_;
+        trBeatSeen_ = true;
+        trPlayWas_  = trPlaying_;
+    }
+
+    // --- v3: One-shot LFOs, the per-voice half -----------------------------
+
+    // dsp::Lfo::setRate's body, for the one-shot increment. Spelled out rather
+    // than borrowed because a one-shot's increment lives in a VOICE and there
+    // is no dsp::Lfo there to set; the arithmetic is that function's, exactly.
+    static f32 rateInc(f64 sr, f32 hz) {
+        if (sr <= 0.0 || !(hz > 0.f)) return 0.f;
+        return clampv((f32)((f64)hz / sr), 0.f, 0.5f);
+    }
+
+    // This sample's value for every one-shot LFO of one voice, read BEFORE any
+    // phase advances — the same sentence, and the same reason, as the three
+    // instance-wide LFOs in process().
+    void voiceLfoRead(Voice& v, const Blk& b) {
+        if (v.osSnap) {
+            // A note-on has no Blk to read, so the voice takes the block's
+            // increment and coefficient on its first rendered sample. The
+            // control tick owns both from there.
+            for (int j = 0; j < 3; ++j) { v.osInc[j] = b.lInc[j]; v.osA[j] = b.smA[j]; }
+            v.osSnap = false;
+        }
+        for (int j = 0; j < 3; ++j) {
+            if (b.lmode[j] != kLfoOneShot) continue;
+            const f32 ph = v.osPh[j];
+            if (b.lshape[j] != 5) { v.osVal[j] = lfoShapeAt(b.lshape[j], ph, v.osSh[j]); continue; }
+            const f32 lv = gridAt(j, ph);
+            if (smoothQ_[j].load(std::memory_order_relaxed) <= 0) { v.osVal[j] = lv; continue; }
+            v.osY[j] += (lv - v.osY[j]) * v.osA[j];
+            v.osVal[j] = v.osY[j];
+        }
+    }
+
+    // ...and the advance, at the bottom of the sample, beside lfoTicks(). The
+    // phase CLAMPS at 1.0 instead of wrapping: that clamp is the whole
+    // difference between an LFO and an envelope.
+    static void voiceLfoTick(Voice& v, const Blk& b) {
+        for (int j = 0; j < 3; ++j) {
+            if (b.lmode[j] != kLfoOneShot || v.osPh[j] >= 1.f) continue;
+            v.osPh[j] += v.osInc[j];
+            if (!(v.osPh[j] >= 0.f)) v.osPh[j] = 0.f;
+            if (v.osPh[j] > 1.f)     v.osPh[j] = 1.f;
         }
     }
 
@@ -931,6 +1812,10 @@ private:
         lfoTickOne(lfo_,  lfoRng_,  shVal_);
         lfoTickOne(lfo2_, lfo2Rng_, shVal2_);
         lfoTickOne(lfo3_, lfo3Rng_, shVal3_);
+        // One sample at a time, for dsp::Lfo::tick's reason and for the same
+        // gate. Advanced whether or not any LFO reads it, so its value is a
+        // function of time alone and never of the routing.
+        beatAcc_ += beatInc_;
     }
 
     // 24 bits of a plain LCG, in [0, 1). Deterministic and seeded in prepare().
@@ -988,6 +1873,21 @@ private:
             // Both droppable, by the argument above: a pressure value lost in
             // a flood this dense is replaced by the next one.
             if (nPend_ >= kOnCap) return;
+        } else if (type == kEvCC || type == kEvBend) {
+            // v3. A controller and a bend FOLD rather than drop — the contract
+            // puts them under the queue's overflow rule — and they fold at
+            // kOnCap rather than at kPend, so the 32 slots this file reserves
+            // for note-offs and panics stay reserved for note-offs and panics.
+            // Only the LAST value of each survives, and that is right rather
+            // than merely convenient: a controller has no history worth
+            // keeping, only a current value. Both folds are O(1), so no flood
+            // of any length can lose one.
+            if (nPend_ >= kOnCap) {
+                if (type == kEvCC) { ovfCCNum_ = (i16)a; ovfCCVal_ = (i16)b; }
+                else               { ovfBend_  = (i16)((int)a | ((int)b << 7)); }
+                haveOvf_ = true;
+                return;
+            }
         } else if (nPend_ >= kPend) {
             if (type == kEvOff) {
                 ovfOff_[(a >> 5) & 3] |= 1u << (a & 31);
@@ -1010,6 +1910,10 @@ private:
 
     // REALTIME. The overflow set, drained at the block's last sample.
     void applyOverflow() {
+        // v3's two folded controllers first: they are values, not actions, and
+        // a note the panic below is about to stop should still have seen them.
+        if (ovfCCNum_ >= 0) { applyCC((u8)ovfCCNum_, (u8)ovfCCVal_); ovfCCNum_ = -1; }
+        if (ovfBend_  >= 0) { bend_ = bendOf(ovfBend_);              ovfBend_  = -1; }
         for (int w = 0; w < 4; ++w) {
             u32 bits = ovfOff_[w];
             while (bits) {
@@ -1034,8 +1938,30 @@ private:
             case kEvOff:      noteOff(e.a); break;
             case kEvNotesOff: allNotesOff(); break;
             case kEvPressure: after_ = (f32)e.a * (1.f / 127.f); break;
+            case kEvCC:       applyCC(e.a, e.b); break;
+            case kEvBend:     bend_ = bendOf((int)e.a | ((int)e.b << 7)); break;
             default:          allSoundOff(); break;
         }
+    }
+
+    // v3, matrix sources 14 and 16. One event serves both, because learning
+    // CC 1 is legal and redundant (source 14 already has it) and a controller
+    // that is both must move both. There is exactly ONE learn slot: every
+    // matrix slot whose source is 16 reads the same controller, which is what
+    // makes the learn a property of the INSTRUMENT and not of a slot.
+    void applyCC(u8 num, u8 val) {
+        const f32 v = (f32)val * (1.f / 127.f);
+        if (num == 1) wheel_ = v;
+        const int learn = ccNum_.load(std::memory_order_relaxed);
+        if (learn >= 0 && (int)num == learn) ccVal_ = v;
+    }
+
+    // Matrix source 15. `b = (v14 - 8192) / 8192`, domain [-1, +0.999878]. The
+    // asymmetry is MIDI's — 8192 is the centre of a 14-bit range whose top
+    // value is 16383 — and it is stated rather than hidden by rescaling,
+    // because rescaling would make the centre not exactly 0.
+    static f32 bendOf(int v14) {
+        return (f32)(v14 - 8192) * (1.f / 8192.f);
     }
 
     // Random-per-note (matrix source 13): a splitmix64-finalised hash of the
@@ -1050,6 +1976,38 @@ private:
         x ^= x >> 27; x *= 0x94D049BB133111EBull;
         x ^= x >> 31;
         return (f32)(x >> 40) * (2.f / 16777216.f) - 1.f;      // [-1, 1)
+    }
+
+    // v3, shape 4 under One-shot. "A one-shot wraps exactly once, at phase 0,
+    // so it draws one value at note-on and holds it", and the draw is the
+    // note's stable identity SALTED BY THE LFO NUMBER — the same construction
+    // matrix source 13 uses, so no RNG state is carried between notes and voice
+    // stealing cannot perturb it. There is no second hash in this device: this
+    // is source 13's, with the identity offset before the finaliser runs.
+    static f32 lfoRandom(u8 ch, u8 note, u64 absSample, int j) {
+        const u64 salt = (u64)(j + 1) * 0x9E3779B97F4A7C15ull;
+        u64 x = (absSample ^ ((u64)note << 48) ^ ((u64)ch << 56)) + salt;
+        x += 0x9E3779B97F4A7C15ull;
+        x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 27; x *= 0x94D049BB133111EBull;
+        x ^= x >> 31;
+        return (f32)(x >> 40) * (2.f / 16777216.f) - 1.f;      // [-1, 1)
+    }
+
+    // v3. A one-shot LFO retriggers EXACTLY when ENV1 retriggers and never
+    // otherwise: in Mono every note-on retriggers it; in Legato an overlapped
+    // note-on does NOT, and the note-off fallback to a still-held note does
+    // not, because a fallback is not a note-on. That is the same sentence v2
+    // wrote about envelopes, and a one-shot LFO is an envelope — so this is
+    // called from exactly the two places that set e1.stage = kAtk.
+    void oneShotTrigger(Voice& v, u8 ch, u8 note, u64 absSample) {
+        for (int j = 0; j < 3; ++j) {
+            v.osPh[j]  = 0.f;
+            v.osY[j]   = gridAt(j, 0.f);               // the lag starts at L(d_0)
+            v.osSh[j]  = lfoRandom(ch, note, absSample, j);
+            v.osVal[j] = 0.f;
+        }
+        v.osSnap = true;
     }
 
     // The mono/legato held-note stack, newest last. Maintained in EVERY mode
@@ -1149,6 +2107,7 @@ private:
         v.e1.stage = kAtk;
         v.e2.stage = kAtk;
         v.e3.stage = kAtk;
+        oneShotTrigger(v, ch, note, absSample);
         v.age = ++age_;
     }
 
@@ -1198,6 +2157,7 @@ private:
         v.e1.stage = kAtk; v.e1.v = 0.f;
         v.e2.stage = kAtk; v.e2.v = 0.f;
         v.e3.stage = kAtk; v.e3.v = 0.f;
+        oneShotTrigger(v, ch, note, absSample);
         v.fs[0].reset();
         v.fs[1].reset();
         v.fSnap = true;
@@ -1260,6 +2220,9 @@ private:
         nPend_ = 0;
         ovfOff_[0] = ovfOff_[1] = ovfOff_[2] = ovfOff_[3] = 0u;
         ovfPanic_  = 0;
+        ovfCCNum_  = -1;
+        ovfCCVal_  = 0;
+        ovfBend_   = -1;
         haveOvf_   = false;
     }
 
@@ -1290,9 +2253,19 @@ private:
     // voice-bound sources read 0).
     inline f32 srcValue(int src, const Voice* v, const Blk& b, const Glob& g) const {
         switch (src) {
-            case kSLfo1:   return g.l1;
-            case kSLfo2:   return g.l2;
-            case kSLfo3:   return g.l3;
+            // v3: a One-shot LFO belongs to a VOICE, so a slot that reads one
+            // reads that voice's value. With no voice — a rate destination with
+            // nothing sounding — it reads 0, exactly as every other voice-bound
+            // source already does. In Loop mode (the default) this is the v2
+            // expression, selected and not computed.
+            //
+            // The DOMAIN is shape-dependent from v3 on: [-1..1] for shapes 0..4
+            // and [0..1] for shape 5, because sixteen levels cannot be
+            // symmetric about an exact zero and an all-zero grid must be
+            // silence. A bipolar reading is one negative Amt away.
+            case kSLfo1:   return b.lmode[0] ? (v ? v->osVal[0] : 0.f) : g.l1;
+            case kSLfo2:   return b.lmode[1] ? (v ? v->osVal[1] : 0.f) : g.l2;
+            case kSLfo3:   return b.lmode[2] ? (v ? v->osVal[2] : 0.f) : g.l3;
             case kSEnv2:   return v ? v->e2.v : 0.f;
             case kSEnv3:   return v ? v->e3.v : 0.f;
             case kSVel:    return v ? v->vel01 : 0.f;
@@ -1301,8 +2274,31 @@ private:
             case kSMac1: case kSMac2: case kSMac3: case kSMac4:
                            return b.macro[src - kSMac1];
             case kSRandom: return v ? v->rnote : 0.f;
+            // v3's three MIDI sources. All instance-wide and omni, like the
+            // Aftertouch source they follow in every respect, and all three 0
+            // after prepare() — bend meaning centre.
+            case kSWheel:  return g.wheel;
+            case kSBend:   return g.bend;
+            case kSCC:     return g.cc;
             default:       return 0.f;
         }
+    }
+
+    // One slot's signed contribution: the source, then v3's response curve,
+    // then the slot's depth. LINEAR IS A SELECTED BRANCH and not a multiply by
+    // one — that is what makes the bit-identity gate hold, and it is the same
+    // discipline the whole of v2 is built on.
+    inline f32 slotMod(const Blk::Slot& s, const Voice* v,
+                       const Blk& b, const Glob& g) const {
+        const f32 u = srcValue(s.src, v, b, g);
+        return s.amt * (s.curve == kCvLinear ? u : spCurve(s.curve, u));
+    }
+
+    // LFO1's value for one voice: the instance generator in Loop mode, the
+    // voice's own in One-shot. Every routing that consumes a one-shot LFO
+    // becomes per voice, INCLUDING the fixed v1 routings (34, 35, 36).
+    static inline f32 lfo1Of(const Voice& v, const Blk& b, const Glob& g) {
+        return b.lmode[0] ? v.osVal[0] : g.l1;
     }
 
     // The slot sums for the two control-tick destinations (Cutoff, Resonance).
@@ -1312,9 +2308,9 @@ private:
         mdRes = 0.f;
         for (int k = 0; k < b.mN; ++k) {
             if (b.slot[k].dst == kDCut)
-                mdCut += b.slot[k].amt * srcValue(b.slot[k].src, &v, b, g);
+                mdCut += slotMod(b.slot[k], &v, b, g);
             else if (b.slot[k].dst == kDRes)
-                mdRes += b.slot[k].amt * srcValue(b.slot[k].src, &v, b, g);
+                mdRes += slotMod(b.slot[k], &v, b, g);
         }
     }
 
@@ -1354,24 +2350,62 @@ private:
     // Resonance per voice (the same cadence v1's LFO->cutoff already has), and
     // the three LFO rates instance-wide.
     void retarget(const Blk& b, const Glob& g) {
+        static constexpr int kRateDst[3] = { kDL1Rate, kDL2Rate, kDL3Rate };
         if (b.dstMask & ((1u << kDL1Rate) | (1u << kDL2Rate) | (1u << kDL3Rate))) {
             // An LFO has one phase for all voices, so a per-voice source
             // driving its rate needs one voice picked: the NEWEST active one
             // (the musically obvious choice for the mono patches this is
             // for); none active reads the voice-bound sources as 0.
+            //
+            // v3: THAT RULE IS FOR LOOP MODE AND ONLY FOR IT. A one-shot LFO
+            // does belong to a voice, so its rate is evaluated per voice, in
+            // the loop further down; the newest-voice rule exists only because
+            // a Loop LFO has no voice to belong to.
             const Voice* nv = nullptr;
             for (const Voice& v : voices_)
                 if (v.active && (!nv || v.age > nv->age)) nv = &v;
             dsp::Lfo* ls[3] = { &lfo_, &lfo2_, &lfo3_ };
-            const int dstOf[3] = { kDL1Rate, kDL2Rate, kDL3Rate };
             for (int j = 0; j < 3; ++j) {
-                if (!(b.dstMask & (1u << dstOf[j])) || !b.lfree[j]) continue;
+                if (!(b.dstMask & (1u << kRateDst[j])) || !b.lfree[j]) continue;
+                if (b.lmode[j] == kLfoOneShot) continue;
                 f32 s = 0.f;
                 for (int k = 0; k < b.mN; ++k)
-                    if (b.slot[k].dst == dstOf[j])
-                        s += b.slot[k].amt * srcValue(b.slot[k].src, nv, b, g);
+                    if (b.slot[k].dst == kRateDst[j])
+                        s += slotMod(b.slot[k], nv, b, g);
                 const f32 norm = clampv(b.lRateNorm[j] + s, 0.f, 1.f);
                 ls[j]->setRate(sr_, 0.01f * std::exp2(norm * kRateOct));
+            }
+        }
+
+        // v3: the drawn grid's smoothing coefficient, recomputed HERE — at the
+        // absolute-timed control tick, the cadence the contract names and for
+        // the block-size-invariance reason v2's matrix destinations use.
+        // Instance-wide for a Loop LFO, per voice for a One-shot one.
+        if (b.anyCustom) {
+            const dsp::Lfo* ls[3] = { &lfo_, &lfo2_, &lfo3_ };
+            for (int j = 0; j < 3; ++j)
+                if (b.lshape[j] == 5 && b.lmode[j] == kLfoLoop)
+                    smA_[j] = smoothCoef(ls[j]->inc, j);
+        }
+        if (b.anyOneShot) {
+            for (Voice& v : voices_) {
+                if (!v.active) continue;         // NOT gated on fSnap: a voice's
+                                                 // one-shot phase runs from its
+                                                 // very first sample
+                for (int j = 0; j < 3; ++j) {
+                    if (b.lmode[j] != kLfoOneShot) continue;
+                    f32 inc = b.lInc[j];
+                    if (b.rateSlot[j]) {
+                        f32 s = 0.f;
+                        for (int k = 0; k < b.mN; ++k)
+                            if (b.slot[k].dst == kRateDst[j])
+                                s += slotMod(b.slot[k], &v, b, g);
+                        const f32 norm = clampv(b.lRateNorm[j] + s, 0.f, 1.f);
+                        inc = rateInc(sr_, 0.01f * std::exp2(norm * kRateOct));
+                    }
+                    v.osInc[j] = inc;
+                    if (b.lshape[j] == 5) v.osA[j] = smoothCoef(inc, j);
+                }
             }
         }
 
@@ -1383,7 +2417,8 @@ private:
             f32 mdC = 0.f, mdR = 0.f;
             if (mc || mr) cutResMods(b, v, g, mdC, mdR);
             const dsp::SvfCoeffs tgt =
-                dsp::svfCoeffs(sr_, voiceCutoff(v, b, g.l1, mc, mdC), voiceQ(b, mr, mdR));
+                dsp::svfCoeffs(sr_, voiceCutoff(v, b, lfo1Of(v, b, g), mc, mdC),
+                               voiceQ(b, mr, mdR));
             v.fInc = dsp::svfSlope(v.fc, tgt, invk);
             if (!b.nzBypass) v.nzCoef = noiseCoef(v, b);
         }
@@ -1540,6 +2575,18 @@ private:
         }
     }
 
+    // The matrix's pitch destinations (7, 8) in semitones, ±24 st per
+    // full-scale slot. v2 clamped the summed matrix pitch at ±48 st; v3 sums
+    // the pitch wheel into that clamp, and since the wheel was already applied
+    // to the voice's base pitch the residual is what this stage adds. At
+    // bendSt == 0 the two arms are the same number and the first is v2's
+    // expression, character for character.
+    static inline f32 matrixPitch(f32 mdPitch, f32 bendSt) {
+        const f32 m = mdPitch * 24.f;
+        if (bendSt == 0.f) return clampv(m, -48.f, 48.f);
+        return clampv(bendSt + m, -48.f, 48.f) - bendSt;
+    }
+
     // polyBLEP corrective for the sub square's edges; t in [0,1), dt = inc.
     static inline f32 spBlep(f32 t, f32 dt) {
         if (dt <= 0.f) return 0.f;
@@ -1560,12 +2607,21 @@ private:
         envTick(v.e3, b.a3, b.d3, b.s3, b.r3);
         if (v.e1.stage == kIdle) { v.active = false; return; }
 
-        // Glide, then vibrato, then the increment.
+        // Glide, then vibrato, then the pitch wheel, then the increment.
         if (v.glideLeft > 0) {
             v.pitch += v.glideStep;
             if (--v.glideLeft == 0) v.pitch = v.pitchTarget;
         }
-        const f32 midi = v.pitch + b.lfoPitch * g.l1 * 0.01f;
+        const f32 lfo1 = lfo1Of(v, b, g);
+        // v3, id 99. The wheel is added to the POST-GLIDE pitch alongside
+        // vibrato and therefore BEFORE per-oscillator Coarse/Fine — so the sub
+        // (id 17) follows the wheel exactly as it follows vibrato. A range of 0
+        // or a centred wheel is BRANCHED AROUND rather than added as a zero:
+        // "mathematically equal" is not "bit-identical", and this is the one
+        // new path that can change an existing set's render at all.
+        const f32 bendSt = (b.bendRange > 0.f && g.bend != 0.f) ? g.bend * b.bendRange : 0.f;
+        const f32 midi = bendSt != 0.f ? (v.pitch + b.lfoPitch * lfo1 * 0.01f + bendSt)
+                                       : (v.pitch + b.lfoPitch * lfo1 * 0.01f);
         const f32 base = clampv(b.incScale * std::exp2((midi - 69.f) * (1.f / 12.f)),
                                 0.f, 0.45f);
 
@@ -1575,12 +2631,12 @@ private:
         // expressions below untouched.
         f32 md[kDstCount] = {};
         for (int k = 0; k < b.mN; ++k)
-            md[b.slot[k].dst] += b.slot[k].amt * srcValue(b.slot[k].src, &v, b, g);
+            md[b.slot[k].dst] += slotMod(b.slot[k], &v, b, g);
 
         // Position: the parameter plus both fixed modulators plus the matrix,
         // clamped into the frame axis (inside oscSelect). ENV2 is per voice,
         // so this is too.
-        const f32 mod = b.lfoPos * g.l1 + b.env2Pos * v.e2.v;
+        const f32 mod = b.lfoPos * lfo1 + b.env2Pos * v.e2.v;
         f32 posA = b.posA + mod;
         f32 posB = b.posB + mod;
         if (b.dstMask & (1u << kDAPos)) posA += md[kDAPos];
@@ -1592,12 +2648,17 @@ private:
 
         // Pitch: ±24 st per full-scale slot, added after coarse/fine/glide,
         // the summed matrix pitch clamped ±48 st (contract).
+        //
+        // v3: the wheel is already in `base`, and the contract sums it WITH the
+        // matrix pitch and clamps the pair at ±48 st total. Clamping the sum
+        // and subtracting the part already applied is the whole of that, and at
+        // bendSt == 0 the expression is v2's, selected and not computed.
         f32 incA = base * b.ratioA;
         f32 incB = base * b.ratioB;
         if (b.dstMask & (1u << kDAPitch))
-            incA *= std::exp2(clampv(md[kDAPitch] * 24.f, -48.f, 48.f) * (1.f / 12.f));
+            incA *= std::exp2(matrixPitch(md[kDAPitch], bendSt) * (1.f / 12.f));
         if (b.dstMask & (1u << kDBPitch))
-            incB *= std::exp2(clampv(md[kDBPitch] * 24.f, -48.f, 48.f) * (1.f / 12.f));
+            incB *= std::exp2(matrixPitch(md[kDBPitch], bendSt) * (1.f / 12.f));
 
         // Detune: the fan's ratios rebuilt at audio rate; the pans hold (the
         // spread's geometry does not move, only its width in cents).
@@ -1745,7 +2806,7 @@ private:
             const bool mr = (b.dstMask & (1u << kDRes)) != 0;
             f32 mdC = 0.f, mdR = 0.f;
             if (mc || mr) cutResMods(b, v, g, mdC, mdR);
-            v.fc   = dsp::svfCoeffs(sr_, voiceCutoff(v, b, g.l1, mc, mdC), voiceQ(b, mr, mdR));
+            v.fc   = dsp::svfCoeffs(sr_, voiceCutoff(v, b, lfo1, mc, mdC), voiceQ(b, mr, mdR));
             v.fInc = dsp::SvfCoeffs{ 0.f, 0.f, 0.f, 0.f };
             v.fSnap = false;
             if (!b.nzBypass) v.nzCoef = noiseCoef(v, b);
@@ -1817,6 +2878,114 @@ private:
         }
     }
 
+    // --- v3 state parsing ---------------------------------------------------
+
+    // One record. Returns false ONLY for a key this build knows carrying a
+    // value it could not have written; an unrecognised key returns true and is
+    // skipped, which is the forward compatibility the format is for.
+    static bool readRecord(SpState& st, const std::string& key, const std::string& val) {
+        if (key.size() == 4 && key.compare(0, 3, "lfo") == 0 &&
+            key[3] >= '1' && key[3] <= '3') {
+            if ((int)val.size() != kSpSteps) return false;
+            const int n = key[3] - '1';
+            for (int i = 0; i < kSpSteps; ++i) {
+                const int d = spHexLo(val[(size_t)i]);
+                if (d < 0) return false;
+                st.grid[n][i] = (u8)d;
+            }
+            return true;
+        }
+        if (key.size() == 7 && key.compare(0, 6, "smooth") == 0 &&
+            key[6] >= '1' && key[6] <= '3') {
+            int v = 0;
+            if (!spParseUInt(val, 4, 1000, v)) return false;
+            st.smooth[key[6] - '1'] = (i16)v;
+            return true;
+        }
+        if (key == "cc") {
+            int v = 0;
+            if (!spParseUInt(val, 3, 127, v)) return false;
+            st.cc = (i16)v;
+            return true;
+        }
+        if (key == "wtA" || key == "wtB") {
+            u64 h = 0;
+            if (!spParseHex64(val, h)) return false;
+            st.wt[key[2] == 'B' ? 1 : 0] = h;
+            return true;
+        }
+        if (key == "wtpathA" || key == "wtpathB") {
+            std::string pth;
+            if (!smUnesc(val, pth) || pth.empty()) return false;
+            st.wtPath[key[6] == 'B' ? 1 : 0] = pth;
+            return true;
+        }
+        return true;                    // unknown key: forward compatibility
+    }
+
+    // GUI thread. Copies the two fields the audio thread reads out of st_ into
+    // the atomics it actually reads, so st_ itself goes back to being what its
+    // own comment claims: GUI-thread-owned. Called from every path that writes
+    // st_'s grids or smooths.
+    void publishStateToAudio() {
+        for (int j = 0; j < 3; ++j) {
+            u64 bits = 0;
+            for (int i = 0; i < kSpSteps; ++i)
+                bits |= (u64)(st_.grid[j][i] & 15u) << (4 * i);
+            gridBits_[j].store(bits, std::memory_order_relaxed);
+            smoothQ_[j].store(st_.smooth[j], std::memory_order_relaxed);
+        }
+    }
+
+    // GUI thread. The one writer of st_ outside adoptCustom(), and therefore
+    // the one place the derived state — the audio-readable CC number, the
+    // drawn grid's lag origin, and the custom-table resolution — is refreshed.
+    void adoptState(const SpState& st) {
+        const u64 was[2] = { st_.wt[0], st_.wt[1] };
+        st_ = st;
+        ccNum_.store((int)st_.cc, std::memory_order_relaxed);
+        publishStateToAudio();
+        for (int j = 0; j < 3; ++j) {
+            smY_[j] = gridAt(j, 0.f);
+            smA_[j] = 1.f;
+        }
+        for (int o = 0; o < 2; ++o) if (st_.wt[o] != was[o]) warnedTable_[o] = false;
+        resolveTables();
+    }
+
+    // GUI thread. Asks the table wave's seam to resolve each custom slot this
+    // state names, and records the answer. The audio thread never asks: it
+    // takes whatever pointer spTableBase() hands it and renders factory table 0
+    // on a null, so a failure here costs one warning and no branch in the voice.
+    void resolveTables() {
+        for (int o = 0; o < 2; ++o) {
+            if (oscH_[o] < 0) { wtOk_[o] = false; continue; }
+            // Called with hash 0 as well, and deliberately: that is how "this
+            // preset names no table" reaches the seam and clears the record.
+            wtOk_[o] = spResolveCustom(oscH_[o], st_.wt[o],
+                                       st_.wtPath[o].empty() ? nullptr
+                                                             : st_.wtPath[o].c_str());
+            if (st_.wt[o] == 0 || wtOk_[o] || warnedTable_[o]) continue;
+            warnedTable_[o] = true;
+            const std::string what = st_.wtPath[o].empty() ? spFmtHex64(st_.wt[o])
+                                                           : st_.wtPath[o];
+            LOGW("spectra: oscillator %c's custom wavetable (%s) could not be resolved; "
+                 "that oscillator renders factory table 0 and the state keeps the record, "
+                 "so the set still names the file", o ? 'B' : 'A', what.c_str());
+        }
+    }
+
+    // One log line per instance, whatever a set throws at it — the sampler's
+    // rule, and this device can appear thirty times in one project.
+    bool badState(const std::string& s) {
+        if (!warnedBadState_) {
+            warnedBadState_ = true;
+            LOGW("spectra: device state did not parse (%zu bytes); the instrument is "
+                 "unchanged", s.size());
+        }
+        return false;
+    }
+
     const SpectraTables* tbl_ = nullptr;
 
     // 128 slots. A note-on may take at most kOnCap of them, leaving 32 that
@@ -1857,6 +3026,70 @@ private:
     static constexpr int kHeld = 64;    // mono/legato held-note stack
     u8    held_[kHeld] = {};
     int   nHeld_ = 0;
+
+    // --- v3 instance state ---
+    //
+    // st_ is GUI-thread-owned: it is written by setStateString(), loadPreset()
+    // and the import path, all of which the contract puts on that thread, and
+    // read by the audio thread through the grids and the smooths. Those reads
+    // are of bytes that only change when a patch changes, which is the same
+    // class of access every parameter already has.
+    //
+    // ccNum_ WAS the one exception and is atomic, because midi() reads it on the
+    // audio thread to decide whether a controller is worth queueing at all.
+    //
+    // gridBits_ and smoothQ_ are two more of the same, and they are not
+    // optional. The paragraph above used to argue that the grids and the
+    // smooths "only change when a patch changes, which is the same class of
+    // access every parameter already has" — and that was true right up until
+    // this device grew a state string. A PARAMETER is written through setParam
+    // on one thread; STATE arrives through setStateString(), which the daemon
+    // calls on its pump thread while the audio thread is inside process().
+    // TSan caught the write of st_ racing the read of st_.smooth in exactly
+    // that window (found by the wavetable wave, whose tests were the first to
+    // hand a SOUNDING Spectra a state).
+    //
+    // The consequence was not cosmetic: a torn smooth is one control tick of a
+    // wrong coefficient, but a torn grid nibble is an LFO step at a level
+    // nobody drew, and it is nondeterministic — which would end "the same
+    // input renders the same audio" for every project load under the default
+    // engine, this tree's spine.
+    //
+    // Sixteen levels pack into ONE u64, so the audio thread takes a grid in a
+    // single load and can never see it half-old. Relaxed is enough: these carry
+    // no other memory with them, exactly as ccNum_ does not.
+    SpState st_;
+    std::atomic<int> ccNum_{-1};
+    std::atomic<u64> gridBits_[3] = {};    // 16 nibbles, step i at bits 4i
+    std::atomic<i16> smoothQ_[3]  = {};    // thousandths, mirrors st_.smooth
+
+    f32   wheel_ = 0.f;                 // CC 1, matrix source 14
+    f32   bend_  = 0.f;                 // 0xE0, source 15; 0 is centre
+    f32   ccVal_ = 0.f;                 // the learned controller, source 16
+    i16   ovfCCNum_ = -1, ovfCCVal_ = 0;
+    i16   ovfBend_  = -1;
+
+    f32   smY_[3] = {};                 // Loop-mode drawn-grid lag state
+    f32   smA_[3] = { 1.f, 1.f, 1.f };  // ...and its control-tick coefficient
+
+    // The beat counter the drawn grid's step index locks to when synced. f64
+    // because it is a position and not an increment: an f32 beat would lose a
+    // step boundary in a long set. See the file header for the anchoring rule.
+    f64   beatAcc_ = 0.0, beatInc_ = 0.0, trBeatWas_ = 0.0;
+    bool  trBeatSeen_ = false, trPlayWas_ = false;
+
+    // Did slot 8 resolve for this oscillator? Decided on the GUI thread by
+    // resolveTables(); the audio thread never asks, it just takes the pointer
+    // spTableBase() hands it and falls back to factory 0 on a null.
+    // The two oscillator handles this instance owns, from spAcquireOsc(); -1
+    // means the process ran out and this Spectra plays factory tables only.
+    int   oscH_[2] = { -1, -1 };
+    bool  wtOk_[2] = { false, false };
+    // The sampler's warnedMissing_ discipline: one device pointing at one file
+    // it cannot open is one line of information; a set with thirty Spectras in
+    // it must not turn that into a screen.
+    bool  warnedTable_[2] = { false, false };
+    bool  warnedBadState_ = false;
 };
 
 constexpr const char* kSpectraUri = "nxtakt:spectra";

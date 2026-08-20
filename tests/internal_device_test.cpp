@@ -3397,7 +3397,7 @@ struct SpectraParamSpec {
 };
 
 static const SpectraParamSpec kSpectraContract[] = {
-    {  0, "A Table",       0.f,     7.f,     true,  false },
+    {  0, "A Table",       0.f,     8.f,     true,  false },   // widened by v3
     {  1, "A Position",    0.f,     1.f,     false, false },
     {  2, "A Coarse",     -24.f,    24.f,    true,  false },
     {  3, "A Fine",       -100.f,   100.f,   false, false },
@@ -3405,7 +3405,7 @@ static const SpectraParamSpec kSpectraContract[] = {
     {  5, "A Unison",      1.f,     7.f,     true,  false },
     {  6, "A Detune",      0.f,     100.f,   false, false },
     {  7, "A Spread",      0.f,     1.f,     false, false },
-    {  8, "B Table",       0.f,     7.f,     true,  false },
+    {  8, "B Table",       0.f,     8.f,     true,  false },   // widened by v3
     {  9, "B Position",    0.f,     1.f,     false, false },
     { 10, "B Coarse",     -24.f,    24.f,    true,  false },
     { 11, "B Fine",       -100.f,   100.f,   false, false },
@@ -3434,7 +3434,7 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 34, "LFO>Position", -1.f,     1.f,     false, false },
     { 35, "LFO>Cutoff",   -1.f,     1.f,     false, false },
     { 36, "LFO>Pitch",     0.f,     100.f,   false, false },
-    { 37, "LFO Shape",     0.f,     4.f,     true,  false },
+    { 37, "LFO Shape",     0.f,     5.f,     true,  false },   // widened by v3
     { 38, "Glide",         0.f,     2000.f,  false, false },   // widened by v2
     { 39, "Voices",        1.f,     16.f,    true,  false },
     { 40, "Master",        0.f,     1.5f,    false, false },
@@ -3455,40 +3455,41 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 53, "—",             0.f,     1.f,     false, false },
     { 54, "L2 Rate",       0.01f,   40.f,    false, true  },
     { 55, "L2 Sync",       0.f,     9.f,     true,  false },
-    { 56, "L2 Shape",      0.f,     4.f,     true,  false },
+    { 56, "L2 Shape",      0.f,     5.f,     true,  false },   // widened by v3
     { 57, "L3 Rate",       0.01f,   40.f,    false, true  },
     { 58, "L3 Sync",       0.f,     9.f,     true,  false },
-    { 59, "L3 Shape",      0.f,     4.f,     true,  false },
-    { 60, "—",             0.f,     1.f,     false, false },
-    { 61, "—",             0.f,     1.f,     false, false },
+    { 59, "L3 Shape",      0.f,     5.f,     true,  false },   // widened by v3
+    // v3 spends this block's two reserved ids: 0 Loop (v2 verbatim) · 1 One-shot.
+    { 60, "L2 Mode",       0.f,     1.f,     true,  false },
+    { 61, "L3 Mode",       0.f,     1.f,     true,  false },
     { 62, "E3 Attack",     0.1f,    5000.f,  false, true  },
     { 63, "E3 Decay",      1.f,     5000.f,  false, true  },
     { 64, "E3 Sustain",    0.f,     1.f,     false, false },
     { 65, "E3 Release",    1.f,     8000.f,  false, true  },
     { 66, "—",             0.f,     1.f,     false, false },
     { 67, "—",             0.f,     1.f,     false, false },
-    { 68, "M1 Src",        0.f,     13.f,    true,  false },
+    { 68, "M1 Src",        0.f,     16.f,    true,  false },
     { 69, "M1 Dst",        0.f,     19.f,    true,  false },
     { 70, "M1 Amt",       -1.f,     1.f,     false, false },
-    { 71, "M2 Src",        0.f,     13.f,    true,  false },
+    { 71, "M2 Src",        0.f,     16.f,    true,  false },
     { 72, "M2 Dst",        0.f,     19.f,    true,  false },
     { 73, "M2 Amt",       -1.f,     1.f,     false, false },
-    { 74, "M3 Src",        0.f,     13.f,    true,  false },
+    { 74, "M3 Src",        0.f,     16.f,    true,  false },
     { 75, "M3 Dst",        0.f,     19.f,    true,  false },
     { 76, "M3 Amt",       -1.f,     1.f,     false, false },
-    { 77, "M4 Src",        0.f,     13.f,    true,  false },
+    { 77, "M4 Src",        0.f,     16.f,    true,  false },
     { 78, "M4 Dst",        0.f,     19.f,    true,  false },
     { 79, "M4 Amt",       -1.f,     1.f,     false, false },
-    { 80, "M5 Src",        0.f,     13.f,    true,  false },
+    { 80, "M5 Src",        0.f,     16.f,    true,  false },
     { 81, "M5 Dst",        0.f,     19.f,    true,  false },
     { 82, "M5 Amt",       -1.f,     1.f,     false, false },
-    { 83, "M6 Src",        0.f,     13.f,    true,  false },
+    { 83, "M6 Src",        0.f,     16.f,    true,  false },
     { 84, "M6 Dst",        0.f,     19.f,    true,  false },
     { 85, "M6 Amt",       -1.f,     1.f,     false, false },
-    { 86, "M7 Src",        0.f,     13.f,    true,  false },
+    { 86, "M7 Src",        0.f,     16.f,    true,  false },
     { 87, "M7 Dst",        0.f,     19.f,    true,  false },
     { 88, "M7 Amt",       -1.f,     1.f,     false, false },
-    { 89, "M8 Src",        0.f,     13.f,    true,  false },
+    { 89, "M8 Src",        0.f,     16.f,    true,  false },
     { 90, "M8 Dst",        0.f,     19.f,    true,  false },
     { 91, "M8 Amt",       -1.f,     1.f,     false, false },
     { 92, "—",             0.f,     1.f,     false, false },
@@ -3498,7 +3499,21 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 96, "Macro 3",       0.f,     1.f,     false, false },
     { 97, "Macro 4",       0.f,     1.f,     false, false },
     { 98, "Voice Mode",    0.f,     2.f,     true,  false },
-    { 99, "—",             0.f,     1.f,     false, false },
+    // Bend Range: the revision's ONE stated exception to "every default does
+    // what v2 did" — it defaults to 2 semitones, not 0.
+    { 99, "Bend Range",    0.f,     24.f,    true,  false },
+    // --- v3, ids 100..110 ("v3 — hands on the modulation").
+    { 100, "L1 Mode",      0.f,     1.f,     true,  false },
+    { 101, "M1 Curve",     0.f,     2.f,     true,  false },
+    { 102, "M2 Curve",     0.f,     2.f,     true,  false },
+    { 103, "M3 Curve",     0.f,     2.f,     true,  false },
+    { 104, "M4 Curve",     0.f,     2.f,     true,  false },
+    { 105, "M5 Curve",     0.f,     2.f,     true,  false },
+    { 106, "M6 Curve",     0.f,     2.f,     true,  false },
+    { 107, "M7 Curve",     0.f,     2.f,     true,  false },
+    { 108, "M8 Curve",     0.f,     2.f,     true,  false },
+    { 109, "—",            0.f,     1.f,     false, false },
+    { 110, "—",            0.f,     1.f,     false, false },
 };
 static constexpr int kSpectraContractN =
     (int)(sizeof kSpectraContract / sizeof kSpectraContract[0]);
@@ -3509,7 +3524,12 @@ static constexpr int kSpectraContractN =
 // Init, the category tags in contract order with the contract counts,
 // alphabetical within a category, and the naming constraints. The bank file
 // itself (src/plugin/spectra_presets.inc) is authored against the doc.
-static constexpr int kSpectraPresetN = 49;    // Init + 48
+// v3 appends BANK 2: 48 more presets in the same seven categories, after
+// bank 1 and never interleaved with it (a preset index is stored in no set,
+// but the user-preset contract freezes the factory ORDER). So the bank is
+// Init + 48 + 48 and the category sweep below runs TWICE.
+static constexpr int kSpectraPresetBanks = 2;
+static constexpr int kSpectraPresetN = 1 + 48 * kSpectraPresetBanks;
 struct SpectraPresetCat { const char* tag; int count; };
 static const SpectraPresetCat kSpectraPresetCats[] = {
     { "BA", 9 }, { "LD", 9 }, { "PD", 8 }, { "KY", 7 },
@@ -4670,8 +4690,8 @@ static void testSpectraPresets(PluginRegistry& reg) {
     if (!s) return;
 
     CHECK(s->presetCount() == kSpectraPresetN,
-          "presetCount() is %d (the contract's bank is Init + 48 = %d rows)",
-          s->presetCount(), kSpectraPresetN);
+          "presetCount() is %d (the contract's bank is Init + 48 x %d = %d rows)",
+          s->presetCount(), kSpectraPresetBanks, kSpectraPresetN);
     CHECK(s->presetName(-1) == nullptr && s->presetName(s->presetCount()) == nullptr,
           "presetName() is null out of range");
     CHECK(s->presetName(0) && std::strcmp(s->presetName(0), "Init") == 0,
@@ -4684,7 +4704,12 @@ static void testSpectraPresets(PluginRegistry& reg) {
     {
         bool ok = true;
         int row = 1;
+        for (int bank = 0; bank < kSpectraPresetBanks; ++bank)
         for (const SpectraPresetCat& cat : kSpectraPresetCats) {
+            // Alphabetical WITHIN each bank's own group of a category: bank 2
+            // appends, so its BA rows sort among themselves and not into
+            // bank 1's. The editor draws a header wherever the tag changes,
+            // which is why the popover shows the seven categories twice.
             const char* prev = nullptr;
             for (int j = 0; j < cat.count; ++j, ++row) {
                 const char* n = s->presetName(row);
@@ -4720,8 +4745,8 @@ static void testSpectraPresets(PluginRegistry& reg) {
             }
         }
         CHECK(ok && row == kSpectraPresetN,
-              "the bank is BA9 LD9 PD8 KY7 PL6 FX5 SQ4 in order, alphabetical within "
-              "each category, names tagged and <= 20 chars");
+              "both banks are BA9 LD9 PD8 KY7 PL6 FX5 SQ4 in order, alphabetical "
+              "within each bank's category, names tagged and <= 20 chars");
     }
 
     // Init is the defaults, exactly. Not approximately: a preset that drifts
@@ -5703,6 +5728,1536 @@ static void testSpectraV2Determinism(PluginRegistry& reg) {
                   chunk, kBlock, (double)diff);
         }
         CHECK(all, "Mono/Legato voice management applies at stamped samples");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spectra v3 (ids 100..110, the spent reserved ids 60/61/99, three widened
+// enums and the state string) — drawable LFOs, one-shot LFOs, MIDI as a mod
+// source, and the per-slot matrix response curves.
+//
+// House rule, unchanged since v1: everything below MEASURES. A drawn grid is
+// not asserted to exist, its sixteen levels are read out of the rendered audio
+// and compared against d/15; a one-shot is not asserted to be an envelope, it
+// is shown to clamp; a response curve is not asserted to be x*x, the number is
+// checked at four points including the two the contract fixes (f(0) = 0 and
+// f(1) = 1).
+//
+// HOW A MODULATOR IS READ OUT OF THE AUDIO. spV3Probe() below is a patch whose
+// output level IS the modulation: one oscillator, one unison voice, a saw at
+// position 0, the filter wide open and the envelopes flat, so the voice's
+// output is `saw(t) * A Level * ENV1 * velAmp * Master` and every factor but
+// A Level is constant for the whole render. A matrix slot driving A Level from
+// a base of 0 with amount 1 then makes the local peak of the output
+// proportional to the source, and dividing by the render's own maximum cancels
+// the constant. That is the whole instrument, used as a voltmeter.
+// ---------------------------------------------------------------------------
+
+// One matrix slot including v3's per-slot curve: slot k is 68+3k / 69+3k /
+// 70+3k for the triple and 101+k for the curve, by raw contract ids.
+static void spV3Slot(PluginInstance& s, int k, int src, int dst, f32 amt, int curve = 0) {
+    s.setParam(68 + 3 * k, (f32)src);
+    s.setParam(69 + 3 * k, (f32)dst);
+    s.setParam(70 + 3 * k, amt);
+    s.setParam(101 + k, (f32)curve);
+}
+
+static std::unique_ptr<PluginInstance> spV3Probe(PluginRegistry& reg, const PluginDesc& d) {
+    auto s = reg.instantiate(d, kSR, kBlock);
+    if (!s) return s;
+    s->setParam(spIdx(*s, "A Table"), 0.f);
+    s->setParam(spIdx(*s, "A Position"), 0.f);
+    s->setParam(spIdx(*s, "A Level"), 0.f);         // the slot supplies it
+    s->setParam(spIdx(*s, "A Unison"), 1.f);
+    s->setParam(spIdx(*s, "A Detune"), 0.f);
+    s->setParam(spIdx(*s, "A Spread"), 0.f);
+    s->setParam(spIdx(*s, "B Level"), 0.f);
+    s->setParam(spIdx(*s, "Attack"), 0.1f);
+    s->setParam(spIdx(*s, "Decay"), 5000.f);
+    s->setParam(spIdx(*s, "Sustain"), 1.f);
+    s->setParam(spIdx(*s, "Release"), 1.f);
+    s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+    s->setParam(spIdx(*s, "Resonance"), 0.f);
+    s->setParam(spIdx(*s, "Master"), 1.f);
+    s->setParam(spIdx(*s, "Voices"), 1.f);
+    return s;
+}
+
+// Peak |x| over a window, clipped to the buffer.
+static f32 spV3Peak(const std::vector<f32>& x, int from, int n) {
+    f32 pk = 0.f;
+    const int lo = from < 0 ? 0 : from;
+    const int hi = (from + n) > (int)x.size() ? (int)x.size() : (from + n);
+    for (int i = lo; i < hi; ++i) pk = std::fmax(pk, std::fabs(x[(size_t)i]));
+    return pk;
+}
+
+// One note, held for the whole render, at C6 — 1046.5 Hz is ~46 samples a
+// cycle, so a 256-sample probe window holds five and a half of them and its
+// peak is a stable reading of the level.
+static std::vector<SpEvent> spV3Note(int frame = 0, u8 note = 84) {
+    return { { frame, 0x90, note, 127 } };
+}
+
+static const char* kSpV3RampGrid = "0123456789abcdef";
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3Contract(PluginRegistry& reg) {
+    banner("Spectra v3: the widened enums, the spent reserved ids and the append");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    CHECK(s->paramCount() == 111, "kSpParamCount went 100 -> 111 (it is %d)",
+          s->paramCount());
+    CHECK(d->paramCount == 111, "the descriptor advertises 111 too (it is %d)",
+          d->paramCount);
+
+    // The one default the whole revision is written around.
+    CHECK(s->getParam(99) == 2.f,
+          "Bend Range defaults to 2 semitones, not 0 — v3's ONE stated exception "
+          "to \"every default does what v2 did\" (it is %g)", (double)s->getParam(99));
+
+    // ...and every other new default is inert.
+    bool inert = true;
+    for (int id : { 100, 60, 61 }) if (s->getParam(id) != 0.f) inert = false;
+    for (int k = 0; k < 8; ++k) if (s->getParam(101 + k) != 0.f) inert = false;
+    CHECK(inert, "L1/L2/L3 Mode default to Loop and all eight curves to Linear, so "
+                 "every v3 parameter but Bend Range is the v2 behaviour");
+
+    // The three widenings are supersets: the old top value keeps its meaning
+    // and the new one is reachable.
+    s->setParam(0, 8.f);  CHECK(s->getParam(0) == 8.f, "A Table reaches the custom slot 8");
+    s->setParam(8, 8.f);  CHECK(s->getParam(8) == 8.f, "B Table reaches the custom slot 8");
+    s->setParam(0, 9.f);  CHECK(s->getParam(0) == 8.f, "A Table clamps above 8 (a later, "
+                                                       "wider build's value arrives as 8)");
+    s->setParam(0, 0.f);
+    s->setParam(8, 1.f);
+    for (int id : { 37, 56, 59 }) {
+        s->setParam(id, 5.f);
+        CHECK(s->getParam(id) == 5.f, "id %d (LFO Shape) reaches 5 = Custom", id);
+        s->setParam(id, 6.f);
+        CHECK(s->getParam(id) == 5.f, "id %d clamps above 5", id);
+        s->setParam(id, 0.f);
+    }
+    for (int k = 0; k < 8; ++k) {
+        s->setParam(68 + 3 * k, 16.f);
+        if (s->getParam(68 + 3 * k) != 16.f)
+            CHECK(false, "M%d Src does not reach source 16 (MIDI CC)", k + 1);
+        s->setParam(68 + 3 * k, 0.f);
+    }
+    CHECK(true, "all eight M Src reach 16 — 14 Mod Wheel, 15 Pitch Bend, 16 MIDI CC");
+
+    // The destination enum does NOT widen: nothing v3 adds is a modulatable
+    // target. Stated as a check because "we did not do it" is a decision.
+    s->setParam(69, 20.f);
+    CHECK(s->getParam(69) == 19.f, "M1 Dst still stops at 19 — the destination enum "
+                                   "does not widen in v3");
+    s->setParam(69, 0.f);
+
+    // Eight reserved ids remain, and 92/93 are two of them: they were the
+    // obvious home for the per-slot curves and could not hold eight.
+    int reserved = 0;
+    for (int id : { 46, 47, 52, 53, 66, 67, 92, 93, 109, 110 })
+        if (s->paramInfo(id).name == "\xE2\x80\x94") ++reserved;
+    CHECK(reserved == 10, "ten ids are still registered reserved (\"—\", 0..1, default 0): "
+                          "the eight v2 left plus v3's own tail (%d found)", reserved);
+    CHECK(s->paramInfo(92).name == "\xE2\x80\x94" && s->paramInfo(93).name == "\xE2\x80\x94",
+          "92 and 93 stayed reserved — an id ARRAY must be contiguous and two ids "
+          "cannot hold eight curves");
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3State(PluginRegistry& reg) {
+    banner("Spectra v3: the state string (nxspc1)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    // THE ROUND-TRIP GATE. Spectra had no state string before v3; a v2 project
+    // must still write no `state` key at all.
+    CHECK(s->stateString().empty(),
+          "a fresh instance's stateString() is EMPTY, so a v2 project round-trips "
+          "byte-identically");
+    spBusyPatch(*s);
+    CHECK(s->stateString().empty(),
+          "...and stays empty however many PARAMETERS move — state is state");
+    CHECK(s->setStateString(""), "the empty state is accepted (it is not malformed)");
+
+    // Every one of bank 1's 49 rows is a v2 preset and must emit nothing.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        int nonEmpty = 0;
+        if (q) for (int i = 0; i < 49 && i < q->presetCount(); ++i) {
+            q->loadPreset(i);
+            if (!q->stateString().empty()) ++nonEmpty;
+        }
+        CHECK(nonEmpty == 0, "all 49 bank-1 presets still emit no state (%d did)", nonEmpty);
+    }
+
+    // --- what a v3 state looks like, and that it is its own inverse.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (!q) return;
+        const std::string in =
+            "nxspc1;lfo1=0123456789abcdef;lfo3=f0f0f0f0f0f0f0f0;smooth1=250;"
+            "smooth3=1000;cc=74";
+        CHECK(q->setStateString(in), "a full grid/smooth/cc state is accepted");
+        CHECK(q->stateString() == in,
+              "...and is re-emitted EXACTLY (write and read are inverses)\n        got: %s",
+              q->stateString().c_str());
+
+        // Records are written in the contract's order whatever order they
+        // arrive in, so a round trip is canonical rather than merely lossless.
+        auto r = reg.instantiate(*d, kSR, kBlock);
+        if (r) {
+            CHECK(r->setStateString("nxspc1;cc=74;smooth3=1000;smooth1=250;"
+                                    "lfo3=f0f0f0f0f0f0f0f0;lfo1=0123456789abcdef"),
+                  "the same records in a different order are accepted");
+            CHECK(r->stateString() == in, "...and normalise to the contract's order");
+        }
+    }
+
+    // A smooth with no grid, and a grid with no smooth: independent records,
+    // and an all-zero grid is the DEFAULT and emits nothing.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            CHECK(q->setStateString("nxspc1;lfo2=0000000000000000"),
+                  "an all-zero grid parses");
+            CHECK(q->stateString().empty(),
+                  "...and emits nothing, because all sixteen levels 0 IS the default "
+                  "(got \"%s\")", q->stateString().c_str());
+            CHECK(q->setStateString("nxspc1;smooth2=1"), "a smooth with no grid parses");
+            CHECK(q->stateString() == "nxspc1;smooth2=1",
+                  "...and is emitted on its own");
+        }
+    }
+
+    // A custom-table record survives a machine that cannot resolve it: THE
+    // RECORD IS KEPT AND RE-EMITTED VERBATIM, and setStateString still returns
+    // TRUE — a missing file is not a malformed state.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            const std::string wt =
+                "nxspc1;wtA=0123456789abcdef;wtpathA=/tmp/no%20such%20file.wav";
+            CHECK(q->setStateString(wt),
+                  "a state naming a wavetable this machine does not have is ACCEPTED");
+            CHECK(q->stateString() == wt,
+                  "...and its records are re-emitted verbatim, so saving here does not "
+                  "lose the file's name\n        got: %s", q->stateString().c_str());
+            q->setParam(0, 8.f);
+            CHECK(q->getParam(0) == 8.f,
+                  "...and the PARAMETER keeps its value — the set's intent is not "
+                  "edited by the machine that could not honour it");
+        }
+    }
+
+    // --- refusals. Every one of these leaves the device exactly as it was.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (!q) return;
+        const std::string good = "nxspc1;lfo1=0123456789abcdef;smooth1=250;cc=7";
+        q->setStateString(good);
+
+        struct Bad { const char* s; const char* why; };
+        const Bad bad[] = {
+            { "nxsmp1;lfo1=0123456789abcdef",       "a version tag from another device" },
+            { "nxspc2;lfo1=0123456789abcdef",       "a version tag from a later build" },
+            { "nxspc1;;;;",                          "empty records (the reason they are refused rather than skipped)" },
+            { "nxspc1;lfo1",                         "a record with no '='" },
+            { "nxspc1;=0123456789abcdef",            "a record with an empty key" },
+            { "nxspc1;lfo1=0123456789abcde",         "a 15-digit grid" },
+            { "nxspc1;lfo1=0123456789abcdefa",       "a 17-digit grid" },
+            { "nxspc1;lfo1=0123456789ABCDEF",        "an UPPERCASE grid (read is strict, so read and write are inverses)" },
+            { "nxspc1;lfo1=0123456789abcdeg",        "a non-hex grid digit" },
+            { "nxspc1;lfo1=0000000000000000;lfo1=1000000000000000", "a duplicate key (choosing one of two is guessing)" },
+            { "nxspc1;smooth1=1001",                 "a smooth over 1000" },
+            { "nxspc1;smooth1=0250",                 "a leading zero (two spellings of one number)" },
+            { "nxspc1;smooth1=",                     "an empty smooth" },
+            { "nxspc1;smooth1=25.0",                 "a DECIMAL POINT — the locale hazard the integer encoding exists to avoid" },
+            { "nxspc1;smooth1=-1",                   "a negative smooth" },
+            { "nxspc1;cc=128",                       "a controller number over 127" },
+            { "nxspc1;cc=007",                       "a leading-zero controller number" },
+            { "nxspc1;wtA=0123456789abcde",          "a 15-digit content hash" },
+            { "nxspc1;wtpathA=/tmp/a b",             "a raw space in a path (a byte the writer would have escaped)" },
+            { "nxspc1;wtpathA=/tmp/a%2",             "a truncated escape" },
+            { "nxspc1;wtpathA=/tmp/a%zz",            "a non-hex escape" },
+            { "nxspc1;wtpathA=/tmp/a%00b",           "an escape decoding to NUL" },
+            { "nxspc1;wtpathA=",                     "an empty path" },
+        };
+        int refused = 0;
+        for (const Bad& t : bad) {
+            const bool ok = q->setStateString(t.s);
+            if (ok) CHECK(false, "accepted a state it must refuse: %s", t.why);
+            else    ++refused;
+        }
+        CHECK(refused == (int)(sizeof bad / sizeof bad[0]),
+              "all %d malformed states are refused", (int)(sizeof bad / sizeof bad[0]));
+        CHECK(q->stateString() == good,
+              "and a refusal changed NOTHING: the state is still the one that was "
+              "accepted\n        got: %s", q->stateString().c_str());
+    }
+
+    // Forward compatibility: a record this build does not know is SKIPPED, and
+    // the ones beside it still apply. That is the whole reason the format is
+    // key=value and not positional.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            CHECK(q->setStateString("nxspc1;lfo9=deadbeefdeadbeef;smooth1=500;"
+                                    "future=whatever42"),
+                  "records from a later build are skipped, not refused");
+            CHECK(q->stateString() == "nxspc1;smooth1=500",
+                  "...and this build re-emits only what it understands (got \"%s\")",
+                  q->stateString().c_str());
+        }
+    }
+
+    // A path with every byte class the escaper cares about, through the
+    // SAMPLER'S escaper — the same function, not a second one.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            const std::string st = "nxspc1;wtA=00000000000000ff;"
+                                   "wtpathA=/tmp/a%20b%3Bc%2Cd%3Ae%3Df%25g%09h";
+            CHECK(q->setStateString(st), "a path carrying space ; , : = %% and a tab parses");
+            CHECK(q->stateString() == st,
+                  "...and re-escapes to the identical bytes (uppercase hex, the "
+                  "sampler's spelling)\n        got: %s", q->stateString().c_str());
+        }
+    }
+
+    // loadPreset resets STATE as well as parameters. Deliberately unlike the
+    // sampler, which keeps its file: a wavetable and a drawn grid are sound
+    // design, and sound design is what a preset replaces.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            q->setStateString("nxspc1;lfo1=0123456789abcdef;smooth1=250;cc=74");
+            q->loadPreset(0);                          // Init: zero overrides
+            CHECK(q->stateString().empty(),
+                  "loadPreset(Init) resets every state block to its default too "
+                  "(got \"%s\")", q->stateString().c_str());
+        }
+    }
+
+    // ...and a preset row that CARRIES state hands it over. Bank 2 is authored
+    // with SPLFO/SPWTA/SPCC rows; at least one of them must reach the device,
+    // or the row format is a no-op nobody would notice.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        int withState = 0, withGrid = 0, withCC = 0, withWt = 0;
+        if (q) for (int i = 49; i < q->presetCount(); ++i) {
+            q->loadPreset(i);
+            const std::string st = q->stateString();
+            if (st.empty()) continue;
+            ++withState;
+            if (st.find(";lfo") != std::string::npos) ++withGrid;
+            if (st.find(";cc=") != std::string::npos) ++withCC;
+            if (st.find(";wt")  != std::string::npos) ++withWt;
+        }
+        CHECK(withState > 0, "%d bank-2 presets carry state through the SPLFO/SPWTA/SPCC "
+                             "macros", withState);
+        CHECK(withGrid > 0, "%d of them carry a drawn grid", withGrid);
+        CHECK(withCC > 0, "%d of them learn a controller", withCC);
+        CHECK(withWt > 0, "%d of them name a custom wavetable", withWt);
+    }
+
+    // The state is a state: two instances given the same string render the
+    // same audio, which is the only property a state string actually promises.
+    {
+        auto a = reg.instantiate(*d, kSR, kBlock);
+        auto b2 = reg.instantiate(*d, kSR, kBlock);
+        if (a && b2) {
+            for (auto* q : { a.get(), b2.get() }) {
+                spBusyPatch(*q);
+                q->setParam(37, 5.f);                 // LFO Shape = Custom
+                q->setStateString("nxspc1;lfo1=08c4f6a20d9315be;smooth1=250");
+            }
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, spScript(), 9000, kBlock, aL, aR, 120.0);
+            spRender(*b2, spScript(), 9000, kBlock, bL, bR, 120.0);
+            CHECK(spV3Peak(aL, 0, 9000) > 0.02f, "the state-restored render is not silent");
+            CHECK(spV2MaxDiff(aL, bL) == 0.f && spV2MaxDiff(aR, bR) == 0.f,
+                  "two instances given the same state string render bit-identically");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3CustomLfo(PluginRegistry& reg) {
+    banner("Spectra v3: the drawable 16-step LFO (shape 5)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // One cycle a second at 48 kHz is 3000 samples a step, which is wide
+    // enough to read a 256-sample probe out of the middle of.
+    const int kStep = 3000;
+    const int kFrames = 16 * kStep + 2000;
+
+    auto build = [&](const char* grid, int smoothMilli, f32 amt) {
+        auto s = spV3Probe(reg, *d);
+        if (!s) return s;
+        s->setParam(spIdx(*s, "LFO Shape"), 5.f);
+        s->setParam(spIdx(*s, "LFO Sync"), 0.f);
+        s->setParam(spIdx(*s, "LFO Rate"), 1.f);
+        spV3Slot(*s, 0, 1 /*LFO1*/, 5 /*A Level*/, amt);
+        if (grid) {
+            char st[128];
+            std::snprintf(st, sizeof st, "nxspc1;lfo1=%s;smooth1=%d", grid, smoothMilli);
+            if (smoothMilli == 0) std::snprintf(st, sizeof st, "nxspc1;lfo1=%s", grid);
+            s->setStateString(st);
+        }
+        return s;
+    };
+
+    // --- 1. shape 5 with NO grid in the state is not malformed: the grid reads
+    //        as its default, all zeros, and the LFO is silent. An all-zero grid
+    //        MUST be silence — that is the reason the domain is unipolar.
+    {
+        auto s = build(nullptr, 0, 1.f);
+        std::vector<f32> L, R;
+        if (s) spRender(*s, spV3Note(), 8000, kBlock, L, R);
+        CHECK(s && spV3Peak(L, 0, 8000) == 0.f,
+              "shape 5 with no grid in the state is SILENT, not malformed (peak %.9f)",
+              s ? (double)spV3Peak(L, 0, 8000) : -1.0);
+    }
+
+    // --- 2. the sixteen levels, read out of the audio. L(d) = d/15 exactly,
+    //        digit 0 is 0.0 and digit 15 is 1.0.
+    {
+        const char* grid = "0369cf0369cf0369";     // 0,3,6,9,12,15 repeating
+        const u8 want[16] = { 0,3,6,9,12,15, 0,3,6,9,12,15, 0,3,6,9 };
+        auto s = build(grid, 0, 1.f);
+        std::vector<f32> L, R;
+        if (!s) return;
+        spRender(*s, spV3Note(), kFrames, kBlock, L, R);
+
+        f32 mx = 0.f;
+        f32 probe[16];
+        for (int k = 0; k < 16; ++k) {
+            probe[k] = spV3Peak(L, k * kStep + kStep / 2 - 128, 256);
+            mx = std::fmax(mx, probe[k]);
+        }
+        CHECK(mx > 0.05f, "the drawn-grid render is not silent (max probe %.4f)", (double)mx);
+        f64 worst = 0.0;
+        int bad = 0;
+        for (int k = 0; k < 16; ++k) {
+            const f64 got = (f64)probe[k] / (f64)mx;
+            const f64 exp = (f64)want[k] / 15.0;
+            worst = std::fmax(worst, std::fabs(got - exp));
+            if (std::fabs(got - exp) > 0.04) {
+                CHECK(false, "step %d reads %.4f, the grid digit %u says %.4f",
+                      k, got, (unsigned)want[k], exp);
+                ++bad;
+            }
+        }
+        CHECK(bad == 0, "all sixteen steps read L(d) = d/15 out of the audio "
+                        "(worst error %.4f)", worst);
+
+        // ...and the SCALE is absolute, not merely proportional. Normalising by
+        // the render's own maximum would let L(d) = d/16 pass unnoticed, so the
+        // full-scale digit is calibrated against an unmodulated A Level of 1:
+        // digit 15 is exactly 1.0 and digit 0 is exactly 0.0, which is what
+        // makes an all-zero grid silence and a full grid a full-scale source.
+        {
+            auto cal = spV3Probe(reg, *d);
+            if (cal) {
+                cal->setParam(spIdx(*cal, "A Level"), 1.f);
+                std::vector<f32> cL, cR;
+                spRender(*cal, spV3Note(), 8000, kBlock, cL, cR);
+                const f32 unit = spV3Peak(cL, 4000, 256);
+                CHECK(unit > 0.05f, "the absolute calibration reads %.4f", (double)unit);
+                CHECK(std::fabs((f64)mx / unit - 1.0) < 0.02,
+                      "digit f is L = 1.0 on the destination's OWN scale, not merely the "
+                      "loudest step (%.4f of an unmodulated A Level of 1)",
+                      (double)(mx / unit));
+                CHECK(std::fabs((f64)probe[1] / unit - 3.0 / 15.0) < 0.02,
+                      "digit 3 is 3/15 = %.4f absolute (reads %.4f)",
+                      3.0 / 15.0, (double)(probe[1] / unit));
+            }
+        }
+        CHECK(probe[0] == 0.f && probe[6] == 0.f && probe[12] == 0.f,
+              "digit 0 is EXACTLY 0.0 — the three steps drawn at zero are bit-silent");
+
+        // The leftmost digit is step 0, the step in effect at phase 0. Read at
+        // the very start of the render, before the LFO has moved.
+        auto s2 = build("f00000000000000f", 0, 1.f);
+        std::vector<f32> L2, R2;
+        if (s2) {
+            spRender(*s2, spV3Note(), kFrames, kBlock, L2, R2);
+            const f32 first = spV3Peak(L2, 200, 256);
+            const f32 last  = spV3Peak(L2, 15 * kStep + kStep / 2, 256);
+            const f32 mid   = spV3Peak(L2, 8 * kStep + kStep / 2, 256);
+            CHECK(first > 0.05f && last > 0.05f && mid == 0.f,
+                  "the LEFTMOST digit is step 0 and the rightmost is step 15 "
+                  "(first %.4f, middle %.4f, last %.4f)",
+                  (double)first, (double)mid, (double)last);
+        }
+    }
+
+    // --- 3. UNIPOLAR, and the check is crisp: a negative amount on a source
+    //        that never goes below zero can only ever clamp A Level to 0, so
+    //        the render is silent. The same slot with a bipolar shape is not.
+    {
+        auto uni = build("0369cf0369cf0369", 0, -1.f);
+        std::vector<f32> L, R;
+        if (uni) spRender(*uni, spV3Note(), kFrames, kBlock, L, R);
+        CHECK(uni && spV3Peak(L, 0, kFrames) == 0.f,
+              "a drawn grid at amount -1 is SILENT: its domain is [0..1], not [-1..1] "
+              "(peak %.9f)", uni ? (double)spV3Peak(L, 0, kFrames) : -1.0);
+
+        auto bip = spV3Probe(reg, *d);
+        if (bip) {
+            bip->setParam(spIdx(*bip, "LFO Shape"), 0.f);      // sine, bipolar
+            bip->setParam(spIdx(*bip, "LFO Rate"), 1.f);
+            spV3Slot(*bip, 0, 1, 5, -1.f);
+            std::vector<f32> bL, bR;
+            spRender(*bip, spV3Note(), kFrames, kBlock, bL, bR);
+            CHECK(spV3Peak(bL, 0, kFrames) > 0.05f,
+                  "...while shapes 0..4 keep the [-1..1] domain they have always had "
+                  "(peak %.4f)", (double)spV3Peak(bL, 0, kFrames));
+        }
+    }
+
+    // --- 4. smooth. s = 0 is a HARD STAIRCASE selected outright; s > 0 lags.
+    {
+        // Grid f then 0: one full-scale step followed by a zero, so the
+        // boundary at 1*3000 is the sharpest edge the grid can make.
+        const char* grid = "f0f0f0f0f0f0f0f0";
+        auto hard = build(grid, 0, 1.f);
+        auto soft = build(grid, 500, 1.f);
+        std::vector<f32> hL, hR, sL, sR;
+        if (!hard || !soft) return;
+        spRender(*hard, spV3Note(), kFrames, kBlock, hL, hR);
+        spRender(*soft, spV3Note(), kFrames, kBlock, sL, sR);
+
+        const int edge = kStep;                 // f -> 0
+        const f32 hAfter = spV3Peak(hL, edge + 60, 192);
+        const f32 hDeep  = spV3Peak(hL, edge + 1200, 512);
+        const f32 sAfter = spV3Peak(sL, edge + 60, 192);
+        const f32 hFull  = spV3Peak(hL, kStep / 2 - 128, 256);
+        CHECK(hFull > 0.05f, "the staircase render is not silent (%.4f)", (double)hFull);
+        // The oscillator stops on the sample the step changes, so what is left
+        // just after the edge is the FILTER'S OWN TAIL and not a lag: it is
+        // three orders of magnitude down and gone entirely a step later, while
+        // the smoothed edge below is still a fifth of full scale.
+        CHECK(hAfter < 0.005f * hFull,
+              "smooth 0 is a hard staircase: the level is already down %.1f dB one "
+              "sample past the edge (only the filter's ring is left)",
+              20.0 * std::log10((double)(hAfter + 1e-12f) / (double)hFull));
+        CHECK(hDeep == 0.f,
+              "...and bit-silent well inside the zero step (%.9f)", (double)hDeep);
+        CHECK(sAfter > 0.15f * hFull,
+              "smooth 500 lags the same edge (%.4f of full scale %.4f)",
+              (double)(sAfter / hFull), (double)hFull);
+
+        // ...and it is a LAG and not a delay: it decays towards the new level
+        // rather than stepping there late.
+        const f32 s1 = spV3Peak(sL, edge + 60, 192);
+        const f32 s2 = spV3Peak(sL, edge + 600, 192);
+        const f32 s3 = spV3Peak(sL, edge + 1600, 192);
+        CHECK(s1 > s2 && s2 > s3,
+              "the smoothed edge decays monotonically (%.4f > %.4f > %.4f)",
+              (double)s1, (double)s2, (double)s3);
+
+        // The coefficient is continuous across its own default: a very small
+        // smooth is very nearly the staircase.
+        auto tiny = build(grid, 1, 1.f);
+        std::vector<f32> tL, tR;
+        if (tiny) {
+            spRender(*tiny, spV3Note(), kFrames, kBlock, tL, tR);
+            CHECK(spV3Peak(tL, edge + 60, 192) < 0.02f * hFull,
+                  "smooth 1/1000 is within a whisker of the s = 0 branch — the control "
+                  "is continuous across its default");
+        }
+    }
+
+    // --- 5. THE DIVISION IS THE WHOLE CYCLE, not one step. Sync 5 (1/4) at
+    //        120 bpm is a 0.5 s quarter note, so all sixteen steps run inside
+    //        24000 samples and the grid repeats twice in 48000.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            s->setParam(spIdx(*s, "LFO Shape"), 5.f);
+            s->setParam(spIdx(*s, "LFO Sync"), 5.f);          // 1/4
+            spV3Slot(*s, 0, 1, 5, 1.f);
+            s->setStateString("nxspc1;lfo1=f000000000000000");
+            std::vector<f32> L, R;
+            spRender(*s, spV3Note(), 60000, kBlock, L, R, 120.0);
+            // Step 0 is 1500 samples long; the pulse must recur every 24000.
+            const f32 p0 = spV3Peak(L, 200, 512);
+            const f32 p1 = spV3Peak(L, 24200, 512);
+            const f32 gap = spV3Peak(L, 12000, 512);
+            CHECK(p0 > 0.05f && p1 > 0.05f && gap == 0.f,
+                  "sync 1/4 runs ALL SIXTEEN steps inside one quarter note: the pulse "
+                  "is at 0 and 24000 and the middle is silent (%.4f / %.4f / %.9f)",
+                  (double)p0, (double)p1, (double)gap);
+        }
+    }
+
+    // --- 6. determinism: the grid is state and the step index is a projection
+    //        of the phase, so nothing here can carry between renders.
+    {
+        auto a = build("08c4f6a20d9315be", 250, 1.f);
+        auto b2 = build("08c4f6a20d9315be", 250, 1.f);
+        std::vector<f32> aL, aR, bL, bR;
+        if (a && b2) {
+            spRender(*a, spV3Note(), kFrames, kBlock, aL, aR);
+            spRender(*b2, spV3Note(), kFrames, kBlock, bL, bR);
+            CHECK(spV2MaxDiff(aL, bL) == 0.f,
+                  "two instances with the same grid and smooth render bit-identically");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3OneShot(PluginRegistry& reg) {
+    banner("Spectra v3: One-shot LFOs (ids 60/61/100) — an LFO that is an envelope");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    const int kStep = 3000;                    // 1 Hz, 16 steps, 48 kHz
+
+    // A rising 16-step ramp on LFO1, driving A Level. In Loop it sweeps and
+    // wraps; in One-shot it sweeps once and holds.
+    auto build = [&](int mode, int noteFrame) {
+        auto s = spV3Probe(reg, *d);
+        if (!s) return s;
+        s->setParam(spIdx(*s, "LFO Shape"), 5.f);
+        s->setParam(spIdx(*s, "LFO Sync"), 0.f);
+        s->setParam(spIdx(*s, "LFO Rate"), 1.f);
+        s->setParam(100, (f32)mode);                       // L1 Mode
+        spV3Slot(*s, 0, 1, 5, 1.f);
+        s->setStateString((std::string("nxspc1;lfo1=") + kSpV3RampGrid).c_str());
+        (void)noteFrame;
+        return s;
+    };
+
+    // --- 1. Loop mode is v2 verbatim: setting id 100 to 0 explicitly renders
+    //        identically to never having touched it. That is the whole
+    //        bit-identity claim for this feature, in one check.
+    {
+        auto a = build(0, 0);
+        auto b2 = spV3Probe(reg, *d);
+        if (a && b2) {
+            b2->setParam(spIdx(*b2, "LFO Shape"), 5.f);
+            b2->setParam(spIdx(*b2, "LFO Rate"), 1.f);
+            spV3Slot(*b2, 0, 1, 5, 1.f);
+            b2->setStateString((std::string("nxspc1;lfo1=") + kSpV3RampGrid).c_str());
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, spV3Note(), 60000, kBlock, aL, aR);
+            spRender(*b2, spV3Note(), 60000, kBlock, bL, bR);
+            CHECK(spV2MaxDiff(aL, bL) == 0.f,
+                  "L1 Mode = Loop is bit-identical to a build that never had the "
+                  "parameter");
+        }
+    }
+
+    // --- 2. one-shot RAMPS ONCE AND CLAMPS; loop wraps.
+    {
+        auto loop = build(0, 0);
+        auto once = build(1, 0);
+        std::vector<f32> lL, lR, oL, oR;
+        if (!loop || !once) return;
+        spRender(*loop, spV3Note(), 100000, kBlock, lL, lR);
+        spRender(*once, spV3Note(), 100000, kBlock, oL, oR);
+
+        f32 mx = 0.f;
+        f32 pr[16];
+        for (int k = 0; k < 16; ++k) {
+            pr[k] = spV3Peak(oL, k * kStep + kStep / 2 - 128, 256);
+            mx = std::fmax(mx, pr[k]);
+        }
+        CHECK(mx > 0.05f, "the one-shot ramp is not silent (max %.4f)", (double)mx);
+        int bad = 0;
+        for (int k = 0; k < 16; ++k)
+            if (std::fabs((f64)pr[k] / mx - (f64)k / 15.0) > 0.04) ++bad;
+        CHECK(bad == 0, "the one-shot climbs its sixteen steps exactly once (%d off)", bad);
+
+        // Past the end of the cycle: one-shot HOLDS phase 1.0 (step 15),
+        // loop has wrapped back to step 0, which this grid draws at zero.
+        const f32 oHold = spV3Peak(oL, 60000, 512);
+        const f32 lWrap = spV3Peak(lL, 48200, 512);
+        CHECK(std::fabs((f64)oHold / mx - 1.0) < 0.04,
+              "one-shot CLAMPS at 1.0 and holds it for as long as the voice lives "
+              "(%.4f of full scale, 12500 samples past the end)", (double)(oHold / mx));
+        CHECK(lWrap == 0.f,
+              "...while Loop has wrapped back to step 0 (%.9f)", (double)lWrap);
+        const f32 oLater = spV3Peak(oL, 95000, 512);
+        CHECK(std::fabs((f64)oLater - (f64)oHold) < 0.02 * mx,
+              "and it is still holding a second later");
+    }
+
+    // --- 3. THE ORIGIN IS THE NOTE, NOT THE CLOCK. The same ramp measured
+    //        relative to a note-on at 17000 is the same ramp.
+    {
+        auto once = build(1, 0);
+        std::vector<f32> L, R;
+        if (once) {
+            spRender(*once, spV3Note(17000), 100000, kBlock, L, R);
+            f32 mx = 0.f, pr[16];
+            for (int k = 0; k < 16; ++k) {
+                pr[k] = spV3Peak(L, 17000 + k * kStep + kStep / 2 - 128, 256);
+                mx = std::fmax(mx, pr[k]);
+            }
+            int bad = 0;
+            for (int k = 0; k < 16; ++k)
+                if (std::fabs((f64)pr[k] / mx - (f64)k / 15.0) > 0.05) ++bad;
+            CHECK(bad == 0 && mx > 0.05f,
+                  "a one-shot's phase is 0 at the NOTE-ON's stamped sample, whatever the "
+                  "transport is doing (%d steps off)", bad);
+            CHECK(spV3Peak(L, 0, 16800) == 0.f,
+                  "...and nothing sounds before the note");
+        }
+    }
+
+    // --- 4. SYNC SETS THE SPEED, NOT THE ALIGNMENT. A one-shot locked to the
+    //        bar line would not be an envelope.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            s->setParam(spIdx(*s, "LFO Shape"), 5.f);
+            s->setParam(spIdx(*s, "LFO Sync"), 3.f);          // one bar = 2 s @ 120
+            s->setParam(100, 1.f);
+            spV3Slot(*s, 0, 1, 5, 1.f);
+            s->setStateString("nxspc1;lfo1=0000000000000000");
+            s->setStateString((std::string("nxspc1;lfo1=") + kSpV3RampGrid).c_str());
+            std::vector<f32> L, R;
+            // A note a quarter of the way into the bar: if sync aligned the
+            // phase, the ramp would start a quarter of the way up.
+            spRender(*s, spV3Note(24000), 160000, kBlock, L, R, 120.0);
+            const f32 atOn   = spV3Peak(L, 24100, 400);
+            const f32 atHalf = spV3Peak(L, 24000 + 48000, 512);
+            const f32 mx     = spV3Peak(L, 24000, 136000);
+            CHECK(mx > 0.05f, "the synced one-shot is not silent (%.4f)", (double)mx);
+            CHECK(atOn / mx < 0.10f,
+                  "a synced one-shot starts at phase 0 AT THE NOTE, not at the bar's "
+                  "phase (%.4f of full scale)", (double)(atOn / mx));
+            CHECK(std::fabs((f64)atHalf / mx - 8.0 / 15.0) < 0.08,
+                  "...and its SPEED is the division: half a bar in, it is half way up "
+                  "(%.4f, want %.4f)", (double)(atHalf / mx), 8.0 / 15.0);
+        }
+    }
+
+    // --- 5. IT RETRIGGERS EXACTLY WHEN ENV1 DOES. Mono retriggers on every
+    //        note-on; a Legato overlap does not; a note-off fallback does not.
+    {
+        auto mk = [&](int voiceMode) {
+            auto s = build(1, 0);
+            if (s) {
+                s->setParam(spIdx(*s, "Voice Mode"), (f32)voiceMode);
+                s->setParam(spIdx(*s, "Glide"), 0.f);
+            }
+            return s;
+        };
+        // Note A at 0, note B at 24000 while A is still held (an overlap).
+        const std::vector<SpEvent> ev = {
+            {     0, 0x90, 84, 127 },
+            { 24000, 0x90, 84, 100 },        // same note: Mono retrigger / Legato overlap
+        };
+        auto mono = mk(1);
+        auto lega = mk(2);
+        std::vector<f32> mL, mR, lL, lR;
+        if (mono && lega) {
+            spRender(*mono, ev, 100000, kBlock, mL, mR);
+            spRender(*lega, ev, 100000, kBlock, lL, lR);
+            const f32 mMax = spV3Peak(mL, 0, 100000);
+            const f32 lMax = spV3Peak(lL, 0, 100000);
+            // Just after the second note-on: a retrigger is back at step 0
+            // (level 0), a non-retrigger is still 8/15 of the way up.
+            const f32 mAfter = spV3Peak(mL, 24200, 400);
+            const f32 lAfter = spV3Peak(lL, 24200, 400);
+            CHECK(mMax > 0.05f && lMax > 0.05f, "both mono renders sound");
+            CHECK(mAfter / mMax < 0.10f,
+                  "Mono: every note-on retriggers the one-shot, exactly as it retriggers "
+                  "ENV1 (%.4f of full scale just after)", (double)(mAfter / mMax));
+            CHECK(std::fabs((f64)lAfter / lMax - 8.0 / 15.0) < 0.08,
+                  "Legato: an OVERLAPPED note-on does not retrigger it — a fallback and "
+                  "an overlap are not note-ons (%.4f, want %.4f)",
+                  (double)(lAfter / lMax), 8.0 / 15.0);
+        }
+
+        // The note-off fallback: hold two notes, release the newer. The
+        // surviving voice glides to the older note and keeps running.
+        auto leg2 = mk(2);
+        if (leg2) {
+            const std::vector<SpEvent> ev2 = {
+                {     0, 0x90, 84, 127 },
+                {  6000, 0x90, 79, 110 },
+                { 24000, 0x80, 79,   0 },      // fallback to 84, NOT a note-on
+            };
+            std::vector<f32> L, R;
+            spRender(*leg2, ev2, 100000, kBlock, L, R);
+            const f32 mx = spV3Peak(L, 0, 100000);
+            const f32 after = spV3Peak(L, 24400, 400);
+            CHECK(mx > 0.05f && std::fabs((f64)after / mx - 8.0 / 15.0) < 0.10,
+                  "a note-off FALLBACK does not retrigger it either (%.4f, want %.4f)",
+                  (double)(after / mx), 8.0 / 15.0);
+        }
+    }
+
+    // --- 6. S&H (shape 4) under one-shot: ONE draw, at note-on, held for the
+    //        life of the voice, and the value is the note's identity hash.
+    {
+        auto mk = [&](u8 note, int frame) {
+            auto s = spV3Probe(reg, *d);
+            if (!s) return s;
+            s->setParam(spIdx(*s, "LFO Shape"), 4.f);        // S&H
+            s->setParam(spIdx(*s, "LFO Rate"), 3.f);
+            s->setParam(100, 1.f);                           // one-shot
+            s->setParam(spIdx(*s, "A Level"), 0.5f);         // bipolar source
+            spV3Slot(*s, 0, 1, 5, 0.5f);
+            (void)note; (void)frame;
+            return s;
+        };
+        f32 val[4] = {};
+        bool ok = true;
+        const u8 notes[4] = { 84, 85, 84, 86 };
+        const int frames[4] = { 0, 0, 5000, 0 };
+        for (int i = 0; i < 4; ++i) {
+            auto s = mk(notes[i], frames[i]);
+            if (!s) { ok = false; break; }
+            std::vector<f32> L, R;
+            spRender(*s, spV3Note(frames[i], notes[i]), 40000, kBlock, L, R);
+            const int from = frames[i] + 2000;
+            const f32 a = spV3Peak(L, from, 512);
+            const f32 b3 = spV3Peak(L, from + 20000, 512);
+            if (std::fabs((f64)a - (f64)b3) > 0.03 * std::fmax(a, 1e-6f)) ok = false;
+            val[i] = a;
+        }
+        CHECK(ok, "a one-shot S&H draws ONCE at note-on and holds — it wraps exactly "
+                  "once, at phase 0");
+        CHECK(!(val[0] == val[1] && val[1] == val[2] && val[2] == val[3]),
+              "...and the draw is the NOTE'S identity (channel, note, stamped sample), "
+              "so different notes draw differently (%.4f %.4f %.4f %.4f)",
+              (double)val[0], (double)val[1], (double)val[2], (double)val[3]);
+
+        // The same note at the same sample, twice: identical, because there is
+        // no RNG state carried between notes.
+        auto a = mk(84, 0), b4 = mk(84, 0);
+        if (a && b4) {
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, spV3Note(0, 84), 40000, kBlock, aL, aR);
+            spRender(*b4, spV3Note(0, 84), 40000, kBlock, bL, bR);
+            CHECK(spV2MaxDiff(aL, bL) == 0.f,
+                  "the same note at the same sample draws the same value in two "
+                  "instances — no RNG state, no clock");
+        }
+    }
+
+    // --- 7. all three LFOs have a mode, and L2/L3's live on the reserved ids
+    //        the block that owns them left behind.
+    {
+        bool all = true;
+        const int modeId[3] = { 100, 60, 61 };
+        const char* shapeN[3] = { "LFO Shape", "L2 Shape", "L3 Shape" };
+        const char* rateN[3]  = { "LFO Rate", "L2 Rate", "L3 Rate" };
+        const int srcOf[3]    = { 1, 2, 3 };
+        for (int j = 0; j < 3; ++j) {
+            auto s = spV3Probe(reg, *d);
+            if (!s) { all = false; break; }
+            s->setParam(spIdx(*s, shapeN[j]), 5.f);
+            s->setParam(spIdx(*s, rateN[j]), 1.f);
+            s->setParam(modeId[j], 1.f);
+            spV3Slot(*s, 0, srcOf[j], 5, 1.f);
+            char st[64];
+            std::snprintf(st, sizeof st, "nxspc1;lfo%d=%s", j + 1, kSpV3RampGrid);
+            s->setStateString(st);
+            std::vector<f32> L, R;
+            spRender(*s, spV3Note(), 100000, kBlock, L, R);
+            const f32 mx = spV3Peak(L, 0, 100000);
+            const f32 hold = spV3Peak(L, 80000, 512);
+            if (!(mx > 0.05f && std::fabs((f64)hold / mx - 1.0) < 0.05)) all = false;
+        }
+        CHECK(all, "LFO1 (id 100), LFO2 (id 60) and LFO3 (id 61) each ramp once and hold "
+                   "in One-shot, each through its own drawn grid");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3Midi(PluginRegistry& reg) {
+    banner("Spectra v3: MIDI as a modulation source (wheel, bend, one learned CC)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // --- 1. the mod wheel, through a slot.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            spV3Slot(*s, 0, 14 /*Mod Wheel*/, 5 /*A Level*/, 1.f);
+            const std::vector<SpEvent> ev = {
+                {     0, 0x90, 84, 127 },
+                { 12000, 0xB0,  1, 127 },
+                { 24000, 0xB0,  1,  64 },
+                { 36000, 0xB0,  1,   0 },
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 48000, kBlock, L, R);
+            const f32 before = spV3Peak(L, 4000, 512);
+            const f32 full   = spV3Peak(L, 16000, 512);
+            const f32 half   = spV3Peak(L, 28000, 512);
+            const f32 off    = spV3Peak(L, 40000, 512);
+            CHECK(before == 0.f, "the wheel is 0 after prepare() (%.9f)", (double)before);
+            // Absolute, not proportional: a wheel scaled by anything but 1/127
+            // would keep every ratio below and still be wrong.
+            auto cal = spV3Probe(reg, *d);
+            f32 unit = 0.f;
+            if (cal) {
+                cal->setParam(spIdx(*cal, "A Level"), 1.f);
+                std::vector<f32> cL, cR;
+                spRender(*cal, spV3Note(), 8000, kBlock, cL, cR);
+                unit = spV3Peak(cL, 4000, 512);
+            }
+            CHECK(unit > 0.05f && std::fabs((f64)full / unit - 1.0) < 0.02,
+                  "CC 1 at 127 opens the destination FULLY: w = 127/127 = 1 exactly "
+                  "(%.4f of an unmodulated A Level of 1)", (double)(full / unit));
+            CHECK(std::fabs((f64)half / full - 64.0 / 127.0) < 0.04,
+                  "...and w = data2/127 exactly (%.4f at 64, want %.4f)",
+                  (double)(half / full), 64.0 / 127.0);
+            CHECK(off == 0.f, "CC 1 at 0 closes it again (%.9f)", (double)off);
+        }
+    }
+
+    // --- 2. a wheel NO SLOT READS changes nothing. That is the v2 gate for
+    //        every new MIDI source but bend, in one measurement.
+    {
+        auto a = spV3Probe(reg, *d);
+        auto b2 = spV3Probe(reg, *d);
+        if (a && b2) {
+            for (auto* q : { a.get(), b2.get() }) {
+                spBusyPatch(*q);
+                q->setParam(spIdx(*q, "Master"), 0.6f);
+            }
+            std::vector<SpEvent> plain = spScript();
+            std::vector<SpEvent> noisy = plain;
+            for (int f = 500; f < 11000; f += 137)
+                noisy.push_back({ f, 0xB0, 1, (u8)((f / 137) & 0x7F) });
+            for (int f = 700; f < 11000; f += 211)
+                noisy.push_back({ f, 0xB0, 74, (u8)((f / 211) & 0x7F) });
+            std::sort(noisy.begin(), noisy.end(),
+                      [](const SpEvent& x, const SpEvent& y) { return x.frame < y.frame; });
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, plain, 14000, kBlock, aL, aR, 120.0);
+            spRender(*b2, noisy, 14000, kBlock, bL, bR, 120.0);
+            CHECK(spV3Peak(aL, 0, 14000) > 0.05f, "the comparison render is not silent");
+            CHECK(spV2MaxDiff(aL, bL) == 0.f && spV2MaxDiff(aR, bR) == 0.f,
+                  "a stream full of CC 1 and CC 74 that no slot reads renders "
+                  "BIT-IDENTICALLY to one with none — every new source but bend is "
+                  "inert by construction");
+        }
+    }
+
+    // --- 3. pitch bend, hardwired through Bend Range (id 99). A wheel at full
+    //        travel down is exactly -1, so the pitch moves by exactly the range.
+    {
+        auto mk = [&](f32 range) {
+            auto s = spV2Base(reg, *d);
+            if (s) {
+                s->setParam(spIdx(*s, "A Table"), 0.f);
+                s->setParam(spIdx(*s, "A Unison"), 1.f);
+                s->setParam(99, range);
+            }
+            return s;
+        };
+        const std::vector<SpEvent> ev = {
+            { 0, 0xE0, 0, 0 },              // v14 = 0 -> b = -1
+            { 1, 0x90, 69, 127 },           // A4 = 440 Hz
+        };
+        auto s = mk(2.f);
+        std::vector<f32> L, R;
+        if (s) {
+            spRender(*s, ev, 24000, kBlock, L, R);
+            const f64 at440 = tBinMag(L, 8000, 8192, 440.0);
+            const f64 at392 = tBinMag(L, 8000, 8192, 440.0 * std::pow(2.0, -2.0 / 12.0));
+            CHECK(at392 > 4.0 * at440,
+                  "Bend Range 2 with the wheel full down moves A4 to G4: %.5f at 392 Hz "
+                  "against %.5f at 440", at392, at440);
+        }
+        // Range 0 is inert and bit-identical to v2.
+        auto z0 = mk(0.f);
+        auto z1 = mk(0.f);
+        if (z0 && z1) {
+            std::vector<f32> zL, zR, nL, nR;
+            spRender(*z0, ev, 24000, kBlock, zL, zR);
+            spRender(*z1, { { 1, 0x90, 69, 127 } }, 24000, kBlock, nL, nR);
+            CHECK(spV2MaxDiff(zL, nL) == 0.f,
+                  "Bend Range 0 is INERT: the same stream with and without bend bytes "
+                  "renders bit-identically");
+        }
+        // ...and 24 st is the top of the range.
+        auto wide = mk(24.f);
+        if (wide) {
+            std::vector<f32> wL, wR;
+            spRender(*wide, ev, 24000, kBlock, wL, wR);
+            const f64 at110 = tBinMag(wL, 8000, 8192, 110.0);
+            const f64 at440b = tBinMag(wL, 8000, 8192, 440.0);
+            // 440 is the fourth harmonic of 110, so a saw down there still has
+            // real energy at the old fundamental; the test is which one leads.
+            CHECK(at110 > 2.5 * at440b,
+                  "Bend Range 24 drops A4 two octaves to A2 (%.5f at 110 Hz against "
+                  "%.5f at 440)", at110, at440b);
+        }
+    }
+
+    // --- 4. the wheel reaches the pitch BEFORE Coarse/Fine, so the sub follows
+    //        it exactly as it follows vibrato.
+    {
+        auto s = spV2Base(reg, *d);
+        if (s) {
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            s->setParam(spIdx(*s, "Sub"), 1.f);
+            s->setParam(spIdx(*s, "A Coarse"), 12.f);     // must NOT move the sub
+            s->setParam(99, 2.f);
+            const std::vector<SpEvent> ev = { { 0, 0xE0, 0, 0 }, { 1, 0x90, 69, 127 } };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 24000, kBlock, L, R);
+            const f64 at220 = tBinMag(L, 8000, 8192, 220.0);
+            const f64 at196 = tBinMag(L, 8000, 8192, 220.0 * std::pow(2.0, -2.0 / 12.0));
+            CHECK(at196 > 4.0 * at220,
+                  "the sub follows the wheel (%.5f at 196 Hz against %.5f at 220) — the "
+                  "bend lands on the POST-GLIDE pitch, before per-oscillator tuning",
+                  at196, at220);
+        }
+    }
+
+    // --- 5. bend as a matrix source (15), live at the same time as the
+    //        hardwired action. Setting Bend Range to 0 disables only the first.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            s->setParam(99, 0.f);
+            s->setParam(spIdx(*s, "A Level"), 0.5f);
+            spV3Slot(*s, 0, 15 /*Pitch Bend*/, 5 /*A Level*/, 0.5f);
+            const std::vector<SpEvent> ev = {
+                {     0, 0x90, 84, 127 },
+                { 12000, 0xE0, 0, 0 },                    // -1
+                { 24000, 0xE0, 0x7F, 0x7F },              // +0.999878
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 40000, kBlock, L, R);
+            const f32 centre = spV3Peak(L, 6000, 512);
+            const f32 down   = spV3Peak(L, 18000, 512);
+            const f32 up     = spV3Peak(L, 34000, 512);
+            CHECK(centre > 0.05f, "bend reads 0 = CENTRE after prepare (%.4f)", (double)centre);
+            CHECK(down == 0.f, "full down (-1) closes A Level to 0 (%.9f)", (double)down);
+            CHECK(std::fabs((f64)up / centre - 2.0) < 0.06,
+                  "full up (+0.999878) doubles it — the asymmetry is MIDI's and is not "
+                  "rescaled, so the centre stays exactly 0 (%.4f)", (double)(up / centre));
+        }
+    }
+
+    // --- 6. the learned CC. There is exactly ONE learn slot: every slot whose
+    //        source is 16 reads the same controller.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            spV3Slot(*s, 0, 16 /*MIDI CC*/, 5, 1.f);
+            const std::vector<SpEvent> ev = {
+                {     0, 0x90, 84, 127 },
+                { 12000, 0xB0, 74, 127 },
+                { 24000, 0xB0, 75,  40 },      // a DIFFERENT value on a
+                                               // controller nobody learned
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 36000, kBlock, L, R);
+            CHECK(spV3Peak(L, 0, 36000) == 0.f,
+                  "with no CC learned, source 16 is constant 0 — inert like every other "
+                  "v3 default");
+
+            auto q = spV3Probe(reg, *d);
+            if (q) {
+                spV3Slot(*q, 0, 16, 5, 1.f);
+                q->setStateString("nxspc1;cc=74");
+                std::vector<f32> qL, qR;
+                spRender(*q, ev, 36000, kBlock, qL, qR);
+                const f32 before = spV3Peak(qL, 4000, 512);
+                const f32 after  = spV3Peak(qL, 16000, 512);
+                const f32 other  = spV3Peak(qL, 30000, 512);
+                CHECK(before == 0.f && after > 0.05f,
+                      "the learned controller (cc=74, from the STATE) drives source 16 "
+                      "(%.9f before, %.4f after)", (double)before, (double)after);
+                CHECK(std::fabs((f64)other - (f64)after) < 0.02 * (f64)after,
+                      "...and CC 75 does not touch it — one learn slot, not one per slot");
+            }
+        }
+    }
+
+    // --- 7. CC 120 and 123 keep the meanings v1 gave them and do NOT feed the
+    //        three new sources, even when 123 is what somebody learned.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            spV3Slot(*s, 0, 16, 5, 1.f);
+            s->setStateString("nxspc1;cc=123");
+            const std::vector<SpEvent> ev = {
+                {     0, 0x90, 84, 127 },
+                { 12000, 0xB0, 123, 127 },
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 30000, kBlock, L, R);
+            CHECK(spV3Peak(L, 0, 30000) == 0.f,
+                  "a learned CC 123 is still ONLY All Notes Off: it does not feed "
+                  "source 16 (%.9f)", (double)spV3Peak(L, 0, 30000));
+        }
+    }
+
+    // --- 8. the queue's overflow rule. Past the cap a controller FOLDS into
+    //        one slot and lands at the block's last sample, so no flood of any
+    //        length can lose its current value.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            spV3Slot(*s, 0, 14 /*wheel*/, 5, 1.f);
+            std::vector<SpEvent> ev;
+            ev.push_back({ 0, 0x90, 84, 127 });
+            // One block, 200 note-ons of a note that is instantly released,
+            // then the wheel. The queue is long past full when it arrives.
+            for (int i = 0; i < 200; ++i) ev.push_back({ 512 + i % 200, 0x90, 40, 1 });
+            ev.push_back({ 700, 0xB0, 1, 127 });
+            std::sort(ev.begin(), ev.end(),
+                      [](const SpEvent& x, const SpEvent& y) { return x.frame < y.frame; });
+            std::vector<f32> L, R;
+            spRender(*s, ev, 30000, 1024, L, R);
+            CHECK(spV3Peak(L, 20000, 512) > 0.05f,
+                  "a wheel value that overflowed a full queue still lands, at the "
+                  "block's last sample (%.4f)", (double)spV3Peak(L, 20000, 512));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3Curves(PluginRegistry& reg) {
+    banner("Spectra v3: the per-slot matrix response curves (ids 101..108)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // Pitch bend is the source, because it is the one source the suite can set
+    // to an EXACT value: v14/8192 - 1 with v14 chosen by hand. Bend Range is 0
+    // throughout, so the wheel moves the curve under test and nothing else.
+    auto probe = [&](int curve, int v14, f32 base, f32 amt) {
+        auto s = spV3Probe(reg, *d);
+        if (!s) return 0.f;
+        s->setParam(99, 0.f);                              // bend does not move pitch
+        s->setParam(spIdx(*s, "A Level"), base);
+        spV3Slot(*s, 0, 15 /*Pitch Bend*/, 5 /*A Level*/, amt, curve);
+        const std::vector<SpEvent> ev = {
+            { 0, 0xE0, (u8)(v14 & 0x7F), (u8)((v14 >> 7) & 0x7F) },
+            { 1, 0x90, 84, 127 },
+        };
+        std::vector<f32> L, R;
+        spRender(*s, ev, 20000, kBlock, L, R);
+        return spV3Peak(L, 8000, 1024);
+    };
+
+    // The scale: A Level 1.0 with no modulation, which is what f(x) = 1 reads.
+    const f32 unit = probe(0, 8192, 1.f, 0.f);
+    CHECK(unit > 0.05f, "the curve probe is calibrated (full scale reads %.4f)", (double)unit);
+    if (!(unit > 0.f)) return;
+
+    // f(0) = 0 and f(1) = 1 for all three: a curve can never make an idle
+    // source contribute and can never change a full-scale source's reach.
+    {
+        bool zero = true, one = true;
+        for (int c = 0; c < 3; ++c) {
+            if (probe(c, 8192, 0.f, 1.f) != 0.f) zero = false;
+            if (std::fabs((f64)probe(c, 16383, 0.f, 1.f) / unit - 1.0) > 0.01) one = false;
+        }
+        CHECK(zero, "f(0) = 0 EXACTLY for Linear, Exp and S-curve — an idle source "
+                    "cannot be made to contribute");
+        CHECK(one, "f(1) = 1 for all three — a curve cannot change a full-scale "
+                   "source's reach");
+    }
+
+    // The formulas, at |u| = 0.5 and |u| = 0.25. Base 0.5 and amount 0.5, so
+    // the reading is 0.5 + 0.5 * sign(u) * f(|u|).
+    {
+        struct Pt { int v14; f64 u; };
+        const Pt pts[] = { { 12288, 0.5 }, { 10240, 0.25 }, { 4096, -0.5 }, { 6144, -0.25 } };
+        const char* nm[3] = { "Linear f(x)=x", "Exp f(x)=x*x", "S-curve f(x)=x*x*(3-2x)" };
+        int bad = 0;
+        f64 worst = 0.0;
+        for (int c = 0; c < 3; ++c) {
+            for (const Pt& pt : pts) {
+                const f64 x = std::fabs(pt.u);
+                const f64 f = c == 0 ? x : (c == 1 ? x * x : x * x * (3.0 - 2.0 * x));
+                const f64 want = 0.5 + 0.5 * (pt.u < 0 ? -f : f);
+                const f64 got  = (f64)probe(c, pt.v14, 0.5f, 0.5f) / unit;
+                worst = std::fmax(worst, std::fabs(got - want));
+                if (std::fabs(got - want) > 0.02) {
+                    CHECK(false, "%s at u = %+.2f reads %.4f, the contract says %.4f",
+                          nm[c], pt.u, got, want);
+                    ++bad;
+                }
+            }
+        }
+        CHECK(bad == 0, "all three curves match the contract's formulas at u = ±0.25 and "
+                        "±0.5 (worst error %.4f)", worst);
+    }
+
+    // The curve is applied SYMMETRICALLY about zero, so a bipolar source stays
+    // bipolar and zero stays zero.
+    {
+        bool sym = true, zero = true;
+        for (int c = 1; c < 3; ++c) {
+            const f64 up   = (f64)probe(c, 12288, 0.5f, 0.5f) / unit - 0.5;
+            const f64 down = (f64)probe(c, 4096,  0.5f, 0.5f) / unit - 0.5;
+            if (std::fabs(up + down) > 0.02) sym = false;
+            if (std::fabs((f64)probe(c, 8192, 0.5f, 0.5f) / unit - 0.5) > 0.01) zero = false;
+        }
+        CHECK(sym, "Exp and S-curve are symmetric about zero: sign(u)*f(|u|), so a "
+                   "bipolar source stays bipolar");
+        CHECK(zero, "...and zero stays zero for every curve");
+    }
+
+    // LINEAR IS A SELECTED BRANCH, not a multiply by one. Two renders, one with
+    // the curve parameter never touched and one set to 0 explicitly.
+    {
+        auto mk = [&](bool setCurve) {
+            auto s = spV3Probe(reg, *d);
+            if (!s) return s;
+            spBusyPatch(*s);
+            s->setParam(spIdx(*s, "Master"), 0.6f);
+            for (int k = 0; k < 8; ++k) {
+                s->setParam(68 + 3 * k, (f32)(1 + k % 13));
+                s->setParam(69 + 3 * k, (f32)(1 + k * 2));
+                s->setParam(70 + 3 * k, 0.4f);
+                if (setCurve) s->setParam(101 + k, 0.f);
+            }
+            return s;
+        };
+        auto a = mk(false);
+        auto b2 = mk(true);
+        if (a && b2) {
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, spScript(), 14000, kBlock, aL, aR, 120.0);
+            spRender(*b2, spScript(), 14000, kBlock, bL, bR, 120.0);
+            CHECK(spV3Peak(aL, 0, 14000) > 0.05f, "the eight-slot render is not silent");
+            CHECK(spV2MaxDiff(aL, bL) == 0.f && spV2MaxDiff(aR, bR) == 0.f,
+                  "eight slots at Linear render bit-identically to a build with no curve "
+                  "parameter at all");
+        }
+    }
+
+    // Per SLOT, not per instrument: slot 0 curved and slot 1 linear on the same
+    // source must differ.
+    {
+        auto s = spV3Probe(reg, *d);
+        if (s) {
+            s->setParam(99, 0.f);
+            s->setParam(spIdx(*s, "A Level"), 0.f);
+            spV3Slot(*s, 0, 15, 5, 0.25f, 1);        // Exp
+            spV3Slot(*s, 1, 15, 5, 0.25f, 0);        // Linear
+            const std::vector<SpEvent> ev = {
+                { 0, 0xE0, (u8)(12288 & 0x7F), (u8)(12288 >> 7) },
+                { 1, 0x90, 84, 127 },
+            };
+            std::vector<f32> L, R;
+            spRender(*s, ev, 20000, kBlock, L, R);
+            const f64 got = (f64)spV3Peak(L, 8000, 1024) / unit;
+            const f64 want = 0.25 * 0.25 + 0.25 * 0.5;      // Exp + Linear
+            CHECK(std::fabs(got - want) < 0.02,
+                  "two slots on one source with different curves sum independently "
+                  "(%.4f, want %.4f) — the curve is the SLOT's response", got, want);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV3Refusal(PluginRegistry& reg) {
+    banner("Spectra v3: an unresolvable custom slot (the refusal contract)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // A patch on slot 8 that nothing resolves must render FACTORY TABLE 0 —
+    // "silence would be a worse lie than the wrong table" — and must render it
+    // identically to a patch that asked for table 0 in the first place.
+    auto mk = [&](int table, const char* state) {
+        auto s = spV2Base(reg, *d);
+        if (!s) return s;
+        s->setParam(spIdx(*s, "A Unison"), 1.f);
+        s->setParam(spIdx(*s, "A Position"), 0.4f);
+        s->setParam(0, (f32)table);
+        if (state) s->setStateString(state);
+        return s;
+    };
+    auto refused = mk(8, "nxspc1;wtA=0123456789abcdef;wtpathA=/tmp/nx-no-such-table.wav");
+    auto factory = mk(0, nullptr);
+    if (refused && factory) {
+        std::vector<f32> rL, rR, fL, fR;
+        spRender(*refused, spV3Note(), 20000, kBlock, rL, rR);
+        spRender(*factory, spV3Note(), 20000, kBlock, fL, fR);
+        CHECK(spV3Peak(rL, 0, 20000) > 0.05f,
+              "an unresolvable slot 8 still SOUNDS (%.4f)", (double)spV3Peak(rL, 0, 20000));
+        CHECK(spV2MaxDiff(rL, fL) == 0.f,
+              "...and it sounds exactly like factory table 0");
+        CHECK(refused->getParam(0) == 8.f,
+              "the parameter keeps its value — the set's intent is not edited by the "
+              "machine that could not honour it");
+        CHECK(refused->stateString() ==
+              "nxspc1;wtA=0123456789abcdef;wtpathA=/tmp/nx-no-such-table.wav",
+              "and the records are re-emitted verbatim, so a save here does not lose "
+              "the file's name\n        got: %s", refused->stateString().c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+// The v3 kitchen sink: v2's busy patch plus a drawn grid, a one-shot LFO, all
+// three MIDI sources and three different response curves, so that nothing the
+// revision added is switched off when the block size changes.
+static void spV3BusyPatch(PluginInstance& s) {
+    spV2BusyPatch(s);
+    s.setParam(spIdx(s, "LFO Shape"), 5.f);        // LFO1 drawn
+    s.setParam(spIdx(s, "L2 Shape"), 5.f);         // LFO2 drawn
+    s.setParam(100, 1.f);                          // L1 Mode = One-shot
+    s.setParam(61, 1.f);                           // L3 Mode = One-shot
+    s.setParam(99, 7.f);                           // Bend Range
+    spV3Slot(s, 0, 2  /*LFO2*/,      1  /*A Pos*/,     0.5f, 2);
+    spV3Slot(s, 1, 3  /*LFO3*/,      11 /*Cutoff*/,    0.4f, 1);
+    spV3Slot(s, 2, 14 /*Mod Wheel*/, 8  /*B Pitch*/,   0.3f, 2);
+    spV3Slot(s, 3, 13 /*Random*/,    16 /*Pan*/,       0.8f, 0);
+    spV3Slot(s, 4, 15 /*Pitch Bend*/,13 /*Drive*/,     0.5f, 1);
+    spV3Slot(s, 5, 16 /*MIDI CC*/,   12 /*Resonance*/, 0.3f, 2);
+    spV3Slot(s, 6, 1  /*LFO1*/,      10 /*Noise Lvl*/, 0.5f, 1);
+    spV3Slot(s, 7, 8  /*Aftertouch*/,17 /*LFO1 Rate*/, 0.4f, 2);
+    s.setStateString("nxspc1;lfo1=0369cf0369cf0369;lfo2=08c4f6a20d9315be;"
+                     "smooth1=250;smooth2=40;cc=74");
+}
+
+static void testSpectraV3Determinism(PluginRegistry& reg) {
+    banner("Spectra v3: block-size invariance with everything v3 added engaged");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    const int kFrames = 14000;
+    // The v2 script plus mid-block controller traffic: wheel, learned CC,
+    // pitch bend and channel pressure, none of them on a block boundary at any
+    // of the sizes below. If any of the four were applied when midi() was
+    // called rather than at its stamped sample, this cannot pass.
+    std::vector<SpEvent> ev = spScript();
+    ev.push_back({ 3000, 0xD0, 96, 0 });
+    ev.push_back({ 9000, 0xD0, 20, 0 });
+    for (int f = 137; f < kFrames; f += 379)
+        ev.push_back({ f, 0xB0, 1, (u8)((f / 379 * 13) & 0x7F) });
+    for (int f = 251; f < kFrames; f += 431)
+        ev.push_back({ f, 0xB0, 74, (u8)((f / 431 * 7) & 0x7F) });
+    for (int f = 89; f < kFrames; f += 293) {
+        const int v14 = (f * 37) & 0x3FFF;
+        ev.push_back({ f, 0xE0, (u8)(v14 & 0x7F), (u8)((v14 >> 7) & 0x7F) });
+    }
+    std::sort(ev.begin(), ev.end(),
+              [](const SpEvent& a, const SpEvent& b) { return a.frame < b.frame; });
+
+    for (int mode = 0; mode < 2; ++mode) {
+        auto build = [&]() {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (s) {
+                spV3BusyPatch(*s);
+                s->setParam(spIdx(*s, "Voice Mode"), mode ? 2.f : 0.f);
+                s->setParam(spIdx(*s, "Glide"), mode ? 900.f : 0.f);
+            }
+            return s;
+        };
+        auto ref = build();
+        if (!ref) return;
+        std::vector<f32> refL, refR, altL, altR;
+        spRender(*ref, ev, kFrames, kBlock, refL, refR, 120.0);
+        CHECK(spV3Peak(refL, 0, kFrames) > 0.02f,
+              "the v3 busy render (%s) is not silent (peak %.4f)",
+              mode ? "Legato" : "Poly", (double)spV3Peak(refL, 0, kFrames));
+
+        bool all = true;
+        for (int chunk : { 1, 7, 64, 300, 1024 }) {
+            auto alt = build();
+            if (!alt) break;
+            spRender(*alt, ev, kFrames, chunk, altL, altR, 120.0);
+            const f32 diff = std::fmax(spV2MaxDiff(refL, altL), spV2MaxDiff(refR, altR));
+            if (diff != 0.f) all = false;
+            CHECK(diff == 0.f, "v3 busy patch (%s): blocks of %d bit-identical to %d "
+                               "(max diff %.9f)", mode ? "Legato" : "Poly", chunk,
+                  kBlock, (double)diff);
+        }
+        CHECK(all, "drawn grids, one-shot LFOs, wheel/bend/CC traffic and three "
+                   "response curves all land on ABSOLUTE sample time (%s)",
+              mode ? "Legato" : "Poly");
+
+        auto a = build();
+        auto b2 = build();
+        if (a && b2) {
+            std::vector<f32> aL, aR, bL, bR;
+            spRender(*a, ev, kFrames, kBlock, aL, aR, 120.0);
+            spRender(*b2, ev, kFrames, kBlock, bL, bR, 120.0);
+            CHECK(spV2MaxDiff(aL, bL) == 0.f,
+                  "two fresh instances render the v3 busy patch identically (%s)",
+                  mode ? "Legato" : "Poly");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+// spRender with a TRUTHFUL transport: the beat advances with the samples, as a
+// host's does. spRender itself pushes a constant beat, which is a fine model of
+// an offline render and is deliberately kept that way — the drawn grid's step
+// index falls back to accumulated phase under exactly that host, and the tests
+// above rely on it. This one models the other host.
+static void spRenderBeat(PluginInstance& p, const std::vector<SpEvent>& ev, int frames,
+                         int chunk, std::vector<f32>& L, std::vector<f32>& R,
+                         f64 bpm, f64 beat0) {
+    L.assign((size_t)frames, 0.f);
+    R.assign((size_t)frames, 0.f);
+    std::vector<f32> bl((size_t)chunk, 0.f), br((size_t)chunk, 0.f);
+    size_t next = 0;
+    for (int i = 0; i < frames; i += chunk) {
+        const int n = (frames - i) < chunk ? (frames - i) : chunk;
+        while (next < ev.size() && ev[next].frame < i + n) {
+            const u8 m[3] = { ev[next].st, ev[next].a, ev[next].b };
+            p.midi(m, 3, ev[next].frame - i);
+            ++next;
+        }
+        p.setTransport(bpm, beat0 + (f64)i * bpm / (60.0 * kSR), true);
+        std::fill(bl.begin(), bl.begin() + n, 0.f);
+        std::fill(br.begin(), br.begin() + n, 0.f);
+        f32* o[2] = { bl.data(), br.data() };
+        p.process(nullptr, o, 2, n);
+        for (int j = 0; j < n; ++j) {
+            L[(size_t)(i + j)] = bl[(size_t)j];
+            R[(size_t)(i + j)] = br[(size_t)j];
+        }
+    }
+}
+
+static void testSpectraV3BeatLock(PluginRegistry& reg) {
+    banner("Spectra v3: the drawn grid locks to the transport beat (orchestrator ruling)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // One bar per cycle at 120 bpm: four beats, 96000 samples, 6000 a step.
+    // A render that STARTS at beat 2.0 is halfway through the bar, so the
+    // sequence must start on step 8 and not on step 0. That is the whole of
+    // what "a step sequencer locks to the grid" means, and it is the one
+    // behaviour the ruling adds over v2's rate-sync.
+    auto mk = [&]() {
+        auto s = spV3Probe(reg, *d);
+        if (!s) return s;
+        s->setParam(spIdx(*s, "LFO Shape"), 5.f);
+        s->setParam(spIdx(*s, "LFO Sync"), 3.f);          // one bar
+        spV3Slot(*s, 0, 1, 5, 1.f);
+        s->setStateString("nxspc1;lfo1=00000000f0000000");  // one pulse, at step 8
+        return s;
+    };
+
+    auto atZero = mk();
+    auto atTwo  = mk();
+    std::vector<f32> zL, zR, tL, tR;
+    if (atZero && atTwo) {
+        spRenderBeat(*atZero, spV3Note(), 60000, kBlock, zL, zR, 120.0, 0.0);
+        spRenderBeat(*atTwo,  spV3Note(), 60000, kBlock, tL, tR, 120.0, 2.0);
+        CHECK(spV3Peak(zL, 0, 20000) == 0.f,
+              "starting at beat 0, the step-8 pulse has not arrived in the first "
+              "20000 samples (%.9f)", (double)spV3Peak(zL, 0, 20000));
+        CHECK(spV3Peak(zL, 48200, 512) > 0.05f,
+              "...it arrives halfway through the bar, at 48000 (%.4f)",
+              (double)spV3Peak(zL, 48200, 512));
+        CHECK(spV3Peak(tL, 200, 512) > 0.05f,
+              "starting at BEAT 2.0 the sequence begins ON step 8 — the grid is "
+              "locked to the bar line, not to prepare() (%.4f)",
+              (double)spV3Peak(tL, 200, 512));
+        CHECK(spV3Peak(tL, 8000, 512) == 0.f,
+              "...and step 9 is silent again, so it is the grid and not a level "
+              "offset (%.9f)", (double)spV3Peak(tL, 8000, 512));
+    }
+
+    // ...and the lock is still block-size invariant, because the beat ANCHORS
+    // the counter and does not drive it.
+    {
+        auto ref = mk();
+        std::vector<f32> rL, rR, aL, aR;
+        if (ref) {
+            spRenderBeat(*ref, spV3Note(), 30000, kBlock, rL, rR, 120.0, 2.0);
+            bool all = true;
+            for (int chunk : { 1, 7, 64, 300, 1024 }) {
+                auto alt = mk();
+                if (!alt) break;
+                spRenderBeat(*alt, spV3Note(), 30000, chunk, aL, aR, 120.0, 2.0);
+                const f32 diff = spV2MaxDiff(rL, aL);
+                if (diff != 0.f) all = false;
+                CHECK(diff == 0.f, "beat-locked grid: blocks of %d bit-identical to %d "
+                                   "(max diff %.9f)", chunk, kBlock, (double)diff);
+            }
+            CHECK(all, "the transport ANCHORS the beat counter and never drives it, so "
+                       "a phase read once per block cannot quantise the render");
+        }
+    }
+
+    // Shapes 0..4 are NOT phase-locked: the ruling's point 1. A sine LFO
+    // rendered from beat 0 and from beat 2 is the same signal, because it rate
+    // syncs exactly as it did in v1 and v2.
+    {
+        auto mk2 = [&]() {
+            auto s = spV3Probe(reg, *d);
+            if (!s) return s;
+            s->setParam(spIdx(*s, "LFO Shape"), 0.f);      // sine
+            s->setParam(spIdx(*s, "LFO Sync"), 3.f);
+            s->setParam(spIdx(*s, "A Level"), 0.5f);
+            spV3Slot(*s, 0, 1, 5, 0.5f);
+            return s;
+        };
+        auto a = mk2(), b2 = mk2();
+        if (a && b2) {
+            std::vector<f32> aL2, aR2, bL2, bR2;
+            spRenderBeat(*a,  spV3Note(), 30000, kBlock, aL2, aR2, 120.0, 0.0);
+            spRenderBeat(*b2, spV3Note(), 30000, kBlock, bL2, bR2, 120.0, 2.0);
+            CHECK(spV3Peak(aL2, 0, 30000) > 0.05f, "the sine-LFO render is not silent");
+            CHECK(spV2MaxDiff(aL2, bL2) == 0.f,
+                  "shapes 0..4 in Loop are NOT phase-locked: the same patch from beat 0 "
+                  "and from beat 2 is bit-identical, exactly as in v2");
+        }
+    }
+
+    // ...and a ONE-SHOT drawn grid ignores the beat entirely: its origin is the
+    // note (the ruling's point 3).
+    {
+        auto mk3 = [&](f64 beat0) {
+            auto s = spV3Probe(reg, *d);
+            if (!s) return std::vector<f32>{};
+            s->setParam(spIdx(*s, "LFO Shape"), 5.f);
+            s->setParam(spIdx(*s, "LFO Sync"), 3.f);
+            s->setParam(100, 1.f);                         // one-shot
+            spV3Slot(*s, 0, 1, 5, 1.f);
+            s->setStateString((std::string("nxspc1;lfo1=") + kSpV3RampGrid).c_str());
+            std::vector<f32> L, R;
+            spRenderBeat(*s, spV3Note(12000), 60000, kBlock, L, R, 120.0, beat0);
+            return L;
+        };
+        const std::vector<f32> a = mk3(0.0), b2 = mk3(2.0);
+        if (!a.empty() && !b2.empty()) {
+            CHECK(spV3Peak(a, 0, 60000) > 0.05f, "the one-shot render is not silent");
+            CHECK(spV2MaxDiff(a, b2) == 0.f,
+                  "a One-shot drawn grid is identical from beat 0 and from beat 2 — its "
+                  "origin is the NOTE, and sync sets only its speed");
+        }
     }
 }
 
@@ -8476,6 +10031,15 @@ int main() {
     testSpectraV2Matrix(reg);
     testSpectraV2Voice(reg);
     testSpectraV2Determinism(reg);
+    testSpectraV3Contract(reg);
+    testSpectraV3State(reg);
+    testSpectraV3CustomLfo(reg);
+    testSpectraV3OneShot(reg);
+    testSpectraV3Midi(reg);
+    testSpectraV3Curves(reg);
+    testSpectraV3Refusal(reg);
+    testSpectraV3BeatLock(reg);
+    testSpectraV3Determinism(reg);
     testSamplerContract(reg);
     testSamplerEmpty(reg);
     testSamplerPlayback(reg);
