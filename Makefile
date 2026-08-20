@@ -189,13 +189,14 @@ CORE_SRC  := src/core/common.cpp src/core/project.cpp src/audio/sample.cpp src/a
 # translation units.
 INTERNAL_INSTR := src/plugin/spectra.cpp src/plugin/sampler.cpp \
                   src/plugin/fx_shimmer.cpp src/plugin/fx_bloom.cpp src/plugin/fx_tape.cpp
-# Data an instrument includes textually (spectra_presets.inc, the Spectra v2
-# factory bank). Same staleness class as INTERNAL_INSTR itself: it must be a
-# prerequisite of every target that compiles internal_devices.cpp, or editing
-# a preset leaves every tool and test binary stale. It is NOT a source, so
-# recipes that used $^ raw now filter %.cpp — the idiom internal_device_test
-# and handle_test already use, for the same reason.
-INTERNAL_DATA := src/plugin/spectra_presets.inc
+# Data an instrument includes textually: the Spectra factory bank, and the
+# wavetable pipeline spectra.cpp was split along. Same staleness class as
+# INTERNAL_INSTR itself: each must be a prerequisite of every target that
+# compiles internal_devices.cpp, or editing a preset — or a table — leaves
+# every tool and test binary stale. They are NOT sources, so recipes that used
+# $^ raw filter %.cpp — the idiom internal_device_test and handle_test already
+# use, for the same reason.
+INTERNAL_DATA := src/plugin/spectra_presets.inc src/plugin/spectra_tables.inc
 TOOL_LIBS := $(shell pkg-config --libs sndfile samplerate lilv-0) -ldl -lpthread -lm
 TOOL_CF   := -std=c++20 -O2 -w $(shell pkg-config --cflags sndfile samplerate lilv-0) -Ivendor/clap/include
 
