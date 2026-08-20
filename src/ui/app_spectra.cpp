@@ -140,6 +140,18 @@ enum SpecParamV2 : int {
 static_assert(pM1Src + 3 * 7 + 2 == 91, "M8 Amt is id 91 per the contract");
 static_assert(pMacro1 + 3 == 97 && pVoiceMode == 98, "v2 tail ids off the contract");
 
+// The v3 append ("v3 -- hands on the modulation"). Three of v2's reserved ids
+// are spent (60, 61, 99) and ids 100..108 are new; 109/110 are the fresh
+// reserved tail and get no name here, for the reason the v2 block gives.
+enum SpecParamV3 : int {
+    pL2Mode = 60, pL3Mode = 61,
+    pBendRange = 99,
+    pL1Mode = 100,
+    pM1Curve = 101,                              // slot k is 101 + k
+    pCountV3 = 111
+};
+static_assert(pM1Curve + 7 == 108, "M8 Curve is id 108 per the contract");
+
 // The eight tables, by index. UI labels, per the contract's own wording.
 const char* const kTables[8] = {"Basic", "PWM", "Harmonic", "Formant",
                                 "Bell",  "Digital", "Vox",  "Fold"};
@@ -149,7 +161,11 @@ const char* const kTables[8] = {"Basic", "PWM", "Harmonic", "Formant",
 // id 33, verbatim", and one array is how two things stay verbatim.
 const char* const kSyncDiv[10] = {"free", "4 bars", "2 bars", "1 bar", "1/2",
                                   "1/4",  "1/8",    "1/16",   "1/4T",  "1/8T"};
-const char* const kShapeName[5] = {"sine", "tri", "saw", "square", "S&H"};
+// SIX shapes since v3: id 37/56/59 widen 0..4 -> 0..5, and 5 is the drawn
+// 16-step grid. The cluster below always draws six segments and lets the
+// DEVICE say how many of them are real -- the filter cluster's rule, applied
+// to the other enum the contract widened.
+const char* const kShapeName[6] = {"sine", "tri", "saw", "square", "S&H", "custom"};
 
 // v2 enums, straight off the contract's tables.
 const char* const kSubShape[3]  = {"sine", "tri", "sqr"};
@@ -159,13 +175,94 @@ const char* const kVoiceMode[3] = {"poly", "mono", "leg"};
 // Matrix sources 0..13 and destinations 0..19, in the contract's order. The
 // spellings are display labels cut to what a 50px selector can carry; the
 // tooltip says the long form.
-const char* const kMatrixSrc[14] = {
+// v3 appends three MIDI sources (14/15/16) under the append-only rule, so this
+// list GREW at the end and every old value kept its number. How many of them a
+// device actually has is paramInfo(68).max, asked at the call site.
+const char* const kMatrixSrc[17] = {
     "Off",     "LFO 1",   "LFO 2",   "LFO 3",   "ENV 2",   "ENV 3",  "Velo",
-    "KeyTrk",  "AfterT",  "Macro 1", "Macro 2", "Macro 3", "Macro 4", "Random"};
+    "KeyTrk",  "AfterT",  "Macro 1", "Macro 2", "Macro 3", "Macro 4", "Random",
+    "Wheel",   "Bend",    "MIDI CC"};
+constexpr int kSrcCount = 17;
 const char* const kMatrixDst[20] = {
     "Off",     "A Pos",   "B Pos",   "A Warp",  "B Warp",  "A Level", "B Level",
     "A Pitch", "B Pitch", "Sub",     "Noise",   "Cutoff",  "Reso",    "Drive",
     "A Det",   "B Det",   "Pan",     "L1 Rate", "L2 Rate", "L3 Rate"};
+constexpr int kDstCount = 20;
+// The three per-slot response curves (ids 101..108). The contract's own words
+// for the shapes; the tooltip carries the formulas.
+const char* const kCurveName[3] = {"lin", "exp", "S"};
+// LFO mode (ids 60/61/100). One-shot makes an LFO an envelope.
+const char* const kLfoMode[2] = {"loop", "1shot"};
+
+// ---------------------------------------------------------------------------
+// THE DESTINATION MAP -- which knob in this panel a matrix destination lands
+// on. It is the whole of what drag-assign and the mod rings need, and it is
+// read off the contract's destination list and nothing else.
+//
+// TWO ENTRIES ARE -1 AND BOTH ARE HONEST. Destination 0 is Off, and
+// destination 16 is Pan, which this instrument has no parameter for at all
+// (the contract makes it a matrix-only destination: "base is centre"). A drop
+// on a knob is refused when the knob is not in this table, and Pan simply
+// cannot be reached by dragging -- it is reached by picking it in a slot's
+// destination selector, which is where every destination is always reachable.
+//
+// A PITCH DESTINATION LANDS ON THE COARSE KNOB, and that is a judgment worth
+// stating: destination 7 is "A Pitch [unit: +/-24 st, added after
+// coarse/fine/glide]", so it is not the Coarse parameter -- but Coarse is the
+// only control in the panel that MEANS "osc A's pitch in semitones", and a
+// mod ring on it reads exactly right. The scale row below is what keeps the
+// ring honest about it.
+const int kDestParam[kDstCount] = {
+    -1,         pAPos,      pBPos,      pAWarpAmt,  pBWarpAmt,
+    pALevel,    pBLevel,    pACoarse,   pBCoarse,   pSub,
+    pNoise,     pCutoff,    pReso,      pDrive,     pADetune,
+    pBDetune,   -1,         pLfoRate,   pL2Rate,    pL3Rate};
+// Amount -> the fraction of the CONTROL's own travel one unit of Amt covers.
+// The contract's normalized destinations are 1.0 by construction ("+/-1 = full
+// 0..1", and Cutoff/LFO-rate say "norm, log domain of id N", which is exactly
+// the knob's own log travel). The unit-domain destinations are the ones with a
+// number here: Pitch reaches +/-24 st on a knob that spans 48, Drive reaches
+// +/-24 dB on a knob that spans 24, Detune +/-100 ct on a knob that spans 100.
+const f32 kDestSpan[kDstCount] = {
+    0.f,  1.f,  1.f,  1.f,  1.f,
+    1.f,  1.f,  0.5f, 0.5f, 1.f,
+    1.f,  1.f,  1.f,  1.f,  1.f,
+    1.f,  0.f,  1.f,  1.f,  1.f};
+
+// A source's value domain, for the mod ring. The contract states it per source
+// and there is exactly one shape-dependent case: LFO 1..3 are bipolar for
+// shapes 0..4 and UNIPOLAR for shape 5 (Custom), because sixteen levels cannot
+// be symmetric about an exact zero. That case is resolved at the call site,
+// which is the only place that can see the shape parameters.
+bool srcBipolarStatic(int src) {
+    return src == 7 || src == 13 || src == 15;   // KeyTrk, Random, Pitch Bend
+}
+// Matrix source 1/2/3 is LFO 1/2/3, and its polarity is its SHAPE's.
+const int kLfoShapeId[3] = {pLfoShape, pL2Shape, pL3Shape};
+const int kLfoRateId[3]  = {pLfoRate,  pL2Rate,  pL3Rate};
+const int kLfoSyncId[3]  = {pLfoSync,  pL2Sync,  pL3Sync};
+
+// THE KNOB'S OWN GEOMETRY, mirrored.
+//
+// The mod ring is drawn AROUND knobNx's arc, and knobNx keeps its sweep angles
+// and its cap radius as file-locals in src/ui/widgets.cpp -- a header this file
+// may not edit this round. So the three numbers are mirrored here, with the
+// mirror named rather than hidden: if widgets.cpp ever moves the sweep, this
+// ring points somewhere else and nothing catches it. The fix is one accessor on
+// Ui, filed as ed3-filed-src-ui-widgets.h.diff; until it lands, this comment is
+// the interlock.
+constexpr f32 kDegRad  = 3.14159265358979323846f / 180.f;
+constexpr f32 kKnobA0  = -225.f * kDegRad;
+constexpr f32 kKnobA1  =   45.f * kDegRad;
+
+// knobT()'s twin: where a value sits on its own control's travel, log or not.
+f32 knobTravelOf(const Ui::KnobStyle& st, f32 v) {
+    const f32 lo = std::min(st.lo, st.hi), hi = std::max(st.lo, st.hi);
+    if (st.log && st.lo > 0.f && st.hi > st.lo)
+        return clampv(std::log(clampv(v, lo, hi) / st.lo) / std::log(st.hi / st.lo),
+                      0.f, 1.f);
+    return hi > lo ? clampv((v - lo) / (hi - lo), 0.f, 1.f) : 0.f;
+}
 
 // ---------------------------------------------------------------------------
 // PRESET CATEGORIES, derived from nothing but the name.
@@ -195,6 +292,21 @@ int presetCatOf(const char* n) {
 
 constexpr f32 kTwoPi = 6.28318530717958647692f;
 
+// A wavetable arrives as a WAV and nothing else -- the plan's three
+// interpretation rules all start from one. The test is on the NAME because
+// that is all a drag in flight has; the importer is what actually reads the
+// bytes, and its refusal is what the amber line carries when the name lied.
+bool looksLikeWav(const std::string& p) {
+    if (p.size() < 5) return false;
+    const char* t = p.c_str() + p.size() - 4;
+    return t[0] == '.' && (t[1] | 32) == 'w' && (t[2] | 32) == 'a' && (t[3] | 32) == 'v';
+}
+const char* baseNameOf(const char* p) {
+    if (!p || !*p) return "";
+    const char* slash = strrchr(p, '/');
+    return slash ? slash + 1 : p;
+}
+
 // PRESETS. host.h's contract says presetName() may return null out of range,
 // and "out of range" includes every index on every device that has no presets
 // -- which is all of them but this one. So the null is handled here, once, and
@@ -203,6 +315,274 @@ const char* presetNameOf(const PluginInstance& p, int i) {
     const char* n = p.presetName(i);
     return n ? n : "?";
 }
+
+// ---------------------------------------------------------------------------
+// THE GUARD, RAISED ONE LEVEL: FROM THE PARAMETER TO THE CONTRACT ITSELF
+//
+// Every guard above this line answers "does the device this panel is pointed at
+// have parameter N". v3 asks a question that is one storey higher, because two
+// of its three pillars are not parameters at all: they are METHODS on
+// PluginInstance that a sibling wave is adding to src/plugin/host.h --
+// `wavetable()`, `savePreset()` and `factoryPresetCount()` -- and this file is
+// not allowed to add them and must build with or without them.
+//
+// `has(id)` cannot express that. A method that does not exist is not a runtime
+// absence, it is a compile error, and "compiles today, lights up when the
+// header lands, with no edit here" is the exact property that makes four
+// parallel agents safe. So the same discipline is applied with the only tool
+// that can: a C++20 `requires` test per method, and an `if constexpr` that
+// DISCARDS the call in the build where the method is absent.
+//
+// The result is that every call site below reads like an ordinary null check --
+// `wtSupported(inst)` is false, `wtImport(...)` returns false, `psFactoryCount()`
+// answers presetCount() -- and every one of those is the same answer the
+// runtime null would give. A panel built against today's host.h draws the
+// import affordance and the save chip INERT AND EXPLAINED; the same source,
+// rebuilt after the sibling's header lands, draws them live. Nothing in
+// between, and nothing to remember.
+//
+// The proposed header addition is filed verbatim as
+// ed3-filed-src-plugin-host.h.diff; these shims are what stands in for its
+// absence, and they are correct to leave in place after it arrives.
+// ---------------------------------------------------------------------------
+template <class P>
+concept HasWavetable = requires(P* p) { p->wavetable(); };
+template <class P>
+concept HasSavePreset = requires(P* p) { p->savePreset("x"); };
+template <class P>
+concept HasFactoryCount = requires(const P* p) { p->factoryPresetCount(); };
+
+// Non-null only when the contract HAS the accessor and the device answers one.
+template <class P> bool wtSupported(P* p) {
+    if constexpr (HasWavetable<P>) return p && p->wavetable() != nullptr;
+    else { (void)p; return false; }
+}
+template <class P> bool wtImport(P* p, int osc, const char* path) {
+    if constexpr (HasWavetable<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w && w->importFile(osc, path);
+    } else { (void)p; (void)osc; (void)path; return false; }
+}
+template <class P> bool wtHasCustom(P* p, int osc) {
+    if constexpr (HasWavetable<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w && w->hasCustom(osc);
+    } else { (void)p; (void)osc; return false; }
+}
+template <class P> const char* wtName(P* p, int osc) {
+    if constexpr (HasWavetable<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        const char* n = w ? w->customName(osc) : nullptr;
+        return n ? n : "";
+    } else { (void)p; (void)osc; return ""; }
+}
+template <class P> int wtFrames(P* p, int osc) {
+    if constexpr (HasWavetable<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w ? w->customFrames(osc) : 0;
+    } else { (void)p; (void)osc; return 0; }
+}
+template <class P> void wtClear(P* p, int osc) {
+    if constexpr (HasWavetable<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        if (w) w->clearCustom(osc);
+    } else { (void)p; (void)osc; }
+}
+template <class P> const char* wtError(P* p) {
+    if constexpr (HasWavetable<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        const char* e = w ? w->lastError() : nullptr;
+        return (e && *e) ? e : "the import was refused and said nothing";
+    } else { (void)p; return ""; }
+}
+
+// The user-preset half. `psSupported` is a CONTRACT question and not a device
+// one -- savePreset()'s own default returns false, so a device that does not
+// save presets answers the refusal itself and the chip stays live to hear it.
+template <class P> constexpr bool psSupported() { return HasSavePreset<P>; }
+template <class P> bool psSave(P* p, const char* name) {
+    if constexpr (HasSavePreset<P>) return p && p->savePreset(name);
+    else { (void)p; (void)name; return false; }
+}
+// The boundary between the factory bank and the user bank. The contract's own
+// default answers presetCount(), so a build without the method -- and a device
+// without a user bank -- both say "every preset is a factory preset", which is
+// what draws no User header at all.
+template <class P> int psFactoryCount(const P* p) {
+    if constexpr (HasFactoryCount<P>) return p ? p->factoryPresetCount() : 0;
+    else return p ? p->presetCount() : 0;
+}
+
+// ---------------------------------------------------------------------------
+// THE STATE STRING, this side of it.
+//
+// v3 gives Spectra `nxspc1;<record>;<record>;...` and puts TWO of this file's
+// controls in it rather than in parameters: the three drawn LFO grids and their
+// smooths. So this panel is a WRITER of a device state string, which nothing in
+// the editor has ever been before, and the contract's rules are transcribed
+// here the same way its parameter table is:
+//
+//   * a record is `key=value`, `key` matching [a-z][a-z0-9]*;
+//   * a record with no `=`, an empty record, or a duplicate key is REFUSED --
+//     the whole string, not the record;
+//   * a key this build does not know is SKIPPED on read and CARRIED VERBATIM on
+//     write. That last half is this file's whole obligation to its siblings:
+//     `wtA`, `wtpathA`, `cc` and anything a later revision adds are written by
+//     code that is not here, and a grid edit that dropped them would delete an
+//     imported wavetable by drawing a step.
+//
+// WRITING IS MINIMAL-CHURN. Records that were there keep their position;
+// a known record that has gone back to its default is dropped, so a grid the
+// user cleared collapses the state back towards the empty string the contract
+// says a v2 project must round-trip to. A record that is new is appended in the
+// contract's own order.
+//
+// PARSE FAILURE IS READ-ONLY, NOT REPAIR. If the device hands back something
+// this parser refuses, the grid draws but does not write: editing would mean
+// choosing what the malformed half meant, and the contract's answer to that
+// everywhere else is "refuse and change nothing".
+// ---------------------------------------------------------------------------
+constexpr char kStateTag[] = "nxspc1";
+constexpr int  kGridSteps  = 16;
+constexpr int  kGridLevels = 16;      // digit 0..15, level = d/15
+
+struct SpecState {
+    bool parsed  = false;             // the device's string was understood
+    bool present = false;             // ...and it was not empty
+    std::vector<std::pair<std::string, std::string>> recs;   // in arrival order
+    int  grid[3][kGridSteps]{};       // digit 0..15 per step
+    int  smooth[3]{};                 // thousandths, 0..1000
+
+    // THE CONTRACT'S KEY CHARSET, and a discrepancy inside the contract that
+    // this reader must not turn into a refusal. The state-string section says
+    // `key` matches `[a-z][a-z0-9]*`; the key TABLE four lines below it names
+    // `wtA`, `wtB`, `wtpathA` and `wtpathB`, which that regex rejects. The
+    // table is the authority -- it is the list of keys that actually exist, and
+    // the DSP emits exactly those spellings -- so the accepted set is the
+    // superset that contains both readings. What the rule is really for is
+    // refusing an EMPTY key and a key with punctuation in it, and this still
+    // refuses both.
+    static bool keyOk(const std::string& k) {
+        const auto alpha = [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        };
+        if (k.empty() || !alpha(k[0])) return false;
+        for (char c : k)
+            if (!alpha(c) && !(c >= '0' && c <= '9')) return false;
+        return true;
+    }
+    static int hexOf(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+        return -1;                    // uppercase is REFUSED, per the contract
+    }
+    const std::string* find(const char* key) const {
+        for (const auto& r : recs) if (r.first == key) return &r.second;
+        return nullptr;
+    }
+    bool gridEmpty(int n) const {
+        for (int i = 0; i < kGridSteps; ++i) if (grid[n][i]) return false;
+        return true;
+    }
+
+    bool parse(const std::string& s) {
+        *this = SpecState{};
+        if (s.empty()) { parsed = true; return true; }
+        size_t p = s.find(';');
+        const std::string tag = s.substr(0, p == std::string::npos ? s.size() : p);
+        if (tag != kStateTag) return false;
+        while (p != std::string::npos) {
+            const size_t q = s.find(';', p + 1);
+            const std::string rec =
+                s.substr(p + 1, q == std::string::npos ? std::string::npos : q - p - 1);
+            p = q;
+            if (rec.empty()) return false;                 // `;;` says nothing twice
+            const size_t eq = rec.find('=');
+            if (eq == std::string::npos) return false;
+            const std::string k = rec.substr(0, eq), v = rec.substr(eq + 1);
+            if (!keyOk(k) || find(k.c_str())) return false;
+            recs.emplace_back(k, v);
+        }
+        present = !recs.empty();
+        // The two blocks this panel owns, decoded. A malformed value in a key
+        // this build DOES know is a refusal: the writer could not have produced
+        // it, so guessing is the one thing the contract forbids.
+        for (int n = 0; n < 3; ++n) {
+            char key[12];
+            snprintf(key, sizeof key, "lfo%d", n + 1);
+            if (const std::string* g = find(key)) {
+                if ((int)g->size() != kGridSteps) return false;
+                for (int i = 0; i < kGridSteps; ++i) {
+                    const int d = hexOf((*g)[(size_t)i]);
+                    if (d < 0) return false;
+                    grid[n][i] = d;
+                }
+            }
+            snprintf(key, sizeof key, "smooth%d", n + 1);
+            if (const std::string* sm = find(key)) {
+                if (sm->empty() || sm->size() > 4) return false;
+                if (sm->size() > 1 && (*sm)[0] == '0') return false;   // no leading zeros
+                int v = 0;
+                for (char c : *sm) {
+                    if (c < '0' || c > '9') return false;
+                    v = v * 10 + (c - '0');
+                }
+                if (v > 1000) return false;
+                smooth[n] = v;
+            }
+        }
+        parsed = true;
+        return true;
+    }
+
+    // What this panel's two blocks should read as now, folded back into the
+    // records that were already there. Unknown keys keep their place and their
+    // bytes; a defaulted block leaves no record behind at all.
+    std::string emit() const {
+        // Is `k` one of the two blocks this panel owns? If so `v` comes back as
+        // the value it should carry NOW, and empty means "back at its default,
+        // so it gets no record at all".
+        const auto mine = [&](const std::string& k, std::string& v) {
+            for (int n = 0; n < 3; ++n) {
+                char g[12], sm[12];
+                snprintf(g, sizeof g, "lfo%d", n + 1);
+                snprintf(sm, sizeof sm, "smooth%d", n + 1);
+                if (k == g) {
+                    v.clear();
+                    if (!gridEmpty(n))
+                        for (int i = 0; i < kGridSteps; ++i)
+                            v += "0123456789abcdef"[clampv(grid[n][i], 0, 15)];
+                    return true;
+                }
+                if (k == sm) {
+                    v = smooth[n] > 0 ? std::to_string(clampv(smooth[n], 0, 1000))
+                                      : std::string();
+                    return true;
+                }
+            }
+            return false;
+        };
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto& r : recs) {
+            std::string v;
+            if (!mine(r.first, v)) { out.push_back(r); continue; }   // not ours
+            if (!v.empty()) out.emplace_back(r.first, v);            // ours, in use
+        }                                                           // ours, default: gone
+        // ...and the blocks that are newly in use, in the contract's own order.
+        const auto want = [&](const char* k) {
+            for (const auto& r : out) if (r.first == k) return;
+            std::string v;
+            if (mine(k, v) && !v.empty()) out.emplace_back(k, v);
+        };
+        char k[12];
+        for (int n = 0; n < 3; ++n) { snprintf(k, sizeof k, "lfo%d", n + 1);    want(k); }
+        for (int n = 0; n < 3; ++n) { snprintf(k, sizeof k, "smooth%d", n + 1); want(k); }
+        if (out.empty()) return {};
+        std::string s = kStateTag;
+        for (const auto& r : out) { s += ';'; s += r.first; s += '='; s += r.second; }
+        return s;
+    }
+};
 
 // A micro-label cut to fit its box -- app_devices.cpp's helper, and for the
 // same reason: microIn draws glyph by glyph to get §5's tracking, so it has no
@@ -252,6 +632,73 @@ struct SpectraDrop {
 SpectraDrop g_drop;
 int g_page = 0;             // 0 MAIN, 1 MOD
 u64 g_pageUid = 0;          // which panel the two fields above belong to
+
+// --- v3's own panel-local state, on the same terms and for the same reason ---
+
+// THE WAVETABLE IMPORT. `osc` is which oscillator the hero's import row is
+// pointed at -- A or B -- and it is UI state and not a parameter, because
+// "which of the two am I loading" is a question about the pointer and not
+// about the sound. `err` holds the refusal of the last import that failed, so
+// the amber line survives the frame the drop happened on; it is cleared by the
+// next successful import or by pointing the row at the other oscillator.
+// `dragHold` is NXTAKT_DEBUG_SPECTRAWTDRAG's, re-armed every frame for exactly
+// the reason app_sampler.cpp re-arms its own.
+struct SpectraWt {
+    int osc = 0;
+    std::string err;
+    std::string dragHold;
+};
+SpectraWt g_wt;
+
+// THE GRID PAINT GESTURE. `lfo` is -1 when nothing is being drawn. The start
+// step and level are what a shift-drag interpolates FROM: a line needs two
+// ends, and the first end is where the press landed.
+struct SpectraGrid {
+    int lfo = -1;
+    int startStep = 0, startLevel = 0;
+};
+SpectraGrid g_gridDrag;
+
+// DRAG-ASSIGN, in three states and no more:
+//   src < 0                      nothing in flight
+//   src >= 0 && !tuning          a source is being dragged; the pointer is
+//                                looking for a modulatable control
+//   tuneSlot >= 0                a drop has landed and the destination knob is
+//                                temporarily the new slot's AMOUNT knob
+// The third state is what "opens its amount for immediate drag" means in a UI
+// whose gesture ended when the button came up: the control you dropped on is
+// where the depth is set, immediately, without going to look for the slot.
+struct SpectraAssign {
+    int src = -1;               // matrix source value being dragged
+    int tuneSlot = -1;          // the slot whose amount the destination knob edits
+    int tuneDest = -1;          // ...and the destination it was assigned to
+    int tuneParam = -1;         // the panel control that is standing in for it
+    // The drop lands INSIDE the destination knob's own draw, which has already
+    // gone past the point where it would have drawn itself as an amount. So the
+    // frame the assignment happens on is a frame amount mode is not visible on,
+    // and the end-of-frame rule below would read that as "the knob is gone" and
+    // cancel what had just been made. One flag, and it costs one frame.
+    bool tuneFresh = false;
+};
+SpectraAssign g_assign;
+
+// THE SAVE FIELD. Open means the preset chip has become a text field; the
+// buffer is the marker-rename idiom's `renameBuf_`, held here for the reason
+// every other field in this file is held here.
+struct SpectraSave {
+    bool open = false;
+    bool pending = false;       // the debug hook standing in for a click
+    // SpectraDrop::justOpened's twin, and the same bug it was written for.
+    // textField's dismissal rule is "a press anywhere else takes the value as
+    // typed" -- which is right, and which fires on the BIRTH FRAME if a press
+    // is already in flight when the field is opened by something that is not
+    // that press. The chip's own click cannot do it (a button fires on the
+    // RELEASE, so the press is a frame old by then) but the debug hook can, and
+    // so could any future opener. The field skips its birth frame instead.
+    bool justOpened = false;
+    std::string buf;
+};
+SpectraSave g_save;
 
 // ---------------------------------------------------------------------------
 // THE DISPLAYED WAVEFORM IS THE REAL ONE -- EXCEPT WHEN IT SAYS OTHERWISE
@@ -481,12 +928,24 @@ int App::spectraOpenIdx(const std::vector<DeviceModel>& devices) const {
 //    60..63      the preset row: prev, next, the name chip, the popover latch
 //   100+id*4+k   a stepper on param `id` (k: 0 gesture, 1 prev, 2 next)
 //   600..605     the filter-type segments
-//    50..54      LFO1's shape segments (v1's numbers, kept)
-//   630..644     LFO2 (630+) and LFO3 (640+) shape segments
+//    50..55      LFO1's shape segments (v1's numbers, kept; v3 added the sixth)
+//   630..645     LFO2 (630+) and LFO3 (640+) shape segments
 //   650..652     the sub shape segments
 //   660..662     the voice mode segments
 //   670          the noise-track toggle
 //   700..707     matrix source selectors, 720..727 destination selectors
+//
+// ...and v3's band, which is 800+ so that nothing it spends can walk into the
+// stepper range (100 + id*4 + k, and the widest id is 110, so 542 is its top):
+//
+//   800          the hero well's drop target
+//   801, 802     the import row's A / B target segments
+//   803          the browse chip, 804 the revert-to-factory chip
+//   810..812     the three LFO grids, 820..822 their smooth troughs
+//   830..841     the source grab handles, indexed by matrix source value
+//   850          the save chip, 851 the inline name field
+//   860..867     the matrix's per-slot curve selectors
+//   870          LFO1's compact sync selector (the Custom layout only)
 // ---------------------------------------------------------------------------
 
 void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
@@ -521,8 +980,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         g_pageUid = dm.uid;
         g_page = 0;
         g_drop.open = false;
+        g_assign = SpectraAssign{};
+        g_gridDrag = SpectraGrid{};
+        g_save.open = false;
+        g_wt.err.clear();
         if (ui_.editId == dropId) ui_.editId = 0;
     }
+    // A gesture in flight belongs to the surface it started on. The drag ghost
+    // is cleared here rather than at the end of the frame it ended on so that
+    // nothing below has to remember it might be stale.
+    bool tuneDrawn = false, tuneTouched = false;
     const auto openDrop = [&] {
         g_drop.open = true;
         g_drop.justOpened = true;
@@ -596,6 +1063,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         if (ui_.tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 2, &page) &&
             page != g_page) {
             closeDrop();
+            g_assign = SpectraAssign{};      // a gesture does not survive the turn
             g_page = page;
         }
         if (ui_.hovered(tabR))
@@ -615,10 +1083,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             snprintf(note, sizeof note, "panel forced onto %s - %d of %d parameters",
                      dm.desc.name.c_str(), pc, (int)pCountV2);
             microFit(ui_, fSmall_, noteR, note, nx::amber.alpha(0.9f), Align::Left, 0);
-        } else if (pc < (int)pCountV2) {
+        } else if (pc < (int)pCountV3) {
             snprintf(note, sizeof note,
                      "DSP has %d of %d parameters - newer controls are inert sockets",
-                     pc, (int)pCountV2);
+                     pc, (int)pCountV3);
             microFit(ui_, fSmall_, noteR, note, nx::amber.alpha(0.9f), Align::Left, 0);
         }
     }
@@ -697,12 +1165,301 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                                           inst->paramInfo(id).id), v, gesture);
     };
 
+    // =======================================================================
+    // v3's shared machinery: the state string, the mod reach, drag-assign.
+    // Everything below the parameter access layer and above the widgets,
+    // because every widget in both pages reaches for some of it.
+    // =======================================================================
+
+    // How wide an enum the DEVICE actually registered. The filter cluster's
+    // rule, hoisted: v3 widens Table (0..7 -> 0..8), LFO Shape (0..4 -> 0..5)
+    // and Matrix Source (0..13 -> 0..16), and this panel asks rather than
+    // asserts -- so it draws three enums at their v2 width against a v2 DSP and
+    // at their v3 width against a v3 one, with no edit here.
+    const auto enumMax = [&](int id, int v2Max) {
+        return has(id) ? clampv((int)std::lround(inst->paramInfo(id).max), 0, 64)
+                       : v2Max;
+    };
+    const int srcMax = enumMax(pM1Src, 13);
+
+    // THE STATE STRING, read once a frame. Read once because stateString()
+    // builds a fresh string every call (engine_handle.cpp says so at length),
+    // and because a panel that asked twice could get two answers if anything
+    // between the two asks wrote.
+    SpecState sstate;
+    const bool stateOk = sstate.parse(inst->stateString());
+
+    // ...and written only ever from a user edit. The undo point is taken
+    // BEFORE the device changes and coalesces on the active widget, so one
+    // paint stroke is one entry -- the same contract commit() has for a knob.
+    const auto writeState = [&](const char* what) {
+        if (!stateOk) return;
+        const std::string s = sstate.emit();
+        undoPoint(what);
+        if (!inst->setStateString(s)) {
+            status_ = "Spectra refused that state string - nothing was stored";
+        } else if (inst->stateString() != s) {
+            // The base class's accept-anything-remember-nothing default. Saying
+            // so is the difference between a control that does not work and a
+            // control that lies about working.
+            status_ = "This DSP keeps no state string - the drawn grid is not stored";
+        }
+    };
+
+    // THE MOD RING'S NUMBER.
+    //
+    // What the matrix can do to a destination, AT REST -- and "at rest" is the
+    // whole design of it, so it is stated here rather than in the release
+    // notes. The reach is computed from PARAMETERS ONLY: the eight slots'
+    // source, destination and amount, plus the three LFO shape parameters (a
+    // Custom LFO is unipolar and reaches one way; the other five shapes are
+    // bipolar and reach both). It never reads a running LFO, an envelope, a
+    // held note or anything else the audio thread owns, and there is nothing
+    // for it to read -- the panel is on the far side of the PluginInstance
+    // boundary and the daemon's process besides.
+    //
+    // THIS RING MUST NEVER BECOME A METER. The moving value of a modulated
+    // control is the knob's own position, which the DSP does not write back and
+    // should not; the ring is the REACH, it changes when you turn an amount and
+    // at no other time, and the moment it is fed a live signal it becomes a
+    // sixty-hertz repaint of the whole panel for an animation nobody asked for.
+    // The plan's open question asks for exactly this sentence and here it is.
+    struct ModReach { f32 lo = 0.f, hi = 0.f; int slots = 0; };
+    const auto shapeOf = [&](int shapeId) {
+        return has(shapeId) ? clampv((int)std::lround(get(shapeId, 0.f)), 0, 5) : 0;
+    };
+    const auto modReach = [&](int d) {
+        ModReach mr;
+        if (d <= 0 || d >= kDstCount) return mr;
+        for (int k = 0; k < 8; ++k) {
+            const int sid = pM1Src + 3 * k;
+            if (!has(sid) || !has(sid + 1) || !has(sid + 2)) continue;
+            const int src = clampv((int)std::lround(get(sid, 0.f)), 0, kSrcCount - 1);
+            const int dst = clampv((int)std::lround(get(sid + 1, 0.f)), 0, kDstCount - 1);
+            if (src == 0 || dst != d) continue;
+            const f32 amt = get(sid + 2, 0.f) * kDestSpan[d];
+            if (std::fabs(amt) < 1e-4f) continue;
+            bool bip = srcBipolarStatic(src);
+            if (src >= 1 && src <= 3) bip = shapeOf(kLfoShapeId[src - 1]) != 5;
+            if (bip)                  { mr.lo -= std::fabs(amt); mr.hi += std::fabs(amt); }
+            else if (amt >= 0.f)      { mr.hi += amt; }
+            else                      { mr.lo += amt; }
+            ++mr.slots;
+        }
+        return mr;
+    };
+    // Which destination a panel control IS. -1 for every control the matrix
+    // cannot reach, which is most of them -- an envelope time, a glide, a
+    // unison count -- and that -1 is what a refused drop explains.
+    const auto destOfParam = [&](int id) {
+        for (int d = 1; d < kDstCount; ++d)
+            if (kDestParam[d] == id) return d;
+        return -1;
+    };
+
+    // DRAG-ASSIGN, the drop half. Called by every control that can be a
+    // destination, with the rect the pointer has to be inside.
+    //
+    // FRAME BY FRAME, and this is the whole interaction:
+    //   press on a source handle   g_assign.src is set; nothing is written yet
+    //   move                       every modulatable control rings itself in
+    //                              violet at 0.35 -- quiet, and only while a
+    //                              drag is actually in flight, which is the
+    //                              sampler's "accepts samples" rule; the one
+    //                              under the pointer takes the lit edge and the
+    //                              Add badge and says what it will do
+    //   release over a control     the first slot whose source is Off takes
+    //                              src -> dest at +0.30, in one undo entry, and
+    //                              that control becomes the slot's AMOUNT knob
+    //                              until the next click elsewhere
+    //   release anywhere else      nothing is written and the status bar says
+    //                              which of the two refusals it was
+    const auto dropTarget = [&](const Rect& r0, int id, const char* label) {
+        if (g_assign.src < 0 || !has(id)) return;
+        const int d = destOfParam(id);
+        if (d < 0) return;                       // not a destination: no framing
+        const f32 rad0 = nx::radiusXs * s;
+        if (!r0.contains(in.mx, in.my)) {
+            rend_.roundRectOutline(r0, rad0, std::max(1.f, nx::snapPx(s)),
+                                   nx::violet.alpha(0.35f));
+            return;
+        }
+        rend_.gradStroke(r0, rad0, s, nx::edgeLit, 1.f);
+        ui_.badge = Badge::Add;
+        // The slot this would take, worked out now so the tip can name it.
+        int slot = -1;
+        for (int k = 0; k < 8 && slot < 0; ++k) {
+            const int sid = pM1Src + 3 * k;
+            if (has(sid) && has(sid + 1) && has(sid + 2) &&
+                std::lround(get(sid, 0.f)) == 0)
+                slot = k;
+        }
+        char t[144];
+        if (slot < 0)
+            snprintf(t, sizeof t,
+                     "All eight matrix slots are in use - free one before "
+                     "assigning %s to %s", kMatrixSrc[g_assign.src], label);
+        else
+            snprintf(t, sizeof t, "Assign %s -> %s at +0.30 in slot M%d",
+                     kMatrixSrc[g_assign.src], kMatrixDst[d], slot + 1);
+        ui_.tip = t;
+        if (!in.released[0]) return;
+
+        const int src = g_assign.src;
+        g_assign.src = -1;
+        if (slot < 0) {
+            status_ = std::string("Spectra: all eight matrix slots are in use - ") +
+                      kMatrixSrc[src] + " was not assigned";
+            return;
+        }
+        const int sid = pM1Src + 3 * slot;
+        // ONE undo entry for the whole assignment: three setParam calls that
+        // are one edit to the user, so they coalesce on one gesture id the way
+        // a knob drag's frames do.
+        const u64 gest = uiId(UiSpectraPanel, 830 + src, uidKey);
+        commit(sid + 0, (f32)src, gest, "assign modulation");
+        commit(sid + 1, (f32)d,   gest, "assign modulation");
+        commit(sid + 2, 0.30f,    gest, "assign modulation");
+        g_assign.tuneSlot  = slot;
+        g_assign.tuneDest  = d;
+        g_assign.tuneParam = id;
+        g_assign.tuneFresh = true;
+        char msg[160];
+        snprintf(msg, sizeof msg,
+                 "Spectra: %s -> %s at +0.30 in M%d - the knob is its amount "
+                 "until you click elsewhere", kMatrixSrc[src], kMatrixDst[d],
+                 slot + 1);
+        status_ = msg;
+    };
+
+    // THE SOURCE GRAB HANDLE. Three stacked dashes in a box barely wider than
+    // they are -- the grip glyph every list in the program uses for "this is
+    // draggable" -- muted at rest, violet under the pointer. It claims no hot
+    // rectangle when the device cannot offer the source, so a v2 DSP's panel
+    // has three MIDI handles the pointer passes straight through.
+    const auto srcHandle = [&](const Rect& hr, int srcVal) {
+        const bool live = has(pM1Src) && srcVal <= srcMax;
+        const u64 wid = uiId(UiSpectraPanel, 830 + srcVal, uidKey);
+        bool over = false;
+        if (live) {
+            over = ui_.grab(2.f * s).setHot(wid, hr) && ui_.isHot(wid);
+            if (over) {
+                ui_.cursor = Cursor::Grab;
+                char t[128];
+                snprintf(t, sizeof t,
+                         "Drag %s onto any knob with a mod ring to patch it "
+                         "into the first free matrix slot", kMatrixSrc[srcVal]);
+                ui_.tip = t;
+                if (in.pressed[0]) {
+                    g_assign.src = srcVal;
+                    g_assign.tuneSlot = -1;
+                    g_assign.tuneParam = -1;
+                }
+            }
+        } else if (ui_.hovered(hr)) {
+            char t[128];
+            snprintf(t, sizeof t,
+                     "%s is a v3 matrix source - this DSP's source enum stops "
+                     "at %s", kMatrixSrc[srcVal], kMatrixSrc[clampv(srcMax, 0,
+                     kSrcCount - 1)]);
+            ui_.tip = t;
+        }
+        const Col ink = !live ? nx::muted.alpha(0.30f)
+                      : (g_assign.src == srcVal) ? nx::violetSoft
+                      : over ? nx::text : nx::muted.alpha(0.70f);
+        const f32 x0 = hr.cx() - 3.f * s, x1 = hr.cx() + 3.f * s;
+        for (int i = -1; i <= 1; ++i)
+            rend_.line(x0, std::round(hr.cy() + (f32)i * 2.5f * s),
+                       x1, std::round(hr.cy() + (f32)i * 2.5f * s),
+                       std::max(1.f, nx::snapPx(s)), ink);
+    };
+
+    // A recessed micro-selector over an integer parameter: click steps forward,
+    // right-click back, the wheel scrubs. The matrix's own control, hoisted to
+    // the shared layer in v3 because a second caller appeared -- LFO 1's sync,
+    // which has to shrink from a 92px stepper to one cell when the drawn grid
+    // takes the row it was standing in. Two call sites, one control.
+    const auto enumSel = [&](int sub, const Rect& r0, int id,
+                             const char* const* names, int count,
+                             const char* what, f32 dim) {
+        const bool live = has(id) && count > 0;
+        rend_.well(r0, nx::radiusXs * s, false);
+        int idx = live ? clampv((int)std::lround(get(id, 0.f)), 0, count - 1) : 0;
+        if (live) {
+            const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
+            if (ui_.grab(2.f * s).setHot(wid, r0) && ui_.isHot(wid)) {
+                ui_.cursor = Cursor::Hand;
+                int d = 0;
+                if (in.pressed[0]) d = +1;
+                if (in.pressed[2]) d = -1;
+                if (in.wheel != 0.f) {
+                    d = in.wheel > 0.f ? +1 : -1;
+                    in.wheel = 0.f;              // not the strip's notch to spend
+                }
+                if (d) commit(id, (f32)(((idx + d) % count + count) % count), wid, what);
+                char t[112];
+                snprintf(t, sizeof t,
+                         "%s: %s - click next, right-click back, wheel steps",
+                         what, names[idx]);
+                ui_.tip = t;
+            }
+        } else if (ui_.hovered(r0)) {
+            char t[80];
+            snprintf(t, sizeof t, "%s: this device has no parameter %d", what, id);
+            ui_.tip = t;
+        }
+        const Col ink = !live ? nx::muted.alpha(0.40f)
+                      : idx == 0 ? nx::muted.alpha(0.55f * dim + 0.30f)
+                                 : nx::text.alpha(dim);
+        microFit(ui_, fSmall_, r0, live ? names[idx] : "-", ink, Align::Center);
+        return idx;
+    };
+
+    // A one-segment toggle over a 0/1 parameter, showing the state it is IN
+    // rather than the state it would go to -- the noise-track toggle's rule.
+    // v3's only caller is the per-LFO mode (ids 100/60/61): Loop is v2's
+    // instance-wide generator, One-shot makes the LFO a per-voice envelope.
+    const auto modeToggle = [&](int sub, const Rect& r0, int id, const char* what) {
+        // L2 Mode (60) and L3 Mode (61) are v2 RESERVED ids spent by v3 at the
+        // same range, so `has()` cannot tell a v3 mode from a v2 placeholder.
+        // L1 Mode (100) can be told apart and is covered by has() alone; the
+        // combined test is written once and is right for all three.
+        const bool live = has(id) && pc >= (int)pCountV3;
+        const int  m = live ? clampv((int)std::lround(get(id, 0.f)), 0, 1) : 0;
+        ui_.segCluster(r0);
+        Rect g = r0;
+        if (live) {
+            const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
+            if (ui_.segButton(wid, r0, m == 1, nx::violet))
+                commit(id, m ? 0.f : 1.f, wid, what);
+            g = ui_.lastRect;
+        }
+        microFit(ui_, fSmall_, g, live ? kLfoMode[m] : "-",
+                 (live && m ? nx::text : nx::muted).alpha(live ? 0.85f : 0.40f),
+                 Align::Center);
+        if (ui_.hovered(r0) && g_assign.src < 0)
+            ui_.tip = live
+                ? "Loop is one instance-wide generator; One-shot gives every "
+                  "voice its own, run once from note-on and held - which is "
+                  "what makes any LFO an envelope"
+                : std::string("This device has no parameter ") + std::to_string(id);
+    };
+
     // A knob cell: the control, its readout (drawn by the widget) and its name
     // underneath. `st` carries the contract's own range, curve and centre.
+    // `spentReserved` is for the THREE v3 controls whose ids were RESERVED in
+    // v2 -- L2 Mode (60), L3 Mode (61) and Bend Range (99). `has(id)` cannot
+    // tell those apart from the real thing: a v2 DSP registers all three, at
+    // 0..1 with default 0, exactly as the reserved rule instructs, so the slot
+    // is filled and the guard says "present" about a parameter that means
+    // nothing. Two of the three cannot even be told apart by their range (L2/L3
+    // Mode is 0..1 in v3 as well). The honest test is the one the title bar
+    // already makes -- does this DSP have the v3 block at all -- so the caller
+    // passes it and the socket is drawn for the right reason.
     const auto knob = [&](const Rect& cell, int id, const char* label,
-                          Ui::KnobStyle st, f32 dim) {
+                          Ui::KnobStyle st, f32 dim, bool spentReserved = false) {
         st.dim = dim;
-        st.absent = !has(id);
+        st.absent = !has(id) || (spentReserved && pc < (int)pCountV3);
         // THE UNIT COMES FROM THE DEVICE, not from this file. The contract
         // fixes the range and the curve, so those are spelled out at the call
         // sites -- but "st", "ct", "Hz", "ms", "dB" are the plugin's own
@@ -720,20 +1477,98 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         f32 v = has(id) ? inst->getParam(id) : st.def;
         const u64 wid = uiId(UiSpectraKnob, id, uidKey);
         const Rect kr{cell.x, cell.y, cell.w, cell.h - lblH};
+        const int  dst = st.absent ? -1 : destOfParam(id);
+
+        // AMOUNT MODE -- the third state of drag-assign, and the answer to
+        // "opens its amount for immediate drag" in a UI whose gesture ended
+        // when the button came up. The knob you just dropped on stops being
+        // itself: it SHOWS and EDITS the new slot's depth, ringed and named so
+        // it cannot be mistaken for its own value, until you click anywhere
+        // else or press Escape. No page turn, no hunting for the slot, and the
+        // control under your hand is the one whose depth you want.
+        if (g_assign.tuneParam == id && g_assign.tuneSlot >= 0 && !st.absent) {
+            tuneDrawn = true;
+            if (ui_.hovered(kr)) tuneTouched = true;
+            const int aid = pM1Src + 3 * g_assign.tuneSlot + 2;
+            Ui::KnobStyle as;
+            as.lo = -1.f; as.hi = 1.f; as.def = 0.f; as.bipolar = true;
+            as.arc = nx::cyan; as.fmt = "%+.2f"; as.dim = dim; as.absent = !has(aid);
+            f32 av = get(aid, 0.f);
+            const u64 awid = uiId(UiSpectraKnob, aid, uidKey);
+            char what[24];
+            snprintf(what, sizeof what, "M%d amount", g_assign.tuneSlot + 1);
+            if (ui_.knobNx(awid, kr, &av, as)) commit(aid, av, awid, what);
+            rend_.roundRectOutline(cell, nx::radiusXs * s,
+                                   std::max(1.f, nx::snapPx(s)), nx::cyan.alpha(0.55f));
+            char lb[32];
+            snprintf(lb, sizeof lb, "M%d amt", g_assign.tuneSlot + 1);
+            microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, lb,
+                     nx::cyan.alpha(0.9f), Align::Center);
+            if (ui_.hovered(kr)) {
+                char t[160];
+                snprintf(t, sizeof t,
+                         "M%d depth: %s -> %s. Drag to set it; click anywhere "
+                         "else (or Escape) and this knob is %s again.",
+                         g_assign.tuneSlot + 1,
+                         kMatrixSrc[clampv((int)std::lround(
+                             get(pM1Src + 3 * g_assign.tuneSlot, 0.f)), 0, kSrcCount - 1)],
+                         kMatrixDst[clampv(g_assign.tuneDest, 0, kDstCount - 1)], label);
+                ui_.tip = t;
+            }
+            return;
+        }
+
         if (ui_.knobNx(wid, kr, &v, st)) commit(id, v, wid, label);
+
+        // THE MOD RING. One thin cyan arc outside the value arc, spanning what
+        // the matrix can add to this control and subtract from it -- the reach,
+        // not the value. See modReach() above for why it is static and must
+        // stay static. Cyan because §1 makes cyan the light INSIDE a material:
+        // the ring is not a second control, it is this control lit from behind
+        // by the patch.
+        if (dst > 0 && !st.absent) {
+            const ModReach mr = modReach(dst);
+            if (mr.slots) {
+                const f32 dpi = std::max(1.f, s);
+                const f32 textH = (st.fmt || st.text) ? fSmall_.height() : 0.f;
+                const f32 avail = std::min(kr.w, kr.h - textH);
+                const f32 krad  = avail * 0.5f - 2.f * dpi;
+                if (krad > 1.f) {
+                    const f32 aTh = std::max(1.5f * dpi, krad * 0.17f);
+                    const f32 rr  = krad + 2.5f * dpi + aTh * 0.5f + 2.2f * dpi;
+                    const f32 t   = knobTravelOf(st, v);
+                    const f32 a0 = kKnobA0 + (kKnobA1 - kKnobA0) *
+                                   clampv(t + mr.lo, 0.f, 1.f);
+                    const f32 a1 = kKnobA0 + (kKnobA1 - kKnobA0) *
+                                   clampv(t + mr.hi, 0.f, 1.f);
+                    if (a1 - a0 > 1e-4f)
+                        ui_.arc(kr.cx(), kr.y + 2.f * dpi + krad, rr, a0, a1,
+                                std::max(1.f, 1.3f * dpi), nx::cyan.alpha(0.55f * dim));
+                }
+            }
+        }
+        dropTarget(kr, id, label);
+
         microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, label,
                  nx::muted.alpha((st.absent ? 0.40f : 0.85f) * dim), Align::Center);
         // The label is cut short to fit 46 logical pixels, so the tooltip is
         // where the parameter says its whole name, its range and its unit.
-        if (ui_.hovered(kr)) {
-            char t[128];
+        if (ui_.hovered(kr) && g_assign.src < 0) {
+            char t[192];
             if (st.absent)
                 snprintf(t, sizeof t, "%s: this device has no parameter %d", label, id);
-            else
-                snprintf(t, sizeof t, "%s  %g .. %g %s%s%s  (id %d)", label,
+            else {
+                const ModReach mr = dst > 0 ? modReach(dst) : ModReach{};
+                char reach[64] = {};
+                if (mr.slots)
+                    snprintf(reach, sizeof reach, "  -  mod reach %+.2f..%+.2f (%d slot%s)",
+                             (double)mr.lo, (double)mr.hi, mr.slots,
+                             mr.slots == 1 ? "" : "s");
+                snprintf(t, sizeof t, "%s  %g .. %g %s%s%s  (id %d)%s", label,
                          (double)st.lo, (double)st.hi,
                          inst->paramInfo(id).unit.c_str(), st.log ? " log" : "",
-                         st.bipolar ? " bipolar" : "", id);
+                         st.bipolar ? " bipolar" : "", id, reach);
+            }
             ui_.tip = t;
         }
     };
@@ -805,8 +1640,12 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // pages stay the exact shape. The defaults are arguments because the
     // contract gives ENV3 its own (2/300/0/150 against ENV1/2's 5/200/0.7/300):
     // an absent envelope draws at ITS OWN defaults, not another envelope's.
+    // `srcVal` is the matrix source this envelope IS (4 for ENV2, 5 for ENV3),
+    // or -1 for ENV1, which the contract hardwires to amplitude and gives no
+    // source value at all. It is what puts a grab handle on the two envelopes
+    // that can be dragged into a slot and none on the one that cannot.
     const auto envRow = [&](const Rect& c, f32 y, const char* name, int base,
-                            f32 dA, f32 dD, f32 dS, f32 dR) {
+                            f32 dA, f32 dD, f32 dS, f32 dR, int srcVal = -1) {
         const f32 curveW = 48 * s;
         // The curve, drawn from the four values that are actually there --
         // a missing one falls back to its contract default, and the well
@@ -833,6 +1672,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         }
         microFit(ui_, fSmall_, {c.x, y + rowH - lblH, curveW, lblH}, name,
                  nx::muted.alpha(0.85f), Align::Center);
+        // The grab handle rides the curve well's top-right corner -- the one
+        // corner of an ADSR trace that is always empty, because a released
+        // envelope has come down by then.
+        if (srcVal >= 0)
+            srcHandle({cw0.right() - 12 * s, cw0.y + 1 * s, 11 * s, 9 * s}, srcVal);
 
         const f32 kw = (c.w - curveW) / 4.f;
         Ui::KnobStyle st;
@@ -851,25 +1695,41 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // LFOs -- the contract says LFO2/3 take "the shape list of id 37,
     // verbatim", so they take the CLUSTER of id 37, verbatim. Lettered names
     // would not fit at 27px a segment and would say less than the shape does.
+    //
+    // SIX SEGMENTS SINCE v3, and the sixth is the file's guard doctrine applied
+    // to an enum rather than to an id. The contract widened LFO Shape 0..4 ->
+    // 0..5 (5 = the drawn grid), so the cluster always cuts itself into six and
+    // asks paramInfo(id).max how many of them the DEVICE has: against a v2 DSP
+    // the Custom segment is an INERT SOCKET at the disabled weight that claims
+    // no hot rectangle and says why when hovered, and against a v3 DSP it is a
+    // segment like the other five, with no edit here.
     const auto shapeCluster = [&](const Rect& shR, int id, int segBase,
                                   const char* what) {
         ui_.segCluster(shR);
-        const f32 sw = shR.w / 5.f;
+        constexpr int kSeg = 6;
+        const f32 sw = shR.w / (f32)kSeg;
         const bool live = has(id);
-        const int shape = live ? clampv((int)std::lround(get(id, 0.f)), 0, 4) : -1;
-        for (int k = 0; k < 5; ++k) {
+        const int  top  = live ? clampv(enumMax(id, 4), 0, 5) : 4;
+        const int shape = live ? clampv((int)std::lround(get(id, 0.f)), 0, top) : -1;
+        for (int k = 0; k < kSeg; ++k) {
             const Rect seg{shR.x + sw * (f32)k, shR.y, sw, shR.h};
             if (k) rend_.hairlineV(seg.x, shR.y + 2 * s, shR.bottom() - 2 * s);
             const bool on = k == shape;
+            const bool segLive = live && k <= top;
             Rect g = seg;
-            if (live) {
+            if (segLive) {
                 const u64 wid = uiId(UiSpectraPanel, segBase + k, uidKey);
                 if (ui_.segButton(wid, seg, on, nx::violet))
                     commit(id, (f32)k, wid, what);
                 g = ui_.lastRect;
+            } else if (ui_.hovered(seg) && k == 5) {
+                ui_.tip = live
+                    ? "Custom is v3's drawn 16-step grid - this DSP's LFO shape "
+                      "enum stops at S&H"
+                    : std::string("This device has no parameter ") + std::to_string(id);
             }
-            const Col ic = on ? nx::text : nx::muted.alpha(live ? 0.85f : 0.40f);
-            const f32 w2 = 6.f * s, h2 = 3.2f * s, th = 1.1f * s;
+            const Col ic = on ? nx::text : nx::muted.alpha(segLive ? 0.85f : 0.40f);
+            const f32 w2 = 5.f * s, h2 = 3.2f * s, th = 1.1f * s;
             const f32 gx = g.cx(), gy = g.cy();
             switch (k) {
             case 0: {                                   // sine
@@ -898,19 +1758,211 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 rend_.line(gx, gy + h2, gx + w2, gy + h2, th, ic);
                 rend_.line(gx + w2, gy + h2, gx + w2, gy - h2, th, ic);
                 break;
-            default:                                    // sample & hold
+            case 4:                                     // sample & hold
                 rend_.line(gx - w2, gy + h2, gx - w2 * 0.33f, gy + h2, th, ic);
                 rend_.line(gx - w2 * 0.33f, gy - h2, gx + w2 * 0.33f, gy - h2, th, ic);
                 rend_.line(gx + w2 * 0.33f, gy + h2 * 0.3f, gx + w2, gy + h2 * 0.3f, th, ic);
                 break;
+            default: {                                  // custom: a drawn staircase
+                const f32 lv[4] = {0.9f, 0.1f, 0.6f, -0.7f};
+                const f32 bw = w2 * 0.5f;
+                for (int i = 0; i < 4; ++i) {
+                    const f32 bx = gx - w2 + bw * (f32)i;
+                    rend_.line(bx, gy - h2 * lv[i], bx + bw * 0.8f, gy - h2 * lv[i],
+                               th, ic);
+                }
+                break;
+            }
             }
         }
-        if (ui_.hovered(shR))
+        if (ui_.hovered(shR) && g_assign.src < 0)
             ui_.tip = live ? std::string(what) + ": " +
                              (shape >= 0 ? kShapeName[shape] : "?")
                            : std::string("This device has no parameter ") +
                              std::to_string(id);
         return shape;
+    };
+
+    // =======================================================================
+    // THE DRAWN LFO -- a 16-step grid and its smooth, and the one control in
+    // this panel that is NOT a parameter.
+    //
+    // The contract puts the grid in the state string rather than in 51 ids, and
+    // says what that costs in the same breath: a drawn grid cannot be automated
+    // and cannot be a matrix destination. It is SHAPE, like a table is shape.
+    // So this block reads and writes through stateString()/setStateString(),
+    // carrying every record it does not understand across untouched -- see
+    // SpecState for why that half is the important half.
+    //
+    // THE GESTURES, and they are the three a step sequencer has had since the
+    // Roland x0x:
+    //   drag        paints the level under the pointer into the step under it
+    //   shift-drag  interpolates from where the press landed to where the
+    //               pointer is now, so a ramp is one stroke and not sixteen
+    //   right-click clears one step to zero
+    // Level is quantized to the contract's sixteen digits on the way in, so
+    // what is on screen is exactly what is in the string -- there is no finer
+    // value being kept behind the bar you can see.
+    //
+    // WHERE IT SITS. A grid wants two of a column's three cells and a row of
+    // its own, which LFO 2 and LFO 3 have free (the contract gives them no
+    // fixed routings, so their depth cells are empty) and LFO 1 does not. LFO
+    // 1's column therefore re-cuts when Custom is chosen -- see the call site,
+    // which is where the cost of that is written down.
+    const auto lfoGridBlock = [&](const Rect& blk, int n) {
+        const f32 smH = 13 * s;
+        const Rect gr{blk.x, blk.y, blk.w, std::max(14 * s, blk.h - smH - 2 * s)};
+        rend_.well(gr, nx::radiusXs * s, true);
+        const Rect p = gr.insetXY(2 * s, 2 * s);
+        const bool editable = stateOk;
+        const u64 wid = uiId(UiSpectraPanel, 810 + n, uidKey);
+        const f32 cw16 = p.w / (f32)kGridSteps;
+        const auto stepAt = [&](f32 x) {
+            return clampv((int)std::floor((x - p.x) / std::max(1e-3f, cw16)),
+                          0, kGridSteps - 1);
+        };
+        const auto levelAt = [&](f32 y) {
+            return clampv((int)std::lround((1.f - (y - p.y) / std::max(1e-3f, p.h)) *
+                                           (f32)(kGridLevels - 1)), 0, kGridLevels - 1);
+        };
+
+        // A CLICK IS A STROKE OF ONE STEP, and it has to be handled as one:
+        // a fast click delivers its press and its release in the SAME frame
+        // (the popover learned this the hard way -- see SpectraDrop::justOpened)
+        // and a paint loop that tested `in.down[0]` first would drop it on the
+        // floor, so a step you clicked would stay where it was.
+        bool pressedNow = false;
+        if (editable && ui_.setHot(wid, gr) && ui_.isHot(wid)) {
+            ui_.cursor = Cursor::Hand;
+            ui_.badge  = Badge::Draw;
+            if (in.pressed[2]) {
+                sstate.grid[n][stepAt(in.mx)] = 0;
+                writeState("clear LFO step");
+            }
+            if (in.pressed[0]) {
+                ui_.active = wid;                // so one stroke is one undo entry
+                g_gridDrag.lfo = n;
+                g_gridDrag.startStep  = stepAt(in.mx);
+                g_gridDrag.startLevel = levelAt(in.my);
+                pressedNow = true;
+            }
+            char t[176];
+            snprintf(t, sizeof t,
+                     "LFO %d steps: drag to paint, shift-drag for a line, "
+                     "right-click clears a step. Step %d of 16, level %.2f - "
+                     "the whole cycle is the sync division.",
+                     n + 1, stepAt(in.mx) + 1,
+                     (double)sstate.grid[n][stepAt(in.mx)] / 15.0);
+            ui_.tip = t;
+        }
+        if (g_gridDrag.lfo == n) {
+            if (in.down[0] || pressedNow) {
+                const int s1 = stepAt(in.mx), l1 = levelAt(in.my);
+                bool changed = false;
+                if (in.shift()) {
+                    const int a = g_gridDrag.startStep, b = s1;
+                    const int la = g_gridDrag.startLevel, lb = l1;
+                    for (int i = std::min(a, b); i <= std::max(a, b); ++i) {
+                        const f32 u = a == b ? 1.f : (f32)(i - a) / (f32)(b - a);
+                        const int lv = clampv((int)std::lround((f32)la +
+                                              ((f32)lb - (f32)la) * u), 0, 15);
+                        if (sstate.grid[n][i] != lv) { sstate.grid[n][i] = lv; changed = true; }
+                    }
+                } else {
+                    // A FREE STROKE FILLS THE STEPS IT FLEW OVER. The pointer
+                    // is sampled once a frame and a hand moves faster than
+                    // that, so painting only the step under the cursor leaves
+                    // holes in a quick sweep -- and a sequencer that drops
+                    // steps when you draw fast is a sequencer you stop drawing
+                    // on. The span from the last sample to this one is filled
+                    // with the same interpolation shift-drag uses; a stroke
+                    // that stayed in one step is the one-step case of it.
+                    const int a = clampv(g_gridDrag.startStep, 0, kGridSteps - 1);
+                    const int la = clampv(g_gridDrag.startLevel, 0, 15);
+                    for (int i = std::min(a, s1); i <= std::max(a, s1); ++i) {
+                        const f32 u = a == s1 ? 1.f : (f32)(i - a) / (f32)(s1 - a);
+                        const int lv = clampv((int)std::lround((f32)la +
+                                              ((f32)l1 - (f32)la) * u), 0, 15);
+                        if (sstate.grid[n][i] != lv) { sstate.grid[n][i] = lv; changed = true; }
+                    }
+                    // ...and the next frame's span starts where this one ended.
+                    // (Shift-drag deliberately does NOT do this: a line has one
+                    // anchor, and moving it would make the line follow the hand
+                    // instead of standing where it was started.)
+                    g_gridDrag.startStep  = s1;
+                    g_gridDrag.startLevel = l1;
+                }
+                if (changed) writeState("draw LFO steps");
+            }
+            if (!in.down[0]) g_gridDrag.lfo = -1;
+        }
+
+        // The bars. Every fourth seam is a hairline, so sixteen steps read as
+        // four beats of four without a single number on screen.
+        for (int i = 1; i < kGridSteps; ++i)
+            if (i % 4 == 0)
+                rend_.hairlineV(std::round(p.x + cw16 * (f32)i), gr.y + 2 * s,
+                                gr.bottom() - 2 * s);
+        for (int i = 0; i < kGridSteps; ++i) {
+            const int d = clampv(sstate.grid[n][i], 0, 15);
+            const f32 bx = p.x + cw16 * (f32)i + 0.5f * s;
+            const f32 bw = std::max(1.f, cw16 - 1.f * s);
+            const f32 bh = p.h * (f32)d / 15.f;
+            if (bh <= 0.5f) {
+                rend_.rect({bx, p.bottom() - std::max(1.f, nx::snapPx(s)), bw,
+                            std::max(1.f, nx::snapPx(s))}, nx::line.alpha(0.55f));
+                continue;
+            }
+            const Rect bar{bx, p.bottom() - bh, bw, bh};
+            rend_.rect(bar, nx::violet.alpha(editable ? 0.55f : 0.30f));
+            // §1's one lamp: the lit edge is the TOP of the bar, which is also
+            // the edge that moves, so light rides the value here too.
+            rend_.rect({bar.x, bar.y, bar.w, std::max(1.f, nx::snapPx(s))},
+                       nx::cyan.alpha(editable ? 0.75f : 0.30f));
+        }
+        if (!editable && ui_.hovered(gr))
+            ui_.tip = "This device's state string does not parse - the grid is "
+                      "read-only rather than overwrite what it could not read";
+
+        // The smooth control, in the hero's own label / trough / value idiom.
+        const Rect smr{blk.x, blk.bottom() - smH, blk.w, smH};
+        // The smooth row's label is a GLYPH and not the word, for the reason the
+        // filter and shape clusters carry glyphs: the row is 90 logical pixels
+        // wide and "smooth" is thirty-eight of them, which would leave a 0..1
+        // control twenty-six pixels to be dragged in. So the label is what the
+        // control DOES -- a step with its corner rounded off -- and the tooltip
+        // is the sentence.
+        const Rect lr{smr.x, smr.y, 13 * s, smH};
+        const Rect vr{smr.right() - 24 * s, smr.y, 24 * s, smH};
+        const Rect tr{lr.right() + 2 * s, smr.y + 2 * s,
+                      std::max(4 * s, vr.x - lr.right() - 6 * s), smH - 4 * s};
+        {
+            const Col gc = nx::muted.alpha(editable ? 0.80f : 0.35f);
+            const f32 gt = std::max(1.f, nx::snapPx(s));
+            const f32 gx = lr.x + 1 * s, gy = lr.cy();
+            rend_.line(gx, gy + 2.5f * s, gx + 3.5f * s, gy + 2.5f * s, gt, gc);
+            rend_.line(gx + 3.5f * s, gy + 2.5f * s, gx + 5.5f * s, gy + 0.5f * s, gt, gc);
+            rend_.line(gx + 5.5f * s, gy + 0.5f * s, gx + 7.f * s, gy - 2.5f * s, gt, gc);
+            rend_.line(gx + 7.f * s, gy - 2.5f * s, gx + 10.5f * s, gy - 2.5f * s, gt, gc);
+        }
+        f32 sv = (f32)clampv(sstate.smooth[n], 0, 1000) / 1000.f;
+        if (editable) {
+            const u64 swid = uiId(UiSpectraPanel, 820 + n, uidKey);
+            if (ui_.trough(swid, tr, &sv, 0.f, 1.f, nx::violetSoft, 1.f)) {
+                sstate.smooth[n] = clampv((int)std::lround(sv * 1000.f), 0, 1000);
+                writeState("LFO smooth");
+            }
+            if (ui_.hovered(tr))
+                ui_.tip = "Step smoothing: 0 is a hard staircase (a selected "
+                          "branch, bit-exact); above it a one-pole lag toward "
+                          "each step, stored as thousandths";
+        } else {
+            rend_.well(tr, nx::radiusXs * s, true);
+        }
+        char sb[16];
+        snprintf(sb, sizeof sb, "%.2f", (double)sv);
+        rend_.textIn(fSmall_, vr, editable ? sb : "-",
+                     nx::muted.alpha(editable ? 1.f : 0.4f), Align::Right, 0);
     };
 
     // --- shared state several sections read --------------------------------
@@ -938,8 +1990,222 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const Rect c = col(0);
         const f32 y0 = sect(c, "WAVETABLE", 1.f);
         const f32 slidH = 13 * s;
-        const Rect dispR{c.x, y0 + 2 * s, c.w,
-                         std::max(24 * s, c.bottom() - (y0 + 2 * s) - (slidH * 2.f + 10 * s))};
+        // v3 gave the hero column a selector band, and it takes the SAME band
+        // every other column's selector row sits in -- rows that line up across
+        // seven columns are most of what makes a panel read as built, and the
+        // hero was the one column that had nothing in that band. The well pays
+        // for it out of its own height, which is the only budget there is.
+        const Rect impR{c.x, y0, c.w, subH};
+        const Rect dispR{c.x, y0 + subH + gap, c.w,
+                         std::max(24 * s, c.bottom() - (y0 + subH + gap) -
+                                          (slidH * 2.f + 8 * s))};
+
+        // =====================================================================
+        // THE IMPORT -- pillar 1's whole surface in this file.
+        //
+        // THE DROP TARGET IS THE HERO ITSELF, and the language is the sampler's
+        // word for word: the lit edge arrives when a drag is over the target,
+        // the Add badge says what a release will do, and the INVITATION IS
+        // QUIET AND CONDITIONAL -- there is no chip shouting "DROP A WAVETABLE
+        // HERE" at rest, because the owner was right about the first cut of the
+        // sampler's ("looks goofy and unprofessional") and this is not the
+        // place to re-loudify it. At rest the row says which table each
+        // oscillator is on. While a browser drag is in flight it says whether
+        // it will take it. That is all.
+        //
+        // WHICH OSCILLATOR gets the file is a visible choice and not a guess:
+        // the A / B pair at the left of the row is the target, it is UI state
+        // (not a parameter -- "which am I loading" is a question about the
+        // pointer), and the badge's tooltip names it before the button comes
+        // up. The alternative -- inferring the target from which half of the
+        // well the pointer is over -- would be a rule nobody can see.
+        // =====================================================================
+        const bool wtLive  = wtSupported(inst);
+        const int  wtOsc   = clampv(g_wt.osc, 0, 1);
+        const int  wtTblId = wtOsc ? pBTable : pATable;
+        const bool wtCustom = wtLive && wtHasCustom(inst, wtOsc);
+        const Rect wtDropR{c.x, impR.y, c.w, dispR.bottom() - impR.y};
+
+        // NXTAKT_DEBUG_SPECTRAWTDRAG, re-armed here and not once in the seed:
+        // app_session.cpp clears any drag the mouse is not holding, which is
+        // right for a real drag and leaves a headless one alive for one frame.
+        if (!g_wt.dragHold.empty()) {
+            drag_.kind  = DragState::Kind::BrowserFile;
+            drag_.path  = g_wt.dragHold;
+            drag_.armed = true;
+        }
+        const bool fileDrag  = drag_.kind == DragState::Kind::BrowserFile && drag_.armed;
+        const bool dragWav   = fileDrag && looksLikeWav(drag_.path);
+        const bool dragHere  = fileDrag && wtDropR.contains(in.mx, in.my);
+        const bool dropReady = dragHere && dragWav && wtLive;
+
+        if (dragHere) {
+            rend_.gradStroke(wtDropR, nx::radiusSm * s, s,
+                             dropReady ? nx::edgeLit : nx::edge, 1.f);
+            if (dropReady) {
+                ui_.badge = Badge::Add;
+                char t[176];
+                snprintf(t, sizeof t, "Drop to import %s into osc %s",
+                         baseNameOf(drag_.path.c_str()), wtOsc ? "B" : "A");
+                ui_.tip = t;
+            } else if (!wtLive) {
+                ui_.tip = "This device has no wavetable import - the panel's "
+                          "PluginInstance does not answer wavetable()";
+            } else {
+                ui_.tip = "A wavetable is imported from a .wav";
+            }
+            if (in.released[0] && dropReady) {
+                // ONE undo entry for the whole verb. The Table parameter is
+                // written below WITHOUT commit(), which would take a second
+                // point for what is one edit to the user; everything else about
+                // the write is commit()'s body, line for line.
+                undoPoint("import wavetable");
+                if (wtImport(inst, wtOsc, drag_.path.c_str())) {
+                    g_wt.err.clear();
+                    // An import that did not move the oscillator onto its
+                    // custom slot would be a silent no-op with a filename
+                    // attached, so the drop DOES what dropping means.
+                    if (has(wtTblId) && enumMax(wtTblId, 7) >= 8) {
+                        inst->setParam(wtTblId, 8.f);
+                        if (ownTrack)
+                            autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid,
+                                        dm.uid, inst->paramInfo(wtTblId).id), 8.f, 0);
+                    }
+                    char msg[224];
+                    snprintf(msg, sizeof msg, "Spectra: osc %s plays %s (%d frames)",
+                             wtOsc ? "B" : "A", wtName(inst, wtOsc),
+                             wtFrames(inst, wtOsc));
+                    status_ = msg;
+                } else {
+                    // §9, and the refusal idiom: the importer's own sentence,
+                    // never a silent no-op. It stays on the row in amber until
+                    // the next import or the next target change.
+                    g_wt.err = wtError(inst);
+                    status_ = std::string("Spectra: ") + g_wt.err;
+                }
+                drag_ = DragState{};
+            }
+        }
+
+        {
+            ui_.segCluster(impR);
+            const f32 tgW = 15 * s;
+            const f32 clrW = wtCustom ? 15 * s : 0.f;
+            const Rect abR{impR.x, impR.y, tgW * 2.f, impR.h};
+            const Rect brR{impR.right() - 19 * s - clrW, impR.y, 19 * s, impR.h};
+            const Rect clR{impR.right() - clrW, impR.y, std::max(0.f, clrW), impR.h};
+            const Rect nmR{abR.right() + 2 * s, impR.y,
+                           std::max(4 * s, brR.x - abR.right() - 4 * s), impR.h};
+            rend_.hairlineV(abR.right(), impR.y + 2 * s, impR.bottom() - 2 * s);
+            rend_.hairlineV(brR.x, impR.y + 2 * s, impR.bottom() - 2 * s);
+
+            for (int k = 0; k < 2; ++k) {
+                const Rect seg{abR.x + tgW * (f32)k, abR.y, tgW, abR.h};
+                if (k) rend_.hairlineV(seg.x, abR.y + 2 * s, abR.bottom() - 2 * s);
+                Rect g = seg;
+                if (wtLive) {
+                    const u64 wid = uiId(UiSpectraPanel, 801 + k, uidKey);
+                    if (ui_.segButton(wid, seg, k == wtOsc, nx::violet)) {
+                        g_wt.osc = k;
+                        g_wt.err.clear();
+                    }
+                    g = ui_.lastRect;
+                }
+                ui_.microIn(fSmall_, g, k ? "B" : "A",
+                            k == wtOsc && wtLive ? nx::text
+                                                 : nx::muted.alpha(wtLive ? 0.85f : 0.40f),
+                            Align::Center);
+            }
+
+            // THE NAME. A custom table is named by its basename, which is the
+            // only thing about it a person recognises; a factory slot is named
+            // by the contract's own label. An import that was refused replaces
+            // both with its reason, in amber, until it is answered.
+            const int  tblIdx = has(wtTblId)
+                ? clampv((int)std::lround(get(wtTblId, 0.f)), 0, 8) : 0;
+            const char* nm; Col nink;
+            if (!g_wt.err.empty()) {
+                nm = g_wt.err.c_str(); nink = nx::amber.alpha(0.95f);
+            } else if (!wtLive) {
+                // Short, because the row is 144px and the sentence is 60 -- the
+                // tooltip is where the whole of it lives, which is this file's
+                // rule for every label cut to a cell.
+                nm = "no import"; nink = nx::muted.alpha(0.45f);
+            } else if (wtCustom) {
+                nm = wtName(inst, wtOsc);
+                nink = tblIdx >= 8 ? nx::cyan.alpha(0.95f) : nx::muted.alpha(0.75f);
+            } else {
+                nm = kTables[clampv(tblIdx, 0, 7)]; nink = nx::muted.alpha(0.80f);
+            }
+            microFit(ui_, fSmall_, nmR, nm, nink, Align::Center);
+            if (ui_.hovered(nmR) && g_assign.src < 0) {
+                if (!g_wt.err.empty()) ui_.tip = g_wt.err;
+                else if (!wtLive)
+                    ui_.tip = "Custom wavetables need PluginInstance::wavetable(), "
+                              "which this build's plugin contract does not have";
+                else if (wtCustom) {
+                    char t[224];
+                    snprintf(t, sizeof t,
+                             "Osc %s: %s, %d frames%s", wtOsc ? "B" : "A",
+                             wtName(inst, wtOsc), wtFrames(inst, wtOsc),
+                             tblIdx >= 8 ? " - playing"
+                                         : " - imported, but Table is on a factory slot");
+                    ui_.tip = t;
+                } else
+                    ui_.tip = "Osc " + std::string(wtOsc ? "B" : "A") +
+                              " is on a factory table - drop a .wav here to import one";
+            }
+
+            // BROWSE. There is no modal file chooser in this program and there
+            // should not be one: the file browser IS the browse, and the chip
+            // opens it (Ctrl+B's other half) rather than inventing a second
+            // way to find a file.
+            if (wtLive) {
+                if (ui_.segButton(uiId(UiSpectraPanel, 803, uidKey), brR, false,
+                                  nx::violet)) {
+                    showBrowser_ = true;
+                    status_ = "Spectra: drag a .wav from the browser onto the "
+                              "wavetable well";
+                }
+                ui_.microIn(fSmall_, ui_.lastRect, "...", nx::muted, Align::Center);
+                if (ui_.hovered(brR))
+                    ui_.tip = "Browse: opens the file browser - drag a .wav from "
+                              "it onto the well above";
+            } else {
+                ui_.microIn(fSmall_, brR, "...", nx::muted.alpha(0.35f), Align::Center);
+            }
+
+            // REVERT TO FACTORY. Present only when there IS a custom table to
+            // revert from, because a control that undoes nothing is a control
+            // that has to be explained.
+            if (wtCustom) {
+                const u64 wid = uiId(UiSpectraPanel, 804, uidKey);
+                const bool hit = ui_.segButton(wid, clR, false, nx::violet);
+                const Rect g = ui_.lastRect;
+                const f32 k = 3.f * s;
+                rend_.line(g.cx() - k, g.cy() - k, g.cx() + k, g.cy() + k, 1.2f * s,
+                           nx::muted);
+                rend_.line(g.cx() - k, g.cy() + k, g.cx() + k, g.cy() - k, 1.2f * s,
+                           nx::muted);
+                if (ui_.hovered(clR))
+                    ui_.tip = "Drop the imported table and put this oscillator "
+                              "back on a factory one";
+                if (hit) {
+                    undoPoint("clear custom wavetable");
+                    wtClear(inst, wtOsc);
+                    g_wt.err.clear();
+                    if (has(wtTblId) && std::lround(get(wtTblId, 0.f)) >= 8) {
+                        inst->setParam(wtTblId, 0.f);
+                        if (ownTrack)
+                            autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid,
+                                        dm.uid, inst->paramInfo(wtTblId).id), 0.f, 0);
+                    }
+                    status_ = std::string("Spectra: osc ") + (wtOsc ? "B" : "A") +
+                              " back on factory table " + kTables[0];
+                }
+            }
+        }
+
         rend_.well(dispR, nx::radiusSm * s, true);
 
         const bool haveA = has(pATable) && has(pAPos);
@@ -996,20 +2262,38 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                     px = qx; py = qy;
                 }
             };
-            if (has(pBTable) && has(pBPos) && bLevel > 1e-4f)
-                trace(clampv((int)std::lround(get(pBTable, 0.f)), 0, 7), posB,
-                      nx::violetSoft.alpha(0.75f), 1.2f * s);
+            // v3 WIDENED THE TABLE ENUM, and slot 8 is a table this side has no
+            // view of: detail::spectraTables() publishes the eight procedural
+            // sets and nothing else, and an imported table lives in the
+            // instrument's own memory behind a control interface that hands out
+            // a name, a frame count and no samples. So an oscillator on its
+            // custom slot draws NO TRACE and its legend letter goes amber --
+            // which is the display keeping the honesty it has kept since v2,
+            // when warp made it say "pre-warp" rather than draw a guess.
+            const int tblA = has(pATable) ? clampv((int)std::lround(get(pATable, 0.f)), 0, 8) : 0;
+            const int tblB = has(pBTable) ? clampv((int)std::lround(get(pBTable, 0.f)), 0, 8) : 0;
+            const bool bShown = has(pBTable) && has(pBPos) && bLevel > 1e-4f;
+            if (bShown && tblB < 8)
+                trace(tblB, posB, nx::violetSoft.alpha(0.75f), 1.2f * s);
             // §1: cyan is the light inside the material. This is the live shape
             // the instrument is standing on, so it is the one cyan thing here.
-            trace(clampv((int)std::lround(get(pATable, 0.f)), 0, 7), posA,
-                  nx::cyan, 1.5f * s);
+            if (tblA < 8) trace(tblA, posA, nx::cyan, 1.5f * s);
 
             // The legend, so the two traces are named rather than guessed at.
             ui_.microIn(fSmall_, {dispR.x + 6 * s, dispR.y + 1 * s, 40 * s, 10 * s},
-                        "A", nx::cyan.alpha(0.9f), Align::Left, 0);
-            if (has(pBTable) && bLevel > 1e-4f)
+                        "A", (tblA >= 8 ? nx::amber : nx::cyan).alpha(0.9f),
+                        Align::Left, 0);
+            if (bShown)
                 ui_.microIn(fSmall_, {dispR.x + 16 * s, dispR.y + 1 * s, 40 * s, 10 * s},
-                            "B", nx::violetSoft.alpha(0.9f), Align::Left, 0);
+                            "B", (tblB >= 8 ? nx::amber : nx::violetSoft).alpha(0.9f),
+                            Align::Left, 0);
+            if (tblA >= 8 || (bShown && tblB >= 8))
+                rend_.textIn(fSmall_, dispR,
+                             tblA >= 8 && bShown && tblB >= 8
+                                 ? "both oscillators play imported tables"
+                                 : (tblA >= 8 ? "osc A plays an imported table"
+                                              : "osc B plays an imported table"),
+                             nx::muted.alpha(0.55f), Align::Center);
             // And the label, which is where this display keeps its honesty.
             // With the tables in hand there is nothing left to disclaim, so it
             // says something useful instead: WHERE ON THE FRAME AXIS the morph
@@ -1032,8 +2316,18 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                  get(pAWarpAmt, 0.f) > 1e-4f) ||
                 (has(pBWarp) && bLevel > 1e-4f &&
                  std::lround(get(pBWarp, 0.f)) != 0 && get(pBWarpAmt, 0.f) > 1e-4f);
-            char wlabel[48];
-            if (tset)
+            char wlabel[96];
+            if (tblA >= 8) {
+                // THE HERO LABELS THE IMPORT BY BASENAME. A hash is the table's
+                // identity and a path is a recovery hint (the contract says
+                // both); neither is a thing a person recognises across a room,
+                // and the file's own name is.
+                const char* cn = wtLive ? wtName(inst, 0) : "";
+                snprintf(wlabel, sizeof wlabel, "%s · %d frames%s",
+                         (cn && *cn) ? cn : "custom table",
+                         wtLive ? wtFrames(inst, 0) : 0,
+                         warpOn ? " · pre-warp" : "");
+            } else if (tset)
                 snprintf(wlabel, sizeof wlabel, "frame %.1f / %d%s",
                          (double)(posA * (f32)(tset->frames - 1)), tset->frames,
                          warpOn ? " · pre-warp" : "");
@@ -1070,6 +2364,26 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const u64 wid = uiId(UiSpectraPos, id, uidKey);
             if (ui_.trough(wid, tr, &v, 0.f, 1.f, nx::cyan, dim))
                 commit(id, v, wid, "Position");
+            // THE MOD RING, on a control that is not a circle. Position is a
+            // trough, so its reach is a BRACKET along the trough's own top edge
+            // -- the same number, the same rule (static, never a meter), drawn
+            // in the shape the control actually has.
+            {
+                const ModReach mr = modReach(destOfParam(id));
+                if (mr.slots) {
+                    const f32 x0 = tr.x + tr.w * clampv(v + mr.lo, 0.f, 1.f);
+                    const f32 x1 = tr.x + tr.w * clampv(v + mr.hi, 0.f, 1.f);
+                    const f32 yb = tr.y - 1.f * s;
+                    const f32 th = std::max(1.f, nx::snapPx(s));
+                    rend_.rect({std::min(x0, x1), yb, std::max(th, std::fabs(x1 - x0)), th},
+                               nx::cyan.alpha(0.55f * dim));
+                    rend_.rect({x0 - th * 0.5f, yb - 1.5f * s, th, 3.f * s},
+                               nx::cyan.alpha(0.55f * dim));
+                    rend_.rect({x1 - th * 0.5f, yb - 1.5f * s, th, 3.f * s},
+                               nx::cyan.alpha(0.55f * dim));
+                }
+            }
+            dropTarget(tr, id, label);
             char buf[24];
             snprintf(buf, sizeof buf, "%.2f", (double)v);
             rend_.textIn(fSmall_, vr, buf,
@@ -1088,8 +2402,25 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     const auto oscColumn = [&](int ci, const char* label, int base, f32 dim) {
         const Rect c = col(ci);
         const f32 y0 = sect(c, label, dim);
-        stepper({c.x, y0, c.w, subH}, base + 0, 8, kTables, dim, "no table",
-                "Table", "The oscillator's wavetable - the arrows cycle the eight");
+        // THE TABLE ENUM ASKS THE DEVICE HOW WIDE IT IS. The contract widened
+        // id 0 / id 8 from 0..7 to 0..8, where 8 is THIS oscillator's imported
+        // table -- so the ring the arrows walk is eight long against a v2 DSP
+        // and nine long against a v3 one, and slot 8 wears the imported file's
+        // own basename rather than the word "custom", because that is the name
+        // the person who imported it will look for.
+        const int  tblId = base + 0;
+        const int  nTbl  = clampv(enumMax(tblId, 7) + 1, 1, 9);
+        const int  oscN  = base == pBTable ? 1 : 0;
+        const char* cName = wtSupported(inst) ? wtName(inst, oscN) : "";
+        const char* tblNames[9] = {kTables[0], kTables[1], kTables[2], kTables[3],
+                                   kTables[4], kTables[5], kTables[6], kTables[7],
+                                   (cName && *cName) ? cName : "no import"};
+        stepper({c.x, y0, c.w, subH}, tblId, nTbl, tblNames, dim, "no table",
+                "Table", nTbl > 8
+                    ? "The oscillator's wavetable - eight factory tables and, "
+                      "at the end of the ring, the one imported onto this "
+                      "oscillator"
+                    : "The oscillator's wavetable - the arrows cycle the eight");
 
         const f32 cw = c.w / 3.f;
         const f32 r1 = y0 + subH + gap, r2 = r1 + rowH + gap;
@@ -1238,7 +2569,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const f32 er1 = y0 + subH + gap, er2 = er1 + rowH + gap;
         envRow(c, er1, "ENV 1", pAttack,   5.f, 200.f, 0.7f, 300.f);
         rend_.hairlineH(c.x, c.right(), er2 - 2 * s);
-        envRow(c, er2, "ENV 2", pE2Attack, 5.f, 200.f, 0.7f, 300.f);
+        envRow(c, er2, "ENV 2", pE2Attack, 5.f, 200.f, 0.7f, 300.f, 4);
     }
 
     // =======================================================================
@@ -1247,21 +2578,53 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     {
         const Rect c = col(5);
         const f32 y0 = sect(c, "LFO", 1.f);
-        shapeCluster({c.x, y0, c.w, subH}, pLfoShape, 50, "LFO Shape");
+        const int shape = shapeCluster({c.x, y0, c.w, subH}, pLfoShape, 50,
+                                       "LFO Shape");
+        const bool drawn = shape == 5;
 
         const f32 cw = c.w / 3.f;
         const f32 r1 = y0 + subH + gap, r2 = r1 + rowH + gap;
 
+        // THE HEADER BAND CARRIES THIS LFO'S OWN CHROME: the mode toggle, the
+        // grab handle that makes it a draggable source, and -- only when the
+        // drawn grid is on -- the sync selector, compacted.
+        //
+        // WHY SYNC MOVES, stated where the cost is paid. A 16-step grid wants
+        // two of a column's three cells and a row of its own. LFO 2 and LFO 3
+        // have exactly that free, because the contract gives them no fixed
+        // routings; LFO 1 does not -- its six cells hold rate, three fixed
+        // depths and a two-cell sync selector, and there is no arrangement of
+        // six cells that also holds a grid. So choosing Custom moves sync into
+        // the header band, which is the one band in this column with room, and
+        // the grid takes the two cells it vacated. NOTHING IS HIDDEN: every
+        // control that was on screen before the shape changed is still on
+        // screen after it, which is the property that mattered.
+        {
+            const f32 hy = c.y, hh = headH;
+            const Rect handR{c.right() - 12 * s, hy, 12 * s, hh};
+            srcHandle(handR, 1);
+            const Rect modeR{handR.x - 32 * s, hy + 0.5f * s, 30 * s, hh - 1 * s};
+            modeToggle(880, modeR, pL1Mode, "L1 Mode");
+            if (drawn)
+                enumSel(870, {modeR.x - 46 * s, hy + 0.5f * s, 44 * s, hh - 1 * s},
+                        pLfoSync, kSyncDiv, 10, "Sync", 1.f);
+        }
+
         // The sync selector takes two cells of the second row and is a
         // 14px control inside a 48px band, so it is centred in it rather than
         // hung off the top -- the row is what the eye aligns on.
-        const Rect syncR{c.x, r2 + (rowH - lblH - subH) * 0.5f, cw * 2.f, subH};
-        const int sync = stepper(syncR, pLfoSync, 10, kSyncDiv, 1.f, "no sync",
-                                 "Sync",
-                                 "LFO sync: free-running, or a division of the "
-                                 "transport's tempo");
-        microFit(ui_, fSmall_, {c.x, r2 + rowH - lblH, cw * 2.f, lblH}, "sync",
-                 nx::muted.alpha(0.85f), Align::Center);
+        int sync = has(pLfoSync) ? clampv((int)std::lround(get(pLfoSync, 0.f)), 0, 9) : 0;
+        if (drawn) {
+            lfoGridBlock({c.x, r2 + 1 * s, cw * 2.f - 2 * s, rowH - 2 * s}, 0);
+        } else {
+            const Rect syncR{c.x, r2 + (rowH - lblH - subH) * 0.5f, cw * 2.f, subH};
+            sync = stepper(syncR, pLfoSync, 10, kSyncDiv, 1.f, "no sync",
+                           "Sync",
+                           "LFO sync: free-running, or a division of the "
+                           "transport's tempo");
+            microFit(ui_, fSmall_, {c.x, r2 + rowH - lblH, cw * 2.f, lblH}, "sync",
+                     nx::muted.alpha(0.85f), Align::Center);
+        }
 
         Ui::KnobStyle st;
         // THE RATE KNOB SWAPS ITS READOUT. When the LFO is synced the number in
@@ -1293,6 +2656,62 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // it. The section's own header says so too -- it does not advertise a
         // control that is not there.
         const f32 y0 = sect(c, np > 0 ? "GLOBAL / PRESET" : "GLOBAL", 1.f);
+
+        // =====================================================================
+        // SAVE -- pillar 3's whole surface in this file.
+        //
+        // A chip in the section header, and then the arrangement's
+        // marker-rename idiom exactly: the thing you are naming BECOMES the
+        // field. The preset chip is what the popover hangs from and what the
+        // name is read from, so the preset chip is what you type into -- there
+        // is no dialog, no second surface, and nowhere for the name to appear
+        // that is not where the name lives.
+        //
+        // GUARDED AT THE CONTRACT, not at the device. savePreset()'s own
+        // default returns false, so a device that cannot save presets answers
+        // for itself and the chip stays live to hear the refusal; what the chip
+        // cannot survive is the METHOD not existing, which is a compile
+        // question and is answered by psSupported<>() -- inert, and the tooltip
+        // says which of the two absences it is.
+        // =====================================================================
+        const u64 saveFieldId = uiId(UiSpectraPanel, 851, uidKey);
+        const bool saveLive = psSupported<PluginInstance>();
+        {
+            const Rect chip{c.right() - 34 * s, c.y, 34 * s, headH};
+            if (saveLive && !g_save.open) {
+                if (ui_.button(uiId(UiSpectraPanel, 850, uidKey), chip, "") ||
+                    g_save.pending) {
+                    g_save.pending = false;
+                    g_save.open = true;
+                    g_save.justOpened = true;
+                    closeDrop();
+                    g_save.buf = np > 0 ? presetNameOf(*inst, spectraPreset_) : "";
+                    // beginEdit()'s body, done from outside because the click
+                    // that opens the field lands on the CHIP and not on the
+                    // field -- the marker rename gets this for free only
+                    // because its double-click lands on the flag the field
+                    // replaces.
+                    ui_.editId = saveFieldId;
+                    ui_.editBuf = g_save.buf;
+                    ui_.caret = (int)ui_.editBuf.size();
+                    ui_.active = saveFieldId;
+                }
+                ui_.microIn(fSmall_, ui_.lastRect, "SAVE",
+                            ui_.hovered(chip) ? nx::text : nx::muted.alpha(0.85f),
+                            Align::Center);
+            } else {
+                ui_.microIn(fSmall_, chip, "SAVE",
+                            g_save.open ? nx::violetSoft : nx::muted.alpha(0.35f),
+                            Align::Center);
+            }
+            if (ui_.hovered(chip) && g_assign.src < 0)
+                ui_.tip = saveLive
+                    ? "Save this patch to the user bank - the name field opens "
+                      "in the preset row; Enter saves, Escape cancels"
+                    : "User presets need PluginInstance::savePreset(), which "
+                      "this build's plugin contract does not have";
+        }
+
         if (np > 0) {
             spectraPreset_ = clampv(spectraPreset_, 0, np - 1);
             const Rect pr{c.x, y0, c.w, subH};
@@ -1322,12 +2741,21 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             };
             // The arrows stay beside the dropdown: one-hand browsing is a
             // different gesture from picking by name, and it costs 32px.
-            if (ui_.segButton(uiId(UiSpectraPanel, 60, uidKey), lb, false, nx::violet))
-                loadIdx(spectraPreset_ - 1);
-            chev(ui_.lastRect, true);
-            if (ui_.segButton(uiId(UiSpectraPanel, 61, uidKey), rb, false, nx::violet))
-                loadIdx(spectraPreset_ + 1);
-            chev(ui_.lastRect, false);
+            // ...and they stand down while the name field is open: a click on
+            // an arrow would commit the typed name (textField's own rule) and
+            // load a different preset in the same frame, which is two verbs for
+            // one click and the second one is a surprise.
+            if (!g_save.open) {
+                if (ui_.segButton(uiId(UiSpectraPanel, 60, uidKey), lb, false, nx::violet))
+                    loadIdx(spectraPreset_ - 1);
+                chev(ui_.lastRect, true);
+                if (ui_.segButton(uiId(UiSpectraPanel, 61, uidKey), rb, false, nx::violet))
+                    loadIdx(spectraPreset_ + 1);
+                chev(ui_.lastRect, false);
+            } else {
+                chev(lb, true);
+                chev(rb, false);
+            }
 
             // THE CHIP -- the dropdown the preset name always wanted to be.
             // The name area is a segment of the same cluster; clicking it
@@ -1339,6 +2767,79 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // click-outside rule, which closes -- so the chip toggles without
             // owning a second gesture.
             const Rect nameR{lb.right(), pr.y, rb.x - lb.right(), pr.h};
+
+            // THE NAME FIELD. The preset chip, being typed into.
+            if (g_save.open) {
+                const bool birth = g_save.justOpened;
+                g_save.justOpened = false;
+                const bool done = ui_.textField(saveFieldId, nameR, &g_save.buf,
+                                                nx::panel2, nx::text, Align::Left,
+                                                false) && !birth;
+                // ...and if the birth frame's stray press took the caret with
+                // it on the way past, hand it straight back. beginEdit()'s body
+                // again, for the same reason it is here at all.
+                if (birth && ui_.editId != saveFieldId) {
+                    ui_.editId  = saveFieldId;
+                    ui_.editBuf = g_save.buf;
+                    ui_.caret   = (int)ui_.editBuf.size();
+                    ui_.active  = saveFieldId;
+                }
+                if (done) {
+                    g_save.open = false;
+                    // The contract's own refusals, checked HERE for the two it
+                    // can name better than a bool can: an empty name and an
+                    // over-long one. Everything else savePreset() refuses for
+                    // its own reasons and the status bar carries the general
+                    // form, because a UI that invented a reason would be
+                    // guessing at a failure it did not see.
+                    std::string nm = g_save.buf;
+                    while (!nm.empty() && (nm.back() == ' ' || nm.back() == '\t')) nm.pop_back();
+                    size_t lead = 0;
+                    while (lead < nm.size() && nm[lead] == ' ') ++lead;
+                    nm.erase(0, lead);
+                    if (nm.empty()) {
+                        status_ = "Spectra: a preset needs a name - nothing was saved";
+                    } else if (nm.size() > 64) {
+                        status_ = "Spectra: a preset name is at most 64 bytes - "
+                                  "nothing was saved";
+                    } else {
+                        // Was there already a user preset under this display
+                        // name? The contract keeps ONE generation of the
+                        // overwritten file as <name>.nxp.bak and does not enter
+                        // undo -- presets are files, not session state -- so the
+                        // announcement is the only record the editor makes of it.
+                        const int fc0 = clampv(psFactoryCount(inst), 0, np);
+                        bool replaced = false;
+                        for (int i = fc0; i < np && !replaced; ++i)
+                            replaced = nm == presetNameOf(*inst, i);
+                        char msg[176];
+                        if (psSave(inst, nm.c_str())) {
+                            const int np2 = inst->presetCount();
+                            const int fc2 = clampv(psFactoryCount(inst), 0, np2);
+                            for (int i = fc2; i < np2; ++i)
+                                if (nm == presetNameOf(*inst, i)) { spectraPreset_ = i; break; }
+                            snprintf(msg, sizeof msg,
+                                     replaced ? "Spectra: preset '%s' replaced - the "
+                                                "previous file is kept as .nxp.bak"
+                                              : "Spectra: preset '%s' saved to the "
+                                                "user bank",
+                                     nm.c_str());
+                        } else {
+                            snprintf(msg, sizeof msg,
+                                     "Spectra: '%s' could not be written - check "
+                                     "$XDG_CONFIG_HOME/nxtakt/presets",
+                                     nm.c_str());
+                        }
+                        status_ = msg;
+                    }
+                } else if (ui_.editId != saveFieldId) {
+                    g_save.open = false;         // Escape, or a press elsewhere
+                    status_ = "Spectra: preset not saved";
+                }
+                if (ui_.hovered(nameR))
+                    ui_.tip = "Name this patch. Enter saves it to the user bank; "
+                              "Escape leaves the bank alone.";
+            } else {
             if (ui_.segButton(uiId(UiSpectraPanel, 62, uidKey), nameR, g_drop.open,
                               nx::violet) && !g_drop.open)
                 openDrop();
@@ -1353,13 +2854,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             microFit(ui_, fSmall_, {nr.x + 2 * s, nr.y, nr.w - 16 * s, nr.h},
                      presetNameOf(*inst, spectraPreset_),
                      g_drop.open ? nx::text : nx::text.alpha(0.92f), Align::Center);
-            if (ui_.hovered(pr)) {
-                char t[96];
+            if (ui_.hovered(pr) && g_assign.src < 0) {
+                const int fc = clampv(psFactoryCount(inst), 0, np);
+                char t[128];
                 snprintf(t, sizeof t,
-                         "Preset %d of %d - click the name for the list, arrows step",
-                         spectraPreset_ + 1, np);
+                         "Preset %d of %d (%s) - click the name for the list, "
+                         "arrows step", spectraPreset_ + 1, np,
+                         spectraPreset_ >= fc ? "user bank" : "factory bank");
                 ui_.tip = t;
             }
+            }   // the name field / name chip branch
         }
 
         const f32 cw = c.w / 3.f;
@@ -1387,8 +2891,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // what you reach for while designing, and the pages split on exactly
         // that line.
         st.lo = 0.f; st.hi = 1.f; st.def = 0.f;
-        knob({c.x + cw * 0.5f, r2, cw, rowH}, pNoise, "noise", st, 1.f);
-        knob({c.x + cw * 1.5f, r2, cw, rowH}, pSub, "sub", st, 1.f);
+        knob({c.x, r2, cw, rowH}, pNoise, "noise", st, 1.f);
+        knob({c.x + cw, r2, cw, rowH}, pSub, "sub", st, 1.f);
+        // BEND RANGE (id 99), and it belongs here rather than beside an LFO:
+        // it is not modulation, it is the calibration of a thing on the desk,
+        // which is what this column is for. It is also v3's ONE non-inert
+        // default -- the contract says so out loud: 2 semitones, not 0, because
+        // a build that ignored the pitch wheel was a broken instrument. The two
+        // half-cells this row used to waste are what pays for it.
+        st.lo = 0.f; st.hi = 24.f; st.def = 2.f; st.fmt = "%.0f";
+        knob({c.x + cw * 2.f, r2, cw, rowH}, pBendRange, "bend", st, 1.f, true);
     }
 
     } else {
@@ -1535,14 +3047,34 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // here -- the matrix two columns over is where their reach is patched, and
     // an empty cell is the layout saying so.
     // =======================================================================
-    const auto lfoColumn = [&](int ci, const char* label, int rateId, int syncId,
-                               int shapeId, int segBase, const char* whatShape) {
+    // `n` is the LFO's 0-based number, which is what the state string's grid
+    // block is keyed on and what the matrix source value derives from (source
+    // 1..3 is LFO 1..3, so this LFO's source is n + 1).
+    const auto lfoColumn = [&](int ci, int n, const char* label, int rateId,
+                               int syncId, int shapeId, int modeId, int segBase,
+                               const char* whatShape, const char* whatMode) {
         const Rect c = col(ci);
         const f32 y0 = sect(c, label, 1.f);
-        shapeCluster({c.x, y0, c.w, subH}, shapeId, segBase, whatShape);
+        const int shape = shapeCluster({c.x, y0, c.w, subH}, shapeId, segBase,
+                                       whatShape);
 
         const f32 cw = c.w / 3.f;
         const f32 r1 = y0 + subH + gap, r2 = r1 + rowH + gap;
+        // The same header chrome LFO 1 wears, and it needs no re-cut here: the
+        // contract gives LFO 2 and LFO 3 no fixed routings, so the two cells
+        // LFO 1 spends on l>pos / l>cut are empty in this column -- which is
+        // exactly the two cells a drawn grid wants. The empty cell was the
+        // layout saying "their reach is patched in the matrix"; when the grid
+        // is on it says what the grid is.
+        {
+            const Rect handR{c.right() - 12 * s, c.y, 12 * s, headH};
+            srcHandle(handR, n + 1);
+            modeToggle(880 + n, {handR.x - 32 * s, c.y + 0.5f * s, 30 * s,
+                                 headH - 1 * s}, modeId, whatMode);
+        }
+        if (shape == 5)
+            lfoGridBlock({c.x + cw + 1 * s, r1 + 1 * s, cw * 2.f - 2 * s,
+                          rowH - 2 * s}, n);
         const Rect syncR{c.x, r2 + (rowH - lblH - subH) * 0.5f, cw * 2.f, subH};
         const int sync = stepper(syncR, syncId, 10, kSyncDiv, 1.f, "no sync",
                                  "Sync",
@@ -1557,8 +3089,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         if (!freeRun) st.text = kSyncDiv[clampv(sync, 0, 9)];
         knob({c.x, r1, cw, rowH}, rateId, "rate", st, freeRun ? 1.f : 0.55f);
     };
-    lfoColumn(2, "LFO 2", pL2Rate, pL2Sync, pL2Shape, 630, "L2 Shape");
-    lfoColumn(3, "LFO 3", pL3Rate, pL3Sync, pL3Shape, 640, "L3 Shape");
+    lfoColumn(2, 1, "LFO 2", pL2Rate, pL2Sync, pL2Shape, pL2Mode, 630,
+              "L2 Shape", "L2 Mode");
+    lfoColumn(3, 2, "LFO 3", pL3Rate, pL3Sync, pL3Shape, pL3Mode, 640,
+              "L3 Shape", "L3 Mode");
 
     // =======================================================================
     // M5. ENV 3 + MACROS -- ids 62..65, 94..97. One column, two sections, the
@@ -1571,15 +3105,20 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const Rect c = col(4);
         const f32 y0 = sect(c, "ENV 3 / MACROS", 1.f);
         const f32 er1 = y0 + subH + gap, er2 = er1 + rowH + gap;
-        envRow(c, er1, "ENV 3", pE3Attack, 2.f, 300.f, 0.f, 150.f);
+        envRow(c, er1, "ENV 3", pE3Attack, 2.f, 300.f, 0.f, 150.f, 5);
         rend_.hairlineH(c.x, c.right(), er2 - 2 * s);
         const f32 kw = c.w / 4.f;
         Ui::KnobStyle st;
         st.lo = 0.f; st.hi = 1.f; st.def = 0.f; st.fmt = "%.2f";
         static const char* const kMacroLbl[4] = {"macro 1", "macro 2",
                                                  "macro 3", "macro 4"};
-        for (int m = 0; m < 4; ++m)
+        for (int m = 0; m < 4; ++m) {
             knob({c.x + kw * (f32)m, er2, kw, rowH}, pMacro1 + m, kMacroLbl[m], st, 1.f);
+            // The grab handle sits in the cell's top-left corner, which is dead
+            // space beside a round cap in every knob cell in the panel and the
+            // only 10px a macro cell has to spare. Macro sources are 9..12.
+            srcHandle({c.x + kw * (f32)m + 1 * s, er2 + 1 * s, 10 * s, 9 * s}, 9 + m);
+        }
     }
 
     // =======================================================================
@@ -1602,54 +3141,36 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const f32 top = y0 + 2 * s;
         const f32 rh = (c.bottom() - top) / 4.f;
 
-        // The micro-selector. `sub` is the panel sub-id, `what` the undo label.
-        const auto enumSel = [&](int sub, const Rect& r0, int id,
-                                 const char* const* names, int count,
-                                 const char* what, f32 dim) {
-            const bool live = has(id);
-            rend_.well(r0, nx::radiusXs * s, false);
-            int idx = live ? clampv((int)std::lround(get(id, 0.f)), 0, count - 1) : 0;
-            if (live) {
-                const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
-                if (ui_.setHot(wid, r0) && ui_.isHot(wid)) {
-                    ui_.cursor = Cursor::Hand;
-                    int d = 0;
-                    if (in.pressed[0]) d = +1;
-                    if (in.pressed[2]) d = -1;
-                    if (in.wheel != 0.f) {
-                        d = in.wheel > 0.f ? +1 : -1;
-                        in.wheel = 0.f;          // not the strip's notch to spend
-                    }
-                    if (d) commit(id, (f32)(((idx + d) % count + count) % count),
-                                  wid, what);
-                    char t[112];
-                    snprintf(t, sizeof t,
-                             "%s: %s - click next, right-click back, wheel steps",
-                             what, names[idx]);
-                    ui_.tip = t;
-                }
-            } else if (ui_.hovered(r0)) {
-                char t[80];
-                snprintf(t, sizeof t, "%s: this device has no parameter %d", what, id);
-                ui_.tip = t;
+        // THE THREE MIDI SOURCES LIVE IN THIS HEADER, and they live here
+        // because they are the only sources in the contract with no section of
+        // their own -- a wheel is not a control this panel owns, it is a thing
+        // on the desk. The matrix header band is where they belong: it is the
+        // one place in the panel that is ABOUT sources, it had 200 free pixels,
+        // and a source you can only reach by stepping a selector is a source
+        // drag-assign cannot offer. Guarded like everything else: against a v2
+        // DSP whose source enum stops at Random, all three are inert and say so.
+        {
+            static const char* const kMidiLbl[3] = {"wheel", "bend", "cc"};
+            for (int i = 0; i < 3; ++i) {
+                const Rect g{c.x + 92 * s + 62 * s * (f32)i, c.y, 62 * s, headH};
+                const bool live = has(pM1Src) && (14 + i) <= srcMax;
+                microFit(ui_, fSmall_, {g.x, g.y, 44 * s, g.h}, kMidiLbl[i],
+                         nx::muted.alpha(live ? 0.80f : 0.35f), Align::Right, 0);
+                srcHandle({g.x + 46 * s, g.y, 12 * s, g.h}, 14 + i);
             }
-            const Col ink = !live ? nx::muted.alpha(0.40f)
-                          : idx == 0 ? nx::muted.alpha(0.55f * dim + 0.30f)
-                                     : nx::text.alpha(dim);
-            microFit(ui_, fSmall_, r0, live ? names[idx] : "-", ink, Align::Center);
-            return idx;
-        };
+        }
 
         for (int k = 0; k < 8; ++k) {
             const int bank = k / 4;                      // 0 left, 1 right
             const Rect sr{colX[5 + bank], top + rh * (f32)(k % 4),
                           kColW[5 + bank] * s, rh};
             const int sid = pM1Src + 3 * k, did = sid + 1, aid = sid + 2;
+            const int cid = pM1Curve + k;                // v3: this slot's curve
             const bool absent = !has(sid);
             const int src = absent ? 0
-                : clampv((int)std::lround(get(sid, 0.f)), 0, 13);
+                : clampv((int)std::lround(get(sid, 0.f)), 0, kSrcCount - 1);
             const int dst = !has(did) ? 0
-                : clampv((int)std::lround(get(did, 0.f)), 0, 19);
+                : clampv((int)std::lround(get(did, 0.f)), 0, kDstCount - 1);
             // Quiet unless patched: both ends connected is what "in use" means.
             const f32 sdim = absent ? 0.4f : (src > 0 && dst > 0 ? 1.f : 0.62f);
 
@@ -1665,8 +3186,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             snprintf(wsrc, sizeof wsrc, "M%d source", k + 1);
             snprintf(wdst, sizeof wdst, "M%d dest", k + 1);
             snprintf(wamt, sizeof wamt, "M%d amount", k + 1);
-            enumSel(700 + k, srcR, sid, kMatrixSrc, 14, wsrc, sdim);
-            enumSel(720 + k, dstR, did, kMatrixDst, 20, wdst, sdim);
+            enumSel(700 + k, srcR, sid, kMatrixSrc, clampv(srcMax + 1, 1, kSrcCount),
+                    wsrc, sdim);
+            enumSel(720 + k, dstR, did, kMatrixDst, kDstCount, wdst, sdim);
 
             // The depth: a small bipolar knob with no readout of its own (a
             // 26px cell has no line to spare) -- the tooltip is the readout.
@@ -1677,11 +3199,52 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             f32 v = has(aid) ? inst->getParam(aid) : 0.f;
             const u64 wid = uiId(UiSpectraKnob, aid, uidKey);
             if (ui_.knobNx(wid, knR, &v, st)) commit(aid, v, wid, wamt);
-            if (ui_.hovered(knR)) {
-                char t[112];
+
+            // THE PER-SLOT CURVE (ids 101..108) COSTS NO PIXELS, and that is
+            // exactly why it is here. A slot row is two selectors and a knob in
+            // 138 logical pixels; a fourth control would take twenty from the
+            // two selectors, which already ellipsise "Macro 1". But the amount
+            // knob IS the slot's response -- the curve reshapes the source
+            // before Amt multiplies it -- so the knob's RIGHT-CLICK cycles it
+            // and a six-pixel glyph in the corner of the cell says which of the
+            // three is on. Linear draws at the disabled weight because linear
+            // is the default and the default is "nothing is happening here".
+            const bool curveLive = has(cid);
+            const int  curve = curveLive
+                ? clampv((int)std::lround(get(cid, 0.f)), 0, 2) : 0;
+            if (curveLive && ui_.hovered(knR) && in.pressed[2])
+                commit(cid, (f32)((curve + 1) % 3),
+                       uiId(UiSpectraPanel, 860 + k, uidKey), "matrix curve");
+            if (curveLive) {
+                const f32 gx0 = knR.x + 1 * s, gy1 = knR.bottom() - 1.5f * s;
+                const f32 gw = 7 * s, gh = 5 * s, th = std::max(1.f, nx::snapPx(s));
+                const Col gc = nx::muted.alpha(curve ? 0.85f : 0.30f);
+                if (curve == 0) {
+                    rend_.line(gx0, gy1, gx0 + gw, gy1 - gh, th, gc);
+                } else if (curve == 1) {
+                    rend_.line(gx0, gy1, gx0 + gw * 0.62f, gy1 - gh * 0.28f, th, gc);
+                    rend_.line(gx0 + gw * 0.62f, gy1 - gh * 0.28f, gx0 + gw, gy1 - gh,
+                               th, gc);
+                } else {
+                    rend_.line(gx0, gy1, gx0 + gw * 0.36f, gy1 - gh * 0.12f, th, gc);
+                    rend_.line(gx0 + gw * 0.36f, gy1 - gh * 0.12f,
+                               gx0 + gw * 0.64f, gy1 - gh * 0.88f, th, gc);
+                    rend_.line(gx0 + gw * 0.64f, gy1 - gh * 0.88f, gx0 + gw, gy1 - gh,
+                               th, gc);
+                }
+            }
+
+            if (ui_.hovered(knR) && g_assign.src < 0) {
+                char t[208];
                 if (st.absent)
                     snprintf(t, sizeof t, "%s: this device has no parameter %d",
                              wamt, aid);
+                else if (curveLive)
+                    snprintf(t, sizeof t,
+                             "%s %+.2f  (%s -> %s)  curve %s - right-click cycles "
+                             "it (lin x, exp x*x, S smoothstep)",
+                             wamt, (double)v, kMatrixSrc[src], kMatrixDst[dst],
+                             kCurveName[curve]);
                 else
                     snprintf(t, sizeof t, "%s %+.2f  (%s -> %s)", wamt, (double)v,
                              kMatrixSrc[src], kMatrixDst[dst]);
@@ -1715,15 +3278,53 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // changes (see presetCatOf for how a NAME maps to a CATEGORY -- the
         // contract's "<TAG> <Name>" rule, nothing else). Rebuilt per frame:
         // fifty small structs, and the bank can change under us on reload.
+        //
+        // THE LIST GROUPS; IT NO LONGER SEGMENTS. v1 and v2 drew a header
+        // "wherever the tag changes", which was correct while there was one
+        // bank: the contract orders the file by category, so a tag change WAS a
+        // category boundary. v3 ships a second factory bank of 48 appended
+        // after the first -- the user-preset contract freezes factory ORDER, so
+        // bank 2 cannot interleave -- and walking the list in index order would
+        // then draw BASS · LEAD · PAD · KEYS · PLUCK · FX · SEQUENCE and then
+        // all seven again. Two of every header is not a list, it is a bug
+        // report.
+        //
+        // So the rows are BUCKETED: each category is drawn once, in the
+        // contract's own tag order, with every preset that carries that tag
+        // under it whichever bank it came from. Each row keeps its own bank
+        // INDEX, which is the only thing loadPreset() cares about, and the
+        // keyboard walks the drawn order rather than the index order because
+        // it walks this vector -- the same property that made the v2 headers
+        // skippable is what makes the regrouping free.
+        //
+        // v3 ADDS ONE MORE HEADER AND IT COMES FROM A NUMBER, not from a name.
+        // The user bank has no naming rule and must not grow one -- a preset a
+        // person named is a preset a person named -- so the boundary is
+        // factoryPresetCount(), the one index the contract adds for exactly
+        // this question. Everything at or past it files under "USER" and under
+        // no tag, which is the contract's own instruction: "v3's popover draws
+        // every user preset under one User header".
         struct Row { int preset; int cat; };            // preset < 0: a header
+        constexpr int kUserCat = 7;                     // ...and cat 7 is "USER"
+        const int fc = clampv(psFactoryCount(inst), 0, np);
         std::vector<Row> rows;
-        rows.reserve((size_t)np + 8);
-        int prevCat = -1;
-        for (int i = 0; i < np; ++i) {
-            const int cat = presetCatOf(presetNameOf(*inst, i));
-            if (cat >= 0 && cat != prevCat) rows.push_back({-1, cat});
-            if (cat >= 0) prevCat = cat;
-            rows.push_back({i, cat});
+        rows.reserve((size_t)np + 9);
+        // Untagged factory names first and headerless -- "Init", which the
+        // contract exempts from the naming rule, and the v1 demo list, which
+        // predates it. Bank order inside, because they have no other.
+        for (int i = 0; i < fc; ++i)
+            if (presetCatOf(presetNameOf(*inst, i)) < 0) rows.push_back({i, -1});
+        for (int cIdx = 0; cIdx < 7; ++cIdx) {
+            bool opened = false;
+            for (int i = 0; i < fc; ++i) {
+                if (presetCatOf(presetNameOf(*inst, i)) != cIdx) continue;
+                if (!opened) { rows.push_back({-1, cIdx}); opened = true; }
+                rows.push_back({i, cIdx});
+            }
+        }
+        if (fc < np) {
+            rows.push_back({-1, kUserCat});
+            for (int i = fc; i < np; ++i) rows.push_back({i, -1});
         }
         const int nr = (int)rows.size();
         const auto isSel = [&](int i) { return i >= 0 && i < nr && rows[i].preset >= 0; };
@@ -1815,7 +3416,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                     if (rows[i].preset < 0) {
                         // A category header: the tag's long form, and a
                         // hairline running out to the edge -- a shelf, not a row.
-                        const char* cl = kPresetCat[rows[i].cat].label;
+                        const char* cl = rows[i].cat == kUserCat
+                            ? "USER"
+                            : kPresetCat[clampv(rows[i].cat, 0, 6)].label;
                         ui_.microIn(fSmall_, {rr.x + 8 * s, rr.y, 80 * s, rr.h}, cl,
                                     nx::muted.alpha(0.75f), Align::Left, 0);
                         rend_.hairlineH(rr.x + 12 * s + ui_.microWidth(fSmall_, cl),
@@ -1869,6 +3472,55 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 g_drop.justOpened = false;
             }
         }
+    }
+
+    // =======================================================================
+    // DRAG-ASSIGN, the last two frames of it.
+    //
+    // Everything that CONSUMES the gesture is above: dropTarget() cleared
+    // g_assign.src on a release over a control it could take. So a source still
+    // in flight here is one whose release landed on nothing that could take it,
+    // and §9's rule applies -- a gesture that did nothing says why it did
+    // nothing rather than evaporating. The ghost is drawn last for the same
+    // reason the popover is: it floats, and nothing under it should be able to
+    // draw over the thing that is following the pointer.
+    // =======================================================================
+    if (g_assign.src >= 0) {
+        const char* nm = kMatrixSrc[clampv(g_assign.src, 0, kSrcCount - 1)];
+        if (in.keyPressed[KeyEscape] || in.pressed[2]) {
+            g_assign.src = -1;
+            status_ = std::string("Spectra: ") + nm + " was not assigned";
+        } else if (in.released[0]) {
+            char msg[176];
+            snprintf(msg, sizeof msg,
+                     "Spectra: %s was not assigned - a modulation target is a "
+                     "knob with a mod ring, and Pan is matrix-only", nm);
+            status_ = msg;
+            g_assign.src = -1;
+        } else {
+            ui_.cursor = Cursor::Grab;
+            const f32 gw = ui_.microWidth(fSmall_, nm) + 14 * s, gh = 14 * s;
+            const Rect ghost{in.mx + 11 * s, in.my + 11 * s, gw, gh};
+            const f32 grad = nx::radiusXs * s;
+            rend_.shadow(ghost, grad, nx::shadowSheet);
+            rend_.roundRect(ghost, grad, nx::panel2.alpha(0.96f));
+            rend_.gradRect(ghost, grad, nx::glassChip);
+            rend_.gradStroke(ghost, grad, s, nx::edgeLit, 1.f);
+            ui_.microIn(fSmall_, ghost, nm, nx::text, Align::Center);
+        }
+    }
+    // AMOUNT MODE ends the moment your attention does: a click that was not on
+    // the knob, an Escape, a page turn that took the knob off screen. It never
+    // ends on a timer, because a control that stops being what it says it is
+    // after two seconds is worse than one that never said it.
+    if (g_assign.tuneFresh) {
+        g_assign.tuneFresh = false;              // the drop's own frame, exempt
+    } else if (g_assign.tuneParam >= 0 &&
+               (!tuneDrawn || in.keyPressed[KeyEscape] ||
+                (in.pressed[0] && !tuneTouched))) {
+        g_assign.tuneParam = -1;
+        g_assign.tuneSlot = -1;
+        g_assign.tuneDest = -1;
     }
 
     rend_.popClip();
@@ -1952,6 +3604,33 @@ void App::debugSeedSpectra() {
             g_drop.pending = true;
             LOGI("NXTAKT_DEBUG_SPECTRADROP: popover will open on first draw");
         }
+    }
+
+    // --- v3's own hooks, on the same terms: each one presses a control the
+    // --- mouse has, and none of them is a back door beside one.
+    if (const char* p = env("DEBUG_SPECTRAWTOSC")) {
+        g_wt.osc = clampv(atoi(p), 0, 1);
+        LOGI("NXTAKT_DEBUG_SPECTRAWTOSC: the import row targets osc %s",
+             g_wt.osc ? "B" : "A");
+    }
+    if (const char* p = env("DEBUG_SPECTRAWTDRAG")) {
+        g_wt.dragHold = p;                       // the panel re-arms it every frame
+        LOGI("NXTAKT_DEBUG_SPECTRAWTDRAG: a browser drag holding %s is in flight", p);
+    }
+    if (const char* p = env("DEBUG_SPECTRASAVE")) {
+        if (*p && *p != '0') {
+            g_pageUid = d.uid;
+            g_save.pending = true;
+            LOGI("NXTAKT_DEBUG_SPECTRASAVE: the name field will open on first draw");
+        }
+    }
+    // A drag-assign in flight, held the way the mouse would hold it: the source
+    // is armed and the pointer is wherever xdotool put it, so what the shot
+    // photographs is the target framing the real gesture produces.
+    if (const char* p = env("DEBUG_SPECTRAASSIGN")) {
+        g_assign.src = clampv(atoi(p), 0, kSrcCount - 1);
+        LOGI("NXTAKT_DEBUG_SPECTRAASSIGN: dragging matrix source %d (%s)",
+             g_assign.src, kMatrixSrc[g_assign.src]);
     }
 
     // Both writers go through here, which is the trough's commit() line for
