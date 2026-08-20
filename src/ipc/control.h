@@ -149,7 +149,29 @@ namespace lat::ipc {
 //        flip made the DEFAULT engine: an amber "N refused" for a set that was
 //        otherwise carried perfectly, and Beats-warped clips playing without
 //        the envelopes, maps and grids that shape them.
-inline constexpr u32 kProtocolVersion = 11;
+//   v12 — CUSTOM WAVETABLES (docs/SPECTRA-V3-PLAN.md pillar 1). CmdSetDeviceState
+//        keeps its number, its shape and its answer, and the blob it carries
+//        grows: WireDeviceState gains `wtRef`/`wtCount`, naming a
+//        PoolKindWavetable block that holds the imported f32 frames of the
+//        tables the state's `wt` records name by content hash. `RejectBadWavetable`
+//        joins the reason list. sizeof(WireDeviceState) goes 40 -> 56 and pool
+//        version 8 -> 9 rides along.
+//
+//        NO SECTION OF THE CONTROL REGION MOVES -- the change is entirely in
+//        the pool -- so this bump is doing the job the pool's own version could
+//        not: the two numbers guard different regions, and a client that
+//        attached with a matching layout hash and then wrote a v2 device-state
+//        header into a v8 daemon's pool would be refused per COMMAND, which is
+//        a refusal per instrument rather than at the door. The version and the
+//        layout hash together are what make a v11 and a v12 binary decline each
+//        other outright, which is the mechanism working.
+//
+//        Until this existed a Spectra with an imported wavetable played the
+//        FACTORY table under the custom table's name in daemon mode: the state
+//        crossed, the hash crossed, and the frames the hash names had no wire
+//        spelling at all. Under what v10's flip made the default engine, that
+//        is a set that plays the wrong sound with nothing on screen to say so.
+inline constexpr u32 kProtocolVersion = 12;
 
 // Daemon-generated wire events start here, well clear of lat::Ev. The event
 // ring carries a superset of Ev: the boundary itself has things to report
@@ -561,6 +583,22 @@ enum : u32 {
     // device that will sound EMPTY while it is drawn full — the exact failure
     // this whole channel exists to end, so it gets its own line in the log.
     RejectBadDeviceSample = 26,
+
+    // --- custom wavetables (v12) ---------------------------------------------
+    //
+    // The state named a PoolKindWavetable block and something about it did not
+    // hold: the block failed validation, its entry array or its sample run runs
+    // past its own extent, an entry declares a cycle length this build does not
+    // use, or -- the one that is not a shape check -- A TABLE DOES NOT HASH TO
+    // THE NAME IT WAS OFFERED UNDER.
+    //
+    // That last one is why this is not RejectBadDeviceSample with a wider
+    // meaning. A sample is bytes and the header describes them; a wavetable is
+    // bytes whose NAME IS A FUNCTION OF THE BYTES, so the receiving side can
+    // check the claim rather than merely bound it, and a table that fails that
+    // check would otherwise be filed under somebody else's identity and played
+    // by every set that named it for the life of the process.
+    RejectBadWavetable    = 27,
 };
 
 inline const char* rejectReasonName(u32 r) {
@@ -591,6 +629,7 @@ inline const char* rejectReasonName(u32 r) {
         case RejectNotStateful:     return "that device does not keep a state string";
         case RejectBadDeviceState:  return "the device state would not parse or would not apply";
         case RejectBadDeviceSample: return "the sample the device state named is not usable";
+        case RejectBadWavetable:    return "the wavetables the device state named are not usable";
         default:                    return "none";
     }
 }
@@ -1480,6 +1519,25 @@ struct ControlHeader {
     // Refusals are already devicesFailed and are deliberately not counted twice.
     std::atomic<u32> deviceStatesApplied;
 
+    // --- custom wavetables (v12) --------------------------------------------
+    //
+    // TABLES the daemon copied out of a PoolKindWavetable block and put into
+    // its hash-keyed store, summed over every device state — not device states
+    // that carried tables, and not distinct tables. It counts the thing that
+    // actually crosses, so a set with two Spectras naming the same import
+    // reads 2 and a set with one Spectra naming two reads 2 as well, and both
+    // are true statements about what came over the wire.
+    //
+    // Out of the reserved words for the reason deviceStatesApplied is:
+    // ControlHeader keeps its size, so every section offset below it stays put.
+    // Refusals are already devicesFailed and are not counted twice.
+    //
+    // INCREMENTED AFTER the state that carried them is applied and its
+    // EvDeviceChanged is pushed, release-ordered — the counter-order contract a
+    // failed release gate taught this tree: a counter documented "with an
+    // event" must not be observable before the event it promises.
+    std::atomic<u32> wavetablesIngested;
+
     // Cmd::SetSignatures commands accepted and handed to the engine. It reads 0
     // on every build before v8 AND on a set that never publishes a map, which is
     // why nothing asserts it equals a number on its own: the discriminating
@@ -1517,7 +1575,7 @@ struct ControlHeader {
     // truncated path is a path that names the wrong directory rather than one
     // that fails to open.
     char takeDir[160];
-    u32  reserved[3];
+    u32  reserved[2];      // one spent on wavetablesIngested (v12)
 
     // Creator only, before publishReady(). `takes` is the directory the daemon
     // will write takes into, or null/empty if it could not make one — which is a
@@ -1552,6 +1610,7 @@ struct ControlHeader {
         catalogTruncated.store(0, std::memory_order_relaxed);
         rackStatesApplied.store(0, std::memory_order_relaxed);
         deviceStatesApplied.store(0, std::memory_order_relaxed);
+        wavetablesIngested.store(0, std::memory_order_relaxed);
         signaturesApplied.store(0, std::memory_order_relaxed);
         takesStarted.store(0, std::memory_order_relaxed);
         takesCommitted.store(0, std::memory_order_relaxed);

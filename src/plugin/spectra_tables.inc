@@ -17,6 +17,30 @@
 //
 // The mip-chain reasoning, the level-selection rule and the determinism
 // obligations are documented at the top of spectra.cpp and not repeated here.
+//
+// V3 ADDS THE CUSTOM SLOT. `A/B Table` widens 0..7 -> 0..8; slot 8 is THIS
+// OSCILLATOR'S imported table (docs/SPECTRA-PARAMS.md, "Custom wavetable
+// slots"). Everything about it that is audible lives at the bottom of this
+// file, behind five functions that are the whole seam between the wave that
+// imports wavetables and the wave that plays them. The frames themselves --
+// the reader, the three interpretation rules, the content hash, the disk cache
+// and the process store -- are src/plugin/wavetable_io.{h,cpp}, which knows
+// nothing about mips; this file knows nothing about files.
+
+// The include has to close and re-open the namespaces this text is pasted
+// into, because that is what a textual include costs: `#include` is a
+// file-scope directive and this slab lives three namespaces deep inside
+// spectra.cpp. The alternative was one line in spectra.cpp, which is another
+// wave's file this week. The three names below are exactly the three the
+// header of this file names as "open around the include site".
+} // namespace   (the anonymous one)
+} // namespace detail
+} // namespace lat
+#include "wavetable_io.h"
+#include <memory>
+namespace lat {
+namespace detail {
+namespace {
 
 // ---------------------------------------------------------------------------
 // Table geometry
@@ -229,6 +253,64 @@ f32 spPartial(int table, f32 t, int h) {
 bool spIsAdditive(int table) { return table == 2 || table == 3 || table == 6; }
 
 // ---------------------------------------------------------------------------
+// THE MIP BUILDER -- one implementation, and the only one
+//
+// Takes ONE frame as a harmonic spectrum and writes that frame's whole mip
+// chain, kSpStride floats. The eight factory tables go through it and so does
+// every imported one, which is the plan's "build the SAME per-octave
+// FFT-truncated mip chain the factory tables get -- factor that builder out and
+// share it, one implementation, proven once".
+//
+// `norm` IS THE ONE THING THE TWO CALLERS DISAGREE ABOUT, and the disagreement
+// is deliberate rather than a wart:
+//
+//   * <= 0 means DERIVE IT from this frame's own widest mip, which is what the
+//     factory has always done: each procedural frame is scaled so its mip 0
+//     peaks at exactly 1. Those frames come out of eight unrelated formulae
+//     with no common level, so per-frame is the only normalisation that makes
+//     the set playable, and the editor's SpectraTableSet::frame() documents
+//     that property to anyone drawing one.
+//   * > 0 means USE IT. An imported table is normalised as a SET -- inter-frame
+//     level is musical, and a table whose upper frames are meant to be louder
+//     than its lower ones must stay that way -- so the custom builder passes 1
+//     here and applies one set-wide factor across all 32 frames afterwards.
+//
+// What does NOT vary is the rule underneath both: every LEVEL of a frame shares
+// ONE factor. Normalising each level to its own peak would make a glide across
+// a mip boundary step in loudness; sharing it means the coarser levels are
+// simply quieter, which is what losing their top harmonics actually does.
+//
+// `sre`/`sim` are scratch of at least kSpLen[0]; passed in so a loop over a
+// thousand frames does not allocate a thousand times.
+// ---------------------------------------------------------------------------
+
+void spBuildFrameMips(const SpSpec& spec, f32* dst, const std::vector<f32>* tw,
+                      std::vector<f32>& sre, std::vector<f32>& sim, f32 norm) {
+    f32 g = norm > 0.f ? norm : 1.f;
+    for (int m = 0; m < kSpMips; ++m) {
+        const int n = kSpLen[m];
+        const int hi = kSpHarm[m] < n / 2 - 1 ? kSpHarm[m] : n / 2 - 1;
+        for (int i = 0; i < n; ++i) { sre[(size_t)i] = 0.f; sim[(size_t)i] = 0.f; }
+        const f32 half = 0.5f * (f32)n;
+        for (int h = 1; h <= hi; ++h) {
+            sre[(size_t)h] = half * spec.hr[h];
+            sim[(size_t)h] = half * spec.hi[h];
+            sre[(size_t)(n - h)] =  sre[(size_t)h];
+            sim[(size_t)(n - h)] = -sim[(size_t)h];
+        }
+        spIfft(sre.data(), sim.data(), n, tw[m].data());
+
+        if (m == 0 && norm <= 0.f) {
+            f32 pk = 0.f;
+            for (int i = 0; i < n; ++i) pk = std::fmax(pk, std::fabs(sre[(size_t)i]));
+            g = pk > 1e-9f ? 1.f / pk : 1.f;
+        }
+        f32* d = dst + kSpOff[m];
+        for (int i = 0; i < n; ++i) d[i] = sre[(size_t)i] * g;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Generation. GUI thread, once per process. Allocates freely; nothing here is
 // ever reached from the audio thread.
 // ---------------------------------------------------------------------------
@@ -269,34 +351,12 @@ const SpectraTables* spBuildTables() {
                 }
             }
 
-            // --- 2. one band-limited synthesis per mip level
-            f32 norm = 1.f;
-            for (int m = 0; m < kSpMips; ++m) {
-                const int n = kSpLen[m];
-                const int hi = kSpHarm[m] < n / 2 - 1 ? kSpHarm[m] : n / 2 - 1;
-                for (int i = 0; i < n; ++i) { sre[(size_t)i] = 0.f; sim[(size_t)i] = 0.f; }
-                const f32 half = 0.5f * (f32)n;
-                for (int h = 1; h <= hi; ++h) {
-                    sre[(size_t)h] = half * spec.hr[h];
-                    sim[(size_t)h] = half * spec.hi[h];
-                    sre[(size_t)(n - h)] =  sre[(size_t)h];
-                    sim[(size_t)(n - h)] = -sim[(size_t)h];
-                }
-                spIfft(sre.data(), sim.data(), n, tw[m].data());
-
-                // Every level of a frame shares ONE normalising factor, taken
-                // from the widest one. Normalising each level to its own peak
-                // would make a glide across a mip boundary step in loudness;
-                // sharing it means the coarser levels are simply quieter, which
-                // is what losing their top harmonics actually does.
-                if (m == 0) {
-                    f32 pk = 0.f;
-                    for (int i = 0; i < n; ++i) pk = std::fmax(pk, std::fabs(sre[(size_t)i]));
-                    norm = pk > 1e-9f ? 1.f / pk : 1.f;
-                }
-                f32* dst = const_cast<f32*>(out->frame(tb, fr)) + kSpOff[m];
-                for (int i = 0; i < n; ++i) dst[i] = sre[(size_t)i] * norm;
-            }
+            // --- 2. one band-limited synthesis per mip level, through the
+            //        shared builder. `norm` = -1 asks it to derive the factor
+            //        from this frame's own widest mip, which is byte for byte
+            //        what the loop that used to live here did.
+            spBuildFrameMips(spec, const_cast<f32*>(out->frame(tb, fr)), tw,
+                             sre, sim, -1.f);
         }
     }
     return out;
@@ -342,6 +402,13 @@ const SpectraTables& spTables() {
 
 std::atomic<const SpectraTableSet*> gSpPublished{nullptr};
 
+// The factory set's base, published by the same call and read by spTableBase()
+// on the AUDIO thread. A pointer and not a call to spTables(), because
+// spTables() is a function-local static and a magic-static guard is a thing the
+// audio path should not have to reason about; by the time a voice exists,
+// prepare() has already run this store.
+std::atomic<const f32*> gSpFactoryBase{nullptr};
+
 const SpectraTableSet& spView() {
     static const SpectraTableSet v = [] {
         SpectraTableSet s;
@@ -357,4 +424,344 @@ const SpectraTableSet& spView() {
 
 // GUI thread, from prepare(). Called once per instance and cheap after the
 // first: a compare, and a store of a pointer that is already what is there.
-void spPublish() { gSpPublished.store(&spView(), std::memory_order_release); }
+void spPublish() {
+    gSpFactoryBase.store(spTables().d.data(), std::memory_order_release);
+    gSpPublished.store(&spView(), std::memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
+// CUSTOM WAVETABLES — the seam
+//
+// Five functions are the contract between the wave that imports wavetables and
+// the wave that plays them (docs/SPECTRA-V3-PLAN.md pillar 1). Everything else
+// here exists to make those five true.
+//
+// THE LAYOUT IS THE FACTORY'S, EXACTLY. A built custom table is
+// kSpFrames * kSpStride floats — 32 frames of the identical ten-level mip
+// chain — so spRead() reaches it with nothing changed but the base pointer it
+// was handed. That is a constraint and it has a price, stated here rather than
+// discovered later: a source file with more than 32 frames is DECIMATED to 32
+// at import (wavetable_io.cpp, "THE FRAME-AXIS CAP"), before the hash, so a
+// 256-frame Serum table plays as the 32 frames evenly spread across it. The
+// alternative is a variable frame count in the audio-rate read, which is a
+// change to the read and to the editor's SpectraTableSet, and the read was not
+// this wave's to change.
+//
+// -------------------- THE LIFETIME INVARIANT, VERBATIM --------------------
+//
+//   A BUILT CUSTOM TABLE IS ALLOCATED ONCE AND NEVER FREED, and that is the
+//   whole of its retirement proof: the audio thread holds a raw base pointer
+//   into one for as long as a block lasts, nothing inside a PluginInstance can
+//   know when it last dereferenced that pointer, and there is no event in this
+//   engine that says "no voice is inside this table any more". So the pointer
+//   is made permanently valid instead of proved dead — the same trade
+//   spTables() itself makes for the factory set, for the same reason, and the
+//   reason SamplerControl::reclaim() exists one level up is that a sampler
+//   could not make it.
+//
+//   The cost is bounded and the bound is kSpMaxCustom: past it an import is
+//   REFUSED with a log line rather than served by evicting something a voice
+//   may be reading. The store is a function-local static, so every allocation
+//   in it stays reachable from a root and the leak checker is right not to
+//   complain.
+// ---------------------------------------------------------------------------
+
+// The widened `A/B Table` enum's one new value. 0..7 stay exactly what they
+// were; custom space BEGINS at 8 and a later revision widens it again.
+constexpr int kSpCustomSlot = kSpTables;
+
+// An OSCILLATOR HANDLE, not an oscillator index — see spAcquireOsc(). Two per
+// instance, so this is 128 Spectras with custom tables in one set.
+constexpr int kSpMaxOsc = 256;
+
+// The most distinct custom tables one process will BUILD. Each is 1.31 MB of
+// mip chain (32 * kSpStride * 4), so this is 42 MB of worst case against the
+// factory set's 10.5.
+constexpr int kSpMaxCustom = 32;
+
+struct SpBuiltTable {
+    u64              hash = 0;
+    std::vector<f32> d;                 // kSpFrames * kSpStride
+};
+
+// Function-local static: a root for the leak checker, and built on first use
+// rather than at load, which keeps a process that never imports at zero cost.
+std::vector<std::unique_ptr<SpBuiltTable>>& spBuiltStore() {
+    static std::vector<std::unique_ptr<SpBuiltTable>> v;
+    return v;
+}
+
+// What the AUDIO thread reads: one published base per oscillator handle, or
+// null for "this oscillator has no resolved custom table". Release on the
+// store and acquire on the load, and for the reason spView() states at length —
+// this publishes 1.31 MB of table written before it, not a value.
+std::atomic<const f32*> gSpCustomBase[kSpMaxOsc];
+
+// What the GUI thread keeps. NOT read by the audio thread and not atomic.
+//
+// The record is kept EVEN WHEN RESOLUTION FAILED, which is the refusal contract
+// doing its job: docs/SPECTRA-PARAMS.md requires stateString() to re-emit the
+// hash and the path verbatim on a machine that is missing the file, so that
+// saving there does not lose the file's name.
+struct SpOscRec {
+    u64         hash   = 0;      // 0 = no custom table at all
+    int         frames = 0;      // 0 = named but unresolved (the amber case)
+    std::string path;            // "" when the state named none (a preset)
+    std::string name;            // basename(path), or the bare hash
+    bool        used   = false;  // handle allocation
+};
+SpOscRec gSpOsc[kSpMaxOsc];
+
+std::string spBaseName(const std::string& p) {
+    const size_t slash = p.find_last_of('/');
+    return slash == std::string::npos ? p : p.substr(slash + 1);
+}
+
+// The mip chain for one imported table, built once per HASH and shared by every
+// oscillator that names it. Null when the store is full.
+const f32* spBuildCustomMips(const wt::Table& t) {
+    for (const std::unique_ptr<SpBuiltTable>& b : spBuiltStore())
+        if (b->hash == t.hash) return b->d.data();
+    if ((int)spBuiltStore().size() >= kSpMaxCustom) {
+        LOGW("spectra: this process has already built %d custom wavetables; "
+             "further imports are refused rather than evicted, because a voice "
+             "may be reading one", kSpMaxCustom);
+        return nullptr;
+    }
+
+    auto b = std::make_unique<SpBuiltTable>();
+    b->hash = t.hash;
+    b->d.assign((size_t)kSpFrames * (size_t)kSpStride, 0.f);
+
+    std::vector<f32> twSrc, tw[kSpMips];
+    spTwiddle(twSrc, wt::kCycle);
+    for (int m = 0; m < kSpMips; ++m) spTwiddle(tw[m], kSpLen[m]);
+
+    std::vector<f32> re((size_t)wt::kCycle), im((size_t)wt::kCycle);
+    std::vector<f32> sre(2048), sim(2048);
+    SpSpec spec;
+
+    const int n = t.frames;
+    for (int fr = 0; fr < kSpFrames; ++fr) {
+        // THE FRAME AXIS. An import has 1..32 frames and the layout has exactly
+        // 32, so the source axis is stretched onto the destination one by the
+        // same LINEAR interpolation the audio-rate read already performs
+        // between adjacent frames (spRead's `ff`). Nearest-frame would put a
+        // step into a morph the read is built to make continuous; a single-
+        // frame import lands as 32 identical frames, which is what a table with
+        // no frame axis is.
+        const f64 x = n <= 1 ? 0.0
+                             : (f64)fr * (f64)(n - 1) / (f64)(kSpFrames - 1);
+        int s0 = (int)x;
+        if (s0 > n - 1) s0 = n - 1;
+        const int s1 = s0 + 1 < n ? s0 + 1 : s0;
+        const f32 bl = (f32)(x - (f64)s0);
+        const f32* a = t.frame(s0);
+        const f32* c = t.frame(s1);
+        for (int i = 0; i < wt::kCycle; ++i) {
+            re[(size_t)i] = a[i] + (c[i] - a[i]) * bl;
+            im[(size_t)i] = 0.f;
+        }
+
+        // The analysis length is the cycle length itself, and it is exactly
+        // right rather than merely convenient: a 2048-sample cycle carries
+        // harmonics 1..1023 and a Nyquist bin, kSpMaxHarm is 1023, so every
+        // harmonic the file actually has is kept and nothing is aliased. (The
+        // factory's five shaped tables analyse at 4096 because they RENDER a
+        // formula that has harmonics above the limit; an imported cycle cannot.)
+        spFft(re.data(), im.data(), wt::kCycle, twSrc.data());
+        const f32 s = 2.f / (f32)wt::kCycle;
+        for (int h = 0; h <= kSpMaxHarm; ++h) {
+            spec.hr[h] = h == 0 ? 0.f : re[(size_t)h] * s;
+            spec.hi[h] = h == 0 ? 0.f : im[(size_t)h] * s;
+        }
+        // norm = 1: DO NOT normalise per frame. The frames arrived normalised
+        // as a SET and inter-frame level is musical.
+        spBuildFrameMips(spec, b->d.data() + (size_t)fr * (size_t)kSpStride,
+                         tw, sre, sim, 1.f);
+    }
+
+    // ONE set-wide factor, taken across every frame's widest mip. The frames
+    // were normalised as a set in the time domain; band-limiting moves the peak
+    // by a hair (Gibbs at a discontinuity), so this puts the SET back on 1
+    // without ever putting a FRAME on 1.
+    f32 pk = 0.f;
+    for (int fr = 0; fr < kSpFrames; ++fr) {
+        const f32* m0 = b->d.data() + (size_t)fr * (size_t)kSpStride + kSpOff[0];
+        for (int i = 0; i < kSpLen[0]; ++i) pk = std::fmax(pk, std::fabs(m0[i]));
+    }
+    const f32 g = pk > 1e-9f ? 1.f / pk : 1.f;
+    for (f32& v : b->d) v *= g;
+
+    spBuiltStore().push_back(std::move(b));
+    LOGI("spectra: built a custom wavetable, %s, %d source frame(s) -> %d",
+         wt::hashHex(t.hash).c_str(), t.frames, kSpFrames);
+    return spBuiltStore().back()->d.data();
+}
+
+// ---------------------------------------------------------------------------
+// THE FIVE. Nothing below renames, reorders or widens them.
+//
+// `[[maybe_unused]]` on the free functions and not on the class: their callers
+// live in spectra.cpp, which this wave does not own, and an anonymous-namespace
+// function with no caller yet is a -Wunused-function against a zero-warning
+// gate. The attribute goes away with the diff that wires them up.
+// ---------------------------------------------------------------------------
+
+// slot 0..7 = factory; slot 8 = this oscillator's import, nullptr if unresolved.
+// Audio thread. Never allocates, never locks.
+//
+// NULL IS A REAL ANSWER and the caller must have a branch for it: the refusal
+// contract says an oscillator whose slot 8 will not resolve renders FACTORY
+// TABLE 0, so the call site is `spTableFor()` below unless it has its own
+// reason. Silence would be a worse lie than the wrong table.
+[[maybe_unused]] const f32* spTableBase(int slot, int osc) noexcept {
+    if ((unsigned)slot < (unsigned)kSpTables) {
+        const f32* base = gSpFactoryBase.load(std::memory_order_acquire);
+        return base ? base + (size_t)slot * (size_t)kSpFrames * (size_t)kSpStride
+                    : nullptr;
+    }
+    if (slot == kSpCustomSlot && (unsigned)osc < (unsigned)kSpMaxOsc)
+        return gSpCustomBase[osc].load(std::memory_order_acquire);
+    return nullptr;
+}
+
+// spTableBase() with the refusal contract's fallback applied: factory table 0
+// whenever the asked-for slot has nothing behind it. Audio thread, same rules.
+// This is what a voice should call; spTableBase is what it is built on.
+[[maybe_unused]] const f32* spTableFor(int slot, int osc) noexcept {
+    if (const f32* b = spTableBase(slot, osc)) return b;
+    return spTableBase(0, osc);
+}
+
+// GUI thread. Resolve from a state string's identity; true if osc now has slot 8.
+//
+// The record is written FIRST and kept whatever happens next, so a machine that
+// cannot find the file still re-emits the hash and the path it was given.
+[[maybe_unused]] bool spResolveCustom(int osc, u64 hash, const char* path) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) return false;
+    SpOscRec& r = gSpOsc[osc];
+    r.hash   = hash;
+    r.path   = path ? path : "";
+    r.frames = 0;
+    r.name   = r.path.empty() ? (hash ? wt::hashHex(hash) : std::string())
+                              : spBaseName(r.path);
+    gSpCustomBase[osc].store(nullptr, std::memory_order_release);
+    if (hash == 0) return false;
+
+    const wt::Table* t = wt::resolve(hash, r.path.empty() ? nullptr : r.path.c_str());
+    if (!t) return false;
+    const f32* base = spBuildCustomMips(*t);
+    if (!base) return false;
+    r.frames = t->frames;
+    gSpCustomBase[osc].store(base, std::memory_order_release);
+    return true;
+}
+
+// GUI thread. Import a WAV; returns content hash, 0 on failure, err gets a sentence.
+[[maybe_unused]] u64 spImportWavetable(int osc, const char* path, std::string& err) {
+    err.clear();
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) {
+        err = "this instance has no oscillator slot for a custom table";
+        return 0;
+    }
+    if (!path || !*path) { err = "no file"; return 0; }
+
+    wt::Table t;
+    if (!wt::importFile(path, t, err)) return 0;
+    const wt::Table* stored = wt::adopt(t, true);
+    if (!stored) {
+        err = "this process already holds as many wavetables as it will hold";
+        return 0;
+    }
+    const f32* base = spBuildCustomMips(*stored);
+    if (!base) {
+        err = "this process already holds as many wavetables as it will hold";
+        return 0;
+    }
+    SpOscRec& r = gSpOsc[osc];
+    r.hash   = stored->hash;
+    r.path   = path;
+    r.name   = spBaseName(r.path);
+    r.frames = stored->frames;
+    gSpCustomBase[osc].store(base, std::memory_order_release);
+    LOGI("spectra: imported %s as %s (%s, %d source frame(s) of %d samples)",
+         path, wt::hashHex(stored->hash).c_str(), wt::ruleName(stored->rule),
+         stored->srcFrames, stored->srcCycle);
+    return stored->hash;
+}
+
+// GUI thread. What osc has now, for stateString() and the editor.
+[[maybe_unused]] u64 spCustomHash(int osc) {
+    return (unsigned)osc < (unsigned)kSpMaxOsc ? gSpOsc[osc].hash : 0;
+}
+
+[[maybe_unused]] const char* spCustomPath(int osc) {   // "" when none
+    return (unsigned)osc < (unsigned)kSpMaxOsc ? gSpOsc[osc].path.c_str() : "";
+}
+
+// The SOURCE frame count of the resolved table — 1..32 — and 0 when the
+// oscillator names a table it could not find. Not part of the five, and it
+// exists for one caller: WavetableControl::customFrames(), which reports what
+// the FILE had rather than the 32 slots the audio layout always has.
+[[maybe_unused]] int spCustomFrames(int osc) {
+    return (unsigned)osc < (unsigned)kSpMaxOsc ? gSpOsc[osc].frames : 0;
+}
+
+[[maybe_unused]] void spClearCustom(int osc) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) return;
+    gSpCustomBase[osc].store(nullptr, std::memory_order_release);
+    SpOscRec& r = gSpOsc[osc];
+    r.hash = 0;
+    r.frames = 0;
+    r.path.clear();
+    r.name.clear();
+    // The BUILT table is not touched: see the lifetime invariant above.
+}
+
+// ---------------------------------------------------------------------------
+// Oscillator handles, and why `osc` is one
+//
+// The seam's `osc` is an OSCILLATOR HANDLE and not the 0/1 index of an
+// oscillator within an instance, because a custom table belongs to ONE
+// oscillator of ONE device: two Spectras in a set import two different files
+// onto their A oscillators, and a bare index would make the second overwrite
+// the first. An instance takes a pair at construction and gives them back at
+// destruction.
+//
+// Handles 0 and 1 exist and are ordinary, so a caller that passes a bare index
+// gets defined behaviour (one shared pair) rather than an out-of-range read;
+// allocation starts at 2 so that it never collides with such a caller.
+// ---------------------------------------------------------------------------
+
+[[maybe_unused]] int spAcquireOsc() {
+    for (int i = 2; i < kSpMaxOsc; ++i)
+        if (!gSpOsc[i].used) { gSpOsc[i].used = true; return i; }
+    // Past the cap an instance simply has no custom slot: spTableBase's factory
+    // arm ignores `osc`, so every one of the eight factory tables still plays.
+    LOGW("spectra: no free oscillator handle; this instance plays factory "
+         "tables only");
+    return -1;
+}
+
+[[maybe_unused]] void spReleaseOsc(int osc) {
+    if ((unsigned)osc < 2u || (unsigned)osc >= (unsigned)kSpMaxOsc) return;
+    spClearCustom(osc);
+    gSpOsc[osc].used = false;
+}
+
+// ---------------------------------------------------------------------------
+// WHERE THE HOST CONTRACT'S FACE LIVES, AND WHY IT IS NOT HERE
+//
+// `WavetableControl` (src/plugin/host.h) is implemented in spectra.cpp, as a
+// nested class of the device, because two of its six methods have to touch the
+// DEVICE's state records and not just this file's: importing a table has to
+// make the device's stateString() start naming it, and clearing one has to make
+// it stop. spectra.cpp's own note at "THE OVERRIDE POINT" spells the handshake
+// out — spImportWavetable() here, adoptCustom() there — and the split is the
+// same one the whole seam is: this file owns what a table IS, that file owns
+// what the state SAYS.
+//
+// The `wt3-filed-spectra.cpp.diff` in this wave's scratchpad carries the exact
+// override text.
+// ---------------------------------------------------------------------------

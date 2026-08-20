@@ -2509,6 +2509,356 @@ static void testDeviceState(ipc::EngineClient& c) {
     drainEvents(c);
 }
 
+// ---------------------------------------------------------------------------
+// 11f. CUSTOM WAVETABLES — the table crosses, and the daemon plays THAT table
+// ---------------------------------------------------------------------------
+//
+// The bug this section ends is §11e's, one payload along. A Spectra oscillator
+// on slot 8 IS the table it imported, and no parameter can say which one — the
+// identity lives in stateString() as a content hash, and until pool v9 the
+// FRAMES that hash names had no wire spelling at all. So the state crossed, the
+// hash crossed, the device asked its store for the table, found nothing, and
+// fell back to factory table 0: a set that played the wrong sound, under the
+// right name, with nothing on screen able to say so.
+//
+// The discriminator below is chosen so it can only come out right for one
+// reason. The table sent has TWO frames — frame 0 a sine at 5% and frame 1 a
+// sine at full scale — and Spectra's A Position defaults to 0, so an oscillator
+// that is really playing this table reads frame 0 and meters a small fraction
+// of what factory table 0 does. That is three claims in one number:
+//
+//   * the frames crossed at all (a fallback to factory 0 reads LOUD);
+//   * they crossed intact (a table read at the wrong stride is not quiet);
+//   * and they were normalised as a SET and not per frame. Per-frame
+//     normalisation would put frame 0 at full scale too, and the quiet reading
+//     is the only thing that can tell the two policies apart from out here.
+//
+// THE HASH IS ipc_test's TRANSCRIPTION, not the implementation's — see the head
+// of ipc_test's section 13. The daemon's wt::ingest() recomputes it with the
+// real code and refuses a table that does not have the hash it was offered
+// under, so every PASS below is also the statement that a hand transcription of
+// docs/SPECTRA-PARAMS.md and src/plugin/wavetable_io.cpp compute the same
+// number.
+static u64 wtMix64(u64 x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27; x *= 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    return x;
+}
+static u64 wtHashOf(const f32* frames, int frameCount, int cycle = 2048) {
+    u64 h = wtMix64((u64)(u32)frameCount);
+    h = wtMix64(h ^ (u64)(u32)cycle);
+    const size_t n = (size_t)frameCount * (size_t)cycle;
+    for (size_t i = 0; i < n; ++i) {
+        u32 u;
+        std::memcpy(&u, &frames[i], sizeof u);
+        if (u == 0x80000000u) u = 0;
+        h = wtMix64(h ^ (u64)u);
+    }
+    return h;
+}
+static std::string wtHex(u64 h) {
+    char b[17];
+    std::snprintf(b, sizeof b, "%016llx", (unsigned long long)h);
+    return b;
+}
+
+static void testWavetables(ipc::EngineClient& c) {
+    banner("11f. custom wavetables: the frames cross, and the daemon plays THAT table");
+
+    resetMixer(c);
+    drainEvents(c);
+    const ipc::ControlHeader& h = c.header();
+
+    // Track 2, armed and its own: track 0 is left playing by the clip sections
+    // and track 1 is §11e's sampler.
+    c.pushCommand(Cmd::TrackArm, 2, 1);
+
+    u32 spc = 0;
+    const bool added = addDeviceAndWait(c, ipc::DevTargetTrack, 2, -1, "nxtakt:spectra",
+                                        spc, kScanTimeoutMs);
+    CHECK(added, "AddDevice nxtakt:spectra -> device %u", spc);
+    if (!added) { c.pushCommand(Cmd::TrackArm, 2, 0); return; }
+
+    // A Table = 8, the custom slot. The enum WIDENED from 0..7 to 0..8 and old
+    // values keep their numbers, which is why this is a parameter write and not
+    // a new id (docs/SPECTRA-PARAMS.md, "Custom wavetable slots").
+    CHECK(c.setDeviceParam(spc, 0, 8.f), "A Table = 8, the custom slot");
+    sleepMs(60);
+
+    // -- the frames ----------------------------------------------------------
+    std::vector<f32> tbl((size_t)2 * 2048, 0.f);
+    for (int fr = 0; fr < 2; ++fr) {
+        const f32 amp = fr == 0 ? 0.05f : 1.0f;
+        for (int i = 0; i < 2048; ++i)
+            tbl[(size_t)fr * 2048 + i] =
+                amp * (f32)std::sin(6.283185307179586 * (f64)i / 2048.0);
+    }
+    const u64 hash = wtHashOf(tbl.data(), 2);
+    const std::string state = "nxspc1;wtA=" + wtHex(hash);
+
+    // -- THE NEGATIVE CONTROL: the same state with NO frames beside it -------
+    //
+    // This is the shipped behaviour of every wave before this one, and it is
+    // also the refusal contract working: the parameter keeps its value, the
+    // record is kept, and the oscillator renders factory table 0. Silence would
+    // be a worse lie than the wrong table.
+    CHECK(c.setDeviceState(spc, c.deviceGeneration(spc), state.c_str(),
+                           nullptr, 0, 0, 0.0),
+          "a state naming a table this daemon has never seen crosses");
+    CHECK(waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedState) &&
+                (u32)e.ref == spc) return true;
+        return false;
+    }, 5000), "and is APPLIED, not refused: a missing table is not a malformed state");
+
+    c.pushMidi(0x90, 60, 127);
+    const f32 fallback = settledPeak(c, 2, 400);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(fallback > 0.02f,
+          "the oscillator falls back to FACTORY TABLE 0 and sounds (%.4f)",
+          (double)fallback);
+    CHECK(waitUntil([&] { drainEvents(c); return peakTrack(c, 2, 40) < 1e-3f; }, 4000),
+          "the meter falls back to silence between the two readings");
+
+    // -- and now the frames themselves ---------------------------------------
+    const u64 ingested0 = h.wavetablesIngested.load();
+    const u64 applied0  = h.deviceStatesApplied.load();
+    for (int i = 0; i < 40; ++i) { drainEvents(c); sleepMs(5); }
+    const u64 blocks0 = c.pool().liveBlocks();
+
+    ipc::EngineClient::WavetableUpload up[1];
+    up[0].hash       = hash;
+    up[0].frames     = tbl.data();
+    up[0].frameCount = 2;
+    up[0].cycle      = 2048;
+    CHECK(c.setDeviceState(spc, c.deviceGeneration(spc), state.c_str(),
+                           nullptr, 0, 0, 0.0, up, 1),
+          "the same state again, this time with a PoolKindWavetable block beside it");
+    CHECK(waitUntil([&] {
+        ipc::WireEvent e;
+        while (c.popEvent(e))
+            if (e.type == ipc::EvDeviceChanged && (e.flags & ipc::DeviceChangedState) &&
+                (u32)e.ref == spc) return true;
+        return false;
+    }, 5000), "answered by EvDeviceChanged(DeviceChangedState) for device %u", spc);
+
+    // The counters MOVED. Not "are 1": an unwritten field reads 0 and so does a
+    // daemon that never applied anything, so the discriminating question is the
+    // delta across a publication.
+    CHECK(h.deviceStatesApplied.load() == applied0 + 1,
+          "the daemon counted the state applied (%llu -> %llu)",
+          (unsigned long long)applied0, (unsigned long long)h.deviceStatesApplied.load());
+    CHECK(h.wavetablesIngested.load() == ingested0 + 1,
+          "and counted ONE table ingested (%llu -> %llu)",
+          (unsigned long long)ingested0, (unsigned long long)h.wavetablesIngested.load());
+
+    CHECK(waitUntil([&] {
+        drainEvents(c);
+        return c.pool().liveBlocks() == blocks0;
+    }, 3000), "both blocks came home as EvBlockRetired (live %llu, was %llu)",
+          (unsigned long long)c.pool().liveBlocks(), (unsigned long long)blocks0);
+
+    c.pushMidi(0x90, 60, 127);
+    const f32 custom = settledPeak(c, 2, 400);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(custom > 1e-4f,
+          "the same note still sounds (%.4f): the table resolved, it did not go silent",
+          (double)custom);
+    CHECK(custom * 4.f < fallback,
+          "and it meters %.4f against factory table 0's %.4f — a quarter or less, "
+          "which is frame 0 of the table THIS TEST built, normalised as a SET",
+          (double)custom, (double)fallback);
+
+    // -- refusals, each leaving its blocks free ------------------------------
+    auto refusedWith = [&](u32 want, const char* what) {
+        u32 got = ipc::RejectNone;
+        const bool any = waitUntil([&] {
+            ipc::WireEvent ev;
+            while (c.popEvent(ev))
+                if (ev.type == ipc::EvDeviceFailed &&
+                    (u32)ev.x == ipc::CmdSetDeviceState) { got = (u32)ev.b; return true; }
+            return false;
+        }, 4000);
+        CHECK(any && got == want, "%s -> %s (got %s)", what,
+              ipc::rejectReasonName(want), ipc::rejectReasonName(got));
+    };
+
+    // (a) A TABLE THE STATE DOES NOT NAME. The generic form of §11e's "a state
+    //     that carries a sample for a device that plays no files": a wavetable's
+    //     identity is a function of its own bytes, so the two halves of one
+    //     command can be checked against each other rather than against the
+    //     kind of device they landed on.
+    {
+        const u64 blocksR = c.pool().liveBlocks();
+        std::vector<f32> other = tbl;
+        other[7] = -other[7];
+        ipc::EngineClient::WavetableUpload bad[1];
+        bad[0].hash       = wtHashOf(other.data(), 2);
+        bad[0].frames     = other.data();
+        bad[0].frameCount = 2;
+        bad[0].cycle      = 2048;
+        CHECK(c.setDeviceState(spc, c.deviceGeneration(spc), state.c_str(),
+                               nullptr, 0, 0, 0.0, bad, 1),
+              "a state shipping a table it does not name goes out");
+        refusedWith(ipc::RejectBadWavetable,
+                    "a table the state does not name is refused");
+        CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+              "and its two blocks still came home");
+    }
+
+    // (b) A TABLE THAT DOES NOT HASH TO ITS OWN NAME. Hand-built, because the
+    //     client API computes nothing and would happily send this — it is the
+    //     DAEMON that has to recompute, and this is the check that proves it
+    //     does. Without it a peer could file any bytes under any identity and
+    //     every set naming that hash would play them forever.
+    {
+        const u64 blocksR = c.pool().liveBlocks();
+        ipc::WireWavetable ent{};
+        ent.hash = hash;                       // the right name
+        ent.frames = 2; ent.cycle = 2048;
+        std::vector<f32> lying = tbl;
+        lying[99] += 0.25f;                    // the wrong bytes
+        const f32* dp[1] = { lying.data() };
+        const u64 wref = c.pool().writeWavetables(&ent, dp, 1);
+        ipc::WireDeviceState hdr{};
+        hdr.wtRef = wref; hdr.wtCount = 1;
+        const u64 bref = c.pool().writeDeviceState(hdr, state.c_str());
+        CHECK(wref && bref, "a hand-built blob whose frames do not hash to their name");
+        c.pool().markLive(wref); c.pool().markLive(bref);
+        ipc::WireCommand w{};
+        w.type = ipc::CmdSetDeviceState;
+        w.flags = c.deviceGeneration(spc);
+        w.a = (i32)spc;
+        w.ref = bref;
+        CHECK(c.pushCommand(w), "pushed by hand");
+        c.pool().markDisplaced(bref); c.pool().release(bref);
+        c.pool().markDisplaced(wref); c.pool().release(wref);
+        refusedWith(ipc::RejectBadWavetable,
+                    "the daemon RECOMPUTES the hash and refuses the impostor");
+        CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+              "and both hand-built blocks came home anyway");
+    }
+
+    // (c) A HEADER THAT LIES ABOUT THE BLOCK: wtCount says two, the block holds
+    //     one. The block header is in a client-writable region, so a count read
+    //     from it is a number a peer chose; the daemon checks the command's
+    //     against the block's, which is the same bar translateClip sets.
+    {
+        const u64 blocksR = c.pool().liveBlocks();
+        ipc::WireWavetable ent{};
+        ent.hash = hash; ent.frames = 2; ent.cycle = 2048;
+        const f32* dp[1] = { tbl.data() };
+        const u64 wref = c.pool().writeWavetables(&ent, dp, 1);
+        ipc::WireDeviceState hdr{};
+        hdr.wtRef = wref; hdr.wtCount = 2;      // the block says 1
+        const u64 bref = c.pool().writeDeviceState(hdr, state.c_str());
+        CHECK(wref && bref, "a hand-built state whose table count lies");
+        c.pool().markLive(wref); c.pool().markLive(bref);
+        ipc::WireCommand w{};
+        w.type = ipc::CmdSetDeviceState;
+        w.flags = c.deviceGeneration(spc);
+        w.a = (i32)spc;
+        w.ref = bref;
+        CHECK(c.pushCommand(w), "pushed by hand");
+        c.pool().markDisplaced(bref); c.pool().release(bref);
+        c.pool().markDisplaced(wref); c.pool().release(wref);
+        refusedWith(ipc::RejectBadWavetable,
+                    "a count the block and the state disagree about is refused");
+        CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+              "and both hand-built blocks came home anyway");
+    }
+
+    // (d) THE KIND. A SAMPLES block where wavetables were promised — the
+    //     refusal that costs one line here and would otherwise be a kick drum
+    //     read as a pair of single cycles.
+    {
+        const u64 blocksR = c.pool().liveBlocks();
+        const std::vector<f32> pcm = makeDc(4096, 2, 0.5f);
+        const u64 aref = c.poolWrite(pcm.data(), 4096, 2, 48000.0, 0);
+        ipc::WireDeviceState hdr{};
+        hdr.wtRef = aref; hdr.wtCount = 1;
+        const u64 bref = c.pool().writeDeviceState(hdr, state.c_str());
+        CHECK(aref && bref, "a hand-built state whose wtRef names SAMPLE data");
+        c.pool().markLive(aref); c.pool().markLive(bref);
+        ipc::WireCommand w{};
+        w.type = ipc::CmdSetDeviceState;
+        w.flags = c.deviceGeneration(spc);
+        w.a = (i32)spc;
+        w.ref = bref;
+        CHECK(c.pushCommand(w), "pushed by hand");
+        c.pool().markDisplaced(bref); c.pool().release(bref);
+        c.pool().markDisplaced(aref); c.pool().release(aref);
+        refusedWith(ipc::RejectBadWavetable,
+                    "a sample block offered as wavetables is refused by KIND");
+        CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+              "and both hand-built blocks came home anyway");
+    }
+
+    // (e) A CYCLE LENGTH THIS BUILD DOES NOT USE. `cycle` is carried rather than
+    //     assumed precisely so this is a refusal with a reason instead of a
+    //     table read at the wrong stride.
+    {
+        const u64 blocksR = c.pool().liveBlocks();
+        ipc::WireWavetable ent{};
+        ent.hash = hash; ent.frames = 2; ent.cycle = 1024;
+        const f32* dp[1] = { tbl.data() };
+        const u64 wref = c.pool().writeWavetables(&ent, dp, 1);
+        ipc::WireDeviceState hdr{};
+        hdr.wtRef = wref; hdr.wtCount = 1;
+        const u64 bref = c.pool().writeDeviceState(hdr, state.c_str());
+        CHECK(wref && bref, "a hand-built blob declaring a 1024-sample cycle");
+        c.pool().markLive(wref); c.pool().markLive(bref);
+        ipc::WireCommand w{};
+        w.type = ipc::CmdSetDeviceState;
+        w.flags = c.deviceGeneration(spc);
+        w.a = (i32)spc;
+        w.ref = bref;
+        CHECK(c.pushCommand(w), "pushed by hand");
+        c.pool().markDisplaced(bref); c.pool().release(bref);
+        c.pool().markDisplaced(wref); c.pool().release(wref);
+        refusedWith(ipc::RejectBadWavetable,
+                    "a cycle length this build does not use is refused");
+        CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+              "and both hand-built blocks came home anyway");
+    }
+
+    // (f) A STALE GENERATION, which bites here for the same reason it bites a
+    //     sampler's file: a state in flight when a device was removed must not
+    //     land a TABLE on whatever took its slot.
+    {
+        const u64 blocksR = c.pool().liveBlocks();
+        CHECK(c.setDeviceState(spc, c.deviceGeneration(spc) + 7u, state.c_str(),
+                               nullptr, 0, 0, 0.0, up, 1),
+              "a state stamped with the wrong device generation goes out");
+        refusedWith(ipc::RejectBadDevice,
+                    "a stale generation cannot land a TABLE on somebody else's device");
+        CHECK(waitUntil([&] { drainEvents(c); return c.pool().liveBlocks() == blocksR; }, 3000),
+              "and its two blocks still came home");
+    }
+
+    // AND THE DEVICE IS UNCHANGED BY ALL OF IT. Six refusals, and the
+    // oscillator is still on the table it accepted before them.
+    CHECK(waitUntil([&] { drainEvents(c); return peakTrack(c, 2, 40) < 1e-3f; }, 4000),
+          "the meter falls back to silence after the refusals");
+    c.pushMidi(0x90, 60, 127);
+    const f32 after = settledPeak(c, 2, 400);
+    c.pushMidi(0x80, 60, 0);
+    CHECK(std::fabs(after - custom) < 0.02f,
+          "and the device is provably unchanged: %.4f against the %.4f it had "
+          "before the refusals", (double)after, (double)custom);
+    CHECK(h.wavetablesIngested.load() == ingested0 + 1,
+          "the counter did not move for any of them (%llu)",
+          (unsigned long long)h.wavetablesIngested.load());
+
+    c.removeDevice(spc);
+    c.pushCommand(Cmd::TrackArm, 2, 0);
+    drainEvents(c);
+}
+
 static void testSignatures(ipc::EngineClient& c) {
     banner("11d. the signature map crosses, and the engine plays in it");
 
@@ -5215,6 +5565,7 @@ int main(int argc, char** argv) {
         testRackContents(client);
         testSignatures(client);
         testDeviceState(client);
+        testWavetables(client);
         testDrainsExactness(client);
         testArrangementCommands(client);
         testArrangementPlays(client);

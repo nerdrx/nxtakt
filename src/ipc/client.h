@@ -854,9 +854,23 @@ public:
     // exists means there is only one thing to unwind. The reverse order has a
     // path that allocates a state blob, fails on the audio, and has to release
     // a block whose command never went out.
+    //
+    // THE WAVETABLES, when a device has any, are a THIRD block written the same
+    // way — see WireDeviceState in pool.h for why they ride this channel and
+    // why the far side installs them BEFORE the state text while the sample
+    // goes in after it. `wts` is caller-owned for the duration of the call
+    // only; every sample is copied into the pool before this returns.
+    struct WavetableUpload {
+        u64        hash       = 0;      // lat::wt::contentHash of `frames`
+        const f32* frames     = nullptr;// frameCount * cycle floats, frame-major
+        u32        frameCount = 0;
+        u32        cycle      = 0;      // lat::wt::kCycle
+    };
+
     bool setDeviceState(u32 deviceId, u32 deviceGeneration, const char* state,
                         const f32* audio, i64 audioFrames, int audioChannels,
-                        f64 audioRate) {
+                        f64 audioRate,
+                        const WavetableUpload* wts = nullptr, int wtCount = 0) {
         if (!attached() || !state) return false;
         if (!pool_.valid()) return false;
         if (map_.cmds->size() >= CommandRing::capacity()) return false;
@@ -870,14 +884,52 @@ public:
             pool_.markLive(audioRef);
         }
 
+        // The wavetables next, and the allocation order is the same argument
+        // audio-first makes: allocate the big, failable things while there is
+        // still only one thing to unwind if the next one refuses.
+        u64 wtRef = 0;
+        u32 wtN   = 0;
+        if (wts && wtCount > 0) {
+            if (wtCount > (int)kMaxWavetables) {
+                setErr("a device state may name at most %u wavetables", kMaxWavetables);
+                dropStringBlob(audioRef);
+                return false;
+            }
+            WireWavetable ent[kMaxWavetables]{};
+            const f32*    dat[kMaxWavetables]{};
+            for (int i = 0; i < wtCount; ++i) {
+                if (!wts[i].frames || wts[i].hash == 0 || wts[i].frameCount == 0 ||
+                    wts[i].cycle == 0) {
+                    setErr("wavetable %d has no samples to send", i);
+                    dropStringBlob(audioRef);
+                    return false;
+                }
+                ent[i].hash   = wts[i].hash;
+                ent[i].frames = wts[i].frameCount;
+                ent[i].cycle  = wts[i].cycle;
+                dat[i]        = wts[i].frames;
+            }
+            wtRef = pool_.writeWavetables(ent, dat, (u32)wtCount);
+            if (!wtRef) {
+                setErr("%s", pool_.error());
+                dropStringBlob(audioRef);
+                return false;
+            }
+            pool_.markLive(wtRef);
+            wtN = (u32)wtCount;
+        }
+
         WireDeviceState h{};
         h.audioRef      = audioRef;
         h.audioFrames   = haveAudio ? audioFrames : 0;
         h.audioChannels = haveAudio ? (u32)audioChannels : 0u;
         h.audioRate     = haveAudio ? audioRate : 0.0;
+        h.wtRef         = wtRef;
+        h.wtCount       = wtN;
         const u64 ref = pool_.writeDeviceState(h, state);
         if (!ref) {
             setErr("%s", pool_.error());
+            dropStringBlob(wtRef);
             dropStringBlob(audioRef);
             return false;
         }
@@ -890,14 +942,16 @@ public:
         w.ref   = ref;
         if (!pushCommand(w)) {
             dropStringBlob(ref);
+            dropStringBlob(wtRef);
             dropStringBlob(audioRef);
             return false;
         }
-        // Both blobs belong to the daemon's read now. Drop our own references so
-        // the retirement echoes are the only things left to free them — the
-        // AddDevice dance, run twice, because the command names two blocks.
+        // Every blob belongs to the daemon's read now. Drop our own references
+        // so the retirement echoes are the only things left to free them — the
+        // AddDevice dance, run once per block the command names.
         pool_.markDisplaced(ref);
         pool_.release(ref);
+        if (wtRef)    { pool_.markDisplaced(wtRef);    pool_.release(wtRef); }
         if (audioRef) { pool_.markDisplaced(audioRef); pool_.release(audioRef); }
         return true;
     }

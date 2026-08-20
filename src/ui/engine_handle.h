@@ -352,6 +352,17 @@ public:
     u64 deviceStatesPublished() const;
     u64 deviceStatesRefused() const;
 
+    // Custom wavetables put in the pool beside a device state, summed over
+    // every publication — the near side's half of the daemon's
+    // `wavetablesIngested`, and the two are compared in handle_test because a
+    // table that was sent and not ingested is an oscillator playing the wrong
+    // wave in the process that makes the sound.
+    //
+    // Zero in local mode and zero for a set with no imports, which is almost
+    // every set: the scan that produces it runs only for a device that answers
+    // PluginInstance::wavetable().
+    u64 wavetablesPublished() const;
+
     // --- the arrangement (docs/ARRANGEMENT.md §9) ---------------------------
     //
     // The daemon has been able to take an arrangement since wave 8g; what was

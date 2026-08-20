@@ -73,6 +73,7 @@
 #include "../ipc/control.h"
 #include "../ipc/pool.h"
 #include "../plugin/host.h"
+#include "../plugin/wavetable_io.h"
 
 #include <atomic>
 #include <cmath>
@@ -3332,6 +3333,35 @@ private:
     // life of a device is a 256 MiB arena that a long set fills and never
     // recovers, and the free-after-confirm machinery would have nothing to say
     // about it.
+    //
+    // -----------------------------------------------------------------------
+    // AND THE SAME INVARIANT FOR THE WAVETABLE BLOCK, WRITTEN OUT RATHER THAN
+    // POINTED AT, because a payload that inherits a rule silently is a payload
+    // whose rule nobody checked:
+    //
+    //   NOTHING THE AUDIO THREAD CAN REACH EVER POINTS INTO THE WAVETABLE
+    //   BLOCK, so it is retired the instant it has been copied — confirmed on
+    //   the spot, with no drain proof, exactly as the state text and the sample
+    //   are.
+    //
+    // What pins the block while a voice plays the table it carried? NOTHING
+    // DOES, because the voice never reads it. The frames are copied twice on
+    // this thread before the offset is echoed back — once out of the pool into
+    // a plain std::vector here, once again into the hash-keyed store by
+    // wt::ingest() — and the mip chain a voice actually reads is built from
+    // that store afterwards, in ordinary heap that is never freed
+    // (spectra_tables.inc, "THE LIFETIME INVARIANT"). So there is no path on
+    // which a client releasing a block can pull the floor out from under an
+    // oscillator, and no retirement proof is owed for one.
+    //
+    // THE ORDER IS THE OPPOSITE OF THE SAMPLE'S, and that is forced rather than
+    // chosen. A sampler's state names a PATH, so its audio is adopted AFTER
+    // setStateString() has told the device which file it holds. A wavetable's
+    // state names a CONTENT HASH, which is complete on its own — so the frames
+    // go into the store BEFORE setStateString(), and the device's own parser
+    // then resolves slot 8 out of it with nothing else to be told. Ingesting
+    // after would leave every custom oscillator resolving to the amber fallback
+    // on the first state and to the right table only on the second.
     void doSetDeviceState(const ipc::WireCommand& w) {
         // The blob, and the sample it names, copied out FIRST -- before any
         // refusal path can return -- so that both offsets can be retired on
@@ -3347,12 +3377,20 @@ private:
             sb = readPoolSample(h);
             if (!sb) badSample = true;
         }
+        // The wavetables are COPIED here and INGESTED later, after the device
+        // checks below have passed. The copy has to happen before the block is
+        // retired; the ingest must not, because a state refused for a stale
+        // generation should not leave tables in a store that outlives it.
+        std::vector<PendingWavetable> wts;
+        bool badWavetable = false;
+        if (haveBlob && h.wtRef && !readPoolWavetables(h, wts)) badWavetable = true;
         // A blob so broken that its HEADER would not parse takes its sample
         // block with it: we never learned the offset, so we cannot echo it. That
         // is the one leak this path admits and it costs the client one block of
         // its own pool, on a payload the client itself built wrong.
         if (w.ref)      retireAfterCopy(w.ref, ipc::PoolKindDeviceState);
         if (h.audioRef) retireAfterCopy(h.audioRef, ipc::PoolKindSamples);
+        if (h.wtRef)    retireAfterCopy(h.wtRef, ipc::PoolKindWavetable);
 
         const u32 id = (u32)w.a;
         Device* d = deviceById(id);
@@ -3367,6 +3405,62 @@ private:
             return;
         }
         if (badSample) { failDeviceState(w, id, ipc::RejectBadDeviceSample); return; }
+        if (badWavetable) { failDeviceState(w, id, ipc::RejectBadWavetable); return; }
+
+        // EVERY TABLE THE BLOCK CARRIES MUST BE NAMED BY THE TEXT, and this is
+        // the wavetable arm of the same refusal the sample has ("a state that
+        // carries a sample for a device that plays no files"). It is spelled
+        // differently and it is a stronger check, because it is available:
+        //
+        //   * the sample arm can only ask what KIND OF DEVICE this is, since a
+        //     sampler's state names a path and a path says nothing about audio;
+        //   * a wavetable's state names the table's CONTENT HASH, so the two
+        //     halves of this one command can be checked against each other. A
+        //     state that ships frames it does not name is a client that
+        //     believes something false about this device, whatever kind of
+        //     device it is — a saturator, a sampler, or an instrument whose
+        //     oscillators are all on factory tables.
+        //
+        // Generic, therefore, rather than device-typed: the daemon never asks
+        // "is this a Spectra", it asks "does this state claim this table".
+        {
+            u64 named[ipc::kMaxWavetables];
+            const int namedN = wt::hashesInDeviceState(text.c_str(), named,
+                                                       (int)ipc::kMaxWavetables);
+            for (const PendingWavetable& t : wts) {
+                bool found = false;
+                for (int i = 0; i < namedN && !found; ++i) found = named[i] == t.hash;
+                if (found) continue;
+                logDevice("SetDeviceState: device %u ships a wavetable its own state "
+                          "does not name", id);
+                failDeviceState(w, id, ipc::RejectBadWavetable);
+                return;
+            }
+        }
+        // THE FRAMES INTO THE STORE, BEFORE THE STATE. ingest() RECOMPUTES the
+        // content hash and refuses a table that does not have the one it was
+        // offered under -- the pool is client-writable and a peer naming a
+        // table is a peer that can name it wrongly, and a table filed under
+        // somebody else's identity would answer the wrong question for the life
+        // of this process.
+        for (const PendingWavetable& t : wts) {
+            // Belt and braces before the fold: ingest() reads frames * kCycle
+            // floats, and the only thing that makes that the size of `t.data`
+            // is the cycle-length check in readPoolWavetables. A second reader
+            // of that invariant costs one compare and means a future edit to
+            // the check upstream cannot turn this into a read past the vector.
+            if (t.data.size() != (size_t)t.frames * (size_t)wt::kCycle) {
+                logDevice("SetDeviceState: device %u offered a wavetable whose "
+                          "sample run is not its declared shape", id);
+                failDeviceState(w, id, ipc::RejectBadWavetable);
+                return;
+            }
+            if (wt::ingest(t.hash, (int)t.frames, t.data.data())) continue;
+            logDevice("SetDeviceState: device %u offered a wavetable that does not "
+                      "hash to its own name", id);
+            failDeviceState(w, id, ipc::RejectBadWavetable);
+            return;
+        }
 
         SamplerControl* sc = d->inst->sampler();
         if (sb && !sc) {
@@ -3452,9 +3546,16 @@ private:
 
         map_.hdr->deviceStatesApplied.fetch_add(1, std::memory_order_relaxed);
         emitChanged(id, ipc::DeviceChangedState, -1, latency);
+        // AFTER the event, release-ordered: the counter-order contract. It
+        // promises "the tables that arrived with a state this daemon applied",
+        // and a reader that saw the number before the EvDeviceChanged would be
+        // told about tables belonging to a state that had not been announced.
+        if (!wts.empty())
+            map_.hdr->wavetablesIngested.fetch_add((u32)wts.size(),
+                                                   std::memory_order_release);
         LOGI("device %u: state applied, %zu byte(s), %lld frames of audio, "
-             "%d frames latency",
-             id, text.size(), sb ? (long long)sb->frames : 0ll, latency);
+             "%zu wavetable(s), %d frames latency",
+             id, text.size(), sb ? (long long)sb->frames : 0ll, wts.size(), latency);
     }
 
     // The PoolKindDeviceState blob: [WireDeviceState][text]. `h` is filled on a
@@ -3503,6 +3604,88 @@ private:
             return false;
         }
         out.assign(t, (size_t)len);
+        return true;
+    }
+
+    // One custom wavetable, copied out of the pool and not yet believed: its
+    // hash is checked by wt::ingest(), which is the only thing that can check
+    // it, because checking it means folding every sample.
+    struct PendingWavetable {
+        u64 hash   = 0;
+        u32 frames = 0;
+        std::vector<f32> data;
+    };
+
+    // The PoolKindWavetable block a device state named:
+    // [WireWavetable[wtCount]][f32 samples...]. False on ANY disagreement, and
+    // never a partial read -- a device handed three of its four tables is a
+    // device with one oscillator silently on the wrong wave, which is precisely
+    // the failure this channel exists to end.
+    bool readPoolWavetables(const ipc::WireDeviceState& h,
+                            std::vector<PendingWavetable>& out) {
+        out.clear();
+        if (!pool_.valid()) return false;
+        if (h.wtCount == 0 || h.wtCount > ipc::kMaxWavetables) {
+            logBadRef("device wavetables", h.wtRef, -1, -1,
+                      "the table count is zero or past the bound");
+            return false;
+        }
+        const u64 entryBytes = (u64)h.wtCount * sizeof(ipc::WireWavetable);
+        const char* why = "";
+        u64 blockBytes = 0;
+        // needBytes = the entry array, so validate() proves every entry is
+        // inside the allocation before a single field of one is read.
+        if (!pool_.validate(h.wtRef, ipc::PoolKindWavetable, entryBytes, &why, &blockBytes)) {
+            logBadRef("device wavetables", h.wtRef, -1, -1, why);
+            return false;
+        }
+        const ipc::PoolBlock* b = pool_.block(h.wtRef);
+        if (b->frames != (i64)h.wtCount) {
+            logBadRef("device wavetables", h.wtRef, -1, -1,
+                      "the block holds a different number of tables than the state claims");
+            return false;
+        }
+        // ONE copy of the entries, then reason about the copy and never about
+        // the mapping again -- translateClip's `const WireClip c` rule. A field
+        // re-read after a check is a field a peer may have changed in between.
+        ipc::WireWavetable ent[ipc::kMaxWavetables]{};
+        std::memcpy(ent, pool_.at(h.wtRef), (size_t)entryBytes);
+
+        u64 samples = 0;
+        for (u32 i = 0; i < h.wtCount; ++i) {
+            if (ent[i].cycle != (u32)wt::kCycle) {
+                logBadRef("device wavetables", h.wtRef, -1, -1,
+                          "a table declares a cycle length this build does not use");
+                return false;
+            }
+            if (ent[i].frames == 0 || ent[i].frames > (u32)wt::kMaxFrames) {
+                logBadRef("device wavetables", h.wtRef, -1, -1,
+                          "a table's frame count is zero or past the bound");
+                return false;
+            }
+            if (ent[i].hash == 0) {
+                logBadRef("device wavetables", h.wtRef, -1, -1, "a table has no identity");
+                return false;
+            }
+            samples += (u64)ent[i].frames * (u64)ent[i].cycle;
+        }
+        if (entryBytes + samples * sizeof(f32) > blockBytes) {
+            logBadRef("device wavetables", h.wtRef, -1, -1,
+                      "the sample run declared by the entries runs past the block");
+            return false;
+        }
+
+        const f32* at = (const f32*)(pool_.at(h.wtRef) + entryBytes);
+        out.reserve(h.wtCount);
+        for (u32 i = 0; i < h.wtCount; ++i) {
+            const size_t n = (size_t)ent[i].frames * (size_t)ent[i].cycle;
+            PendingWavetable t;
+            t.hash   = ent[i].hash;
+            t.frames = ent[i].frames;
+            t.data.assign(at, at + n);
+            at += n;
+            out.push_back(std::move(t));
+        }
         return true;
     }
 

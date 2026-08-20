@@ -34,6 +34,10 @@
 // what this suite drives is the SEAM, and a sampler is handed a decoded buffer
 // through SamplerControl::adopt() whether a file or a test made it.
 #include "src/audio/sample.h"
+// The wavetable store: step 4g imports a WAV here and asks a real nxtaktd to
+// play it. The seam still decodes nothing — wavetable_io.cpp does, on whichever
+// side of the boundary actually has a file.
+#include "src/plugin/wavetable_io.h"
 // For the hardware-MIDI check below, which sends a real sequencer event into
 // the GUI's own ALSA client. There is no other way to prove that path: the
 // reader thread is the producer and a fake would test the fake.
@@ -639,6 +643,18 @@ int main() {
     ::setenv("NXTAKT_ENGINE", "daemon", 1);
     ::setenv("NXTAKT_SESSION", session, 1);
     ::setenv("NXTAKT_DAEMON", "build/nxtaktd", 0);   // an externally-set path wins, so the daemon can be sanitised too
+    // THE WAVETABLE CACHE, POINTED SOMEWHERE PRIVATE, AND POINTED THERE BEFORE
+    // THE DAEMON IS SPAWNED — which is the whole of it, and it was a bug for one
+    // afternoon. `nxtaktd` inherits this environment, and step 4g's resolution
+    // order ends with "re-import from the path record, and cache the result", so
+    // a daemon holding the developer's real $XDG_DATA_HOME wrote a table into
+    // ~/.local/share and every LATER run of this suite resolved it from there —
+    // including the runs meant to prove that removing the wire turns 4g red,
+    // which stayed stubbornly green. Both processes now share one temp
+    // directory, and 4g deletes the entry it wants absent.
+    char wtHome[128];
+    std::snprintf(wtHome, sizeof wtHome, "/tmp/nxtakt-wt3-%d", (int)::getpid());
+    ::setenv("XDG_DATA_HOME", wtHome, 1);
 
     std::printf("== EngineHandle, daemon mode, session '%s'\n", session);
 
@@ -1539,6 +1555,492 @@ int main() {
                   "with their real shape: Pulse is an instrument that takes MIDI");
     CHECK(eng.catalogTruncated() == 0,
           "nothing was dropped for want of table space (%u)", eng.catalogTruncated());
+
+    // =====================================================================
+    // STEP 4g: A CUSTOM WAVETABLE, IMPORTED HERE AND PLAYED THERE
+    // =====================================================================
+    //
+    // The near side of docs/SPECTRA-V3-PLAN.md pillar 1, and it is §15's shape
+    // with the identity turned inside out. A sampler's state names a PATH, so
+    // the near side had to be given an accessor for the decoded buffer. A
+    // Spectra's state names a CONTENT HASH, so the near side needs no accessor
+    // at all: it reads the hash out of the state string the device already
+    // wrote, looks the frames up in the process-wide store the import put them
+    // in, and puts those frames in the pool. `WavetableControl` has no method
+    // that hands out samples and is not going to grow one.
+    //
+    // Four things are proved here, in this order:
+    //   1. the three interpretation rules, against three files this test writes;
+    //   2. the identity, the cache file, and the resolution order;
+    //   3. the wire — a real nxtaktd playing a table this process imported;
+    //   4. what bit-identity is available across that boundary, and what is not.
+    banner("step 4g: a custom wavetable imported here plays in the daemon");
+    {
+        // Every path this section touches lives under one temp directory, so the
+        // cache tests cannot see (or write) the developer's real one.
+        // $XDG_DATA_HOME was pointed here at the top of main(), BEFORE the
+        // daemon was spawned, so both processes share this directory — see the
+        // note at that setenv for why that is load-bearing rather than tidy.
+        const char* wtdir = wtHome;
+
+        // A float32 WAV, written by hand: the reader under test is the one in
+        // wavetable_io.cpp and it must not be handed a file some other library
+        // wrote, or a failure would be ambiguous between the two.
+        auto writeWav = [&](const char* path, const std::vector<f32>& mono, int rate) {
+            FILE* f = std::fopen(path, "wb");
+            if (!f) return false;
+            const u32 dataBytes = (u32)(mono.size() * 4);
+            const u32 riff = 36 + dataBytes;
+            auto w32 = [&](u32 v) { std::fwrite(&v, 4, 1, f); };
+            auto w16 = [&](u16 v) { std::fwrite(&v, 2, 1, f); };
+            std::fwrite("RIFF", 1, 4, f); w32(riff); std::fwrite("WAVE", 1, 4, f);
+            std::fwrite("fmt ", 1, 4, f); w32(16);
+            w16(3); w16(1); w32((u32)rate); w32((u32)rate * 4); w16(4); w16(32);
+            std::fwrite("data", 1, 4, f); w32(dataBytes);
+            std::fwrite(mono.data(), 4, mono.size(), f);
+            std::fclose(f);
+            return true;
+        };
+        auto sine = [](size_t n, double period, float amp) {
+            std::vector<f32> v(n, 0.f);
+            for (size_t i = 0; i < n; ++i)
+                v[i] = amp * (f32)std::sin(6.283185307179586 * (double)i / period);
+            return v;
+        };
+
+        // --- 1. THE THREE INTERPRETATION RULES, IN ORDER -------------------
+
+        // (a) The Serum convention: N x 2048, sliced, NEVER resampled. This is
+        //     the common case and the only rule whose identity involves no
+        //     arithmetic beyond a mono fold, a DC removal and one multiply — so
+        //     it is the one that hashes the same on every machine, forever.
+        char pA[160], pB[160], pC[160];
+        std::snprintf(pA, sizeof pA, "%s-serum.wav", wtdir);
+        std::snprintf(pB, sizeof pB, "%s-cycle.wav", wtdir);
+        std::snprintf(pC, sizeof pC, "%s-detect.wav", wtdir);
+
+        std::vector<f32> serum((size_t)2 * 2048, 0.f);
+        for (int fr = 0; fr < 2; ++fr)
+            for (int i = 0; i < 2048; ++i)
+                serum[(size_t)fr * 2048 + i] =
+                    (fr == 0 ? 0.05f : 1.0f) *
+                    (f32)std::sin(6.283185307179586 * (double)i / 2048.0);
+        CHECK(writeWav(pA, serum, 44100), "wrote a 2 x 2048 wavetable at 44.1k");
+
+        wt::Table tA;
+        std::string err;
+        CHECK(wt::importFile(pA, tA, err), "rule (a) imports it: %s", err.c_str());
+        CHECK(tA.rule == wt::Rule::Serum && tA.frames == 2 && tA.srcCycle == 2048,
+              "as the %s: %d frames of %d samples", wt::ruleName(tA.rule),
+              tA.frames, tA.srcCycle);
+        // 44.1k, and NOTHING resampled it. That is the whole reason this file
+        // carries its own RIFF reader instead of the sampler's weak
+        // `loadSample`, which resamples to the engine rate and would have left
+        // 2048-sample cycles no longer 2048 samples long.
+        CHECK(tA.srcFrames == 2, "and the file's own rate never entered it");
+
+        // AND THE FRAME-AXIS CAP, which is the one place the "identical memory
+        // layout to a factory table" constraint costs fidelity, so it is
+        // measured rather than asserted in a comment. A 64-frame Serum table is
+        // accepted, its SOURCE count is reported honestly, and what it plays is
+        // 32 frames evenly spread across the 64 — decided at IMPORT, before the
+        // hash, so the hash names exactly what plays and the same file has the
+        // same identity on both sides of the wire.
+        {
+            char pBig[160];
+            std::snprintf(pBig, sizeof pBig, "%s-big.wav", wtdir);
+            std::vector<f32> big((size_t)64 * 2048, 0.f);
+            for (int fr = 0; fr < 64; ++fr)
+                for (int i = 0; i < 2048; ++i)
+                    big[(size_t)fr * 2048 + i] =
+                        (f32)std::sin(6.283185307179586 * (double)(fr + 1) * (double)i / 2048.0);
+            CHECK(writeWav(pBig, big, 48000), "wrote a 64 x 2048 wavetable");
+            wt::Table tBig;
+            CHECK(wt::importFile(pBig, tBig, err), "it imports: %s", err.c_str());
+            CHECK(tBig.rule == wt::Rule::Serum && tBig.srcFrames == 64,
+                  "as the %s, with %d SOURCE frames reported honestly",
+                  wt::ruleName(tBig.rule), tBig.srcFrames);
+            CHECK(tBig.frames == wt::kMaxFrames &&
+                  tBig.data.size() == (size_t)wt::kMaxFrames * (size_t)wt::kCycle,
+                  "and %d of them kept — the factory layout's frame count, not a "
+                  "policy number", tBig.frames);
+            CHECK(wt::contentHash(tBig.data.data(), tBig.frames) == tBig.hash,
+                  "the hash is over the DECIMATED frames: it names what plays");
+            // Frame 0 of the import is source frame 0 and frame 31 is source
+            // frame 63 — the ends are pinned, so a table's first and last waves
+            // survive the decimation whatever is dropped between them.
+            // The ENDS ARE PINNED: output frame 0 is source frame 0 and output
+            // frame 31 is source frame 63, so a table's first and last waves
+            // survive whatever is dropped between them. Each source frame here
+            // is a different harmonic of the same period, so the frames are
+            // mutually orthogonal and a normalised correlation separates them
+            // completely — 1 for the right one, 0 for every other.
+            auto corr = [&](const f32* a2, const f32* b2) {
+                f64 ab = 0.0, aa = 0.0, bb = 0.0;
+                for (int i = 0; i < 2048; ++i) {
+                    ab += (f64)a2[i] * (f64)b2[i];
+                    aa += (f64)a2[i] * (f64)a2[i];
+                    bb += (f64)b2[i] * (f64)b2[i];
+                }
+                return (aa > 0.0 && bb > 0.0) ? ab / std::sqrt(aa * bb) : 0.0;
+            };
+            const f64 c0  = corr(tBig.frame(0),  big.data());
+            const f64 c31 = corr(tBig.frame(31), big.data() + (size_t)63 * 2048);
+            const f64 cx  = corr(tBig.frame(0),  big.data() + (size_t)63 * 2048);
+            CHECK(c0 > 0.999 && c31 > 0.999 && std::fabs(cx) < 0.01,
+                  "the ends are pinned: frame 0 correlates %.4f with source 0, "
+                  "frame 31 correlates %.4f with source 63, and %.4f across",
+                  c0, c31, cx);
+            std::remove(pBig);
+        }
+
+        // (b) An integer multiple of a power-of-two cycle in 256..4096, each
+        //     cycle resampled to 2048 by windowed sinc. 3072 samples is three
+        //     cycles of 1024 and also six of 512; the LARGEST divisor is the
+        //     reading the exporter meant.
+        CHECK(writeWav(pB, sine(3072, 1024.0, 0.8f), 48000),
+              "wrote 3072 samples — three cycles of 1024");
+        wt::Table tB;
+        CHECK(wt::importFile(pB, tB, err), "rule (b) imports it: %s", err.c_str());
+        CHECK(tB.rule == wt::Rule::Cycle && tB.frames == 3 && tB.srcCycle == 1024,
+              "as the %s: %d frames from a %d-sample cycle", wt::ruleName(tB.rule),
+              tB.frames, tB.srcCycle);
+
+        // (c) Anything else: autocorrelation finds the period, the file is
+        //     sliced at it, and the frame count is capped at 32.
+        CHECK(writeWav(pC, sine(5000, 137.0, 0.7f), 48000),
+              "wrote 5000 samples of a 137-sample period — no power-of-two divisor");
+        wt::Table tC;
+        CHECK(wt::importFile(pC, tC, err), "rule (c) imports it: %s", err.c_str());
+        CHECK(tC.rule == wt::Rule::Detect, "as the %s", wt::ruleName(tC.rule));
+        CHECK(tC.srcCycle >= 135 && tC.srcCycle <= 139,
+              "the detector found a %d-sample period against the true 137",
+              tC.srcCycle);
+        CHECK(tC.frames == wt::kMaxFrames,
+              "and 5000/137 = 36 source frames were capped at %d — the factory "
+              "layout's frame count, applied BEFORE the hash so the hash names "
+              "what plays", tC.frames);
+
+        // Whatever the rule, the result is normalised as a SET and DC-free.
+        auto peakOf = [](const wt::Table& t) {
+            f32 pk = 0.f;
+            for (f32 v : t.data) pk = std::fmax(pk, std::fabs(v));
+            return pk;
+        };
+        CHECK(std::fabs(peakOf(tA) - 1.f) < 1e-4f,
+              "the imported SET peaks at %.6f", (double)peakOf(tA));
+        f32 f0pk = 0.f;
+        for (int i = 0; i < wt::kCycle; ++i) f0pk = std::fmax(f0pk, std::fabs(tA.frame(0)[i]));
+        CHECK(f0pk > 0.03f && f0pk < 0.08f,
+              "and frame 0 still peaks at %.4f and not at 1 — the normalisation is "
+              "SET-WIDE, because inter-frame level is musical", (double)f0pk);
+
+        // --- 2. IDENTITY, THE CACHE FILE, AND RESOLUTION -------------------
+        CHECK(tA.hash != 0 && tB.hash != 0 && tC.hash != 0 &&
+              tA.hash != tB.hash && tB.hash != tC.hash && tA.hash != tC.hash,
+              "three files, three identities (%s, %s, %s)",
+              wt::hashHex(tA.hash).c_str(), wt::hashHex(tB.hash).c_str(),
+              wt::hashHex(tC.hash).c_str());
+        CHECK(wt::contentHash(tA.data.data(), tA.frames) == tA.hash,
+              "and the hash is a function of the frames alone");
+        u64 rt = 0;
+        CHECK(wt::hashFromHex(wt::hashHex(tA.hash).c_str(), 16, rt) && rt == tA.hash,
+              "16 lowercase hex digits round-trip exactly");
+        CHECK(!wt::hashFromHex("0123456789ABCDEF", 16, rt),
+              "uppercase is REFUSED: strict on read and on write, so a round trip "
+              "never normalises anything");
+        CHECK(!wt::hashFromHex("0123456789abcde", 15, rt) &&
+              !wt::hashFromHex("0123456789abcdef0", 17, rt),
+              "and so are fifteen digits and seventeen");
+
+        CHECK(wt::adopt(tA, true) != nullptr, "the table goes into the store");
+        const std::string cache = wt::userCacheDir() + "/" + wt::hashHex(tA.hash) + ".nxwt";
+        wt::Table fromDisk;
+        CHECK(wt::readNxwt(cache, fromDisk),
+              "and a .nxwt lands in %s", wt::userCacheDir().c_str());
+        CHECK(fromDisk.hash == tA.hash && fromDisk.frames == tA.frames &&
+              fromDisk.data == tA.data,
+              "which reads back byte-identical — mips are NOT in it, they are "
+              "derived and they rebuild at load");
+        // A cache entry that does not hash to its own name is not a cache hit.
+        // It is a table that would play under somebody else's identity for the
+        // rest of the process, so the read RECOMPUTES rather than trusting.
+        {
+            FILE* f = std::fopen(cache.c_str(), "r+b");
+            CHECK(f != nullptr, "reopening the cache entry to corrupt it");
+            if (f) {
+                std::fseek(f, wt::kNxwtHeaderBytes + 64, SEEK_SET);
+                const f32 junk = 0.9f;
+                std::fwrite(&junk, 4, 1, f);
+                std::fclose(f);
+            }
+            wt::Table bad;
+            CHECK(!wt::readNxwt(cache, bad),
+                  "a cache entry whose bytes do not hash to its NAME is refused");
+            // And then deleted outright, so that the WIRE is the only route by
+            // which the daemon below can obtain these frames. Both processes
+            // share a filesystem and $XDG_DATA_HOME, so a cache entry left
+            // lying here would let the daemon resolve the table without the
+            // pool ever carrying it — which is a correct behaviour of the
+            // resolution order and a useless test of the wire. Removing the
+            // wtRef from the client turned this section GREEN before this
+            // line existed, which is how it was found.
+            std::remove(cache.c_str());
+        }
+        // Resolution order: the store first, and it answers even though the
+        // cache entry on disk is now corrupt — which is what "cache -> factory
+        // -> user cache -> re-import" means when the first step hits.
+        CHECK(wt::resolve(tA.hash, nullptr) != nullptr,
+              "resolve() still answers from the in-memory store");
+        CHECK(wt::resolve(0x1234567890abcdefull, nullptr) == nullptr,
+              "and a hash nothing holds resolves to NOTHING — the amber case");
+        CHECK(wt::resolve(tB.hash, pB) != nullptr,
+              "a hash the store lacks re-imports from the path record and matches");
+        CHECK(wt::resolve(0x1234567890abcdefull, pB) == nullptr,
+              "but a path that re-imports to a DIFFERENT hash is not that table");
+
+        // The generic scanner the wire uses to find them, and its three bounds.
+        {
+            const std::string st = "nxspc1;lfo1=0123456789abcdef;wtA=" +
+                                   wt::hashHex(tA.hash) + ";wtpathA=%2Ftmp%2Fx.wav;wtB=" +
+                                   wt::hashHex(tB.hash);
+            u64 got[8];
+            const int n = wt::hashesInDeviceState(st.c_str(), got, 8);
+            CHECK(n == 2 && got[0] == tA.hash && got[1] == tB.hash,
+                  "the state's two `wt` records are found and its lfo1 grid — which "
+                  "is also sixteen hex digits — is NOT (%d found)", n);
+            const std::string dup = "nxspc1;wtA=" + wt::hashHex(tA.hash) +
+                                    ";wtB=" + wt::hashHex(tA.hash);
+            CHECK(wt::hashesInDeviceState(dup.c_str(), got, 8) == 1,
+                  "two oscillators naming one table ship it once");
+            CHECK(wt::hashesInDeviceState("nxsmp1;p=%2Ftmp%2Fk.wav", got, 8) == 0,
+                  "and a sampler's state names none of them");
+        }
+
+        // --- 3. THE WIRE ---------------------------------------------------
+        const PluginDesc* spDesc = reg.find("nxtakt:spectra");
+        CHECK(spDesc != nullptr, "the local registry has nxtakt:spectra");
+        std::unique_ptr<PluginInstance> spInst;
+        if (spDesc) spInst = reg.instantiate(*spDesc, eng.sampleRate(), 1024);
+        CHECK(spInst != nullptr, "and a real instance exists");
+
+        if (spInst && spDesc) {
+            // POLLED AT 1 ms, and that is not caution. A track meter is
+            // published once per audio block and decayed by 0.72 each block, so
+            // a probe at 10 ms against a 5.33 ms block misses one publication in
+            // two and reads up to 0.72x the true peak (GUI-ON-DAEMON.md §15.7's
+            // measurement note). The first version of this leg polled at 10 ms
+            // and read 0.0196 for a level the same patch renders at 0.0277 in
+            // this process — 0.708, which is that number and not a disagreement
+            // about the table.
+            auto peakTrack2 = [&](int ms) {
+                Event ev;
+                f32 pk = 0.f;
+                for (int i = 0; i < 60; ++i) { eng.poll(es); while (eng.popEvent(ev)) {} sleepMs(5); }
+                for (int i = 0; i < ms; ++i) {
+                    eng.poll(es);
+                    while (eng.popEvent(ev)) {}
+                    pk = std::fmax(pk, es.meterL[2]);
+                    sleepMs(1);
+                }
+                return pk;
+            };
+            auto on2  = [&](u8 v) { MidiMsg mm{}; mm.status = 0x92; mm.d1 = 60; mm.d2 = v; eng.pushMidi(mm); };
+            auto off2 = [&]()     { MidiMsg mm{}; mm.status = 0x82; mm.d1 = 60; mm.d2 = 0; eng.pushMidi(mm); };
+
+            Command arm{};
+            arm.type = Cmd::TrackArm; arm.a = 2; arm.b = 1;
+            CHECK(eng.pushCommand(arm), "arm track 2");
+            RtChain ch2;
+            ch2.fx[0] = spInst.get();
+            ch2.count = 1;
+            Command sc2{};
+            sc2.type = Cmd::SetChain; sc2.a = 2; sc2.p = &ch2;
+            CHECK(eng.pushCommand(sc2), "publish a chain on track 2 holding one Spectra");
+
+            const RemoteDevice* pd = nullptr;
+            for (int i = 0; i < 600 && !(pd && pd->live); ++i) {
+                eng.poll(es);
+                while (eng.popEvent(e)) {}
+                pd = eng.remoteDevice(spInst.get());
+                sleepMs(10);
+            }
+            CHECK(pd && pd->live, "the daemon instantiated it: device %u '%s'",
+                  pd ? pd->id : 0u, pd ? pd->name.c_str() : "-");
+
+            // A Table = 8, the custom slot, through the GUI's own instance —
+            // the parameter sync carries it like any other knob.
+            spInst->setParam(0, 8.f);
+
+            // THE NEGATIVE CONTROL, and it is the shipped behaviour of every
+            // wave before this one: the state names a table, the frames have no
+            // wire spelling, and the oscillator renders factory table 0.
+            const u64 sent0 = eng.wavetablesPublished();
+            CHECK(sent0 == 0, "nothing has put a wavetable in the pool yet (%llu)",
+                  (unsigned long long)sent0);
+            on2(127);
+            const f32 factoryPeak = peakTrack2(900);
+            off2();
+            CHECK(factoryPeak > 0.02f,
+                  "with no table resolved the oscillator falls back to factory "
+                  "table 0 and SOUNDS: %.4f", (double)factoryPeak);
+
+            // Now the state, naming the table this process imported.
+            //
+            // HASH ONLY, NO `wtpath` RECORD — which is the PRESET spelling, and
+            // it is chosen here for the reason the cache deletion above is:
+            // this leg has to be a test of the WIRE. A path record is a
+            // recovery hint the daemon would honour by opening the file itself,
+            // and it shares a filesystem with this process. With the hint
+            // absent and the cache gone, the pool is the only way those frames
+            // can reach the other process. (The path-recovery leg is proved in
+            // this process instead, by resolve(tB.hash, pB) above.)
+            const std::string st = "nxspc1;wtA=" + wt::hashHex(tA.hash);
+            CHECK(spInst->setStateString(st),
+                  "the GUI's own Spectra takes a state naming the import");
+            CHECK(!spInst->stateString().empty(),
+                  "and keeps it: '%s'", spInst->stateString().c_str());
+
+            const u64 pub0 = eng.deviceStatesPublished();
+            bool shipped = false;
+            for (int i = 0; i < 600 && !shipped; ++i) {
+                eng.poll(es);
+                while (eng.popEvent(e)) {}
+                shipped = eng.deviceStatesPublished() > pub0 &&
+                          eng.wavetablesPublished() > sent0;
+                sleepMs(10);
+            }
+            CHECK(shipped, "syncDeviceStates() put the state AND its table in the pool "
+                  "(%llu state(s), %llu table(s))",
+                  (unsigned long long)eng.deviceStatesPublished(),
+                  (unsigned long long)eng.wavetablesPublished());
+            CHECK(eng.wavetablesPublished() == 1,
+                  "exactly one table, not one per frame (%llu)",
+                  (unsigned long long)eng.wavetablesPublished());
+            CHECK(eng.deviceStatesRefused() == 0,
+                  "and the daemon refused nothing (%llu)",
+                  (unsigned long long)eng.deviceStatesRefused());
+
+            // Give the far side a moment to apply before measuring: the
+            // publication is the send, and the sound is the apply.
+            for (int i = 0; i < 40; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(10); }
+
+            on2(127);
+            const f32 daemonPeak = peakTrack2(900);
+            off2();
+            CHECK(daemonPeak > 1e-4f,
+                  "the daemon still sounds with the custom table: %.4f",
+                  (double)daemonPeak);
+            CHECK(daemonPeak * 4.f < factoryPeak,
+                  "and it is now frame 0 of THIS table (%.4f) rather than factory "
+                  "table 0 (%.4f) — the frames crossed, intact, set-normalised",
+                  (double)daemonPeak, (double)factoryPeak);
+
+            // --- 4. AGAINST THE SAME PATCH IN THIS PROCESS ------------------
+            //
+            // A second Spectra, prepared at the same rate, handed the same state
+            // and the same note. Rendered directly rather than through an Engine
+            // for §15.7's reason: an in-process Engine would add a mixer, a
+            // meter's ballistics and a scheduling phase to a comparison that is
+            // about the INSTRUMENT.
+            // ONE AND A HALF SECONDS, and the peak is taken over the LAST
+            // THIRD of it. That is not padding: Spectra has an amplitude
+            // envelope, so a render of eight blocks measures the ATTACK peak
+            // while the daemon's meter — polled over a second, after the note
+            // has settled — measures the SUSTAIN. Comparing the two read 0.0196
+            // against 0.0277, which is this device's default sustain and not a
+            // disagreement about a table. Both sides now measure the same part
+            // of the same note.
+            constexpr int kBlocks = 280;              // 280 * 256 = 1.49 s
+            f32 localPeak = 0.f;
+            std::vector<f32> localRender;
+            auto renderSpectra = [&](PluginInstance* inst, std::vector<f32>& out) {
+                out.assign((size_t)kBlocks * 256, 0.f);
+                inst->prepare(eng.sampleRate(), 256);
+                const u8 note[3] = { 0x90, 60, 127 };
+                inst->midi(note, 3, 0);
+                std::vector<f32> l((size_t)256, 0.f), r((size_t)256, 0.f);
+                f32* outp[2] = { l.data(), r.data() };
+                const f32* inp[2] = { l.data(), r.data() };
+                for (int b = 0; b < kBlocks; ++b) {
+                    std::fill(l.begin(), l.end(), 0.f);
+                    std::fill(r.begin(), r.end(), 0.f);
+                    inst->process(inp, outp, 2, 256);
+                    std::memcpy(out.data() + (size_t)b * 256, l.data(), 256 * sizeof(f32));
+                }
+            };
+            if (std::unique_ptr<PluginInstance> ref2 =
+                    reg.instantiate(*spDesc, eng.sampleRate(), 1024)) {
+                ref2->prepare(eng.sampleRate(), 256);
+                ref2->setParam(0, 8.f);
+                CHECK(ref2->setStateString(st), "a second Spectra, in this process");
+                renderSpectra(ref2.get(), localRender);
+                for (size_t i = localRender.size() * 2 / 3; i < localRender.size(); ++i)
+                    localPeak = std::fmax(localPeak, std::fabs(localRender[i]));
+
+                // BIT-IDENTITY, WHERE BIT-IDENTITY IS ACHIEVABLE, and this
+                // paragraph is the finding as much as the check is.
+                //
+                // The gate asked for was a cmp-identical render of a
+                // custom-table patch from the DAEMON against one from this
+                // process. It is not achievable in this tree and the reason has
+                // nothing to do with wavetables: the daemon's frames never cross
+                // the boundary at all. It renders into a driver, the null driver
+                // runs against the wall clock, and the only audio number this
+                // side can read is a decaying meter — which is why step 4f's
+                // cross-boundary legs are BOUNDS and say so. Capturing the
+                // daemon's output would need a file/offline driver in nxtaktd,
+                // which is a wire feature to design on its own.
+                //
+                // What IS achievable, and is what the gate was really about, is
+                // that the mip chain is a deterministic function of the frames
+                // and the frames that cross the wire are the ones that were
+                // hashed. Both are checked: the render is bit-identical run to
+                // run below, ipc_test §13 proves the pool round trip is
+                // byte-exact and hashes to the same identity on the other side,
+                // and the daemon's wt::ingest() recomputes the hash before it
+                // will play a single sample. The remaining gap is a transport,
+                // not an arithmetic.
+                std::vector<f32> again;
+                std::unique_ptr<PluginInstance> ref3 = reg.instantiate(*spDesc, eng.sampleRate(), 1024);
+                if (ref3) {
+                    ref3->prepare(eng.sampleRate(), 256);
+                    ref3->setParam(0, 8.f);
+                    ref3->setStateString(st);
+                    renderSpectra(ref3.get(), again);
+                }
+                CHECK(!again.empty() && again.size() == localRender.size() &&
+                      std::memcmp(again.data(), localRender.data(),
+                                  localRender.size() * sizeof(f32)) == 0,
+                      "two independent instances resolving the SAME hash render "
+                      "BIT-IDENTICALLY (%zu frames) — the mip chain is a pure "
+                      "function of the frames", localRender.size());
+            }
+            CHECK(localPeak > 1e-4f, "the in-process patch peaks at %.4f", (double)localPeak);
+            CHECK(std::fabs(daemonPeak - localPeak) < 0.01f,
+                  "AND THE TWO AGREE: daemon %.4f vs in-process %.4f — the same "
+                  "table, one of them through the pool",
+                  (double)daemonPeak, (double)localPeak);
+
+            // Clearing: the state goes back to naming nothing, the oscillator
+            // returns to the factory fallback, and no further table is shipped.
+            const u64 sentBefore = eng.wavetablesPublished();
+            CHECK(spInst->setStateString(""), "an empty state is accepted as a no-op");
+            for (int i = 0; i < 80; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+            CHECK(eng.wavetablesPublished() == sentBefore,
+                  "and nothing new goes into the pool for a state that names no table "
+                  "(%llu)", (unsigned long long)eng.wavetablesPublished());
+
+            Command clear2{};
+            clear2.type = Cmd::SetChain; clear2.a = 2; clear2.p = nullptr;
+            eng.pushCommand(clear2);
+            for (int i = 0; i < 40; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+            arm.b = 0;
+            eng.pushCommand(arm);
+        }
+
+        std::remove(pA); std::remove(pB); std::remove(pC);
+    }
 
     // =====================================================================
     // STEP 4c: THE ARRANGEMENT, over the wire

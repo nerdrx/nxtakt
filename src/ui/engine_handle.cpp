@@ -19,6 +19,13 @@
 // know is how a DECODED one is SHAPED, because a sampler's audio has to reach a
 // daemon that links no decoder either (GUI-ON-DAEMON.md §15.2).
 #include "../audio/sample.h"
+// And, for the same shape of reason, how an IMPORTED WAVETABLE is stored:
+// a custom table crosses beside a device state named by its content hash,
+// and the frames that hash names live in the process-wide store this header
+// declares. The seam still decodes nothing -- src/plugin/wavetable_io.cpp
+// reads the file, on whichever side of the boundary actually has one --
+// it only looks a table up by the identity the state string already carries.
+#include "../plugin/wavetable_io.h"
 
 #include <algorithm>
 #include <cmath>
@@ -234,13 +241,26 @@ u64 rackFingerprint(const RackState& s) {
 // rate, produces the same string and a different buffer. Hashing only the text
 // would serve the cached publication and leave the daemon playing the old bytes
 // under the right name -- a difference nothing on screen could show.
-u64 deviceStateFingerprint(const std::string& text, const SampleBuffer* sb) {
+//
+// AND THE WAVETABLES THAT RESOLVED, which is the third thing and the smallest.
+// A custom table's hash is IN the text, so hashing the text already notices a
+// table changing -- but not a table ARRIVING: a state whose `wtA` names a file
+// this machine could not find at load time is text that never changes again,
+// and if the table later resolves (the user re-imports it, a factory .nxwt is
+// installed) there would be nothing to trigger the send. Mixing the hashes that
+// are actually shippable right now makes "I can send it" part of the identity,
+// which is exactly the sampler's lesson about a path not identifying audio,
+// one payload along.
+u64 deviceStateFingerprint(const std::string& text, const SampleBuffer* sb,
+                           const u64* wtHashes, int wtCount) {
     u64 h = 1469598103934665603ull;
     auto mix = [&](u64 v) {
         for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xffull; h *= 1099511628211ull; }
     };
     mix((u64)text.size());
     for (unsigned char c : text) mix((u64)c);
+    mix((u64)(u32)wtCount);
+    for (int i = 0; i < wtCount; ++i) mix(wtHashes[i]);
     if (!sb) { mix(~0ull); return h; }
     mix((u64)(uintptr_t)sb);
     mix((u64)sb->frames);
@@ -468,6 +488,7 @@ struct RemoteEngine {
     // indistinguishable from one that published and was refused, and both sound
     // like an instrument that went missing.
     u64 statesSent = 0, statesFailed = 0;
+    u64 wavetablesSent = 0;
     // Arrangement lanes and automation sets this handle put on the wire, and the
     // ones the daemon refused (EvArrangementAck with ArrAckRefused). A refusal
     // means a timeline that is drawn and does not play, which is not a state a
@@ -1814,7 +1835,50 @@ struct RemoteEngine {
                 // the accessor.
                 SamplerControl* sc = s.src->sampler();
                 const SampleRef buf = sc ? sc->sampleBuffer() : SampleRef{};
-                const u64 finger = deviceStateFingerprint(text, buf.get());
+
+                // THE WAVETABLES THIS STATE NAMES.
+                //
+                // GENERIC, AND SELF-LIMITING RATHER THAN DEVICE-TYPED. The
+                // question asked of every state is "does this text name a table
+                // this process is holding", and it is bounded three times over:
+                // a record qualifies only if its key begins `wt` and its value
+                // is EXACTLY sixteen lowercase hex digits; a qualifying hash is
+                // only shipped if the store actually has the frames; and the
+                // far side refuses any table its own state does not name. So a
+                // rack, a saturator or a sampler costs one linear scan of a
+                // string this loop already hashes in full, and ships nothing.
+                //
+                // Deliberately NOT gated on `PluginInstance::wavetable()`. That
+                // accessor says what a device can be EDITED as, and this is a
+                // question about what a state SAYS -- a device that answered
+                // null and still named a table would be exactly the silent
+                // half-publication this channel exists to end.
+                //
+                // A device is never asked to hand out the bytes it plays: there
+                // is no accessor for them on WavetableControl and there is
+                // deliberately not going to be one. The bytes come from the
+                // hash-keyed store, which is where the import put them.
+                ipc::EngineClient::WavetableUpload wtUp[ipc::kMaxWavetables];
+                u64 wtHash[ipc::kMaxWavetables];
+                int wtN = 0;
+                if (!text.empty()) {
+                    u64 want[ipc::kMaxWavetables];
+                    const int n = wt::hashesInDeviceState(text.c_str(), want,
+                                                          (int)ipc::kMaxWavetables);
+                    for (int i = 0; i < n; ++i) {
+                        const wt::Table* t = wt::find(want[i]);
+                        if (!t) continue;         // unresolved here: nothing to send,
+                                                  // and the far side falls back amber
+                        wtUp[wtN].hash       = t->hash;
+                        wtUp[wtN].frames     = t->data.data();
+                        wtUp[wtN].frameCount = (u32)t->frames;
+                        wtUp[wtN].cycle      = (u32)wt::kCycle;
+                        wtHash[wtN]          = t->hash;
+                        ++wtN;
+                    }
+                }
+
+                const u64 finger = deviceStateFingerprint(text, buf.get(), wtHash, wtN);
                 if (finger == s.stateFinger) continue;
 
                 // Nothing to say, and nothing has ever been said. Almost every
@@ -1849,7 +1913,8 @@ struct RemoteEngine {
                                         buf ? buf->data.data() : nullptr,
                                         buf ? buf->frames      : 0,
                                         buf ? buf->channels    : 0,
-                                        buf ? buf->rate        : 0.0)) {
+                                        buf ? buf->rate        : 0.0,
+                                        wtN ? wtUp : nullptr, wtN)) {
                     if (!s.stateSent && buf && !loggedStatePool) {
                         loggedStatePool = true;
                         LOGW("the engine would not take device %u's state yet (%s); "
@@ -1862,6 +1927,7 @@ struct RemoteEngine {
                 s.stateFailed = false;
                 s.stateSent   = true;
                 ++statesSent;
+                wavetablesSent += (u64)wtN;
             }
     }
 
@@ -2864,6 +2930,7 @@ u64 EngineHandle::devicesFailed() const  { return remote_ ? remote_->devFailed :
 u64 EngineHandle::racksPublished() const { return remote_ ? remote_->racksSent : 0u; }
 u64 EngineHandle::racksRefused() const   { return remote_ ? remote_->racksFailed : 0u; }
 u64 EngineHandle::deviceStatesPublished() const { return remote_ ? remote_->statesSent : 0u; }
+u64 EngineHandle::wavetablesPublished() const { return remote_ ? remote_->wavetablesSent : 0u; }
 u64 EngineHandle::deviceStatesRefused() const   { return remote_ ? remote_->statesFailed : 0u; }
 u64 EngineHandle::arrangementsPublished() const { return remote_ ? remote_->arrPublished : 0u; }
 u64 EngineHandle::arrangementsRefused() const   { return remote_ ? remote_->arrRefused : 0u; }

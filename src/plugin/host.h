@@ -27,6 +27,7 @@ namespace lat {
 class PluginRegistry;
 class RackControl;
 class SamplerControl;
+class WavetableControl;
 
 // src/audio/sample.h. Named here as an INCOMPLETE type on purpose: the plugin
 // layer has to be able to say "a decoded sample" (SamplerControl, below) and
@@ -174,6 +175,33 @@ public:
     virtual const char* presetName(int i) const  { (void)i; return nullptr; }
     virtual void        loadPreset(int i)        { (void)i; }
 
+    // -----------------------------------------------------------------------
+    // USER PRESETS (docs/SPECTRA-PARAMS.md, "The user-preset contract")
+    //
+    // On PluginInstance and not on any one device, because a preset is
+    // parameters plus stateString() and every device has both. The sampler gets
+    // a user bank the day it asks for one, and so does the next instrument.
+    // -----------------------------------------------------------------------
+
+    // GUI thread. Writes the device's CURRENT parameters and stateString() to
+    // the user preset directory under `name`. Returns false and changes NOTHING
+    // on refusal. The default is false: "this device does not save presets".
+    //
+    // A DEVICE OPTS IN WITH ONE LINE, and the line is
+    // `return saveUserPreset(name);` — the whole implementation is below, in
+    // this class, and knows nothing about any particular device. The default
+    // stays false because the contract says so and because the alternative is
+    // every third-party LV2 in the browser silently growing a save button whose
+    // file nothing would ever read back.
+    virtual bool savePreset(const char* name) { (void)name; return false; }
+
+    // GUI thread. presetCount() enumerates factory presets THEN user presets.
+    // This is the boundary: indices [0, factoryPresetCount()) are factory,
+    // [factoryPresetCount(), presetCount()) are user. The default answers
+    // presetCount(), so every existing backend — which has no user bank — is
+    // already correct without being touched.
+    virtual int factoryPresetCount() const { return presetCount(); }
+
     // GUI thread. Everything the device is BEYOND its parameters, as one line
     // of printable ASCII with no whitespace, no quotes and no newline — so the
     // project layer can carry it as an opaque scalar (`SavedDevice::state`) and
@@ -248,6 +276,84 @@ public:
     // device a file the user just dropped on it, and handing it a buffer that
     // was decoded somewhere else.
     virtual SamplerControl* sampler() { return nullptr; }
+
+    // GUI thread. Non-null only for a device whose sound can be a FILE THE USER
+    // BROUGHT without that file being the whole device — today exactly one,
+    // `nxtakt:spectra`, whose oscillators can each play an imported wavetable.
+    //
+    // The third accessor of the same shape and the same justification as rack()
+    // and sampler(), and the difference from sampler() is worth one line: a
+    // sampler IS its file, so an empty sampler is silence, while a Spectra with
+    // no import is eight factory tables and a complete instrument. That is why
+    // this is `wavetable()` and not a second `sampler()`, and why a failed
+    // resolution here falls back to factory table 0 rather than to silence.
+    //
+    // Persistence does NOT go through here — it goes through
+    // stateString()/setStateString(), which carry the content hash and the path
+    // hint. This interface is for the two things that are not persistence:
+    // handing the device a file the user just dropped, and telling the editor
+    // what it is holding.
+    virtual WavetableControl* wavetable() { return nullptr; }
+
+protected:
+    // -----------------------------------------------------------------------
+    // The user bank's machinery. GUI thread, every one of them.
+    //
+    // GENERIC: written entirely against paramCount()/paramInfo()/getParam()/
+    // setParam()/stateString()/setStateString()/desc(), so it works for any
+    // device that implements PluginInstance and knows about none of them. A
+    // backend joins the bank by forwarding four calls:
+    //
+    //   int  presetCount() const override { return kFactory + userPresetCount(); }
+    //   int  factoryPresetCount() const override { return kFactory; }
+    //   const char* presetName(int i) const override {
+    //       return i < kFactory ? kNames[i] : userPresetName(i - kFactory); }
+    //   void loadPreset(int i) override {
+    //       if (i >= kFactory) { loadUserPreset(i - kFactory); return; } ... }
+    //   bool savePreset(const char* n) override { return saveUserPreset(n); }
+    //
+    // THE LIST IS SCANNED ONCE and re-scanned only by a successful save. A file
+    // added by another process appears when the device is next constructed;
+    // there is no watcher, because a preset list that changes under a live
+    // popover is a bug source and the cost of the honest version is reopening
+    // the device.
+    // -----------------------------------------------------------------------
+
+    // Sorted by display name, byte-wise ascending (memcmp, never a locale
+    // collation), filename as the tiebreak.
+    int         userPresetCount() const;
+    const char* userPresetName(int i) const;   // null out of range
+
+    // Resets every parameter to its default, applies the file's parameters, and
+    // only THEN calls setStateString() — host.h's own load ordering. A file that
+    // does not parse is refused whole: nothing is applied and the device is left
+    // exactly as it was. Returns false on any refusal.
+    bool loadUserPreset(int i);
+
+    // The generic savePreset(). See savePreset() above for the one line that
+    // makes a device use it, and the contract for the refusal list, the slug
+    // rules, the `.nxp.bak` generation and the temp-and-rename.
+    //
+    // Every pointer previously returned by presetName()/userPresetName() is
+    // stale after this returns true. That is the one documented weakening of
+    // presetName()'s lifetime and the only call that can cause it.
+    bool saveUserPreset(const char* name);
+
+    // Forget the scan so the next query re-reads the directory. Rarely needed:
+    // saveUserPreset() does it for you.
+    void invalidateUserPresets();
+
+private:
+    struct UserPreset {
+        std::string name;        // the `name` header — authoritative
+        std::string category;
+        std::string file;        // absolute path
+    };
+    // Mutable because the scan is lazy and userPresetName() is const: the list
+    // is a CACHE of a directory, not part of the device's value.
+    mutable std::vector<UserPreset> userPresets_;
+    mutable bool                    userScanned_ = false;
+    void scanUserPresetsIfNeeded() const;
 };
 
 // ---------------------------------------------------------------------------
@@ -444,6 +550,39 @@ public:
     // because prepare() is by contract called before the instance is handed
     // over.
     virtual void reclaim() = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Custom wavetables
+//
+// The editing face of an instrument whose oscillators can play a table the user
+// imported (`nxtakt:spectra`, docs/SPECTRA-V3-PLAN.md pillar 1). GUI THREAD
+// ONLY, every method — the same rule RackControl and SamplerControl state, for
+// the same reason: reading a WAV, resampling it and building ten mip levels per
+// frame allocates and takes tens of milliseconds, so it happens here, at edit
+// time, and never anywhere near process().
+//
+// `osc` is the oscillator INDEX within the device — 0 for A, 1 for B — and not
+// any handle the implementation may keep behind it. An out-of-range index is a
+// refusal, never a crash: the caller is an editor reacting to a drop.
+//
+// NO ACCESSOR FOR THE FRAMES, deliberately. The wire (src/ui/engine_handle.cpp)
+// gets a table's samples out of the process-wide store in
+// src/plugin/wavetable_io.h, keyed by the content hash the device's own state
+// string carries — so a device is never asked to hand out the bytes it plays,
+// and the pool path stays generic over devices rather than growing a second
+// SamplerControl::sampleBuffer() for every kind of payload an instrument can
+// have.
+// ---------------------------------------------------------------------------
+class WavetableControl {
+public:
+    virtual ~WavetableControl() = default;
+    virtual bool importFile(int osc, const char* path) = 0;   // GUI thread
+    virtual bool hasCustom(int osc) const = 0;
+    virtual const char* customName(int osc) const = 0;        // basename, display
+    virtual int  customFrames(int osc) const = 0;
+    virtual void clearCustom(int osc) = 0;
+    virtual const char* lastError() const = 0;
 };
 
 // Backend entry points. One pair per format; host.cpp dispatches to them.

@@ -116,7 +116,19 @@ DEP := $(OBJ:.o=.d)
 # spawn the engine it defaults to, or every first run opens in degraded mode.
 # `debug` gets the same treatment — a debug GUI still wants an engine to talk
 # to, and the daemon keeps its own flags (it is a separate program).
-all: $(BIN) build/nxtaktd
+# The factory wavetables, beside the binaries that resolve them. wt::factoryDir()
+# looks at $NXTAKT_WAVETABLES, then <exeDir>/wavetables, then
+# <exeDir>/../share/nxtakt/wavetables — so a table copied here is found by a
+# build-tree run with no environment at all, and the same directory name is
+# what `dist` ships. Presets that name a factory table are unplayable without
+# them, which makes this a build output and not an asset lying beside one.
+FACTORY_WT := $(patsubst assets/wavetables/%,build/wavetables/%,$(wildcard assets/wavetables/*.nxwt))
+
+build/wavetables/%.nxwt: assets/wavetables/%.nxwt
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+all: $(BIN) build/nxtaktd $(FACTORY_WT)
 debug: $(BIN) build/nxtaktd
 
 config:
@@ -196,7 +208,17 @@ INTERNAL_INSTR := src/plugin/spectra.cpp src/plugin/sampler.cpp \
 # every tool and test binary stale. They are NOT sources, so recipes that used
 # $^ raw filter %.cpp — the idiom internal_device_test and handle_test already
 # use, for the same reason.
-INTERNAL_DATA := src/plugin/spectra_presets.inc src/plugin/spectra_tables.inc
+INTERNAL_DATA := src/plugin/spectra_presets.inc src/plugin/spectra_tables.inc \
+                 src/plugin/wavetable_io.h
+# A REAL translation unit, not a textual include, and it is listed separately
+# from INTERNAL_INSTR for exactly that reason: the instruments above compile to
+# nothing on their own and this one carries code -- the WAV reader, the content
+# hash, the .nxwt cache and the process-wide wavetable store (pillar 1 of
+# docs/SPECTRA-V3-PLAN.md). It links no decoder and no third-party library, so
+# it goes into every target that compiles internal_devices.cpp INCLUDING
+# nxtaktd, which is the whole point: the daemon never imports a file, it
+# ingests frames off the wire and resolves them by hash exactly as the GUI does.
+INTERNAL_SUP := src/plugin/wavetable_io.cpp
 TOOL_LIBS := $(shell pkg-config --libs sndfile samplerate lilv-0) -ldl -lpthread -lm
 TOOL_CF   := -std=c++20 -O2 -w $(shell pkg-config --cflags sndfile samplerate lilv-0) -Ivendor/clap/include
 
@@ -209,13 +231,13 @@ build/gen_demo: tools/gen_demo.cpp $(CORE_SRC)
 # render materialises a project's device chains, so unlike gen_demo it needs the
 # plugin backends linked in.
 build/render: tools/render.cpp $(CORE_SRC) src/plugin/host.cpp src/plugin/lv2_host.cpp \
-              src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA)
+              src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(TOOL_LIBS)
 build/pitch_check: tools/pitch_check.cpp
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $^ -o $@ $(TOOL_LIBS)
-build/plugin_scan: tools/plugin_scan.cpp src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA)
+build/plugin_scan: tools/plugin_scan.cpp src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(TOOL_LIBS)
 build/engine_test: tests/engine_test.cpp src/audio/engine.cpp src/core/common.cpp
@@ -244,7 +266,7 @@ build/ipc_test: tests/ipc_test.cpp $(IPC_H)
 DAEMON_SRC := src/daemon/nxtaktd.cpp src/audio/engine.cpp src/audio/backend.cpp \
               src/core/common.cpp \
               src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-              src/plugin/internal_devices.cpp $(INTERNAL_INSTR)
+              src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP)
 DAEMON_CF  := -std=c++20 -O2 $(WARN) -Ivendor/clap/include \
               $(shell pkg-config --cflags jack alsa lilv-0)
 DAEMON_LD  := $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -lm
@@ -277,7 +299,7 @@ build/daemon_test: tests/daemon_test.cpp $(IPC_H) src/audio/engine.h build/nxtak
 # handed to g++ is compiled as a precompiled header, not ignored.
 build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
                             src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA) \
+                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA) \
                             src/plugin/host.h src/audio/sample.h
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(shell pkg-config --libs lilv-0) -ldl
@@ -292,7 +314,7 @@ build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
 build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
                          src/audio/sample.cpp src/core/common.cpp \
                          src/plugin/host.cpp src/plugin/lv2_host.cpp \
-                         src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA)
+                         src/plugin/clap_host.cpp src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA)
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(TOOL_LIBS) -ldl
 
@@ -325,7 +347,7 @@ build/timesig_view_test: tests/timesig_view_test.cpp src/audio/engine.cpp \
 build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engine.cpp \
                    src/audio/midi_in.cpp src/core/common.cpp \
                    src/plugin/host.cpp src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
-                   src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_DATA) \
+                   src/plugin/internal_devices.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA) \
                    $(IPC_H) src/ui/engine_handle.h src/ui/engine_state.h \
                    src/audio/engine.h src/plugin/host.h src/audio/sample.h \
                    build/nxtaktd
@@ -373,6 +395,8 @@ dist: all build/nxtaktd build/gen_demo build/render
 	cp build/nxtakt build/nxtaktd build/gen_demo build/render $(DISTDIR)/
 	cp README.md LICENSE $(DISTDIR)/
 	cp assets/logo.svg $(DISTDIR)/icon.svg
+	mkdir -p $(DISTDIR)/wavetables
+	cp assets/wavetables/*.nxwt $(DISTDIR)/wavetables/
 	printf '%s\n' \
 	  "NxTakt $(VERSION) — Linux x86_64" \
 	  "" \

@@ -1012,7 +1012,7 @@ static void testArrangementClassifiers() {
           (unsigned long long)ipc::arrangementBytes(2, 1));
     CHECK(ipc::kMaxArrLanes == kMaxRtArrLanes,
           "the wire lane bound and the engine's agree (%d)", (int)ipc::kMaxArrLanes);
-    CHECK(ipc::kProtocolVersion == 11 && ipc::kPoolVersion == 8 && ipc::kShmVersion == 6,
+    CHECK(ipc::kProtocolVersion == 12 && ipc::kPoolVersion == 9 && ipc::kShmVersion == 6,
           "protocol v%u, pool v%u, shm v%u", ipc::kProtocolVersion, ipc::kPoolVersion,
           ipc::kShmVersion);
     CHECK(ipc::control::kJournal > ipc::control::kParams &&
@@ -1400,7 +1400,7 @@ static void testDeviceStateBlob() {
           ipc::CmdSetDeviceState != ipc::CmdSetRackState,
           "the three occupy distinct slots");
 
-    CHECK(sizeof(ipc::WireDeviceState) == 40 && ipc::kDeviceStateVersion == 1,
+    CHECK(sizeof(ipc::WireDeviceState) == 56 && ipc::kDeviceStateVersion == 2,
           "WireDeviceState is %zu B at v%u",
           sizeof(ipc::WireDeviceState), ipc::kDeviceStateVersion);
 
@@ -1562,7 +1562,7 @@ static void testClipBlobs() {
     // -- shapes first. sizeof(WireClip) is part of the layout hash, so a change
     //    here is a change two builds must not be able to disagree about.
     CHECK(sizeof(ipc::WireClip) == 176, "WireClip is %zu B", sizeof(ipc::WireClip));
-    CHECK(ipc::kProtocolVersion == 11 && ipc::kPoolVersion == 8,
+    CHECK(ipc::kProtocolVersion == 12 && ipc::kPoolVersion == 9,
           "at protocol v%u over pool v%u", ipc::kProtocolVersion, ipc::kPoolVersion);
     CHECK(sizeof(ipc::WireWarpMarker) == 16 && alignof(ipc::WireWarpMarker) == 8,
           "WireWarpMarker is %zu B: one source frame pinned to one beat",
@@ -1815,6 +1815,220 @@ static void testClipBlobs() {
     gShmNameAlt[0] = '\0';
 }
 
+
+// ---------------------------------------------------------------------------
+// 13. THE WAVETABLE BLOB — PoolKindWavetable, pool v9 / protocol v12
+//
+// A custom wavetable crosses beside a device state exactly as a sampler's audio
+// does, and is named DIFFERENTLY: audio is named by a shape, a wavetable is
+// named by a CONTENT HASH that is a function of its own samples. Everything
+// that is interesting about this payload follows from that one difference, and
+// this section is where the wire half of it is checked in one process.
+//
+// THE HASH IS TRANSCRIBED HERE, from docs/SPECTRA-PARAMS.md, "The content
+// hash", and NOT taken from lat::wt::contentHash. That is the point: ipc_test
+// links src/ipc and libc and nothing else, on purpose, so the number this file
+// computes is an INDEPENDENT reading of the specification. daemon_test then
+// sends a blob stamped with it to a real nxtaktd, whose wt::ingest() recomputes
+// the hash with the real implementation and refuses anything that disagrees —
+// so "the doc, the test and the code agree" is a thing the suite proves rather
+// than a thing it assumes.
+// ---------------------------------------------------------------------------
+
+static u64 wtMix64(u64 x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27; x *= 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    return x;
+}
+
+// h = mix64(frameCount); h = mix64(h ^ 2048); then every sample's float32 bits,
+// frame-major, with -0.0 folded to +0.0.
+static u64 wtHash(const f32* frames, int frameCount, int cycle = 2048) {
+    u64 h = wtMix64((u64)(u32)frameCount);
+    h = wtMix64(h ^ (u64)(u32)cycle);
+    const size_t n = (size_t)frameCount * (size_t)cycle;
+    for (size_t i = 0; i < n; ++i) {
+        u32 u;
+        std::memcpy(&u, &frames[i], sizeof u);
+        if (u == 0x80000000u) u = 0;
+        h = wtMix64(h ^ (u64)u);
+    }
+    return h;
+}
+
+static void testWavetableBlob() {
+    banner("13. the wavetable blob: identity, shape, kinds and free-after-confirm");
+
+    // -- the shapes, which are part of the layout hash's promise -------------
+    CHECK(ipc::PoolKindWavetable == 12, "PoolKindWavetable is %u",
+          (unsigned)ipc::PoolKindWavetable);
+    CHECK(std::strcmp(ipc::poolKindName(ipc::PoolKindWavetable), "wavetables") == 0,
+          "and names itself '%s' in a log line", ipc::poolKindName(ipc::PoolKindWavetable));
+    CHECK(sizeof(ipc::WireWavetable) == 16 && alignof(ipc::WireWavetable) == 8,
+          "WireWavetable is %zu B: a hash, a frame count and a cycle length",
+          sizeof(ipc::WireWavetable));
+    CHECK(ipc::kMaxWavetables == 8 && ipc::kMaxWavetableBytes == (4ull << 20),
+          "at most %u tables in a block of at most %llu bytes",
+          ipc::kMaxWavetables, (unsigned long long)ipc::kMaxWavetableBytes);
+    // The worst case the format admits has to FIT the bound, or the bound is a
+    // truncation waiting for the set that reaches it.
+    const u64 worst = (u64)ipc::kMaxWavetables * (16ull + 32ull * 2048ull * 4ull);
+    CHECK(worst < ipc::kMaxWavetableBytes,
+          "and the worst case the format admits (%llu B) fits inside it",
+          (unsigned long long)worst);
+
+    // -- the hash, against the properties the contract states ---------------
+    std::vector<f32> a((size_t)2 * 2048, 0.f);
+    for (int fr = 0; fr < 2; ++fr)
+        for (int i = 0; i < 2048; ++i)
+            a[(size_t)fr * 2048 + i] =
+                (f32)std::sin(6.283185307179586 * (f64)(fr + 1) * (f64)i / 2048.0);
+    const u64 ha = wtHash(a.data(), 2);
+    CHECK(ha != 0, "a two-frame table hashes to %016llx", (unsigned long long)ha);
+    CHECK(wtHash(a.data(), 2) == ha, "and the same samples hash the same way twice");
+
+    std::vector<f32> b = a;
+    b[1234] = std::nextafterf(b[1234], 1.f);
+    CHECK(wtHash(b.data(), 2) != ha,
+          "one sample moved by one ULP is a different table");
+
+    std::vector<f32> z((size_t)2048, 0.f), nz((size_t)2048, -0.f);
+    CHECK(wtHash(z.data(), 1) == wtHash(nz.data(), 1),
+          "-0.0 folds to +0.0: DC removal produces it and two tables that differ "
+          "only in the sign of a zero are the same table");
+    CHECK(wtHash(a.data(), 1) != ha,
+          "and the FRAME COUNT is in the fold, so a prefix is not the same table");
+
+    // -- the block ----------------------------------------------------------
+    char session[48];
+    std::snprintf(session, sizeof session, "ipc-wt-%d", (int)::getpid());
+    std::snprintf(gShmNameAlt, sizeof gShmNameAlt, "nxtakt-pool-%s", session);
+
+    ipc::EngineClient c;
+    if (!c.createPool(session, 8u << 20)) { CHECK(false, "createPool: %s", c.error()); return; }
+    ipc::SamplePool& p = c.pool();
+
+    const char* why = "";
+    bool okv = false;
+    auto validates = [&](u64 r, u32 kind, u64 need) {
+        okv = ipc::poolValidate(p.base(), p.bytes(), p.header(), r, kind, need, &why, nullptr);
+        return okv;
+    };
+
+    ipc::WireWavetable ent[2]{};
+    ent[0].hash = ha;   ent[0].frames = 2; ent[0].cycle = 2048;
+    ent[1].hash = wtHash(z.data(), 1); ent[1].frames = 1; ent[1].cycle = 2048;
+    const f32* dat[2] = { a.data(), z.data() };
+
+    const u64 wref = p.writeWavetables(ent, dat, 2);
+    CHECK(wref != 0, "a two-table blob at %llu", (unsigned long long)wref);
+    if (!wref) { c.closePool(); return; }
+
+    CHECK(validates(wref, ipc::PoolKindWavetable, 2 * sizeof(ipc::WireWavetable)),
+          "it validates as wavetables (%s)", why);
+    const bool notSamples = !validates(wref, ipc::PoolKindSamples, 1);
+    CHECK(notSamples, "and NOT as sample data: %s", why);
+    const bool notState = !validates(wref, ipc::PoolKindDeviceState, 1);
+    CHECK(notState, "and NOT as a device state: %s", why);
+    const bool notString = !validates(wref, ipc::PoolKindString, 1);
+    CHECK(notString, "and NOT as a string: %s", why);
+
+    // The mirror refusal, which is the one that matters for a payload this
+    // close in shape to another: a SAMPLE block must not pass as wavetables.
+    std::vector<f32> pcm((size_t)512, 0.25f);
+    const u64 sref = p.writeSamples(pcm.data(), 256, 2, 48000.0, 0);
+    CHECK(sref != 0, "a sample block at %llu", (unsigned long long)sref);
+    const bool sampleNotWt = !validates(sref, ipc::PoolKindWavetable, 1);
+    CHECK(sampleNotWt, "and a sample block does NOT pass as wavetables: %s", why);
+
+    // The block's own count is the entry count, exactly as a note array's is.
+    CHECK(p.blockAt(wref)->frames == 2,
+          "the block's `frames` is the TABLE COUNT (%lld), the note array's rule",
+          (long long)p.blockAt(wref)->frames);
+
+    // The payload reads back byte for byte. It has to: these floats are hashed
+    // on the far side and a single changed bit is a different table.
+    const ipc::WireWavetable* rd = p.data<ipc::WireWavetable>(wref);
+    CHECK(rd[0].hash == ha && rd[0].frames == 2 && rd[0].cycle == 2048 &&
+          rd[1].hash == ent[1].hash && rd[1].frames == 1,
+          "both entries read back with their identity and shape");
+    const f32* run = (const f32*)(p.data<u8>(wref) + 2 * sizeof(ipc::WireWavetable));
+    CHECK(std::memcmp(run, a.data(), a.size() * sizeof(f32)) == 0,
+          "table 0's %zu samples are byte-identical in the pool", a.size());
+    CHECK(std::memcmp(run + a.size(), z.data(), z.size() * sizeof(f32)) == 0,
+          "and table 1's follow it immediately, in entry order");
+    CHECK(wtHash(run, 2) == ha,
+          "and the pool-resident copy hashes to the identity it was written under");
+
+    // -- refusals, at the bound rather than by truncation --------------------
+    ipc::WireWavetable many[ipc::kMaxWavetables + 1]{};
+    const f32* manyd[ipc::kMaxWavetables + 1]{};
+    for (u32 i = 0; i <= ipc::kMaxWavetables; ++i) {
+        many[i].hash = i + 1; many[i].frames = 1; many[i].cycle = 2048;
+        manyd[i] = z.data();
+    }
+    CHECK(p.writeWavetables(many, manyd, ipc::kMaxWavetables + 1) == 0,
+          "a block naming %u tables is REFUSED, not truncated to %u",
+          ipc::kMaxWavetables + 1, ipc::kMaxWavetables);
+    CHECK(p.writeWavetables(many, manyd, ipc::kMaxWavetables) != 0,
+          "and exactly %u is accepted: the bound is a bound and not an off-by-one",
+          ipc::kMaxWavetables);
+    ipc::WireWavetable one = ent[0];
+    const f32* none[1] = { nullptr };
+    CHECK(p.writeWavetables(&one, none, 1) == 0, "a table with no samples is refused");
+    one.frames = 0;
+    const f32* good[1] = { a.data() };
+    CHECK(p.writeWavetables(&one, good, 1) == 0, "and a table with no frames is refused");
+    one = ent[0];
+    one.frames = 4096;                  // past kMaxWavetableBytes on its own
+    CHECK(p.writeWavetables(&one, good, 1) == 0,
+          "and a single table larger than the whole bound is refused");
+
+    // -- the device state that names it -------------------------------------
+    ipc::WireDeviceState h{};
+    h.wtRef   = wref;
+    h.wtCount = 2;
+    const char* kState = "nxspc1;wtA=0123456789abcdef;wtpathA=%2Ftmp%2Ft.wav";
+    const u64 dref = p.writeDeviceState(h, kState);
+    CHECK(dref != 0, "a device state naming the blob at %llu", (unsigned long long)dref);
+    ipc::WireDeviceState back{};
+    std::memcpy(&back, p.data<u8>(dref), sizeof back);
+    CHECK(back.version == ipc::kDeviceStateVersion && back.wtRef == wref &&
+          back.wtCount == 2 && back.audioRef == 0,
+          "and the header carries wtRef/wtCount through, with no audio beside them");
+    CHECK(back.textBytes == (u32)std::strlen(kState) + 1,
+          "with the text length RECOMPUTED from the string (%u)", back.textBytes);
+
+    // -- FREE-AFTER-CONFIRM, all three blocks -------------------------------
+    p.markLive(dref); p.markLive(wref); p.markLive(sref);
+    p.markDisplaced(dref); p.release(dref);
+    p.markDisplaced(wref); p.release(wref);
+    p.markDisplaced(sref); p.release(sref);
+    CHECK(p.stateOf(dref) == ipc::BlockRetiring && p.stateOf(wref) == ipc::BlockRetiring &&
+          p.stateOf(sref) == ipc::BlockRetiring,
+          "all three are Retiring while the daemon has not answered (%s, %s, %s)",
+          ipc::poolStateName(p.stateOf(dref)), ipc::poolStateName(p.stateOf(wref)),
+          ipc::poolStateName(p.stateOf(sref)));
+    ipc::WireEvent e{};
+    e.type = ipc::EvBlockRetired;
+    e.ref = dref; c.observe(e);
+    e.ref = wref; c.observe(e);
+    CHECK(p.stateOf(dref) == ipc::BlockFree && p.stateOf(wref) == ipc::BlockFree &&
+          p.stateOf(sref) == ipc::BlockRetiring,
+          "the two that were echoed are freed and the third is NOT (%s, %s, %s) — "
+          "a block comes home on its OWN offset",
+          ipc::poolStateName(p.stateOf(dref)), ipc::poolStateName(p.stateOf(wref)),
+          ipc::poolStateName(p.stateOf(sref)));
+    e.ref = sref; c.observe(e);
+    CHECK(p.stateOf(sref) == ipc::BlockFree, "and the third on its own echo");
+
+    c.closePool();
+    CHECK(!shmExistsPool(session), "the wavetable pool is unlinked");
+    gShmNameAlt[0] = '\0';
+}
+
 // ---------------------------------------------------------------------------
 
 int main() {
@@ -1839,8 +2053,9 @@ int main() {
     testTakeFiles();
     testDeviceStateBlob();
     testClipBlobs();
+    testWavetableBlob();
 
-    banner("13. /dev/shm is clean");
+    banner("14. /dev/shm is clean");
     cleanupShm();
     const int leftover = countNxTaktShm();
     CHECK(leftover == 0, "no nxtakt region left in /dev/shm (found %d)", leftover);

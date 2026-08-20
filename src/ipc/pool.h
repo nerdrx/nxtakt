@@ -141,7 +141,22 @@ inline constexpr u64 kPoolBlockMagic = 0x4C54435F424C4B31ull;  // "LTC_BLK1"
 //        argument for a number as every entry above: a v7 daemon handed one of
 //        these refuses it by kind, which is correct and still not a
 //        disagreement two builds should have silently.
-inline constexpr u32 kPoolVersion = 8;
+//   v9 — CUSTOM WAVETABLES (PoolKindWavetable, docs/SPECTRA-V3-PLAN.md pillar
+//        1). Two changes at once, riding one number because they are one
+//        feature: a new kind carrying the imported f32 frames of one or more
+//        tables, each named by its CONTENT HASH; and WireDeviceState grows
+//        `wtRef`/`wtCount` to name such a block beside the state text, exactly
+//        as `audioRef` names a sampler's audio. sizeof(WireDeviceState) goes
+//        40 -> 56, so kDeviceStateVersion goes 1 -> 2 with it.
+//
+//        Until this existed a Spectra with an imported wavetable was the
+//        sampler's v7 problem wearing a different hat: the state string crossed
+//        and named a hash, and the daemon -- which links no decoder and never
+//        will -- had no way to obtain the frames that hash names. The set
+//        played, and it played the wrong wave, under the right name, with
+//        nothing on screen able to say so. Same argument for a number as every
+//        entry above: a v8 daemon handed one of these refuses it by kind.
+inline constexpr u32 kPoolVersion = 9;
 
 // Every block — header and data — starts on a 64-byte line. Blocks are large
 // (a stereo bar of audio is hundreds of kilobytes) so the padding is noise,
@@ -309,6 +324,31 @@ enum : u32 {
     // stable for the life of the session exactly as `data` is), so the block
     // comes home on the drain proof alone — precisely as a sample block does.
     PoolKindTransients = 11,
+
+    // ONE OR MORE CUSTOM WAVETABLES, as imported f32 frames:
+    //
+    //   [WireWavetable[count]][f32 samples ...]
+    //
+    // `count` is the block's `frames` field, exactly as a note array's count
+    // is. The sample run is the entries' frames concatenated in entry order:
+    // entry 0's `frames * cycle` floats, then entry 1's. Each entry names its
+    // table by CONTENT HASH, which is the identity the device's own state
+    // string carries (docs/SPECTRA-PARAMS.md, "The content hash").
+    //
+    // REINTERPRETED FOR VALIDATION AND THEN COPIED, never reinterpreted for
+    // use. The daemon reads the entries out of the pool to learn the shapes,
+    // bounds them against the block, and then copies the samples into its own
+    // heap through wt::ingest() -- which RECOMPUTES the hash and refuses a
+    // table that does not have the one it was offered under. A peer naming a
+    // table is a peer that can name it wrongly, and the frames are what a voice
+    // plays for the life of the process.
+    //
+    // A SEPARATE KIND FROM PoolKindSamples, and the two are nearly the same
+    // shape, which is exactly why: a sample block is audio at a RATE, this is
+    // cycles at a LENGTH, and a reader that took one for the other would play a
+    // wavetable as a four-millisecond sample or slice a kick drum into 32
+    // frames. They also have different bounds -- see kMaxWavetableBytes.
+    PoolKindWavetable = 12,
 };
 
 // The longest string the pool will carry. Not a buffer size — a policy: the
@@ -347,6 +387,25 @@ inline constexpr u64 kMaxRackState = 65536;
 // kMaxPoolString was really protecting.
 inline constexpr u64 kMaxDeviceState = 65536;
 
+// The most tables one device state may name, and the most bytes the block that
+// holds them may be. Both are policy bounds on a peer-driven copy and both are
+// derived from the FORMAT rather than from today's only user:
+//
+//   * a table is at most 32 frames of 2048 f32 (wavetable_io.h's kMaxFrames and
+//     kCycle), which is 256 KiB, and eight of those plus their entries is
+//     2 MiB;
+//   * eight is `Spectra has two oscillators` with room for the device that has
+//     four, because this channel is generic and the next instrument will not
+//     ask permission. A ninth table is a refusal with a reason, never a
+//     truncation: a state that named three tables and installed two would leave
+//     an oscillator silently on the wrong wave.
+//
+// 4 MiB clears the worst case the format admits by a factor of two and is still
+// a bounded copy on the daemon's pump thread, which is the property
+// kMaxPoolString was really protecting.
+inline constexpr u32 kMaxWavetables     = 8;
+inline constexpr u64 kMaxWavetableBytes = 4ull << 20;
+
 // Block lifecycle. See "the free-after-confirm rule" below — these four states
 // *are* the rule, written down.
 enum : u32 {
@@ -369,6 +428,7 @@ inline const char* poolKindName(u32 k) {
         case PoolKindDeviceState: return "device-state";
         case PoolKindWarp:        return "warp-markers";
         case PoolKindTransients:  return "transients";
+        case PoolKindWavetable:   return "wavetables";
         default:                  return "none";
     }
 }
@@ -490,6 +550,20 @@ static_assert(offsetof(WireSig, beat) == offsetof(RtSig, beat));
 // writer has to get consistently wrong.
 //
 // A device with no sample sets audioRef = 0, which is every device but one.
+//
+// THE WAVETABLES, and the one line that says why they are not the sample. A
+// custom wavetable rides beside a device state for the same structural reason a
+// sampler's audio does — the GUI reads files and the daemon does not — and it
+// is named DIFFERENTLY at the far end. A sampler's state carries a PATH, so the
+// daemon adopts the block AFTER setStateString() has told the device which file
+// it is holding. A wavetable's state carries a CONTENT HASH, which is complete
+// on its own, so the block is ingested into the hash-keyed store BEFORE
+// setStateString(), and the device's own parser then resolves slot 8 out of it
+// with nothing else to be told. Same channel, opposite order, and each order is
+// forced by what its payload's identity IS.
+//
+// A device with no custom wavetables sets wtRef = 0 and wtCount = 0, which is
+// every device but one.
 struct WireDeviceState {
     u32 version;        // kDeviceStateVersion
     u32 textBytes;      // including the NUL; <= kMaxDeviceState
@@ -498,6 +572,9 @@ struct WireDeviceState {
     u32 audioChannels;  // 1 or 2
     u32 pad;
     f64 audioRate;
+    u64 wtRef;          // 0 = none; otherwise a PoolKindWavetable block
+    u32 wtCount;        // tables in that block; 1..kMaxWavetables
+    u32 pad2;
 };
 
 // Bumped when the MEANING of the fields above changes. Separate from
@@ -506,10 +583,43 @@ struct WireDeviceState {
 // deserves a refusal with a reason rather than a layout-hash mismatch at
 // attach() — which is the right answer for a whole-region disagreement and the
 // wrong one for a single command.
-inline constexpr u32 kDeviceStateVersion = 1;
+//
+//   v2 — wtRef/wtCount (pool v9). A v1 reader would find the header 16 bytes
+//        short and read whatever followed it as text.
+inline constexpr u32 kDeviceStateVersion = 2;
 
 static_assert(std::is_trivially_copyable_v<WireDeviceState>);
-static_assert(sizeof(WireDeviceState) == 40);
+static_assert(sizeof(WireDeviceState) == 56);
+
+// ---------------------------------------------------------------------------
+// WireWavetable — one entry in a PoolKindWavetable blob
+// ---------------------------------------------------------------------------
+//
+// Identity, then shape. `hash` is the content hash defined in
+// docs/SPECTRA-PARAMS.md and computed by lat::wt::contentHash: a splitmix64
+// fold over the frame count, the cycle length and every sample's float32
+// VALUE. It is the same number the device's state string carries as
+// `wtA=`/`wtB=`, which is what lets the daemon match the two without either
+// side saying which oscillator anything belongs to.
+//
+// `cycle` is carried rather than assumed even though it is 2048 today and the
+// hash folds it anyway, because a blob whose reader has to KNOW a constant is a
+// blob that cannot be checked against itself. The receiving side requires it to
+// be the cycle length that build understands and refuses otherwise — a refusal
+// with a reason instead of a table read at the wrong stride.
+struct WireWavetable {
+    u64 hash;
+    u32 frames;         // 1..32
+    u32 cycle;          // lat::wt::kCycle (2048)
+};
+
+static_assert(std::is_trivially_copyable_v<WireWavetable>);
+static_assert(sizeof(WireWavetable) == 16);
+static_assert(alignof(WireWavetable) == 8);
+// The entry array is a multiple of alignof(f32) in size, so the sample run
+// behind ANY entry count starts aligned — the rule WireAutoLane's explicit pad
+// exists to satisfy, restated for this payload.
+static_assert(sizeof(WireWavetable) % alignof(f32) == 0);
 
 // ---------------------------------------------------------------------------
 // PoolBlock — the inline descriptor, immediately before its data
@@ -689,6 +799,7 @@ inline bool poolValidate(const u8* base, size_t payloadBytes, const PoolHeader* 
                 : wantKind == PoolKindAutomation  ? "block does not hold clip envelopes"
                 : wantKind == PoolKindWarp        ? "block does not hold warp markers"
                 : wantKind == PoolKindTransients  ? "block does not hold a transient grid"
+                : wantKind == PoolKindWavetable   ? "block does not hold wavetables"
                                                   : "block is of the wrong kind");
     if (needBytes > bytes)                   return no("block is smaller than the clip claims");
     // Hand the validated extent back so callers never re-read the mutable field
@@ -954,6 +1065,41 @@ public:
         std::memcpy(base_ + ref, &h, sizeof h);
         std::memcpy(base_ + ref + sizeof h, s, len);
         base_[ref + sizeof h + len] = '\0';
+        return ref;
+    }
+
+    // One or more custom wavetables (PoolKindWavetable): the entry array, then
+    // every table's frames concatenated in entry order. Returns the offset, or
+    // 0 for a shape this writer will not build.
+    //
+    // `entries[i].frames` and `.cycle` are BELIEVED HERE and checked against
+    // `data[i]` being non-null and nothing else, because this is the writer's
+    // side of the boundary: the caller owns the samples and knows their shape.
+    // The READER believes nothing — it bounds the entries against the block, it
+    // requires the cycle it understands, and it recomputes every hash. That
+    // asymmetry is the whole rule, and it is why `count` and the total sample
+    // run ARE recomputed here rather than taken from a caller-supplied total:
+    // a header that disagrees with the payload it precedes cannot be built by
+    // accident, which is poolWriteArrangement's rule for its counts.
+    u64 writeWavetables(const WireWavetable* entries, const f32* const* data, u32 count) {
+        if (!entries || !data || count == 0 || count > kMaxWavetables) return 0;
+        u64 samples = 0;
+        for (u32 i = 0; i < count; ++i) {
+            if (!data[i]) return 0;
+            if (entries[i].frames == 0 || entries[i].cycle == 0) return 0;
+            samples += (u64)entries[i].frames * (u64)entries[i].cycle;
+        }
+        const u64 bytes = (u64)count * sizeof(WireWavetable) + samples * sizeof(f32);
+        if (bytes > kMaxWavetableBytes) return 0;
+        const u64 ref = alloc(bytes, PoolKindWavetable, (i64)count, 0, 0.0, 0);
+        if (!ref) return 0;
+        std::memcpy(base_ + ref, entries, (size_t)count * sizeof(WireWavetable));
+        u8* at = base_ + ref + (size_t)count * sizeof(WireWavetable);
+        for (u32 i = 0; i < count; ++i) {
+            const size_t n = (size_t)entries[i].frames * (size_t)entries[i].cycle;
+            std::memcpy(at, data[i], n * sizeof(f32));
+            at += n * sizeof(f32);
+        }
         return ref;
     }
 
