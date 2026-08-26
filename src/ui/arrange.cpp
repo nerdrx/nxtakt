@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace lat {
 namespace {
@@ -32,6 +33,12 @@ constexpr const char* kEditSplit = "split clip";
 constexpr const char* kEditAuto  = "automation edit";
 constexpr const char* kEditLayout = "lane height";
 constexpr const char* kEditMarkerMove = "move marker";
+// FL's two sweeps. Both are ONE undo entry for the whole stroke, coalesced on
+// the gesture id, because that is what the hand did: a sweep is one movement
+// and undoing it one item at a time would be the worst possible reading of it.
+constexpr const char* kEditErase = "erase clips";
+constexpr const char* kEditPaint = "paint clips";
+constexpr const char* kEditAutoErase = "erase automation points";
 
 // WIDGET IDS IN THIS FILE. Everything here hashes under UiArrange (plus
 // UiArrangeLane and UiArrangeLaneHead for the automation lanes), and the
@@ -40,6 +47,9 @@ constexpr const char* kEditMarkerMove = "move marker";
 //     (UiArrange, 9)            the marker band's hot rect
 //     (UiArrange, 10, <uid>)    a flag's drag gesture
 //     (UiArrange, 11, <uid>)    a flag's inline rename field
+//     (UiArrange, 12)           the right-drag ERASE stroke (items)
+//     (UiArrange, 13)           the left-drag PAINT stroke
+//     (UiArrange, 14, <track>)  the right-drag erase stroke over a lane's points
 //
 // These used to be raw 24/25/26 with a paragraph here explaining why a named
 // UiKind was not available: the registry lived in app_internal.h, App's
@@ -143,7 +153,47 @@ std::string markerLabel(const Font& f, const std::string& name, f32 maxW) {
     return out + "..";
 }
 
+// NXTAKT_DEBUG_ARRHIT -- the hit-zone ruler.
+//
+// A drag edge's real width cannot be read out of the source: it is the product
+// of a constant, a DPI scale, an item's width on screen and the order of an
+// else-if chain, and every previous audit that "measured" one by reading the
+// header measured the wrong thing. This logs the resolved answer under the
+// pointer -- the zone, the item, the rect, the scale -- and it logs it only when
+// the answer CHANGES, so sweeping the pointer along a row of pixels prints the
+// zone map directly and one line per boundary.
+//
+// Off unless the variable is set; one cached bool when it is not.
+bool hitProbeOn() {
+    static const bool on = std::getenv("NXTAKT_DEBUG_ARRHIT") != nullptr;
+    return on;
+}
+void probeHit(const char* what, f32 mx, f32 my, f32 s, f32 x0, f32 x1,
+              f32 scrollX, f32 scrollY) {
+    if (!hitProbeOn()) return;
+    static std::string last;
+    char buf[256];
+    std::snprintf(buf, sizeof buf, "%s span=%.1f..%.1f", what, (double)x0, (double)x1);
+    if (last == buf) return;
+    last = buf;
+    // The scroll is OUTSIDE the dedupe key on purpose: it is what a pan moves,
+    // and a line that only reprinted when the zone changed could never show it.
+    LOGI("NXTAKT_DEBUG_ARRHIT: at %.0f,%.0f s=%.2f scroll=%.1f,%.1f -> %s",
+         (double)mx, (double)my, (double)s, (double)scrollX, (double)scrollY, buf);
+}
+
 void probeArrange(const ArrangeContext& ctx, u32 changed, int selTrack, u64 selItem) {
+    // THE REQUESTS, and the blind spot they close. wantDelete / wantSplit /
+    // wantCreate are honoured by the CALLER, after this function has run, and
+    // none of them sets a bit in `changed` -- so a right-click that deleted an
+    // item left no trace in the probe log at all, and a headless run could only
+    // see it by comparing screenshots. They are logged on their own trigger, the
+    // same way the markers' requests already are.
+    if (probeOn() && (ctx.wantDelete || ctx.wantSplit || ctx.wantCreate))
+        LOGI("NXTAKT_DEBUG_PROBE: arrreq del=%d split=%d create=%d t=%d beat=%.4f "
+             "sel=%d/%llu",
+             (int)ctx.wantDelete, (int)ctx.wantSplit, (int)ctx.wantCreate,
+             ctx.createTrack, ctx.createBeat, selTrack, (unsigned long long)selItem);
     if (!probeOn() || !changed) return;
     LOGI("NXTAKT_DEBUG_PROBE: arr changed=0x%02x sel=%d/%llu loop=%.4f..%.4f %s",
          changed, selTrack, (unsigned long long)selItem,
@@ -292,6 +342,25 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     const f32 s = dpiOf(ui);
     u32 changed = Changed::None;
 
+    // ALT BYPASSES SNAP, and it is the primary spelling because it is FL's --
+    // and Live's, and Bitwig's, and this editor's own automation lane's, which
+    // has taken Alt for exactly this since it was extracted (autolane.cpp).
+    // Before this pass the timeline took SHIFT for it and Alt did nothing, so a
+    // hand that knew the modifier from anywhere else got a quantized answer and
+    // no explanation.
+    //
+    // SHIFT IS STILL BOUND, and where it is not it is because it collides:
+    // FL spends Shift+drag on CLONING an item, which is the louder of the two
+    // meanings and the one a hand reaches for more often. So Shift frees the
+    // grid on every drag on this surface EXCEPT a clip MOVE, where it makes a
+    // copy instead; Alt frees the grid on all of them including that one. Every
+    // gesture therefore has an unquantized spelling, and no gesture has two
+    // meanings at once. This is the one place the two conventions could not both
+    // be honoured, and it is written down here rather than discovered.
+    const auto snapBeat = [&](f64 b) {
+        return (in.alt() || in.shift()) ? b : quantNear(b);
+    };
+
     // The caller owns the selection between frames (it is what the detail panel
     // reads), so it is adopted here rather than assumed: a project load or an
     // undo clears it, and a view that kept its own copy would go on drawing an
@@ -351,6 +420,34 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     if (ctx.loopEnd) contentBeats = std::max(contentBeats, *ctx.loopEnd + kArrTailBeats);
     contentBeats = std::max(contentBeats, ctx.playhead + kArrTailBeats);
 
+    // THE LAYOUT, ONCE, for whatever is driving this from outside the window.
+    // A gesture script has to aim at a pixel, and every band's y depends on
+    // things the script cannot see -- the engine banner appears and disappears
+    // with the link state and moves the whole editor 24 px down. Two runs of the
+    // same script therefore aimed at two different bands, which is a false
+    // finding factory. Logged on the first frame and whenever it moves.
+    if (hitProbeOn()) {
+        static char lastLayout[256] = {0};
+        char buf[256];
+        std::snprintf(buf, sizeof buf,
+                      "rect=%.0f,%.0f %.0fx%.0f marker=%.0f..%.0f bars=%.0f..%.0f "
+                      "lanes.x=%.0f lanes.y=%.0f rows=%zu",
+                      (double)r.x, (double)r.y, (double)r.w, (double)r.h,
+                      (double)mband.y, (double)mband.bottom(),
+                      (double)bruler.y, (double)bruler.bottom(),
+                      (double)lanes.x, (double)lanes.y, rows.size());
+        if (std::strcmp(buf, lastLayout) != 0) {
+            std::snprintf(lastLayout, sizeof lastLayout, "%s", buf);
+            LOGI("NXTAKT_DEBUG_ARRHIT: layout %s", buf);
+            for (size_t i = 0; i < rows.size(); ++i)
+                LOGI("NXTAKT_DEBUG_ARRHIT: row %zu y=%.0f..%.0f auto=%.0f..%.0f n=%d",
+                     i, (double)(lanes.y + rows[i].y),
+                     (double)(lanes.y + rows[i].y + rows[i].h),
+                     (double)(lanes.y + rows[i].autoY),
+                     (double)(lanes.y + rows[i].autoY + rows[i].autoH), rows[i].autos);
+        }
+    }
+
     // --- wheel -------------------------------------------------------------
     //
     // ONE NOTCH, ONE ANSWER. The header column scrolls the lane stack on a
@@ -399,6 +496,46 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             scrollY_ -= in.wheel * 40.f * s;
         }
     }
+
+    // --- MIDDLE-DRAG PANS ---------------------------------------------------
+    //
+    // BOTH AXES, from anywhere on the editor, and it is the gesture a hand that
+    // has used FL, Live, Bitwig or a map reaches for without being told. Until
+    // this pass the middle button did nothing at all on this surface: the only
+    // way along the timeline was the scrollbar-less wheel (vertical) or
+    // Shift+wheel (horizontal), which is two gestures for one movement and
+    // neither of them diagonal.
+    //
+    // It claims `drag_`, which is what makes it exclusive: every "is anything
+    // held" guard below -- the brace grab, the flag hit test, the item hit test,
+    // the paint and erase strokes -- is already written against drag_ == None,
+    // so a pan cannot also select, trim or erase anything it passes over.
+    //
+    // The header column pans too, and only vertically, because that is the one
+    // axis it has: it scrolls with the lane stack and never with time.
+    const bool overEditor = ruler.contains(in.mx, in.my) || body.contains(in.mx, in.my);
+    if (in.pressed[1] && drag_ == Drag::None && overEditor &&
+        rr.currentClip().contains(in.mx, in.my)) {
+        drag_ = Drag::Pan;
+        gesture_ = 0;                // a pan is not an edit: nothing to undo
+        moved_ = true;
+        panGrabX_ = in.mx;  panGrabY_ = in.my;
+        panOrigX_ = scrollX_; panOrigY_ = scrollY_;
+    }
+    if (drag_ == Drag::Pan) {
+        if (!in.down[1]) {
+            drag_ = Drag::None;
+        } else {
+            // Absolute against the press, not integrated: see the members' note.
+            // The header column has no time axis, so a pan started in it moves
+            // only the stack -- otherwise the lanes would slide under a hand
+            // that never left the names.
+            if (!heads.contains(panGrabX_, panGrabY_))
+                scrollX_ = panOrigX_ - (in.mx - panGrabX_);
+            scrollY_ = panOrigY_ - (in.my - panGrabY_);
+        }
+    }
+
     const f32 contentW = (f32)(contentBeats * (f64)pxPerBeat);
     scrollX_ = clampv(scrollX_, 0.f, std::max(0.f, contentW - lanes.w));
     scrollY_ = clampv(scrollY_, 0.f, std::max(0.f, contentH - lanes.h));
@@ -467,6 +604,15 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // Nearest wins, so a brace dragged down to a couple of pixels wide
         // still hands each half of itself to the end it is nearer.
         if (d0 <= g || d1 <= g) braceEnd = (d0 <= d1) ? 0 : 1;
+        if (braceEnd >= 0) {
+            const f32 bx = braceEnd == 0 ? bx0 : bx1;
+            char what[96];
+            std::snprintf(what, sizeof what, "brace end %d grab=%.1f", braceEnd, (double)g);
+            probeHit(what, in.mx, in.my, s, bx - g, bx + g, scrollX_, scrollY_);
+        } else if (hotRuler) {
+            probeHit("bar band (locate / new brace)", in.mx, in.my, s, bruler.x,
+                     bruler.right(), scrollX_, scrollY_);
+        }
     }
 
     if (in.pressed[0] && hotRuler && drag_ == Drag::None) {
@@ -476,7 +622,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             loopAnchor_ = braceEnd == 0 ? *ctx.loopEnd : *ctx.loopStart;
             loopMoved_ = true;
         } else {
-            loopAnchor_ = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+            loopAnchor_ = std::max(0.0, snapBeat(xToBeat(ta, in.mx)));
             loopMoved_ = false;
         }
         moved_ = true;              // the brace is not an edit to any lane
@@ -505,7 +651,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             gesture_ = 0;
             if (ui.active == rulerId) ui.active = 0;
         } else {
-            const f64 b = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+            const f64 b = std::max(0.0, snapBeat(xToBeat(ta, in.mx)));
             if (!loopMoved_ &&
                 std::fabs(beatToX(ta, b) - beatToX(ta, loopAnchor_)) > 3.f * s)
                 loopMoved_ = true;
@@ -560,13 +706,26 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // to a row of things rather than to two: at a zoom where two flags' slop
     // rectangles meet, the one whose pole the pointer is closer to is the one
     // the hand is aiming at.
+    // Computed during an erase stroke as well as at rest: the stroke's whole job
+    // is to keep asking "what is under the pointer NOW".
     int hitFlag = -1;
-    if (hotBand && drag_ == Drag::None) {
+    if (hotBand && (drag_ == Drag::None || drag_ == Drag::EraseMarker)) {
         f32 best = 1e9f;
         for (size_t k = 0; k < flags.size(); ++k) {
             if (!flags[k].hit.contains(in.mx, in.my)) continue;
             const f32 d = std::fabs(in.mx - flags[k].x);
             if (d < best) { best = d; hitFlag = (int)k; }
+        }
+        if (hitFlag >= 0) {
+            const Flag& hf = flags[(size_t)hitFlag];
+            char what[128];
+            std::snprintf(what, sizeof what, "flag uid=%llu box=%.1fx%.1f hit=%.1fx%.1f",
+                          (unsigned long long)hf.uid, (double)hf.box.w, (double)hf.box.h,
+                          (double)hf.hit.w, (double)hf.hit.h);
+            probeHit(what, in.mx, in.my, s, hf.hit.x, hf.hit.right(), scrollX_, scrollY_);
+        } else {
+            probeHit("marker band (empty)", in.mx, in.my, s, mband.y, mband.bottom(),
+                     scrollX_, scrollY_);
         }
     }
 
@@ -575,10 +734,25 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // and they cannot be confused with the bar band's right-click, because that
     // band's hot rect stops at the seam.
     if (hotBand && drag_ == Drag::None && renameMarker_ == 0) {
-        if (in.pressed[2] && hitFlag >= 0) {
-            markerReq_.kind = MarkerReq::Kind::Remove;
-            markerReq_.uid  = flags[(size_t)hitFlag].uid;
-            if (selMarker_ == markerReq_.uid) selMarker_ = 0;
+        if (in.pressed[2]) {
+            // RIGHT-CLICK ERASES, AND RIGHT-DRAG KEEPS ERASING. A press on a
+            // flag removes it, as it always did; the press also arms a stroke,
+            // so sweeping the button across a row of flags takes every one it
+            // crosses. That is FL's gesture and it is the reason a right-click
+            // that removed exactly one thing per press always felt broken here:
+            // the hand does not lift the button between two flags a bar apart.
+            //
+            // Armed even when the press lands on EMPTY band, because the sweep
+            // that clears a stretch of ruler usually starts beside the first
+            // flag rather than on it.
+            drag_ = Drag::EraseMarker;
+            gesture_ = bandId;
+            moved_ = true;              // no lane of items is going to move
+            if (hitFlag >= 0) {
+                markerReq_.kind = MarkerReq::Kind::Remove;
+                markerReq_.uid  = flags[(size_t)hitFlag].uid;
+                if (selMarker_ == markerReq_.uid) selMarker_ = 0;
+            }
         } else if (in.pressed[0] && hitFlag >= 0) {
             const Flag& f = flags[(size_t)hitFlag];
             selMarker_ = f.uid;
@@ -596,7 +770,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 markerReq_.kind = MarkerReq::Kind::Jump;
                 markerReq_.uid  = f.uid;
                 drag_       = Drag::Marker;
-                gesture_    = uiId(UiArrange, 10, (int)(u32)f.uid);
+                gesture_    = uiId(UiArrange, 10, (int)(u32)f.uid, (int)++strokeSeq_);
                 dragMarker_ = f.uid;
                 markerOrig_ = (*markers_)[f.i].beat;
                 markerGrab_ = (f64)xToBeat(ta, in.mx) - markerOrig_;
@@ -607,7 +781,23 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             // Empty band. The same double-click that fills an empty lane with a
             // note block fills an empty ruler with a marker.
             markerReq_.kind = MarkerReq::Kind::Add;
-            markerReq_.beat = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+            markerReq_.beat = std::max(0.0, snapBeat(xToBeat(ta, in.mx)));
+        }
+    }
+
+    // The marker erase stroke. One Remove per frame, because MarkerReq carries
+    // one request and one pointer can only be over one flag at a time; the
+    // caller removes it, the list is rebound next frame without it, and the
+    // stroke simply asks again. There is no "already erased" bookkeeping to get
+    // wrong for exactly that reason.
+    if (drag_ == Drag::EraseMarker) {
+        if (!in.down[2]) {
+            drag_ = Drag::None;
+            gesture_ = 0;
+        } else if (hitFlag >= 0 && markerReq_.kind == MarkerReq::Kind::None) {
+            markerReq_.kind = MarkerReq::Kind::Remove;
+            markerReq_.uid  = flags[(size_t)hitFlag].uid;
+            if (selMarker_ == markerReq_.uid) selMarker_ = 0;
         }
     }
 
@@ -620,10 +810,11 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         } else {
             // Measured from the beat the flag had at the press, exactly as every
             // item drag is, so a drag is absolute against its own start and
-            // cannot integrate its own rounding. Shift is unquantized, which is
-            // the modifier's meaning everywhere else in this editor.
+            // cannot integrate its own rounding. ALT (and, still, Shift) frees
+            // the grid -- see snapBeat at the top of this function for why both
+            // and why Alt is the one documented first.
             const f64 raw = (f64)xToBeat(ta, in.mx) - markerGrab_;
-            const f64 b = std::max(0.0, in.shift() ? raw : quantNear(raw));
+            const f64 b = std::max(0.0, snapBeat(raw));
             if (!moved_ &&
                 std::fabs(beatToX(ta, b) - beatToX(ta, markerOrig_)) > 3.f * s) {
                 // THE UNDO HANDSHAKE, verbatim: the edit is named on the frame
@@ -975,6 +1166,59 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             drawTimeGrid(rr, ta, lr, s, ctx.sig, kArrMinGridPx * s);
             AutoLaneView& v = views[j];
             v.setId(uiId(UiArrangeLane, (int)i, (int)j));
+
+            // RIGHT-DRAG ERASES BREAKPOINTS, and it lives HERE rather than
+            // inside AutoLaneView because the lane is shared with the piano
+            // roll: a change in there would be a change to the roll's surface,
+            // which this pass does not own. The lane's own right-click already
+            // removes the point under the PRESS (autolane.cpp); this is the rest
+            // of the stroke, and between them the gesture is FL's -- sweep the
+            // right button and the envelope clears under it.
+            //
+            // The hit test is autoLanePointAt, declared beside kPtGrab in
+            // autolane.h precisely so that this second caller and the lane's own
+            // pointAt cannot come to different answers about where a point is.
+            //
+            // ONE UNDO ENTRY for the whole sweep, and the mechanism is subtle
+            // enough to say out loud: the Autos bit is what makes
+            // App::arrangeCommitAutos take a point, and it coalesces on
+            // ui.active -- which the widget layer force-clears on every frame the
+            // LEFT button is up, i.e. on every frame of a right-drag. So the bit
+            // is raised on the FIRST erase only, where the frame's snapshot still
+            // holds the lane as it was; every later erase reports itself through
+            // ctx.dirty alone, which is what republishes the lane without asking
+            // for a second entry.
+            if (drag_ == Drag::ErasePoint && in.down[2] && !in.pressed[2] &&
+                lr.contains(in.mx, in.my) && !al.points.empty()) {
+                const f32 plo = tgt ? tgt->lo : 0.f, phi = tgt ? tgt->hi : 1.f;
+                const int k = autoLanePointAt(al.points, ta, lr, s, plo, phi,
+                                              in.mx, in.my, kPtGrab * s);
+                if (k >= 0) {
+                    al.points.erase(al.points.begin() + k);
+                    // The lane holds indices into the vector that just shrank
+                    // and has no "a point was erased under you" hook, so the
+                    // selection goes rather than being left pointing one past
+                    // whatever the user can see.
+                    v.clearSelection();
+                    ctx.dirty.push_back((int)i);
+                    if (!moved_) { moved_ = true; changed |= Changed::Autos; }
+                    lastEdit_ = kEditAutoErase;
+                }
+            }
+            if (in.pressed[2] && drag_ == Drag::None && lr.contains(in.mx, in.my)) {
+                // Armed on the press, so the sweep is live from the next frame.
+                // The press itself is the lane's own to answer, and it does.
+                drag_ = Drag::ErasePoint;
+                gesture_ = uiId(UiArrange, 14, (int)i, (int)++strokeSeq_);
+                // "The press already erased one." The lane answers the press
+                // itself and raises the Autos bit for it, so the stroke must not
+                // raise a second one for the same entry -- moved_ is the latch
+                // that says the entry has been taken.
+                const f32 plo = tgt ? tgt->lo : 0.f, phi = tgt ? tgt->hi : 1.f;
+                moved_ = autoLanePointAt(al.points, ta, lr, s, plo, phi,
+                                         in.mx, in.my, kPtGrab * s) >= 0;
+            }
+
             v.prune((int)al.points.size());
             // beatBase 0: an arrangement lane's points are ALREADY absolute
             // timeline beats (session.h, TrackModel::arrangeAutos), which is the
@@ -994,6 +1238,27 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             rr.hairlineH(lr.x, lr.right(), lr.y);
         }
     }
+    // The breakpoint sweep ends when the button does, wherever the pointer has
+    // wandered to -- including off the lanes entirely, which is why this is out
+    // here and not inside the loop that only runs for lanes that are on screen.
+    if (drag_ == Drag::ErasePoint && !in.down[2]) {
+        drag_ = Drag::None;
+        gesture_ = 0;
+    }
+
+    // Whichever header control the pointer actually won, and the rect it won
+    // with. The header column is where this surface's controls sit shoulder to
+    // shoulder, and shoulder-to-shoulder plus a symmetric hit pad is how a
+    // neighbour ends up owning pixels somebody aimed at the control beside it --
+    // so the answer is logged rather than reasoned about.
+    const auto probeRect = [&](const char* name, u64 id, const Rect& hit) {
+        if (!hitProbeOn() || !ui.isHot(id)) return;
+        char b[128];
+        std::snprintf(b, sizeof b, "%s hit=%.1fx%.1f y=%.1f..%.1f", name,
+                      (double)hit.w, (double)hit.h, (double)hit.y,
+                      (double)hit.bottom());
+        probeHit(b, in.mx, in.my, s, hit.x, hit.right(), scrollX_, scrollY_);
+    };
 
     // --- the header column -------------------------------------------------
     // Scrolls vertically with the lanes and never horizontally, the same
@@ -1021,7 +1286,23 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // for a thing that is CLICKED rather than dragged. The triangle is a
         // drawn shape and the drawing may not move, so the aim grows instead:
         // 18x18 to hit, 12x12 to look at.
-        const bool hotTri = ui.grab(3.f * s).setHot(triId, tri) && ui.isHot(triId);
+        //
+        // AN EXPLICIT CONTAINER, and not `ui.grab(3)`, which is what it was.
+        // A symmetric pad is the wrong tool where two controls sit shoulder to
+        // shoulder: setHot is LAST-WRITER-WINS, so the pad does not share the
+        // contested pixels, it hands all of them to whichever widget is drawn
+        // second. The override chip below sits 3 logical px under this triangle
+        // and is drawn after it, so a 3 px pad on both put the chip's rect over
+        // the bottom quarter of the triangle's -- and a hand aiming at the
+        // disclosure arrow and landing two pixels low sent Back to Arrangement
+        // instead, which is a transport command and not an undoable edit.
+        //
+        // So the two rects are written out, edge to edge and not overlapping:
+        // this one owns hb.y .. hb.y+18, the chip owns hb.y+18 .. hb.y+35. Both
+        // clear the 16 px floor on their short side and neither can steal.
+        const Rect triHit{tri.x - 3.f * s, hb.y, tri.w + 6.f * s, 18.f * s};
+        const bool hotTri = ui.setHot(triId, triHit) && ui.isHot(triId);
+        probeRect("track disclosure triangle", triId, triHit);
         const Col tc = hotTri ? nx::text : nx::muted;
         if (open) rr.triangle(tri.x + 1.f * s, tri.cy() - 2.5f * s,
                               tri.x + 11.f * s, tri.cy() - 2.5f * s,
@@ -1052,9 +1333,14 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             const Rect ov{hb.x + 6.f * s, hb.y + 18.f * s, 58.f * s, 11.f * s};
             const u64 ovId = uiId(UiArrange, 2, (int)i);
             // 11 logical px tall, which is 11.0 device px at 1.0. Same fix as
-            // the triangle: the chip keeps its drawn height and gains 3 px of
-            // aim on every side.
-            const bool hotOv = ui.grab(3.f * s).setHot(ovId, ov) && ui.isHot(ovId);
+            // the triangle, and the same shape of fix: the chip keeps the 58x11
+            // it DRAWS and is hit through a container written out here -- 64x17,
+            // starting exactly where the triangle's container stops, so the two
+            // are edge to edge and neither can take a pixel the other was aimed
+            // at. See the note over triHit for what a symmetric pad did here.
+            const Rect ovHit{ov.x - 3.f * s, ov.y, ov.w + 6.f * s, ov.h + 6.f * s};
+            const bool hotOv = ui.setHot(ovId, ovHit) && ui.isHot(ovId);
+            probeRect("override chip", ovId, ovHit);
             // Amber, and §1 means it: this is "attention", the one state on a
             // track header that is not what the arrangement asked for. A pill,
             // because it is a chip and chips are pills (§5).
@@ -1080,6 +1366,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                         hb.w, kArrLaneGrab * 2.f * s};
         const u64 gripId = uiId(UiArrange, 3, (int)i);
         const bool hotGrip = ui.setHot(gripId, grip) && ui.isHot(gripId);
+        probeRect("lane height grip", gripId, grip);
         if (hotGrip && drag_ == Drag::None) {
             ui.cursor = Cursor::ResizeV;
             // 8 logical px tall, which is exactly the drag floor at scale 1.0
@@ -1088,7 +1375,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             ui.tip = "drag to set this track's lane height";
             if (in.pressed[0] && L.height) {
                 drag_ = Drag::LaneH;
-                gesture_ = gripId;
+                gesture_ = uiId(UiArrange, 3, (int)i, (int)++strokeSeq_);
                 dragTrack_ = (int)i;
                 grabY_ = in.my;
                 origHeight_ = *L.height;
@@ -1124,6 +1411,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 // 14x12 logical; the short side fails the 16 px floor at both
                 // scales. Three pixels of aim on every side makes it 20x18.
                 ui.grab(3.f * s);
+                probeRect("automation lane enable", onId, onR.inset(-3.f * s));
                 if (ui.squareToggle(onId, onR, "", &on, nx::violet)) {
                     al.enabled = on;
                     changed |= Changed::Autos;
@@ -1178,20 +1466,34 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                         names.push_back(e.label.c_str());
                     int& tsel = targetSel_[i];
                     tsel = clampv(tsel, 0, (int)names.size() - 1);
-                    const Rect selR{cb.x + 6.f * s, cb.y + 5.f * s, cb.w - 34.f * s, 14.f * s};
+                    // THE GAP IS EIGHT, and it was four. Both of these are hit
+                    // through a 3 px pad, so a 4 px gap left their rects
+                    // OVERLAPPING by 2 px -- and setHot being last-writer-wins,
+                    // the "+" (drawn second) took both of those pixels. Aiming
+                    // at the right end of the target chooser therefore ADDED AN
+                    // AUTOMATION LANE, which is the more consequential of the
+                    // two verbs and the one that must not be reachable by
+                    // accident. 8 > 3 + 3, so the two zones cannot touch; the
+                    // chooser gives up the 4 px and the row's outer edges do
+                    // not move.
+                    const Rect selR{cb.x + 6.f * s, cb.y + 5.f * s, cb.w - 38.f * s, 14.f * s};
                     // 14 logical px tall, under the floor at both scales; the
                     // chooser row has 44 px of height above and below to lend.
                     ui.grab(3.f * s);
                     ui.selector(uiId(UiArrange, 5, (int)i), selR, &tsel, names.data(), (int)names.size());
+                    probeRect("automation target chooser", uiId(UiArrange, 5, (int)i),
+                              selR.inset(-3.f * s));
                     if (ui.hovered(selR.inset(-3.f * s)))
                         ui.tip = L.targets->entries[(size_t)tsel].group + " " +
                                  L.targets->entries[(size_t)tsel].label + "  " +
                                  L.targets->entries[(size_t)tsel].address +
                                  "  --  click cycles, right-click steps back";
-                    const Rect addR{selR.right() + 4.f * s, selR.y, 20.f * s, selR.h};
+                    const Rect addR{selR.right() + 8.f * s, selR.y, 20.f * s, selR.h};
                     if (ui.hovered(addR.inset(-3.f * s)) && ui.tip.empty())
                         ui.tip = "add an automation lane for the chosen target";
                     ui.grab(3.f * s);
+                    probeRect("add automation lane +", uiId(UiArrange, 6, (int)i),
+                              addR.inset(-3.f * s));
                     if (ui.button(uiId(UiArrange, 6, (int)i), addR, "+") &&
                         (int)L.autos->size() < kMaxArrLanes) {
                         const std::string& addr = L.targets->entries[(size_t)tsel].address;
@@ -1241,30 +1543,65 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     // more specific target and the trim band is still 11 px tall underneath
     // it), and the slop belongs to trim rather than to fade for the same
     // reason: outside the item there is no fade to grab.
+    //
+    // 4. THE OUTSIDE SLOP IS NOW ADAPTIVE, and that is this pass's addition. The
+    //    three zones do not fit on a narrow item: two 8 px trim bands plus a
+    //    body need 16 px before the body has any width at all, so below ~27 px
+    //    the inside band is capped at 30% of the item and shrinks with it. What
+    //    does NOT have to shrink is the reach from OUTSIDE, where there is
+    //    nothing but empty lane -- so the outside slop grows by exactly what the
+    //    inside band lost, and the total reach at an edge stays at the 8 px drag
+    //    floor all the way down to a two-pixel item. Measured: at 10 px wide the
+    //    old zones gave 3 (inside) + 3 (slop) = 6 px an edge; they now give
+    //    3 + 5 = 8.
+    // 5. PASS TWO PICKS THE NEAREST EDGE. It used to take the LAST item in the
+    //    vector that matched, so two items with a four-pixel gap between them
+    //    handed the whole gap to the right-hand one however close the pointer
+    //    was to the left one's tail. Nearest-edge-wins is the rule the brace
+    //    ends and the marker flags already use inside their overlaps.
     int hitTrack = -1, hitIdx = -1;
     enum class Zone { Body, Left, Right, FadeIn, FadeOut } hitZone = Zone::Body;
     const f32 slop = kArrEdgeSlop * s;
+    // How far outside an item of width `w` its edges may be caught from.
+    const auto slopFor = [&](f32 w) {
+        const f32 inside = std::max(std::min(kArrEdgeGrab * s, w * 0.3f), 1.f);
+        return std::max(slop, kArrEdgeGrab * s - inside);
+    };
+    // Which item a pixel belongs to, as one answer both the zone resolution
+    // below and the right-drag erase stroke read.
+    const auto itemAt = [&](f32 mx, f32 my, int& outTrack, int& outIdx) {
+        outTrack = -1; outIdx = -1;
+        const int t = trackAtY(my);
+        if (t < 0 || t >= (int)ctx.lanes.size() || !ctx.lanes[(size_t)t].items) return;
+        if (my >= topY + rows[(size_t)t].y + rows[(size_t)t].h) return;   // the auto rows
+        const std::vector<ArrangeClip>& v = *ctx.lanes[(size_t)t].items;
+        // TWO PASSES, and the order is the whole point. The first asks
+        // "which item is the pointer IN", the second "which edge is it
+        // NEAR". A one-pass search with the slop folded in would let an
+        // item steal the three pixels before its butted-up neighbour's
+        // right edge -- turning a right-trim into a left-trim of the wrong
+        // item, which is the exact class of bug this pass exists to remove.
+        for (size_t k = v.size(); k-- > 0;) {
+            const f32 x0 = beatToX(ta, v[k].start), x1 = beatToX(ta, v[k].end());
+            if (mx < x0 || mx >= x1) continue;
+            outTrack = t; outIdx = (int)k;
+            return;
+        }
+        f32 best = 1e9f;
+        for (size_t k = v.size(); k-- > 0;) {
+            const f32 x0 = beatToX(ta, v[k].start), x1 = beatToX(ta, v[k].end());
+            const f32 sl = slopFor(std::max(1.f, x1 - x0));
+            if (mx < x0 - sl || mx >= x1 + sl) continue;
+            const f32 d = std::min(std::fabs(mx - x0), std::fabs(mx - x1));
+            if (d < best) { best = d; outTrack = t; outIdx = (int)k; }
+        }
+    };
     if (hotLanes && drag_ == Drag::None) {
         const int t = trackAtY(in.my);
         if (t >= 0 && t < (int)ctx.lanes.size() && ctx.lanes[(size_t)t].items &&
             in.my < topY + rows[(size_t)t].y + rows[(size_t)t].h) {
             const std::vector<ArrangeClip>& v = *ctx.lanes[(size_t)t].items;
-            // TWO PASSES, and the order is the whole point. The first asks
-            // "which item is the pointer IN", the second "which edge is it
-            // NEAR". A one-pass search with the slop folded in would let an
-            // item steal the three pixels before its butted-up neighbour's
-            // right edge -- turning a right-trim into a left-trim of the wrong
-            // item, which is the exact class of bug this pass exists to remove.
-            for (int pass = 0; pass < 2 && hitIdx < 0; ++pass) {
-                const f32 sl = pass == 0 ? 0.f : slop;
-                for (size_t k = v.size(); k-- > 0;) {
-                    const f32 x0 = beatToX(ta, v[k].start), x1 = beatToX(ta, v[k].end());
-                    if (in.mx < x0 - sl || in.mx >= x1 + sl) continue;
-                    hitTrack = t;
-                    hitIdx = (int)k;
-                    break;
-                }
-            }
+            itemAt(in.mx, in.my, hitTrack, hitIdx);
             if (hitIdx >= 0) {
                 const ArrangeClip& h = v[(size_t)hitIdx];
                 const f32 x0 = beatToX(ta, h.start), x1 = beatToX(ta, h.end());
@@ -1279,6 +1616,18 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 else if (in.mx < x0 + e)                            hitZone = Zone::Left;
                 else if (in.mx > x1 - e)                            hitZone = Zone::Right;
                 else                                                hitZone = Zone::Body;
+                static const char* kZone[] = {"body", "trimL", "trimR", "fadeIn", "fadeOut"};
+                char what[192];
+                std::snprintf(what, sizeof what,
+                              "item uid=%llu w=%.1f e=%.1f fw=%.1f fadeTop=%.1f "
+                              "band=%.1f..%.1f %s",
+                              (unsigned long long)h.uid, (double)w, (double)e, (double)fw,
+                              (double)topBand, (double)(topY + rows[(size_t)t].y),
+                              (double)(topY + rows[(size_t)t].y + rows[(size_t)t].h),
+                              kZone[(int)hitZone]);
+                probeHit(what, in.mx, in.my, s, x0, x1, scrollX_, scrollY_);
+            } else {
+                probeHit("empty lane", in.mx, in.my, s, 0.f, 0.f, scrollX_, scrollY_);
             }
         }
     }
@@ -1294,6 +1643,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             }
             if (in.pressed[2]) {
                 ctx.wantDelete = true;      // right-click deletes, as in the roll
+                // ...and the press ARMS THE SWEEP. See the erase arm below: the
+                // item under the press goes through the caller's one-shot verb
+                // exactly as it always has, and everything the pointer crosses
+                // after it goes through the stroke, as one coalesced entry.
+                drag_ = Drag::Erase;
+                gesture_ = uiId(UiArrange, 12, (int)++strokeSeq_);
+                moved_ = false;
+                eraseNext_ = 0;
+                eraseNextTrack_ = -1;
+                eraseLast_ = it.uid;        // already going; do not count it twice
             } else if (in.dblClick) {
                 cursorBeat_ = xToBeat(ta, in.mx);
                 ctx.wantSplit = true;       // double-click splits under the cursor
@@ -1303,7 +1662,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                         : hitZone == Zone::FadeIn  ? Drag::FadeIn
                         : hitZone == Zone::FadeOut ? Drag::FadeOut
                                                    : Drag::Move;
-                gesture_ = uiId(UiArrange, 8, hitTrack);
+                gesture_ = uiId(UiArrange, 8, hitTrack, (int)++strokeSeq_);
                 dragTrack_ = hitTrack;
                 dragUid_ = it.uid;
                 grabBeat_ = xToBeat(ta, in.mx) - it.start;
@@ -1317,21 +1676,223 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 dupMade_ = false;
                 ui.active = gesture_;
             }
-        } else if (in.dblClick) {
+        } else if (in.pressed[0] && in.dblClick) {
             // Empty lane space. Double-click on an item splits it; the same
             // gesture on nothing CREATES -- a one-bar note block at the
             // quantized beat, which is the gesture every Live hand reaches
             // for and, until this branch, found nothing under.
+            //
+            // `in.pressed[0]` is new and it is a fix, not a tidy-up: dblClick is
+            // set for WHICHEVER button was double-clicked, so this branch caught
+            // a right-double-click too and answered it by creating a clip. That
+            // was survivable while the right button did one thing per press; it
+            // is not survivable now that right-drag erases, because clearing two
+            // stretches of lane in quick succession IS a right double-click, and
+            // the second press would have left a block behind in the hole the
+            // first one had just made.
             const int t = trackAtY(in.my);
             if (t >= 0) {
                 ctx.wantCreate  = true;
                 ctx.createTrack = t;
-                ctx.createBeat  = std::max(0.0, quantNear(xToBeat(ta, in.mx)));
+                ctx.createBeat  = std::max(0.0, snapBeat(xToBeat(ta, in.mx)));
             }
+        } else if (in.pressed[2]) {
+            // A right press on EMPTY lane arms the sweep too, and it has to: a
+            // hand clearing a stretch of timeline starts the stroke in the gap
+            // beside the first clip about as often as it starts on it.
+            drag_ = Drag::Erase;
+            gesture_ = uiId(UiArrange, 12, (int)++strokeSeq_);
+            moved_ = false;
+            eraseNext_ = 0;
+            eraseNextTrack_ = -1;
+            eraseLast_ = 0;
         } else if (in.pressed[0]) {
             if (selItem_ != 0) changed |= Changed::Selection;
             selTrack_ = -1;
             selItem_ = 0;
+            // LEFT-DRAG PAINTS. The press still only deselects -- a click on
+            // empty lane means "nothing is selected" and always did, and a press
+            // that laid a block down immediately would fight the double-click
+            // that creates one (the second click would land on what the first
+            // made and split it). The stroke begins on the first frame the
+            // pointer TRAVELS, which is exactly the same threshold every other
+            // drag on this surface arms itself with.
+            const int t = trackAtY(in.my);
+            if (t >= 0 && t < (int)ctx.lanes.size() && ctx.lanes[(size_t)t].items) {
+                drag_ = Drag::Paint;
+                gesture_ = uiId(UiArrange, 13, (int)++strokeSeq_);
+                paintTrack_ = t;
+                paintGrabX_ = in.mx;
+                paintCell_  = -1e18;
+                paintAwait_ = false;
+                paintHave_  = false;
+                moved_ = false;
+            }
+        }
+    }
+
+    // --- LEFT-DRAG PAINTS ---------------------------------------------------
+    //
+    // One block per BAR CELL swept, snapped to the bar because that is the
+    // length the caller's "fresh note block" has -- ask for a bar and step by a
+    // bar, and the stroke lays a contiguous run rather than a ladder of overlaps
+    // the repair pass would then eat. The signature map is what says where a bar
+    // is, so this is correct in 7/8 without knowing that it is in 7/8.
+    //
+    // NOTHING STACKS. A cell already holding material is skipped -- silently,
+    // because that is the right answer and not a refusal: sweeping back and
+    // forth over a stretch is how a hand aims, and a stroke that piled a second
+    // block onto every cell it re-crossed would be unusable. It is also what
+    // makes the stroke idempotent, which is what lets the hand wander.
+    if (drag_ == Drag::Paint) {
+        if (!in.down[0]) {
+            if (moved_ && paintTrack_ >= 0 && paintTrack_ < (int)ctx.lanes.size() &&
+                ctx.lanes[(size_t)paintTrack_].items) {
+                arrangeRepair(*ctx.lanes[(size_t)paintTrack_].items);
+                ctx.dirty.push_back(paintTrack_);
+                changed |= Changed::Items;
+            }
+            drag_ = Drag::None;
+            gesture_ = 0;
+            paintHave_ = false;
+            paintAwait_ = false;
+            paintTemplate_ = ArrangeClip{};
+        } else {
+            if (!moved_ && std::fabs(in.mx - paintGrabX_) > 3.f * s) moved_ = true;
+            // The caller has made the first block by now; adopt it as the thing
+            // the rest of the stroke repeats. It is found BY ITS BEAT and not by
+            // the selection, which would have been the obvious handle and is the
+            // wrong one: App::arrangeCommit reads the fresh item's uid before
+            // assignUids has stamped it, so what it selects is uid 0 -- i.e.
+            // nothing -- and a stroke that waited for that selection would wait
+            // for ever. (That is a real bug in the caller and it is filed; this
+            // does not depend on the fix landing.) The cell is a handle the view
+            // owns outright.
+            if (paintAwait_ && paintTrack_ >= 0 &&
+                paintTrack_ < (int)ctx.lanes.size() && ctx.lanes[(size_t)paintTrack_].items) {
+                const std::vector<ArrangeClip>& v = *ctx.lanes[(size_t)paintTrack_].items;
+                int k = -1;
+                for (size_t q = 0; q < v.size(); ++q)
+                    if (std::fabs(v[q].start - paintCell_) < 1e-6) { k = (int)q; break; }
+                if (k >= 0) {
+                    paintTemplate_ = v[(size_t)k];
+                    paintHave_ = true;
+                    paintAwait_ = false;
+                    // THE HANDSHAKE, taken here and not at the first clone,
+                    // because here is the last frame on which nothing has been
+                    // cloned yet. The caller's point is therefore taken against
+                    // "the first block exists" -- so one Ctrl+Z lifts the whole
+                    // painted run and a second lifts the block that started it,
+                    // which is two honest steps rather than one entry that
+                    // half-undoes and one that appears to do nothing.
+                    pendingEdit_ = kEditPaint;
+                    lastEdit_ = kEditPaint;
+                }
+            }
+            const int t = trackAtY(in.my);
+            std::vector<ArrangeClip>* v =
+                (moved_ && t >= 0 && t < (int)ctx.lanes.size()) ? ctx.lanes[(size_t)t].items
+                                                                : nullptr;
+            if (v && t == paintTrack_ && !paintAwait_) {
+                const f64 at = std::max(0.0, (f64)xToBeat(ta, in.mx));
+                const f64 bar = std::floor(ctx.sig.barOfBeat(at));
+                const f64 cell = ctx.sig.beatOfBar(bar);
+                const f64 cellEnd = ctx.sig.beatOfBar(bar + 1.0);
+                bool occupied = std::fabs(cell - paintCell_) < 1e-9;
+                for (size_t k = 0; !occupied && k < v->size(); ++k)
+                    occupied = (*v)[k].start < cellEnd - kArrOverlapEps &&
+                               (*v)[k].end() > cell + kArrOverlapEps;
+                if (!occupied && (int)v->size() >= kMaxArrItems) {
+                    // A refusal that SAYS SO. Silence here reads as a dead
+                    // patch of lane, and the hand's next move is to press
+                    // harder rather than to look at the item count.
+                    ui.tip = "this lane is full - " + std::to_string(kMaxArrItems) +
+                             " items is the limit";
+                } else if (!occupied) {
+                    paintCell_ = cell;
+                    if (paintHave_) {
+                        // A CLONE, which is both what FL paints and what makes
+                        // the stroke one undo entry: the caller's one-shot
+                        // create took its own point for the first block, and
+                        // every block after it rides the gesture named above.
+                        ArrangeClip nc = paintTemplate_;
+                        nc.uid = newUid(ctx);
+                        nc.start = cell;
+                        nc.length = std::max(kMinArrBeats, cellEnd - cell);
+                        nc.fadeIn = 0.0;
+                        nc.fadeOut = 0.0;
+                        v->push_back(std::move(nc));
+                        ctx.dirty.push_back(t);
+                        changed |= Changed::Items;
+                        lastEdit_ = kEditPaint;
+                    } else {
+                        ctx.wantCreate  = true;
+                        ctx.createTrack = t;
+                        ctx.createBeat  = cell;
+                        paintAwait_ = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- RIGHT-DRAG ERASES --------------------------------------------------
+    //
+    // FL's most-used gesture, and the one this surface was most obviously
+    // missing: a right-click removed exactly one item per press, so clearing
+    // eight bars was eight presses. The victim is NAMED on one frame and removed
+    // on the next, which is the pendingEdit handshake -- the caller has to be
+    // able to take its undo point before the first thing disappears, and it can
+    // only do that if the view says "I am about to" a frame ahead.
+    //
+    // The whole stroke is ONE entry, coalesced on the gesture id, because the
+    // hand made one movement. The item under the PRESS is the exception and it
+    // is not one: it goes through ctx.wantDelete as it always did, under its own
+    // "delete clip" entry, so a plain right-click behaves exactly as before.
+    if (drag_ == Drag::Erase) {
+        if (!in.down[2]) {
+            // Whatever was NAMED but not yet removed is simply dropped: the
+            // button came up before the frame that would have taken it, which
+            // means the hand let go over it and did not mean it.
+            drag_ = Drag::None;
+            gesture_ = 0;
+            eraseNext_ = 0;
+            eraseNextTrack_ = -1;
+            eraseLast_ = 0;
+        } else {
+            // The one named last frame, removed now.
+            if (eraseNext_ && eraseNextTrack_ >= 0 &&
+                eraseNextTrack_ < (int)ctx.lanes.size() &&
+                ctx.lanes[(size_t)eraseNextTrack_].items) {
+                std::vector<ArrangeClip>& v = *ctx.lanes[(size_t)eraseNextTrack_].items;
+                const int k = indexOf(v, eraseNext_);
+                if (k >= 0) {
+                    v.erase(v.begin() + k);
+                    arrangeRepair(v);
+                    ctx.dirty.push_back(eraseNextTrack_);
+                    changed |= Changed::Items;
+                    lastEdit_ = kEditErase;
+                    if (selItem_ == eraseNext_) {
+                        selItem_ = 0;
+                        selTrack_ = -1;
+                        changed |= Changed::Selection;
+                    }
+                }
+                eraseLast_ = eraseNext_;
+                eraseNext_ = 0;
+                eraseNextTrack_ = -1;
+            }
+            // And the next one named, if the pointer has found one.
+            int et = -1, ei = -1;
+            itemAt(in.mx, in.my, et, ei);
+            if (et >= 0 && ei >= 0) {
+                const u64 uid = (*ctx.lanes[(size_t)et].items)[(size_t)ei].uid;
+                if (uid && uid != eraseLast_) {
+                    if (!moved_) { moved_ = true; pendingEdit_ = kEditErase; }
+                    eraseNext_ = uid;
+                    eraseNextTrack_ = et;
+                }
+            }
         }
     }
 
@@ -1350,14 +1911,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     clampv(origHeight_ + (in.my - grabY_) / s, kArrMinLaneH, kArrMaxLaneH);
             }
         }
-    } else if (drag_ != Drag::None && drag_ != Drag::Loop && drag_ != Drag::Marker) {
-        // THE ITEM DRAGS, and the exclusions above are what makes that true. This
-        // arm is written as "anything still dragging", so every drag that is not
-        // an item's has to be named in it -- Drag::Loop always was, and
-        // Drag::Marker joins it. A marker drag carries no dragUid_, indexOf(0)
-        // answers -1, and the `idx < 0` branch below would then cancel the
-        // gesture on the frame after the press. Which is exactly what it did:
-        // the flag jumped on the click and would not move.
+    } else if (itemDrag(drag_)) {
+        // THE ITEM DRAGS, and this arm is now a WHITELIST. It used to read
+        // "anything still dragging, minus Loop, minus Marker", so every gesture
+        // added to this file had to remember to exclude itself -- and the one
+        // time that was forgotten, a marker drag fell in here, indexOf(0)
+        // answered -1, and the `idx < 0` branch cancelled the gesture on the
+        // frame after the press: the flag jumped on the click and would not
+        // move. Four more drags arrive in this pass (Pan, Paint, Erase,
+        // EraseMarker) and none of them can repeat that, because the condition
+        // now names what belongs here instead of what does not.
         //
         // Every item drag is measured from the values the item had at the press
         // and written absolutely, so it never integrates its own error and a
@@ -1396,13 +1959,15 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 }
             } else {
                 std::vector<ArrangeClip>* items = ctx.lanes[(size_t)t].items;
-                // Ctrl+drag duplicates: the copy is made once, on the first
-                // frame that actually mutates, so it is taken with the values
-                // the item had at the press. It is the COPY that stays behind at
-                // the original position and the original that travels, which is
-                // what Ctrl+drag means everywhere. The copy has no uid yet; the
-                // caller's assignUids stamps it on commit.
-                if (drag_ == Drag::Move && in.ctrl() && !dupMade_ &&
+                // SHIFT+DRAG CLONES, and Ctrl+drag still does: FL spends Shift
+                // on this and this program had spent Ctrl, so both are bound
+                // rather than one of them being taken away from whoever already
+                // has the habit. The copy is made once, on the first frame that
+                // actually mutates, so it is taken with the values the item had
+                // at the press. It is the COPY that stays behind at the original
+                // position and the original that travels, which is what both
+                // spellings mean everywhere they exist.
+                if (drag_ == Drag::Move && (in.ctrl() || in.shift()) && !dupMade_ &&
                     (int)items->size() < kMaxArrItems) {
                     ArrangeClip copy = (*items)[(size_t)idx];
                     copy.uid = newUid(ctx);
@@ -1417,8 +1982,16 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                 if (idx >= 0) {
                     ArrangeClip& it = (*items)[(size_t)idx];
                     const f64 raw = xToBeat(ta, in.mx);
-                    // Shift is unquantized, exactly as it is for a note.
-                    const auto snap = [&](f64 b) { return in.shift() ? b : quantNear(b); };
+                    // ALT is unquantized -- FL's modifier, and the one the
+                    // automation lane eight pixels below has always used. Shift
+                    // still is too on everything except a MOVE, where it means
+                    // "clone" instead; see snapBeat at the top of this function
+                    // for the collision and why it resolves this way.
+                    const auto snap = [&](f64 b) {
+                        return (in.alt() || (in.shift() && drag_ != Drag::Move))
+                                   ? b
+                                   : quantNear(b);
+                    };
                     switch (drag_) {
                     case Drag::Move: {
                         it.start = std::max(0.0, snap(raw - grabBeat_));
@@ -1504,6 +2077,26 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
     else if (drag_ == Drag::Loop)                          ui.cursor = Cursor::ResizeH;
     else if (drag_ == Drag::LaneH)                         ui.cursor = Cursor::ResizeV;
     else if (drag_ == Drag::Marker)                        ui.cursor = Cursor::Grab;
+    // The four new strokes say what they are while they run. A pan is a Grab
+    // because the surface is what moved; the three erases wear the Delete badge,
+    // which is the one answer in the vocabulary that means "removal is the verb
+    // here" -- and a sweep that is quietly taking things away is exactly where
+    // that has to be visible.
+    else if (drag_ == Drag::Pan)                           ui.cursor = Cursor::Grab;
+    else if (drag_ == Drag::Erase || drag_ == Drag::EraseMarker ||
+             drag_ == Drag::ErasePoint) {
+        ui.badge = Badge::Delete;
+        if (ui.tip.empty())
+            ui.tip = "erasing - sweep the right button across what should go";
+    }
+    else if (drag_ == Drag::Paint) {
+        ui.badge = Badge::Add;
+        // Not unconditionally: the stroke may already have said something more
+        // specific this frame (a lane that has hit its item limit), and a
+        // general tip painted over a refusal is a refusal nobody reads.
+        if (ui.tip.empty())
+            ui.tip = "painting - one block a bar; release to stop";
+    }
     else if (hotBand && renameMarker_ == 0) {
         if (hitFlag >= 0) {
             ui.cursor = Cursor::Grab;
@@ -1513,15 +2106,18 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             // badge in the vocabulary means "this is called something".
             const Marker& m = (*markers_)[flags[(size_t)hitFlag].i];
             ui.tip = (m.name.empty() ? std::string("(unnamed)") : m.name) +
-                     " - click to jump here, drag to move, double-click to "
-                     "rename, right-click to delete";
+                     " - click to jump here, drag to move (Alt: off the grid), "
+                     "double-click to rename, right-click to delete - or "
+                     "right-drag along the band to clear several";
         } else {
             // A CREATION ZONE, which is the badge rule's own worked example: an
             // empty strip above the bar numbers is indistinguishable from
             // padding, and the double-click that puts a marker on it is
             // invisible until it is found by accident.
             ui.badge = Badge::Add;
-            if (ui.tip.empty()) ui.tip = "double-click to drop a marker here";
+            if (ui.tip.empty())
+                ui.tip = "double-click to drop a marker here; right-drag along "
+                         "the band to clear the ones you cross";
         }
     }
     else if (hotRuler && drag_ == Drag::None) {
@@ -1530,8 +2126,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             ui.tip = "drag this end of the loop brace; drag anywhere else on the "
                      "ruler to set a new one, right-click for a signature change";
         else if (ui.tip.empty())
-            ui.tip = "click to locate, drag to set the loop brace, right-click to "
-                     "add or remove a signature change at this bar";
+            ui.tip = "click to locate, drag to set the loop brace (Alt: off the "
+                     "grid), right-click to add or remove a signature change at "
+                     "this bar";
     }
     else if (hitIdx >= 0) {
         ui.cursor = (hitZone == Zone::Left || hitZone == Zone::Right) ? Cursor::ResizeH
@@ -1545,8 +2142,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         if (hitZone == Zone::Body) {
             ui.badge = Badge::Split;
             if (ui.tip.empty())
-                ui.tip = "drag to move, Ctrl+drag to leave a copy, double-click to "
-                         "split here, right-click to delete";
+                ui.tip = "drag to move (Alt: off the grid), Shift or Ctrl+drag to "
+                         "leave a copy, double-click to split here, right-click "
+                         "to delete - right-drag erases everything you cross";
         } else if (hitZone == Zone::FadeIn || hitZone == Zone::FadeOut) {
             if (ui.tip.empty()) ui.tip = "drag the top corner to set the fade";
         } else if (ui.tip.empty()) {
@@ -1563,7 +2161,9 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // that puts a one-bar note block on it is invisible until it is found
         // by accident. The badge is what makes it findable.
         ui.badge = Badge::Add;
-        if (ui.tip.empty()) ui.tip = "double-click to write a one-bar note block here";
+        if (ui.tip.empty())
+            ui.tip = "double-click to write a one-bar note block here, or drag "
+                     "across the lane to paint a run of them";
     }
     // A Ctrl+drag is making a copy, and the moment the modifier goes down is
     // the moment that stops being a plain move. The badge is the only feedback

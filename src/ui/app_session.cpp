@@ -548,6 +548,34 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
     const f32 rad = kCellRadius * s;
     const f32 hair = std::max(1.f, nx::snapPx(s));
 
+    // --- THE DROP, and it happens HERE ------------------------------------
+    // This block used to sit at the bottom of the function, BELOW the early
+    // return an empty slot takes -- which meant an empty slot was not a drop
+    // target at all. Dragging a clip onto one did nothing; dragging a SAMPLE
+    // from the browser onto one did nothing, silently, and that is the one
+    // gesture the empty-state text on the clip panel tells the user to make
+    // ("Drag a file from the browser onto a slot"). Verified in gamescope
+    // 2026-08-26 before the move: the pointer released over an empty slot and
+    // the grid was unchanged, with no message.
+    //
+    // The clip is bound by reference, so a drop that lands here fills `m`
+    // before the rest of the function reads it and the new clip is drawn on
+    // this frame rather than the next.
+    const bool dropHere = drag_.kind != DragState::Kind::None && drag_.armed && hot;
+    if (dropHere && in.released[0]) {
+        if (drag_.kind == DragState::Kind::BrowserFile) {
+            loadClipInto(ti, si, drag_.path);   // takes its own entry, after the decode
+        } else if (drag_.srcTrack != ti || drag_.srcSlot != si) {
+            // One entry for the whole move: the destination write and the
+            // source clear are halves of the same edit.
+            undoPoint(in.ctrl() ? "copy clip" : "move clip");
+            ses_.tracks[ti].slots[si] = ses_.tracks[drag_.srcTrack].slots[drag_.srcSlot];
+            if (!in.ctrl()) clearClip(drag_.srcTrack, drag_.srcSlot);
+            pushClip(ti, si);
+        }
+        drag_ = DragState{};
+    }
+
     if (!m.valid()) {
         const bool target = recIntent_ && ses_.tracks[ti].arm;
         if (recHere && recPhase >= 2) {
@@ -581,6 +609,13 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
                                      pal::recRed.scale(hot ? 0.9f : 0.55f));
         }
         if (sel) rend_.roundRectOutline(snapRect(cell), rad, hair, nx::violet);
+        // A drag in flight over an empty slot: say it will land. An empty cell
+        // is the one place where nothing else on screen says the drop is going
+        // to be accepted, which is precisely why it was possible for it not to
+        // be accepted at all and for nobody to notice.
+        if (dropHere)
+            rend_.roundRectOutline(snapRect(cell), rad, std::max(hair, nx::snapPx(2 * s)),
+                                   nx::violetSoft);
         if (hot) {
             ui_.cursor = Cursor::Hand;
             // The same invisible affordance the owner hit on the timeline,
@@ -589,7 +624,20 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
             if (trackHasNoteDevice(ti) && !recIntent_ && !recHere) {
                 ui_.badge = Badge::Add;
                 if (ui_.tip.empty())
-                    ui_.tip = "Double-click to make an empty pattern here";
+                    ui_.tip = "Double-click to make an empty pattern here, or drop "
+                              "a sample on it";
+            } else if (!recIntent_ && !recHere && ui_.tip.empty()) {
+                // THE OWNER'S OWN QUESTION, answered before it is asked. He
+                // asked in earnest how to put anything but audio in the
+                // arrangement; the grid has the identical hole. An empty slot
+                // on a track with no instrument looks exactly like an empty
+                // slot on a track with one, and the double-click that fills
+                // the second does nothing whatsoever on the first -- no badge,
+                // no message, no reason. A refusal that explains itself is the
+                // whole of the fix.
+                ui_.tip = "Drop a sample here - or add an instrument to \"" +
+                          ses_.tracks[ti].name +
+                          "\" in the DEVICES tab and this slot will make patterns";
             }
             if (in.pressed[0]) {
                 selectTrack(ti); selSlot_ = si;
@@ -600,8 +648,13 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
             // empty pattern to draw into. Only when the record button is unlit:
             // with it lit the same slot is a take waiting to happen, and the
             // first click of the double has already started one.
-            if (in.dblClick && !recIntent_ && !recHere && trackHasNoteDevice(ti))
-                createMidiClip(ti, si);
+            if (in.dblClick && !recIntent_ && !recHere) {
+                if (trackHasNoteDevice(ti)) createMidiClip(ti, si);
+                else
+                    status_ = "\"" + ses_.tracks[ti].name +
+                              "\" has no instrument, so it has no patterns to make - "
+                              "add one in the DEVICES tab, or drop a sample on this slot";
+            }
         }
         return;
     }
@@ -668,9 +721,18 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
                    nx::live.alpha(0.85f));
     }
     if (sel) rend_.roundRectOutline(snapRect(cell), rad, hair, nx::violet);
+    if (dropHere)
+        rend_.roundRectOutline(snapRect(cell), rad, std::max(hair, nx::snapPx(2 * s)),
+                               nx::violetSoft);
 
     if (hot) {
         ui_.cursor = Cursor::Hand;
+        // A 94px cell cuts most clip names, and until now a clip slot had no
+        // tip at all -- so a cut name had nowhere to be read, and the fact that
+        // RIGHT-CLICK EMPTIES THE SLOT (which it has always done, instantly and
+        // without asking) was findable only by doing it.
+        if (ui_.tip.empty())
+            ui_.tip = m.name + "  -  click launches it, right-click clears the slot";
         if (in.pressed[0]) {
             selectTrack(ti); selSlot_ = si;
             // With the record button lit, a MIDI clip on an armed track is an
@@ -695,21 +757,8 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
             clearClip(ti, si);
         }
     }
-
-    // Drop target for a drag in flight.
-    if (drag_.kind != DragState::Kind::None && drag_.armed && hot && in.released[0]) {
-        if (drag_.kind == DragState::Kind::BrowserFile) {
-            loadClipInto(ti, si, drag_.path);   // takes its own entry, after the decode
-        } else if (drag_.srcTrack != ti || drag_.srcSlot != si) {
-            // One entry for the whole move: the destination write and the
-            // source clear are halves of the same edit.
-            undoPoint(in.ctrl() ? "copy clip" : "move clip");
-            ses_.tracks[ti].slots[si] = ses_.tracks[drag_.srcTrack].slots[drag_.srcSlot];
-            if (!in.ctrl()) clearClip(drag_.srcTrack, drag_.srcSlot);
-            pushClip(ti, si);
-        }
-        drag_ = DragState{};
-    }
+    // The drop itself is handled at the TOP of this function now -- see the
+    // block above the empty-slot branch, and why it had to move.
 }
 
 void App::drawSceneColumn(const Rect& r) {
@@ -840,7 +889,11 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         // the eye should group. The plate and the lit edge belong to the
         // cluster; the segments separate by hairline and only fill when they
         // are on.
-        const Rect trio{col.x + 6 * s, y, col.w - 12 * s, 15 * s};
+        // 16, not 15: the cluster is three CLICK TARGETS and 15 device px at
+        // DPI 1.0 is under the 16 px floor on its short side. The row pitch
+        // below is 20, so the extra pixel comes out of the gap and nothing
+        // moves.
+        const Rect trio{col.x + 6 * s, y, col.w - 12 * s, 16 * s};
         ui_.segCluster(trio);
         const f32 bw = trio.w / 3.f;
         Rect mr{trio.x, y, bw, trio.h};
@@ -909,7 +962,10 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
                 Rect cell{col.x + 6 * s + (rn % 2) * cellW, y + (rn / 2) * rowH, cellW, rowH};
                 ui_.microIn(fSmall_, {cell.x, cell.y, 9 * s, cell.h}, kReturnLetter[rn],
                             nx::muted.alpha(0.75f), Align::Left, 0);
-                Rect kr{cell.x + 10 * s, cell.y + 1 * s, 15 * s, 15 * s};
+                // 16 for the same reason the M/S/arm cluster is: a knob is a
+                // drag target and 15 px is under the floor. The cell is 18 tall
+                // and 41 wide, so it fits with a pixel to spare.
+                Rect kr{cell.x + 10 * s, cell.y + 1 * s, 16 * s, 16 * s};
                 const f32 wasSend = t.sends[rn];
                 if (ui_.knob(uiId(6, (int)ti, 10 + rn), kr, &t.sends[rn], 0.f, 1.f, 0.f)) {
                     undoPointWith(kSendUndo[rn], t.sends[rn], wasSend);
@@ -1016,7 +1072,9 @@ void App::drawReturnStrips(const Rect& r) {
         // they land in read as one row of faders rather than a staircase.
         f32 y = mix.y + 26 * s;
         const f32 fh = mix.bottom() - y - 6 * s;
-        Rect fader{mix.x + 10 * s, y, 15 * s, fh};
+        // 16 wide, matching the track faders beside it and clearing the 16 px
+        // floor. The strip is 54 wide and this row spends 10 + 16 + 5 + 9 = 40.
+        Rect fader{mix.x + 10 * s, y, 16 * s, fh};
         Rect meter{fader.right() + 5 * s, y, 9 * s, fh};
         rend_.well({fader.x - 4 * s, y - 4 * s, meter.right() - fader.x + 8 * s, fh + 8 * s},
                    nx::radiusXs * s);

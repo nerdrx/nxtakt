@@ -279,7 +279,12 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
     // naming a target this set cannot resolve today.
     const bool dim = inert || !enabled || !resolved;
 
-    const ValAxis va{r.y + 3.f * s, std::max(1.f, r.h - 6.f * s),
+    // The inset is kAutoLaneInsetY (autolane.h), NOT a literal 3: the
+    // arrangement's right-drag erase sweep has to find a breakpoint at the same
+    // pixel this draws it at, and two spellings that agree by luck stop
+    // agreeing the first time one of them is tuned.
+    const ValAxis va{r.y + kAutoLaneInsetY * s,
+                     std::max(1.f, r.h - 2.f * kAutoLaneInsetY * s),
                      resolved ? lo : 0.f, resolved ? hi : 1.f};
     lo_ = va.lo;
     hi_ = va.hi;

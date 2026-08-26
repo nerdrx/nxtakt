@@ -324,9 +324,31 @@ void App::frame() {
     // for envelope lanes and the session a short one for the grid, and one
     // field would mean every switch between views silently resized the other.
     Rect detail{};
-    const f32 dH = detailHFor(view_);
+    f32& dHRef = detailHFor(view_);
     if (showDetail_) {
-        detail = {0, body.bottom() - dH * s, W, dH * s};
+        // THE SPLITTER. Without it the piano roll gets 83 device px of note
+        // grid at DPI 1.0 — 6.9 rows of a 128-row axis — and three of the eight
+        // notes in the demo's own melody clip open off-screen. Two other panels
+        // (app_sampler.cpp, app_spectra.cpp) already carry comments apologising
+        // for the same missing control; this is that control.
+        Input& sin = win_.input();
+        const f32 gripH = 6.f * s;
+        const Rect grip{0, body.bottom() - dHRef * s - gripH * 0.5f, W, gripH};
+        const u64 gid = uiId(UiDetailSplit, 0);
+        if (ui_.setHot(gid, grip) && ui_.isHot(gid)) {
+            ui_.cursor = Cursor::ResizeV;
+            if (ui_.tip.empty()) ui_.tip = "drag to resize the panel";
+            if (sin.pressed[0]) detailDrag_ = true;
+        }
+        if (detailDrag_ && !sin.down[0]) detailDrag_ = false;
+        if (detailDrag_) {
+            ui_.cursor = Cursor::ResizeV;
+            // Both halves keep a floor: 120 logical px is the smallest panel
+            // that still shows its header and a row, 180 the smallest grid
+            // above it worth having.
+            dHRef = clampv(dHRef - sin.dy / s, 120.f, (f32)H / s - 180.f);
+        }
+        detail = {0, body.bottom() - dHRef * s, W, dHRef * s};
         body.h -= detail.h;
     }
 
@@ -463,6 +485,12 @@ void App::frame() {
     // makes it the last thing in the frame and therefore the only thing that
     // cannot be painted over.
     win_.setCursor(ui_.cursor);
+    // The control menu (FL's right-click-a-knob) is a tier-2 sheet and has to
+    // be the last SURFACE in the frame, for drawBadge's reason: a menu anything
+    // can paint over is not a menu. It took its own input at the top of the
+    // frame -- Ui::beginFrame -> menuBegin -- and shielded everything else from
+    // the pointer in between, so nothing here has to know it is open.
+    ui_.drawMenu(rend_, fSmall_);
     ui_.drawBadge(rend_, fSmall_);
     rend_.end();
     (void)full;
@@ -475,7 +503,15 @@ void App::handleShortcuts() {
     // piano key is still held, this call is what releases the note.
     updateKbdPiano();
 
-    if (ui_.editId) return;                      // typing takes precedence
+    // TYPING, AN OPEN MENU OR ANY MODAL SURFACE TAKES PRECEDENCE.
+    //
+    // It used to be `ui_.editId` alone, which covered text fields and nothing
+    // else -- so Enter inside Spectra's preset popover picked a preset AND
+    // launched the selected clip, because this runs at the top of the frame and
+    // the popover is drawn in the middle of it. Ui::keysOwned() is the general
+    // form: a surface that owns the keyboard says so as it draws, the flag is
+    // carried a frame, and the shell asks it here. See Ui::keyModal.
+    if (ui_.keysOwned()) return;
 
     // Live's Computer MIDI Keyboard toggle. Edge-detected on keyDown[] rather
     // than keyPressed[], which repeats.
@@ -504,6 +540,15 @@ void App::handleShortcuts() {
     };
 
     if (in.keyPressed[' ']) togglePlay();
+    // HOME IS GLOBAL, and it was the keymap's clearest hole: it lived inside
+    // the Arrangement branch, which returns before the session's keys are
+    // reached, so "back to the start" -- the one key that answers "Stop does
+    // not rewind", the surprise every FL and Live user meets in the first
+    // minute -- did nothing at all in the view the program opens in.
+    //
+    // Above the view split, beside Space, because it is a statement about the
+    // transport and the transport is not a view.
+    if (in.keyPressed[KeyHome]) send(Cmd::Locate, 0, 0, 0.0);
     if (in.keyPressed[KeyTab])
         view_ = (view_ == MainView::Session) ? MainView::Arrangement : MainView::Session;
     if (in.keyPressed['b'] && in.ctrl()) showBrowser_ = !showBrowser_;
@@ -575,9 +620,6 @@ void App::handleShortcuts() {
                 }
             }
         }
-        // Home locates to zero (answer #4 names it beside stop-does-not-rewind).
-        if (in.keyPressed[KeyHome]) send(Cmd::Locate, 0, 0, 0.0);
-
         // JUMP TO THE PREVIOUS / NEXT MARKER.
         //
         // `,` and `.`, which carry the < and > legends on every keyboard this

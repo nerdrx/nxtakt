@@ -242,28 +242,14 @@ const int kLfoShapeId[3] = {pLfoShape, pL2Shape, pL3Shape};
 const int kLfoRateId[3]  = {pLfoRate,  pL2Rate,  pL3Rate};
 const int kLfoSyncId[3]  = {pLfoSync,  pL2Sync,  pL3Sync};
 
-// THE KNOB'S OWN GEOMETRY, mirrored.
+// THE KNOB'S OWN GEOMETRY IS THE KNOB'S.
 //
-// The mod ring is drawn AROUND knobNx's arc, and knobNx keeps its sweep angles
-// and its cap radius as file-locals in src/ui/widgets.cpp -- a header this file
-// may not edit this round. So the three numbers are mirrored here, with the
-// mirror named rather than hidden: if widgets.cpp ever moves the sweep, this
-// ring points somewhere else and nothing catches it. The fix is one accessor on
-// Ui, filed as ed3-filed-src-ui-widgets.h.diff; until it lands, this comment is
-// the interlock.
-constexpr f32 kDegRad  = 3.14159265358979323846f / 180.f;
-constexpr f32 kKnobA0  = -225.f * kDegRad;
-constexpr f32 kKnobA1  =   45.f * kDegRad;
-
-// knobT()'s twin: where a value sits on its own control's travel, log or not.
-f32 knobTravelOf(const Ui::KnobStyle& st, f32 v) {
-    const f32 lo = std::min(st.lo, st.hi), hi = std::max(st.lo, st.hi);
-    if (st.log && st.lo > 0.f && st.hi > st.lo)
-        return clampv(std::log(clampv(v, lo, hi) / st.lo) / std::log(st.hi / st.lo),
-                      0.f, 1.f);
-    return hi > lo ? clampv((v - lo) / (hi - lo), 0.f, 1.f) : 0.f;
-}
-
+// The mod ring is drawn AROUND knobNx's arc, and this file used to mirror the
+// three numbers that places it -- the two sweep angles and the cap radius --
+// because they are file-locals in src/ui/widgets.cpp. The mirror is gone:
+// Ui::knobRing() takes the same rect and the same style the knob was given and
+// is concentric with it by construction, so moving the sweep moves both.
+//
 // ---------------------------------------------------------------------------
 // PRESET CATEGORIES, derived from nothing but the name.
 //
@@ -656,6 +642,15 @@ SpectraWt g_wt;
 struct SpectraGrid {
     int lfo = -1;
     int startStep = 0, startLevel = 0;
+    // THE ERASE SWEEP, which is the same stroke with the other button down.
+    // `erase` is the grid a right-drag is clearing (-1 for none) and
+    // `eraseStep` is where the last frame's sample landed, so the span between
+    // two frames is cleared rather than the one step the pointer happened to be
+    // over -- exactly the hole-filling the paint stroke already does, for
+    // exactly the same reason: a hand sweeping across sixteen steps moves
+    // faster than the frame that is watching it.
+    int erase = -1;
+    int eraseStep = 0;
 };
 SpectraGrid g_gridDrag;
 
@@ -670,6 +665,18 @@ SpectraGrid g_gridDrag;
 // where the depth is set, immediately, without going to look for the slot.
 struct SpectraAssign {
     int src = -1;               // matrix source value being dragged
+    // THE GESTURE RUN BACKWARDS, which is what the control menu's "Assign to
+    // matrix slot" needs. A drag knows its source and goes looking for a
+    // destination; a right-click on a knob knows its DESTINATION and has to go
+    // looking for a source. Same three states, same ghost, same refusals -- so
+    // it is the same struct with the ends swapped, and the source handles that
+    // already light up under a drag light up under this too.
+    //   wantDest < 0                nothing pending
+    //   wantDest >= 0               a destination is waiting for a source; the
+    //                               next click on a source handle completes it
+    int wantDest = -1;          // matrix destination value the menu picked
+    int wantParam = -1;         // ...and the panel control it came from
+    char wantLabel[24] = {};    // ...and that control's own name, for the say-so
     int tuneSlot = -1;          // the slot whose amount the destination knob edits
     int tuneDest = -1;          // ...and the destination it was assigned to
     int tuneParam = -1;         // the panel control that is standing in for it
@@ -958,6 +965,27 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     const int uidKey = (int)(dm.uid & 0xffffu);
     const int np = inst->presetCount();
 
+    // THE 16-PIXEL FLOOR, WRITTEN AS A NUMBER RATHER THAN LEFT AS A HABIT.
+    //
+    // This panel packs a hundred controls into a dock 200 logical pixels tall,
+    // so a row is 16 px or it is nothing -- and the measurement pass found rows
+    // of 14, chips of 11 and troughs of 9. Two answers, in this order: the rows
+    // themselves grew (subH is 16 now, and the title band 18), and what is
+    // still short takes the difference in HIT SLOP.
+    //
+    // The slop is the DEFICIT and never more. widgets.h warns that past three
+    // pixels neighbours start stealing each other's hover, and a segmented
+    // cluster is the case it is warning about: pad two adjacent segments by
+    // three each and the right-hand one swallows three pixels of the left-hand
+    // one's own face, because last setHot() wins. Handing a control exactly
+    // what it is short of means a control that already clears the floor is
+    // padded by zero, which is the only value that cannot steal anything.
+    const auto slop = [&](const Rect& r0) {
+        const f32 want = 16.f * s;
+        const f32 need = std::max(want - r0.w, want - r0.h);
+        return clampv(need * 0.5f, 0.f, 3.f * s);
+    };
+
     // --- the popover's frame prologue --------------------------------------
     //
     // All of the popover's *decisions* happen up here, before a single widget
@@ -1030,12 +1058,23 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.55f));
 
     // --- title -------------------------------------------------------------
+    // 20 logical pixels and not 16, and the extra four are spent on ONE
+    // control. The page tab lives in this band and it is the most important
+    // control in the panel -- it is how half the contract is reached -- and
+    // tabPill is the one widget hit slop cannot rescue: it insets the rect it
+    // is given by 2 on every side and then hit-tests ONE RECT PER SLOT in a
+    // loop, so grab() (consumed by the first setHot after it) would pad MAIN
+    // and leave MOD short. Measured at the old 13px band the slots were 12
+    // logical pixels tall. A 20px band makes them 16. The two knob rows pay
+    // one pixel each and the close button gets to be square while it is here.
+    // The proper fix is tabPill hit-testing the UN-inset slot; filed as
+    // ui-filed-src-ui-widgets.h.diff.
     Rect title{box.x, box.y, box.w, 16 * s};
     rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
                 title.h - 8 * s}, tc);
 
-    Rect closeR{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
-    if (ui_.button(uiId(UiSpectraPanel, 0, 0), closeR, "")) {
+    Rect closeR{title.right() - 18 * s, title.y + 2 * s, 16 * s, 16 * s};
+    if (ui_.grab(slop(closeR)).button(uiId(UiSpectraPanel, 0, 0), closeR, "")) {
         closeDrop();
         spectraOpenUid_ = 0;
         spectraForced_ = false;
@@ -1058,9 +1097,18 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // a MAIN-page control.
     {
         static const char* const kPages[2] = {"MAIN", "MOD"};
+        // 16 tall, and the slots ARE 16: tabPill's 2px inset is a drawing
+        // inset for the sliding indicator and is no longer taken out of the
+        // hit test (widgets.cpp). This band paid four pixels to work around
+        // that and has them back — in a 200 logical pixel dock, four pixels is
+        // a knob row's breathing room.
         Rect tabR{title.x + 76 * s, title.y + 1.5f * s, 88 * s, 13 * s};
         int page = g_page;
-        if (ui_.tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 2, &page) &&
+        // grabTo16 because the band is 13 drawn: tabPill re-arms the slop for
+        // every slot, so both tabs come out at the 16px floor rather than the
+        // first one being padded and the second left short (widgets.cpp says
+        // why that asymmetry is worse than uniformly small).
+        if (ui_.grabTo16(tabR).tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 2, &page) &&
             page != g_page) {
             closeDrop();
             g_assign = SpectraAssign{};      // a gesture does not survive the turn
@@ -1114,7 +1162,13 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     rend_.pushClip(box);
 
     const f32 headH = 11 * s;                  // the uppercase micro-label
-    const f32 subH  = 14 * s;                  // a selector / cluster row
+    // A SELECTOR ROW IS 16 AND NOT 14. Every segmented cluster, every stepper,
+    // every matrix selector and every bool toggle in this panel is exactly this
+    // tall, so this one number is what put nineteen controls over the usability
+    // floor at once -- and it did it by making the rows bigger rather than by
+    // padding them, which is the only cure that does not let a segment steal
+    // its neighbour's face. It costs one pixel off each of the two knob rows.
+    const f32 subH  = 16 * s;                  // a selector / cluster row
     const f32 gap   = 4 * s;
     f32 rowH = (body.h - headH - subH - gap * 3.f) * 0.5f;
     rowH = clampv(rowH, 34 * s, 62 * s);
@@ -1192,10 +1246,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // ...and written only ever from a user edit. The undo point is taken
     // BEFORE the device changes and coalesces on the active widget, so one
     // paint stroke is one entry -- the same contract commit() has for a knob.
-    const auto writeState = [&](const char* what) {
+    // `gesture` is not decoration. undoCoalesce() falls back to ui_.active when
+    // it is not given, and Ui::endFrame() drops `active` on any frame the LEFT
+    // button is not held -- which is every frame of a RIGHT-drag. So the erase
+    // sweep has to name its own gesture or it takes one undo entry per step it
+    // crosses. The paint stroke can leave it 0 because a held left button is
+    // exactly what keeps `active` alive.
+    const auto writeState = [&](const char* what, u64 gesture = 0) {
         if (!stateOk) return;
         const std::string s = sstate.emit();
-        undoPoint(what);
+        undoPoint(what, gesture);
         if (!inst->setStateString(s)) {
             status_ = "Spectra refused that state string - nothing was stored";
         } else if (inst->stateString() != s) {
@@ -1257,6 +1317,52 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         return -1;
     };
 
+    // THE ASSIGNMENT ITSELF, spelled once because there are now two ways in:
+    // the drag (source in hand, looking for a knob) and the control menu's
+    // "Assign to matrix slot" (knob in hand, looking for a source). Both end
+    // here, so both take the same slot, the same +0.30, the same single undo
+    // entry and the same amount mode afterwards -- and neither can drift.
+    //
+    // Returns the slot it took, or -1 when all eight are in use, which is the
+    // one refusal this verb has and which both callers say out loud.
+    const auto firstFreeSlot = [&] {
+        for (int k = 0; k < 8; ++k) {
+            const int sid = pM1Src + 3 * k;
+            if (has(sid) && has(sid + 1) && has(sid + 2) &&
+                std::lround(get(sid, 0.f)) == 0)
+                return k;
+        }
+        return -1;
+    };
+    const auto assignSlot = [&](int src, int d, int id, const char* label) {
+        const int slot = firstFreeSlot();
+        if (slot < 0) {
+            status_ = std::string("Spectra: all eight matrix slots are in use - ") +
+                      kMatrixSrc[clampv(src, 0, kSrcCount - 1)] + " was not assigned to " +
+                      label;
+            return -1;
+        }
+        const int sid = pM1Src + 3 * slot;
+        // ONE undo entry for the whole assignment: three setParam calls that
+        // are one edit to the user, so they coalesce on one gesture id the way
+        // a knob drag's frames do.
+        const u64 gest = uiId(UiSpectraPanel, 830 + src, uidKey);
+        commit(sid + 0, (f32)src, gest, "assign modulation");
+        commit(sid + 1, (f32)d,   gest, "assign modulation");
+        commit(sid + 2, 0.30f,    gest, "assign modulation");
+        g_assign.tuneSlot  = slot;
+        g_assign.tuneDest  = d;
+        g_assign.tuneParam = id;
+        g_assign.tuneFresh = true;
+        char msg[192];
+        snprintf(msg, sizeof msg,
+                 "Spectra: %s -> %s at +0.30 in M%d - the knob is its amount "
+                 "until you click elsewhere", kMatrixSrc[clampv(src, 0, kSrcCount - 1)],
+                 kMatrixDst[clampv(d, 0, kDstCount - 1)], slot + 1);
+        status_ = msg;
+        return slot;
+    };
+
     // DRAG-ASSIGN, the drop half. Called by every control that can be a
     // destination, with the rect the pointer has to be inside.
     //
@@ -1285,15 +1391,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             return;
         }
         rend_.gradStroke(r0, rad0, s, nx::edgeLit, 1.f);
-        ui_.badge = Badge::Add;
+        // Assign and not Add: the drop creates no control, it wires two that
+        // are already on screen.
+        ui_.badge = Badge::Assign;
         // The slot this would take, worked out now so the tip can name it.
-        int slot = -1;
-        for (int k = 0; k < 8 && slot < 0; ++k) {
-            const int sid = pM1Src + 3 * k;
-            if (has(sid) && has(sid + 1) && has(sid + 2) &&
-                std::lround(get(sid, 0.f)) == 0)
-                slot = k;
-        }
+        const int slot = firstFreeSlot();
         char t[144];
         if (slot < 0)
             snprintf(t, sizeof t,
@@ -1307,29 +1409,50 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
         const int src = g_assign.src;
         g_assign.src = -1;
-        if (slot < 0) {
-            status_ = std::string("Spectra: all eight matrix slots are in use - ") +
-                      kMatrixSrc[src] + " was not assigned";
-            return;
+        assignSlot(src, d, id, label);
+    };
+
+    // THE CONTROL MENU'S TWO OPT-IN ITEMS, offered by every knob and trough in
+    // the panel that can honestly answer them (uw-WIDGET-API.md §2).
+    //
+    // ASSIGN runs drag-assign BACKWARDS. The menu is opened on the destination,
+    // so the source is the half that is missing, and rather than inventing one
+    // the panel arms the same pick the drag already has: every source handle on
+    // screen is live, the ghost follows the pointer, Escape cancels, and the
+    // next click on a handle completes the wire. One machine, entered from
+    // either end.
+    //
+    // LEARN is the app's own device-parameter MIDI learn -- the identical verb
+    // the generic parameter grid puts on a right-click (app_devices.cpp), on the
+    // identical address. A synth panel that invented a second MIDI-learn beside
+    // it would be a second place for a binding to live.
+    const auto menuOfferFor = [&](int id, int dst) {
+        Ui::MenuOffer o;
+        if (dst > 0) o.items |= Ui::MenuAssign;
+        if (ownTrack && has(id)) o.items |= Ui::MenuLearn;
+        return o;
+    };
+    const auto menuHandle = [&](u64 wid, int id, int dst, const char* label) {
+        if (ui_.menuFired(wid, Ui::MenuAssign) && dst > 0) {
+            g_assign.src = -1;
+            g_assign.wantDest  = dst;
+            g_assign.wantParam = id;
+            snprintf(g_assign.wantLabel, sizeof g_assign.wantLabel, "%s", label);
+            char msg[176];
+            snprintf(msg, sizeof msg,
+                     "Spectra: %s is waiting for a source - click any grip handle "
+                     "(the LFOs, ENV 2/3, the macros, wheel/bend/cc). Escape cancels.",
+                     kMatrixDst[clampv(dst, 0, kDstCount - 1)]);
+            status_ = msg;
         }
-        const int sid = pM1Src + 3 * slot;
-        // ONE undo entry for the whole assignment: three setParam calls that
-        // are one edit to the user, so they coalesce on one gesture id the way
-        // a knob drag's frames do.
-        const u64 gest = uiId(UiSpectraPanel, 830 + src, uidKey);
-        commit(sid + 0, (f32)src, gest, "assign modulation");
-        commit(sid + 1, (f32)d,   gest, "assign modulation");
-        commit(sid + 2, 0.30f,    gest, "assign modulation");
-        g_assign.tuneSlot  = slot;
-        g_assign.tuneDest  = d;
-        g_assign.tuneParam = id;
-        g_assign.tuneFresh = true;
-        char msg[160];
-        snprintf(msg, sizeof msg,
-                 "Spectra: %s -> %s at +0.30 in M%d - the knob is its amount "
-                 "until you click elsewhere", kMatrixSrc[src], kMatrixDst[d],
-                 slot + 1);
-        status_ = msg;
+        if (ui_.menuFired(wid, Ui::MenuLearn)) {
+            if (!ownTrack)
+                status_ = "Only a track's devices can be MIDI-mapped - the address "
+                          "space has no return or master scope";
+            else
+                cycleMidiLearn(addr::deviceParam(ses_.tracks[devOwner_].uid, dm.uid,
+                                                 inst->paramInfo(id).id));
+        }
     };
 
     // THE SOURCE GRAB HANDLE. Three stacked dashes in a box barely wider than
@@ -1340,20 +1463,44 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     const auto srcHandle = [&](const Rect& hr, int srcVal) {
         const bool live = has(pM1Src) && srcVal <= srcMax;
         const u64 wid = uiId(UiSpectraPanel, 830 + srcVal, uidKey);
+        const bool waiting = g_assign.wantDest > 0;
         bool over = false;
         if (live) {
-            over = ui_.grab(2.f * s).setHot(wid, hr) && ui_.isHot(wid);
+            over = ui_.grab(slop(hr)).setHot(wid, hr) && ui_.isHot(wid);
+            // A DESTINATION IS WAITING: the handles are the pick, so they say
+            // so before the pointer reaches one. Violet at 0.35 is the framing
+            // every modulatable knob wears while a drag is in flight -- the
+            // same quiet ring, on the other end of the same gesture.
+            if (waiting)
+                rend_.roundRectOutline(hr, nx::radiusXs * s,
+                                       std::max(1.f, nx::snapPx(s)),
+                                       nx::violet.alpha(over ? 0.9f : 0.35f));
             if (over) {
                 ui_.cursor = Cursor::Grab;
-                char t[128];
-                snprintf(t, sizeof t,
-                         "Drag %s onto any knob with a mod ring to patch it "
-                         "into the first free matrix slot", kMatrixSrc[srcVal]);
+                char t[176];
+                if (waiting) {
+                    ui_.badge = Badge::Assign;
+                    snprintf(t, sizeof t, "Patch %s -> %s at +0.30 in the first "
+                             "free matrix slot", kMatrixSrc[srcVal],
+                             kMatrixDst[clampv(g_assign.wantDest, 0, kDstCount - 1)]);
+                } else {
+                    snprintf(t, sizeof t,
+                             "Drag %s onto any knob with a mod ring to patch it "
+                             "into the first free matrix slot", kMatrixSrc[srcVal]);
+                }
                 ui_.tip = t;
                 if (in.pressed[0]) {
-                    g_assign.src = srcVal;
-                    g_assign.tuneSlot = -1;
-                    g_assign.tuneParam = -1;
+                    if (waiting) {
+                        const int d = g_assign.wantDest, pid = g_assign.wantParam;
+                        char lb[24];
+                        snprintf(lb, sizeof lb, "%s", g_assign.wantLabel);
+                        g_assign.wantDest = g_assign.wantParam = -1;
+                        assignSlot(srcVal, d, pid, lb);
+                    } else {
+                        g_assign.src = srcVal;
+                        g_assign.tuneSlot = -1;
+                        g_assign.tuneParam = -1;
+                    }
                 }
             }
         } else if (ui_.hovered(hr)) {
@@ -1366,7 +1513,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         }
         const Col ink = !live ? nx::muted.alpha(0.30f)
                       : (g_assign.src == srcVal) ? nx::violetSoft
-                      : over ? nx::text : nx::muted.alpha(0.70f);
+                      : over ? nx::text
+                      : waiting ? nx::muted
+                                : nx::muted.alpha(0.70f);
         const f32 x0 = hr.cx() - 3.f * s, x1 = hr.cx() + 3.f * s;
         for (int i = -1; i <= 1; ++i)
             rend_.line(x0, std::round(hr.cy() + (f32)i * 2.5f * s),
@@ -1375,32 +1524,75 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     };
 
     // A recessed micro-selector over an integer parameter: click steps forward,
-    // right-click back, the wheel scrubs. The matrix's own control, hoisted to
-    // the shared layer in v3 because a second caller appeared -- LFO 1's sync,
+    // the wheel scrubs both ways. The matrix's own control, hoisted to the
+    // shared layer in v3 because a second caller appeared -- LFO 1's sync,
     // which has to shrink from a 92px stepper to one cell when the drawn grid
     // takes the row it was standing in. Two call sites, one control.
+    //
+    // RIGHT-CLICK ERASES, AND THAT IS A BINDING CHANGED ON PURPOSE. It used to
+    // step BACKWARDS, which is the idiom Ui::selector keeps and which this
+    // control inherited from it. On a MATRIX SLOT that binding is spent on the
+    // wrong verb: a slot is a routing, right-click is how a routing is deleted
+    // everywhere in FL Studio, and step-backwards already has a home on this
+    // very control -- the wheel, which scrubs both directions and is the more
+    // natural way to walk a twenty-entry list anyway. So `clearSlot` >= 0 means
+    // "this selector belongs to matrix slot k, and a right-click clears the
+    // whole slot": source, destination, amount and curve, in ONE undo entry,
+    // announced. LFO 1's sync selector passes -1 and keeps step-back, because
+    // a sync division is not a routing and there is nothing there to erase.
     const auto enumSel = [&](int sub, const Rect& r0, int id,
                              const char* const* names, int count,
-                             const char* what, f32 dim) {
+                             const char* what, f32 dim, int clearSlot = -1) {
         const bool live = has(id) && count > 0;
         rend_.well(r0, nx::radiusXs * s, false);
         int idx = live ? clampv((int)std::lround(get(id, 0.f)), 0, count - 1) : 0;
         if (live) {
             const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
-            if (ui_.grab(2.f * s).setHot(wid, r0) && ui_.isHot(wid)) {
+            if (ui_.grab(slop(r0)).setHot(wid, r0) && ui_.isHot(wid)) {
                 ui_.cursor = Cursor::Hand;
                 int d = 0;
                 if (in.pressed[0]) d = +1;
-                if (in.pressed[2]) d = -1;
+                if (in.pressed[2] && clearSlot < 0) d = -1;
                 if (in.wheel != 0.f) {
                     d = in.wheel > 0.f ? +1 : -1;
                     in.wheel = 0.f;              // not the strip's notch to spend
                 }
                 if (d) commit(id, (f32)(((idx + d) % count + count) % count), wid, what);
-                char t[112];
-                snprintf(t, sizeof t,
-                         "%s: %s - click next, right-click back, wheel steps",
-                         what, names[idx]);
+                if (in.pressed[2] && clearSlot >= 0) {
+                    const int sid0 = pM1Src + 3 * clearSlot;
+                    const int wasSrc = clampv((int)std::lround(get(sid0, 0.f)), 0,
+                                              kSrcCount - 1);
+                    const int wasDst = has(sid0 + 1)
+                        ? clampv((int)std::lround(get(sid0 + 1, 0.f)), 0, kDstCount - 1) : 0;
+                    if (wasSrc == 0 && wasDst == 0 &&
+                        std::fabs(get(sid0 + 2, 0.f)) < 1e-6f) {
+                        char t2[96];
+                        snprintf(t2, sizeof t2, "Spectra: M%d is already empty",
+                                 clearSlot + 1);
+                        status_ = t2;
+                    } else {
+                        // ONE gesture id for all four writes, so clearing a slot
+                        // is one Ctrl+Z and not four.
+                        const u64 gest = uiId(UiSpectraPanel, 860 + clearSlot, uidKey);
+                        commit(sid0 + 0, 0.f, gest, "clear matrix slot");
+                        commit(sid0 + 1, 0.f, gest, "clear matrix slot");
+                        commit(sid0 + 2, 0.f, gest, "clear matrix slot");
+                        commit(pM1Curve + clearSlot, 0.f, gest, "clear matrix slot");
+                        char t2[176];
+                        snprintf(t2, sizeof t2,
+                                 "Spectra: M%d cleared (was %s -> %s) - Ctrl+Z puts "
+                                 "it back", clearSlot + 1, kMatrixSrc[wasSrc],
+                                 kMatrixDst[wasDst]);
+                        status_ = t2;
+                    }
+                }
+                char t[176];
+                if (clearSlot >= 0)
+                    snprintf(t, sizeof t, "%s: %s - click next, wheel steps, "
+                             "right-click clears M%d", what, names[idx], clearSlot + 1);
+                else
+                    snprintf(t, sizeof t, "%s: %s - click next, right-click back, "
+                             "wheel steps", what, names[idx]);
                 ui_.tip = t;
             }
         } else if (ui_.hovered(r0)) {
@@ -1430,7 +1622,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         Rect g = r0;
         if (live) {
             const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
-            if (ui_.segButton(wid, r0, m == 1, nx::violet))
+            if (ui_.grab(slop(r0)).segButton(wid, r0, m == 1, nx::violet))
                 commit(id, m ? 0.f : 1.f, wid, what);
             g = ui_.lastRect;
         }
@@ -1518,7 +1710,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             return;
         }
 
-        if (ui_.knobNx(wid, kr, &v, st)) commit(id, v, wid, label);
+        // THE CONTROL MENU, OPTED INTO. Right-click is FL Studio's "link to
+        // controller" gesture and it is the single most valuable one a synth
+        // has; the widget layer draws the sheet and performs Reset and Type-in
+        // itself, and this panel adds the two items only it can answer -- the
+        // matrix assignment and the device-parameter MIDI learn. Offered per
+        // knob rather than blanket, so a control that is not a matrix
+        // destination does not grow an Assign item that would refuse.
+        if (ui_.offer(menuOfferFor(id, dst)).knobNx(wid, kr, &v, st))
+            commit(id, v, wid, label);
+        menuHandle(wid, id, dst, label);
 
         // THE MOD RING. One thin cyan arc outside the value arc, spanning what
         // the matrix can add to this control and subtract from it -- the reach,
@@ -1528,24 +1729,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // by the patch.
         if (dst > 0 && !st.absent) {
             const ModReach mr = modReach(dst);
-            if (mr.slots) {
-                const f32 dpi = std::max(1.f, s);
-                const f32 textH = (st.fmt || st.text) ? fSmall_.height() : 0.f;
-                const f32 avail = std::min(kr.w, kr.h - textH);
-                const f32 krad  = avail * 0.5f - 2.f * dpi;
-                if (krad > 1.f) {
-                    const f32 aTh = std::max(1.5f * dpi, krad * 0.17f);
-                    const f32 rr  = krad + 2.5f * dpi + aTh * 0.5f + 2.2f * dpi;
-                    const f32 t   = knobTravelOf(st, v);
-                    const f32 a0 = kKnobA0 + (kKnobA1 - kKnobA0) *
-                                   clampv(t + mr.lo, 0.f, 1.f);
-                    const f32 a1 = kKnobA0 + (kKnobA1 - kKnobA0) *
-                                   clampv(t + mr.hi, 0.f, 1.f);
-                    if (a1 - a0 > 1e-4f)
-                        ui_.arc(kr.cx(), kr.y + 2.f * dpi + krad, rr, a0, a1,
-                                std::max(1.f, 1.3f * dpi), nx::cyan.alpha(0.55f * dim));
-                }
-            }
+            if (mr.slots)
+                ui_.knobRing(kr, st, v, mr.lo, mr.hi, nx::cyan.alpha(0.55f * dim));
         }
         dropTarget(kr, id, label);
 
@@ -1584,7 +1769,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                              const char* absentText, const char* what,
                              const char* tip) {
         ui_.segCluster(r0);
-        const f32 bw = 14 * s;
+        // 16 and not 14: an arrow is 16 logical px on its short side or it is
+        // under the floor, and the name between them can spare the four.
+        const f32 bw = 16 * s;
         Rect lb{r0.x, r0.y, bw, r0.h}, rb{r0.right() - bw, r0.y, bw, r0.h};
         rend_.hairlineV(lb.right(), r0.y + 2 * s, r0.bottom() - 2 * s);
         rend_.hairlineV(rb.x, r0.y + 2 * s, r0.bottom() - 2 * s);
@@ -1595,6 +1782,17 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const int n = ((idx + d) % count + count) % count;
             commit(id, (f32)n, uiId(UiSpectraPanel, 100 + id * 4, uidKey), what);
         };
+        // THE WHEEL STEPS THE RING, which is the one gesture this control was
+        // missing and which its sibling enumSel has had since v3. A stepper and
+        // a micro-selector are the same control at two widths; a wheel that
+        // walked the tables here and scrolled the device strip six inches away
+        // was the panel's own inconsistency, not the user's mistake. Consumed,
+        // for the reason enumSel consumes it: the notch is not the strip's to
+        // spend once a control has answered it.
+        if (live && ui_.hovered(r0) && in.wheel != 0.f) {
+            step(in.wheel > 0.f ? +1 : -1);
+            in.wheel = 0.f;
+        }
         // Chevrons drawn rather than lettered: at twelve pixels the body font
         // ellipsises even a single character (app_devices.cpp's finding).
         const auto chev = [&](const Rect& b, bool leftward) {
@@ -1606,11 +1804,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                        1.1f * s, c);
         };
         if (live) {
-            if (ui_.segButton(uiId(UiSpectraPanel, 100 + id * 4 + 1, uidKey), lb,
-                              false, nx::violet)) step(-1);
+            if (ui_.grab(slop(lb)).segButton(uiId(UiSpectraPanel, 100 + id * 4 + 1,
+                                             uidKey), lb, false, nx::violet)) step(-1);
             chev(ui_.lastRect, true);
-            if (ui_.segButton(uiId(UiSpectraPanel, 100 + id * 4 + 2, uidKey), rb,
-                              false, nx::violet)) step(+1);
+            if (ui_.grab(slop(rb)).segButton(uiId(UiSpectraPanel, 100 + id * 4 + 2,
+                                             uidKey), rb, false, nx::violet)) step(+1);
             chev(ui_.lastRect, false);
         } else {
             chev(lb, true);
@@ -1676,7 +1874,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // corner of an ADSR trace that is always empty, because a released
         // envelope has come down by then.
         if (srcVal >= 0)
-            srcHandle({cw0.right() - 12 * s, cw0.y + 1 * s, 11 * s, 9 * s}, srcVal);
+            // 12 x 10 and not 11 x 9: with the 3px of slop `slop()` grants a
+            // short control that is 18 x 16, and 16 is the floor. The corner it
+            // rides is the one corner of an ADSR trace that is always empty, so
+            // the extra pixel in each direction costs the drawing nothing.
+            srcHandle({cw0.right() - 13 * s, cw0.y + 1 * s, 12 * s, 10 * s}, srcVal);
 
         const f32 kw = (c.w - curveW) / 4.f;
         Ui::KnobStyle st;
@@ -1719,7 +1921,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             Rect g = seg;
             if (segLive) {
                 const u64 wid = uiId(UiSpectraPanel, segBase + k, uidKey);
-                if (ui_.segButton(wid, seg, on, nx::violet))
+                if (ui_.grab(slop(seg)).segButton(wid, seg, on, nx::violet))
                     commit(id, (f32)k, wid, what);
                 g = ui_.lastRect;
             } else if (ui_.hovered(seg) && k == 5) {
@@ -1832,12 +2034,17 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // and a paint loop that tested `in.down[0]` first would drop it on the
         // floor, so a step you clicked would stay where it was.
         bool pressedNow = false;
+        bool erasedNow = false;
         if (editable && ui_.setHot(wid, gr) && ui_.isHot(wid)) {
             ui_.cursor = Cursor::Hand;
-            ui_.badge  = Badge::Draw;
+            // Draw at rest, Delete with the right button down: the badge is the
+            // answer to "what will a click do here?", and while the erase
+            // stroke is in flight the answer is not "draw".
+            ui_.badge  = (in.down[2] || in.pressed[2]) ? Badge::Delete : Badge::Draw;
             if (in.pressed[2]) {
-                sstate.grid[n][stepAt(in.mx)] = 0;
-                writeState("clear LFO step");
+                g_gridDrag.erase = n;
+                g_gridDrag.eraseStep = stepAt(in.mx);
+                erasedNow = true;
             }
             if (in.pressed[0]) {
                 ui_.active = wid;                // so one stroke is one undo entry
@@ -1849,11 +2056,31 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             char t[176];
             snprintf(t, sizeof t,
                      "LFO %d steps: drag to paint, shift-drag for a line, "
-                     "right-click clears a step. Step %d of 16, level %.2f - "
+                     "right-DRAG to erase. Step %d of 16, level %.2f - "
                      "the whole cycle is the sync division.",
                      n + 1, stepAt(in.mx) + 1,
                      (double)sstate.grid[n][stepAt(in.mx)] / 15.0);
             ui_.tip = t;
+        }
+
+        // THE ERASE SWEEP. FL Studio's right-drag over a step sequencer clears
+        // every step the stroke flies over, and a right-click that cleared only
+        // the step it happened to land on was this grid's half of that gesture:
+        // it worked, and it made clearing sixteen steps sixteen aimed clicks.
+        // One stroke now, span-filled between frames the same way the paint
+        // stroke is, and coalesced on the same widget id -- so an erase sweep
+        // is ONE undo entry however many steps it crossed.
+        if (g_gridDrag.erase == n) {
+            if (in.down[2] || erasedNow) {
+                const int s1 = stepAt(in.mx);
+                bool changed = false;
+                for (int i = std::min(g_gridDrag.eraseStep, s1);
+                     i <= std::max(g_gridDrag.eraseStep, s1); ++i)
+                    if (sstate.grid[n][i]) { sstate.grid[n][i] = 0; changed = true; }
+                g_gridDrag.eraseStep = s1;
+                if (changed) writeState("erase LFO steps", wid);
+            }
+            if (!in.down[2]) g_gridDrag.erase = -1;
         }
         if (g_gridDrag.lfo == n) {
             if (in.down[0] || pressedNow) {
@@ -1934,8 +2161,14 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // is the sentence.
         const Rect lr{smr.x, smr.y, 13 * s, smH};
         const Rect vr{smr.right() - 24 * s, smr.y, 24 * s, smH};
-        const Rect tr{lr.right() + 2 * s, smr.y + 2 * s,
-                      std::max(4 * s, vr.x - lr.right() - 6 * s), smH - 4 * s};
+        // The trough takes the WHOLE row band rather than a 9px ribbon inside
+        // it. A 13px row with 2px of air above and below left a 9-logical-pixel
+        // control to aim at, five under the floor and beyond what hit slop is
+        // allowed to make up; the air is what it was spending, so the air is
+        // what it gets back. 13 tall, plus the 1.5px of slop `slop()` grants a
+        // control that is three short, is 16.
+        const Rect tr{lr.right() + 2 * s, smr.y,
+                      std::max(4 * s, vr.x - lr.right() - 6 * s), smH};
         {
             const Col gc = nx::muted.alpha(editable ? 0.80f : 0.35f);
             const f32 gt = std::max(1.f, nx::snapPx(s));
@@ -1948,14 +2181,22 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         f32 sv = (f32)clampv(sstate.smooth[n], 0, 1000) / 1000.f;
         if (editable) {
             const u64 swid = uiId(UiSpectraPanel, 820 + n, uidKey);
-            if (ui_.trough(swid, tr, &sv, 0.f, 1.f, nx::violetSoft, 1.f)) {
+            // The trailing 0.f is the DEFAULT, and it is what makes a
+            // double-click and the control menu's Reset work here: a smooth of
+            // zero is the hard staircase this control starts life at. Without
+            // it the widget layer has nothing to reset to and says so instead
+            // of doing nothing, which is honest but useless on a control whose
+            // default is obvious.
+            if (ui_.grab(slop(tr)).trough(swid, tr, &sv, 0.f, 1.f, nx::violetSoft,
+                                          1.f, 0.f)) {
                 sstate.smooth[n] = clampv((int)std::lround(sv * 1000.f), 0, 1000);
-                writeState("LFO smooth");
+                writeState("LFO smooth", swid);
             }
             if (ui_.hovered(tr))
                 ui_.tip = "Step smoothing: 0 is a hard staircase (a selected "
                           "branch, bit-exact); above it a one-pole lag toward "
-                          "each step, stored as thousandths";
+                          "each step, stored as thousandths. Wheel steps it, "
+                          "double-click is back to 0.";
         } else {
             rend_.well(tr, nx::radiusXs * s, true);
         }
@@ -2026,6 +2267,45 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const bool wtCustom = wtLive && wtHasCustom(inst, wtOsc);
         const Rect wtDropR{c.x, impR.y, c.w, dispR.bottom() - impR.y};
 
+        // REVERT TO FACTORY, spelled once and reached two ways: the ✕ chip at
+        // the end of the import row, and a RIGHT-CLICK anywhere on the hero.
+        // The chip is the discoverable route and the right-click is the one a
+        // hand already knows -- in FL Studio the button that loads a slot and
+        // the button that empties it are the two buttons on the mouse, and a
+        // wavetable this panel imported by dropping is a wavetable it should
+        // drop by right-clicking. Both take one undo point and both say what
+        // happened; the refusal (there is nothing imported to revert) says so
+        // too rather than being a click that did nothing.
+        const auto revertWt = [&] {
+            if (!wtLive) {
+                status_ = "Spectra: this build's plugin contract has no "
+                          "wavetable() - there is no import to revert";
+                return;
+            }
+            if (!wtCustom) {
+                char m[160];
+                snprintf(m, sizeof m,
+                         "Spectra: osc %s is already on factory table %s - "
+                         "there is nothing to revert", wtOsc ? "B" : "A",
+                         kTables[clampv(has(wtTblId)
+                             ? (int)std::lround(get(wtTblId, 0.f)) : 0, 0, 7)]);
+                status_ = m;
+                return;
+            }
+            undoPoint("clear custom wavetable");
+            wtClear(inst, wtOsc);
+            g_wt.err.clear();
+            if (has(wtTblId) && std::lround(get(wtTblId, 0.f)) >= 8) {
+                inst->setParam(wtTblId, 0.f);
+                if (ownTrack)
+                    autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid,
+                                dm.uid, inst->paramInfo(wtTblId).id), 0.f, 0);
+            }
+            status_ = std::string("Spectra: osc ") + (wtOsc ? "B" : "A") +
+                      " back on factory table " + kTables[0] + " - Ctrl+Z puts "
+                      "the import back";
+        };
+
         // NXTAKT_DEBUG_SPECTRAWTDRAG, re-armed here and not once in the seed:
         // app_session.cpp clears any drag the mouse is not holding, which is
         // right for a real drag and leaves a headless one alive for one frame.
@@ -2084,13 +2364,37 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                     status_ = std::string("Spectra: ") + g_wt.err;
                 }
                 drag_ = DragState{};
+                // A DROPPED DRAG IS OVER, including a headless one. The hook
+                // re-arms `drag_` from dragHold on every frame -- which is what
+                // keeps a mouseless drag alive long enough to be photographed
+                // -- and nothing used to spend it, so after a scripted drop the
+                // panel believed a browser drag was still in flight forever.
+                // That is not what a real drag does, and it made the erase
+                // gesture below unreachable under the harness: every right-click
+                // landed on a frame the panel thought was mid-drag. Clearing it
+                // here is the hook modelling the mouse it stands in for.
+                g_wt.dragHold.clear();
             }
         }
 
+        // ...and the erase half of the same pair. It is tested BEFORE the row's
+        // own widgets are drawn, so a right-click on the ✕ chip or the A / B
+        // pair means the hero and not the chip under the pointer: this gesture
+        // is about the imported table, and every pixel of the hero says the
+        // same thing about it.
+        // No badge for it, and that is widgets.h's rule rather than an
+        // omission: a badge appears only where the answer is not otherwise
+        // available, and a Delete glyph parked over the wavetable trace every
+        // time the pointer crossed it would be shouting at the one surface in
+        // this panel whose whole job is to be looked at. The sentence lives in
+        // the tooltips below, where it is read once and asked for.
+        if (!dragHere && in.pressed[2] && wtDropR.contains(in.mx, in.my))
+            revertWt();
+
         {
             ui_.segCluster(impR);
-            const f32 tgW = 15 * s;
-            const f32 clrW = wtCustom ? 15 * s : 0.f;
+            const f32 tgW = 16 * s;
+            const f32 clrW = wtCustom ? 16 * s : 0.f;
             const Rect abR{impR.x, impR.y, tgW * 2.f, impR.h};
             const Rect brR{impR.right() - 19 * s - clrW, impR.y, 19 * s, impR.h};
             const Rect clR{impR.right() - clrW, impR.y, std::max(0.f, clrW), impR.h};
@@ -2105,7 +2409,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 Rect g = seg;
                 if (wtLive) {
                     const u64 wid = uiId(UiSpectraPanel, 801 + k, uidKey);
-                    if (ui_.segButton(wid, seg, k == wtOsc, nx::violet)) {
+                    if (ui_.grab(slop(seg)).segButton(wid, seg, k == wtOsc, nx::violet)) {
                         g_wt.osc = k;
                         g_wt.err.clear();
                     }
@@ -2144,9 +2448,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                     ui_.tip = "Custom wavetables need PluginInstance::wavetable(), "
                               "which this build's plugin contract does not have";
                 else if (wtCustom) {
-                    char t[224];
+                    char t[256];
                     snprintf(t, sizeof t,
-                             "Osc %s: %s, %d frames%s", wtOsc ? "B" : "A",
+                             "Osc %s: %s, %d frames%s. Right-click the well to "
+                             "revert to a factory table.", wtOsc ? "B" : "A",
                              wtName(inst, wtOsc), wtFrames(inst, wtOsc),
                              tblIdx >= 8 ? " - playing"
                                          : " - imported, but Table is on a factory slot");
@@ -2161,8 +2466,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // opens it (Ctrl+B's other half) rather than inventing a second
             // way to find a file.
             if (wtLive) {
-                if (ui_.segButton(uiId(UiSpectraPanel, 803, uidKey), brR, false,
-                                  nx::violet)) {
+                if (ui_.grab(slop(brR)).segButton(uiId(UiSpectraPanel, 803, uidKey),
+                                                  brR, false, nx::violet)) {
                     showBrowser_ = true;
                     status_ = "Spectra: drag a .wav from the browser onto the "
                               "wavetable well";
@@ -2180,7 +2485,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // that has to be explained.
             if (wtCustom) {
                 const u64 wid = uiId(UiSpectraPanel, 804, uidKey);
-                const bool hit = ui_.segButton(wid, clR, false, nx::violet);
+                const bool hit = ui_.grab(slop(clR)).segButton(wid, clR, false,
+                                                              nx::violet);
                 const Rect g = ui_.lastRect;
                 const f32 k = 3.f * s;
                 rend_.line(g.cx() - k, g.cy() - k, g.cx() + k, g.cy() + k, 1.2f * s,
@@ -2189,20 +2495,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                            nx::muted);
                 if (ui_.hovered(clR))
                     ui_.tip = "Drop the imported table and put this oscillator "
-                              "back on a factory one";
-                if (hit) {
-                    undoPoint("clear custom wavetable");
-                    wtClear(inst, wtOsc);
-                    g_wt.err.clear();
-                    if (has(wtTblId) && std::lround(get(wtTblId, 0.f)) >= 8) {
-                        inst->setParam(wtTblId, 0.f);
-                        if (ownTrack)
-                            autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid,
-                                        dm.uid, inst->paramInfo(wtTblId).id), 0.f, 0);
-                    }
-                    status_ = std::string("Spectra: osc ") + (wtOsc ? "B" : "A") +
-                              " back on factory table " + kTables[0];
-                }
+                              "back on a factory one - or right-click anywhere "
+                              "on the wavetable well, which is the same verb";
+                if (hit) revertWt();
             }
         }
 
@@ -2336,7 +2631,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             microFit(ui_, fSmall_,
                      {dispR.x, dispR.bottom() - 11 * s, dispR.w - 6 * s, 10 * s},
                      wlabel, nx::muted.alpha(0.35f), Align::Right, 0);
-            if (ui_.hovered(dispR))
+            if (ui_.hovered(dispR)) {
                 ui_.tip = tset
                     ? (warpOn
                        ? "The wavetable frames themselves, morphed at Position - "
@@ -2345,6 +2640,14 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                          "Position falls between - the same read the voices make")
                     : "No wavetable set in this process, so this is a drawing of "
                       "the same family of shapes and not the tables";
+                // The erase verb, said on the surface it applies to and only
+                // while there is something for it to erase.
+                if (wtCustom)
+                    ui_.tip += ". Drop a .wav to import; right-click to revert "
+                               "this oscillator to a factory table.";
+                else if (wtLive)
+                    ui_.tip += ". Drop a .wav here to import one.";
+            }
         }
 
         // The two Position troughs. THE control, per the contract, so it gets a
@@ -2352,8 +2655,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const auto posRow = [&](f32 y, int id, const char* label, const Col& ink, f32 dim) {
             const Rect lr{c.x, y, 12 * s, slidH};
             const Rect vr{c.right() - 26 * s, y, 26 * s, slidH};
-            const Rect tr{lr.right() + 2 * s, y + 2 * s,
-                          vr.x - lr.right() - 6 * s, slidH - 4 * s};
+            // The whole row band, for the LFO smooth trough's reason: 9 logical
+            // pixels was five under the floor and no amount of hit slop is
+            // allowed to make up five.
+            const Rect tr{lr.right() + 2 * s, y,
+                          vr.x - lr.right() - 6 * s, slidH};
             microFit(ui_, fSmall_, lr, label, ink.alpha(dim), Align::Left, 0);
             if (!has(id)) {
                 rend_.well(tr, nx::radiusXs * s, true);
@@ -2362,8 +2668,18 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             }
             f32 v = clampv(inst->getParam(id), 0.f, 1.f);
             const u64 wid = uiId(UiSpectraPos, id, uidKey);
-            if (ui_.trough(wid, tr, &v, 0.f, 1.f, nx::cyan, dim))
+            const int posDst = destOfParam(id);
+            // Position is the wavetable's own control and the matrix's first
+            // destination, so it takes the same two menu items its neighbours
+            // in the osc columns take. It is the one non-circular control in
+            // the panel that does -- and the reason it must is that a knob and
+            // a trough are the same THING to the person patching, whatever
+            // shape the panel drew them in.
+            if (ui_.offer(menuOfferFor(id, posDst))
+                   .grab(slop(tr))
+                   .trough(wid, tr, &v, 0.f, 1.f, nx::cyan, dim, 0.f))
                 commit(id, v, wid, "Position");
+            menuHandle(wid, id, posDst, label);
             // THE MOD RING, on a control that is not a circle. Position is a
             // trough, so its reach is a BRACKET along the trough's own top edge
             // -- the same number, the same rule (static, never a meter), drawn
@@ -2481,7 +2797,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             Rect g = seg;
             if (ftLive) {
                 const u64 wid = uiId(UiSpectraPanel, 600 + k, uidKey);
-                if (ui_.segButton(wid, seg, on, nx::violet))
+                if (ui_.grab(slop(seg)).segButton(wid, seg, on, nx::violet))
                     commit(pFType, (f32)k, wid, "Filter Type");
                 g = ui_.lastRect;
             }
@@ -2679,7 +2995,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         {
             const Rect chip{c.right() - 34 * s, c.y, 34 * s, headH};
             if (saveLive && !g_save.open) {
-                if (ui_.button(uiId(UiSpectraPanel, 850, uidKey), chip, "") ||
+                if (ui_.grab(slop(chip)).button(uiId(UiSpectraPanel, 850, uidKey),
+                                                chip, "") ||
                     g_save.pending) {
                     g_save.pending = false;
                     g_save.open = true;
@@ -2746,10 +3063,12 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // load a different preset in the same frame, which is two verbs for
             // one click and the second one is a surprise.
             if (!g_save.open) {
-                if (ui_.segButton(uiId(UiSpectraPanel, 60, uidKey), lb, false, nx::violet))
+                if (ui_.grab(slop(lb)).segButton(uiId(UiSpectraPanel, 60, uidKey), lb,
+                                                false, nx::violet))
                     loadIdx(spectraPreset_ - 1);
                 chev(ui_.lastRect, true);
-                if (ui_.segButton(uiId(UiSpectraPanel, 61, uidKey), rb, false, nx::violet))
+                if (ui_.grab(slop(rb)).segButton(uiId(UiSpectraPanel, 61, uidKey), rb,
+                                                false, nx::violet))
                     loadIdx(spectraPreset_ + 1);
                 chev(ui_.lastRect, false);
             } else {
@@ -2840,8 +3159,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                     ui_.tip = "Name this patch. Enter saves it to the user bank; "
                               "Escape leaves the bank alone.";
             } else {
-            if (ui_.segButton(uiId(UiSpectraPanel, 62, uidKey), nameR, g_drop.open,
-                              nx::violet) && !g_drop.open)
+            if (ui_.grab(slop(nameR)).segButton(uiId(UiSpectraPanel, 62, uidKey),
+                                               nameR, g_drop.open, nx::violet) &&
+                !g_drop.open)
                 openDrop();
             const Rect nr = ui_.lastRect;
             {   // the caret, drawn: a name with a caret is a menu, everywhere.
@@ -2932,7 +3252,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 Rect g = seg;
                 if (live) {
                     const u64 wid = uiId(UiSpectraPanel, 650 + k, uidKey);
-                    if (ui_.segButton(wid, seg, on, nx::violet))
+                    if (ui_.grab(slop(seg)).segButton(wid, seg, on, nx::violet))
                         commit(pSubShape, (f32)k, wid, "Sub Shape");
                     g = ui_.lastRect;
                 }
@@ -2963,7 +3283,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             ui_.segCluster(tg);
             if (live) {
                 const u64 wid = uiId(UiSpectraPanel, 670, uidKey);
-                if (ui_.segButton(wid, tg, on, nx::violet))
+                if (ui_.grab(slop(tg)).segButton(wid, tg, on, nx::violet))
                     commit(pNoiseTrack, on ? 0.f : 1.f, wid, "Noise Track");
                 ui_.microIn(fSmall_, ui_.lastRect, "TRK",
                             on ? nx::text : nx::muted.alpha(0.85f), Align::Center);
@@ -2995,7 +3315,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 Rect g = seg;
                 if (live) {
                     const u64 wid = uiId(UiSpectraPanel, 660 + k, uidKey);
-                    if (ui_.segButton(wid, seg, on, nx::violet))
+                    if (ui_.grab(slop(seg)).segButton(wid, seg, on, nx::violet))
                         commit(pVoiceMode, (f32)k, wid, "Voice Mode");
                     g = ui_.lastRect;
                 }
@@ -3117,7 +3437,14 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // The grab handle sits in the cell's top-left corner, which is dead
             // space beside a round cap in every knob cell in the panel and the
             // only 10px a macro cell has to spare. Macro sources are 9..12.
-            srcHandle({c.x + kw * (f32)m + 1 * s, er2 + 1 * s, 10 * s, 9 * s}, 9 + m);
+            // "The only dead 10px a macro has" was the note this handle was
+            // built to, and 10 x 9 plus 3 of slop is 16 x 15 -- one pixel short
+            // on the axis that matters. The cap of a 51px cell is 31px wide and
+            // centred, so the corner has 10 clear pixels of WIDTH and the whole
+            // row height above the arc: 12 x 10 still lands entirely outside
+            // the circle, and with slop it is 18 x 16.
+            srcHandle({c.x + kw * (f32)m + 0.5f * s, er2 + 0.5f * s, 12 * s, 10 * s},
+                      9 + m);
         }
     }
 
@@ -3187,8 +3514,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             snprintf(wdst, sizeof wdst, "M%d dest", k + 1);
             snprintf(wamt, sizeof wamt, "M%d amount", k + 1);
             enumSel(700 + k, srcR, sid, kMatrixSrc, clampv(srcMax + 1, 1, kSrcCount),
-                    wsrc, sdim);
-            enumSel(720 + k, dstR, did, kMatrixDst, kDstCount, wdst, sdim);
+                    wsrc, sdim, k);
+            enumSel(720 + k, dstR, did, kMatrixDst, kDstCount, wdst, sdim, k);
 
             // The depth: a small bipolar knob with no readout of its own (a
             // 26px cell has no line to spare) -- the tooltip is the readout.
@@ -3198,7 +3525,35 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             st.dim = sdim; st.absent = !has(aid);
             f32 v = has(aid) ? inst->getParam(aid) : 0.f;
             const u64 wid = uiId(UiSpectraKnob, aid, uidKey);
-            if (ui_.knobNx(wid, knR, &v, st)) commit(aid, v, wid, wamt);
+            // THE CURVE MOVED HOUSE, and it had to. The amount knob's
+            // right-click used to cycle the slot's response curve; the widget
+            // layer now spends a knob's right-click on the control menu and
+            // CONSUMES the press (uw-WIDGET-API.md §2), so a hand-rolled
+            // pressed[2] beside a knobNx stops firing. The gesture is not lost
+            // -- it is the same right-click, one row further in, and it now
+            // carries its own label instead of being a thing you had to have
+            // read the tooltip to know about.
+            const bool curveLive0 = has(pM1Curve + k);
+            const int  curve0 = curveLive0
+                ? clampv((int)std::lround(get(pM1Curve + k, 0.f)), 0, 2) : 0;
+            char curveLbl[40];
+            snprintf(curveLbl, sizeof curveLbl, "Response: %s -> %s",
+                     kCurveName[curve0], kCurveName[(curve0 + 1) % 3]);
+            Ui::MenuOffer mo;
+            if (curveLive0) { mo.items |= Ui::MenuCustom; mo.custom = curveLbl; }
+            if (ownTrack && has(aid)) mo.items |= Ui::MenuLearn;
+            if (ui_.offer(mo).knobNx(wid, knR, &v, st)) commit(aid, v, wid, wamt);
+            if (ui_.menuFired(wid, Ui::MenuCustom) && curveLive0)
+                commit(pM1Curve + k, (f32)((curve0 + 1) % 3),
+                       uiId(UiSpectraPanel, 860 + k, uidKey), "matrix curve");
+            if (ui_.menuFired(wid, Ui::MenuLearn)) {
+                if (!ownTrack)
+                    status_ = "Only a track's devices can be MIDI-mapped - the "
+                              "address space has no return or master scope";
+                else
+                    cycleMidiLearn(addr::deviceParam(ses_.tracks[devOwner_].uid,
+                                   dm.uid, inst->paramInfo(aid).id));
+            }
 
             // THE PER-SLOT CURVE (ids 101..108) COSTS NO PIXELS, and that is
             // exactly why it is here. A slot row is two selectors and a knob in
@@ -3209,12 +3564,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // and a six-pixel glyph in the corner of the cell says which of the
             // three is on. Linear draws at the disabled weight because linear
             // is the default and the default is "nothing is happening here".
-            const bool curveLive = has(cid);
+            const bool curveLive = curveLive0;
             const int  curve = curveLive
                 ? clampv((int)std::lround(get(cid, 0.f)), 0, 2) : 0;
-            if (curveLive && ui_.hovered(knR) && in.pressed[2])
-                commit(cid, (f32)((curve + 1) % 3),
-                       uiId(UiSpectraPanel, 860 + k, uidKey), "matrix curve");
             if (curveLive) {
                 const f32 gx0 = knR.x + 1 * s, gy1 = knR.bottom() - 1.5f * s;
                 const f32 gw = 7 * s, gh = 5 * s, th = std::max(1.f, nx::snapPx(s));
@@ -3241,8 +3593,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                              wamt, aid);
                 else if (curveLive)
                     snprintf(t, sizeof t,
-                             "%s %+.2f  (%s -> %s)  curve %s - right-click cycles "
-                             "it (lin x, exp x*x, S smoothstep)",
+                             "%s %+.2f  (%s -> %s)  curve %s - right-click for "
+                             "Response (lin x, exp x*x, S smoothstep), Reset, "
+                             "Type in",
                              wamt, (double)v, kMatrixSrc[src], kMatrixDst[dst],
                              kCurveName[curve]);
                 else
@@ -3274,6 +3627,14 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // =======================================================================
     shield.release();
     if (g_drop.open && np > 0 && g_page == 0) {
+        // This popover owns the keyboard while it is up: Up/Down/Home/End/Enter
+        // and Escape are ITS keys. The shell's shortcuts run at the TOP of the
+        // frame, before this draws, so without the flag Enter both picks a
+        // preset and launches the selected clip, and Escape both closes the
+        // list and stops every clip in the set. Carried one frame by Ui, which
+        // is right: a popover opened by a click was opened after the shortcuts
+        // had already run anyway.
+        ui_.keyModal = true;
         // The rows: presets in bank order, a header wherever the category tag
         // changes (see presetCatOf for how a NAME maps to a CATEGORY -- the
         // contract's "<TAG> <Name>" rule, nothing else). Rebuilt per frame:
@@ -3333,7 +3694,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // lives in the last column, so growing leftward is growing inward),
         // clipped to the card -- a menu taller than its card scrolls, it does
         // not escape the panel.
-        const f32 rowHd = 15 * s;
+        // 16 and not 15: a menu row is a click target like any other, and
+        // this list is where a preset is picked by name -- the one gesture the
+        // arrows beside it cannot do.
+        const f32 rowHd = 16 * s;
         const f32 padY  = 3 * s;
         const f32 listW = (lay::spectraColW[6] + nx::sp4) * s;
         Rect listR{presetRowR.right() - listW, presetRowR.bottom() + 2 * s, listW, 0};
@@ -3485,6 +3849,40 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // reason the popover is: it floats, and nothing under it should be able to
     // draw over the thing that is following the pointer.
     // =======================================================================
+    //
+    // THE REVERSE GESTURE ENDS THE SAME WAY. "Assign to matrix slot" leaves a
+    // destination waiting for a source, and a wait with no way out is a mode --
+    // the one thing this panel has refused to grow anywhere else. Escape, a
+    // right-click and a click that landed on no source handle all end it, and
+    // each of them says so; the ghost that follows the pointer is the drag's
+    // own, carrying the DESTINATION's name instead of the source's, because
+    // that is what is in your hand.
+    if (g_assign.wantDest > 0) {
+        const char* dn = kMatrixDst[clampv(g_assign.wantDest, 0, kDstCount - 1)];
+        if (in.keyPressed[KeyEscape] || in.pressed[2]) {
+            status_ = std::string("Spectra: ") + dn + " was not assigned";
+            g_assign.wantDest = g_assign.wantParam = -1;
+        } else if (in.pressed[0]) {
+            // A press that reached here is a press no source handle took --
+            // srcHandle() clears wantDest on the frame it completes one.
+            char msg[192];
+            snprintf(msg, sizeof msg,
+                     "Spectra: %s was not assigned - the source is a grip handle "
+                     "(the LFOs, ENV 2/3, the macros, wheel/bend/cc)", dn);
+            status_ = msg;
+            g_assign.wantDest = g_assign.wantParam = -1;
+        } else {
+            ui_.cursor = Cursor::Grab;
+            const f32 gw = ui_.microWidth(fSmall_, dn) + 14 * s, gh = 14 * s;
+            const Rect ghost{in.mx + 11 * s, in.my + 11 * s, gw, gh};
+            const f32 grad = nx::radiusXs * s;
+            rend_.shadow(ghost, grad, nx::shadowSheet);
+            rend_.roundRect(ghost, grad, nx::panel2.alpha(0.96f));
+            rend_.gradRect(ghost, grad, nx::glassChip);
+            rend_.gradStroke(ghost, grad, s, nx::edgeLit, 1.f);
+            ui_.microIn(fSmall_, ghost, dn, nx::cyan, Align::Center);
+        }
+    }
     if (g_assign.src >= 0) {
         const char* nm = kMatrixSrc[clampv(g_assign.src, 0, kSrcCount - 1)];
         if (in.keyPressed[KeyEscape] || in.pressed[2]) {

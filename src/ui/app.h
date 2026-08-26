@@ -89,6 +89,12 @@ private:
     void drawDeviceStrip(const Rect& r);
     void drawArrangementView(const Rect& r);
     void drawStatusBar(const Rect& r);
+    // F1: src/ui/keymap.h drawn as a full-screen reference card, the same table
+    // `nxtakt --help` prints. Called from the tail of drawStatusBar because it
+    // has to be the last chrome in the frame; it takes no rect because it
+    // centres itself in the window. See the note over g_keysOpen in
+    // app_chrome.cpp for why its input half rides drawControlBar instead.
+    void drawKeysSheet();
     // The engine-link banner (docs/GUI-ON-DAEMON.md §6, §12.7 item 2): one
     // full-width line under the control bar, drawn only when
     // engineLinkBanner(es_.link) has something to say. engineBannerH() is its
@@ -571,6 +577,10 @@ private:
     std::vector<std::string> browserPlaces_;
     f32  browserScroll_ = 0.f;
     int  browserSel_ = -1;
+    // True for the frames between a click that NAVIGATED the browser and the
+    // release of that same press, so the second click of a double-click on a
+    // folder cannot act on whatever row the new listing put under the pointer.
+    bool browserSwallowDbl_ = false;
 
     // device view state
     std::string pluginFilter_;
@@ -1194,6 +1204,9 @@ private:
     // silently resizes the other. Neither is serialized.
     f32  detailHArr_ = 260.f;
     f32& detailHFor(MainView v) { return v == MainView::Session ? detailH_ : detailHArr_; }
+    // The splitter's drag, in flight. Not serialized, like the heights it
+    // moves: a panel size is a working posture, not part of the set.
+    bool detailDrag_ = false;
 
     // Builds the plain view of the arrangement. `targets` is the caller's
     // storage for the per-track AutoTargets the context points into, and may be

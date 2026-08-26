@@ -1,5 +1,6 @@
 // NxTakt — a native, session-first DAW for Linux.
 #include "ui/app.h"
+#include "ui/keymap.h"
 #include "audio/backend.h"
 #include <clocale>
 #include <csignal>
@@ -36,60 +37,21 @@ static void usage() {
 #endif
         "  NXTAKT_SCALE=1.5              override UI scale\n"
         "  (the pre-rename LATTICE_* spellings are still read; NXTAKT_* wins)\n"
-        "\n"
-        "Keys:\n"
-        "  Space          play / stop            Esc      stop all clips\n"
-        "  Tab            Session / Arrangement  Enter    launch selected clip\n"
-        "  Arrows         move selection         Del      clear selected clip\n"
-        "  M              metronome              Ctrl+S   save\n"
-        "  Ctrl+B         browser                Ctrl+D   clip detail\n"
-        "  Ctrl+T         add track              Ctrl+Enter add scene\n"
-        "  Ctrl+Z         undo                   Ctrl+Shift+Z / Ctrl+Y  redo\n"
-        "                 (edits only: the transport, the record button and a\n"
-        "                  take in flight are outside it -- an undo while\n"
-        "                  recording cancels the take)\n"
-        "  Ctrl+Shift+K   computer MIDI keyboard (plays the armed track)\n"
-        "                 FL layout, by key position (any keyboard layout):\n"
-        "                            Z X C V B N M = lower octave white keys,\n"
-        "                            S D   G H J   = its black keys,\n"
-        "                 Q W E R T Y U + I O P    = the two octaves above,\n"
-        "                 2 3   5 6 7   9 0        = their black keys,\n"
-        "                 PgUp / PgDn octave, velocity next to the KBD chip\n"
-        "\n"
-        "Arrangement — markers (locators), on the ruler's upper band:\n"
-        "  Double-click   drop a marker at the grid beat under the pointer\n"
-        "  Click a flag   jump there. Stopped, the playhead goes now; playing,\n"
-        "                 the jump waits for the launch quantum, like a clip\n"
-        "  Drag a flag    move it (Shift = off the grid)\n"
-        "  Double-click a flag  rename it     Right-click a flag  delete it\n"
-        "  ,  /  .        jump to the previous / next marker from the playhead\n"
-        "  The LOWER band is unchanged: click locates, drag sets the loop brace,\n"
-        "  right-click adds or removes a time-signature change at that bar.\n"
-        "\n"
-        "Recording (the round button arms the intent, like Live's session record):\n"
-        "  empty slot     click starts a take on an armed track, click again stops\n"
-        "  MIDI clip      click overdubs another pass into it, click again stops\n"
-        "\n"
-        "Piano roll (CLIP tab, MIDI clips):\n"
-        "  Click          add / select note      Double-click  add / delete\n"
-        "  Drag           move, right edge sizes Right-click   delete note\n"
-        "  Wheel          scroll                 Shift+wheel   scroll time\n"
-        "  Ctrl+wheel     zoom time about the cursor\n"
-        "  Arrows         nudge the selected note (grid step / semitone)\n"
-        "  Shift+Up/Down  nudge by an octave      Del      delete the note\n"
-        "  Esc            deselect the note (again: stop all clips)\n"
-        "  Ctrl+U         double the loop and duplicate its notes\n"
-        "  ALL/FOLD/KEY   what the pitch axis shows: everything, only the\n"
-        "                 pitches this clip plays, or only the ones in the key\n"
-        "  VEL/CHANCE/RANGE  what the bottom lane edits. CHANCE is how often a\n"
-        "                 note sounds (rolled afresh every time round the loop);\n"
-        "                 RANGE is the far end of the velocity span each\n"
-        "                 sounding is drawn from, off at the bottom of the lane\n"
-        "  KEY row        the SET's root and scale, and SNAP: with it on, every\n"
-        "                 note written or dragged lands on a note of the scale\n"
-        "  QUANTIZE/NOTES quantize (grid + strength), legato, duplicate and\n"
-        "                 transpose. All of them act on the selection, or on the\n"
-        "                 whole clip when there is no selection.\n");
+        "\n");
+
+    // THE KEYS COME OUT OF src/ui/keymap.h, which is also what F1 draws inside
+    // the running program. They used to be a second copy in this string, and a
+    // second copy of a keymap is a keymap that is wrong: this help text still
+    // described a piano roll whose shortcuts had moved and said nothing at all
+    // about the widget vocabulary every knob in the program answers to. One
+    // table, two renderers, and the drift is not possible any more.
+    for (int i = 0; i < lat::keys::count; ++i) {
+        const lat::keys::Row& r = lat::keys::table[i];
+        if (!r.keys && !r.what) { std::printf("\n"); continue; }
+        if (!r.keys)            { std::printf("%s\n", r.what); continue; }
+        std::printf("  %-14s %s\n", r.keys, r.what ? r.what : "");
+    }
+    std::printf("\n  (F1 shows this list inside the program.)\n");
 }
 
 int main(int argc, char** argv) {

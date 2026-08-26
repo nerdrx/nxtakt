@@ -221,6 +221,18 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     SamplerControl* smp = inst->sampler();
     const bool real = smp != nullptr;
 
+    // THE 16-PIXEL FLOOR, as app_spectra.cpp states it at length: a control
+    // gets exactly as much hit slop as it is SHORT of the floor and not a pixel
+    // more, because a pad on a control that already clears it only lets that
+    // control steal its neighbour's face (widgets.h's own warning, and a
+    // segmented cluster is what it is warning about). Capped at the 3px that
+    // warning names.
+    const auto slop = [&](const Rect& r0) {
+        const f32 want = 16.f * s;
+        const f32 need = std::max(want - r0.w, want - r0.h);
+        return clampv(need * 0.5f, 0.f, 3.f * s);
+    };
+
     // --- the card ----------------------------------------------------------
     const f32 rad = nx::radiusSm * s;
     rend_.shadow(box, rad, nx::shadow);
@@ -263,12 +275,14 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.55f));
 
     // --- title -------------------------------------------------------------
-    Rect title{box.x, box.y, box.w, 16 * s};
+    // 18 and not 16, exactly as Spectra's band grew and for the same reason:
+    // the close button lives in here and at 16 it could not be 16 tall.
+    Rect title{box.x, box.y, box.w, 18 * s};
     rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
                 title.h - 8 * s}, tc);
 
-    Rect closeR{title.right() - 17 * s, title.y + 2 * s, 14 * s, 12 * s};
-    if (ui_.button(uiId(UiSamplerPanel, 0, 0), closeR, "")) {
+    Rect closeR{title.right() - 18 * s, title.y + 1.5f * s, 15 * s, 15 * s};
+    if (ui_.grab(slop(closeR)).button(uiId(UiSamplerPanel, 0, 0), closeR, "")) {
         samplerOpenUid_ = 0;
         samplerForced_ = false;
         samplerWave_.reset();                    // stop holding the device's buffer
@@ -313,7 +327,11 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     rend_.pushClip(box);
 
     const f32 headH = 11 * s;                  // the uppercase micro-label
-    const f32 subH  = 14 * s;                  // a selector / cluster row
+    // A SELECTOR ROW IS 16. Spectra's finding, applied to the panel built in
+    // its shape: gate, loop and the preset arrows are all exactly this tall,
+    // and at 14 all four were under the floor with nowhere to take slop from
+    // that would not steal a neighbour's pixels.
+    const f32 subH  = 16 * s;                  // a selector / cluster row
     const f32 gap   = 4 * s;
     f32 rowH = (body.h - headH - subH - gap * 3.f) * 0.5f;
     rowH = clampv(rowH, 34 * s, 62 * s);
@@ -384,7 +402,24 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         f32 v = has(id) ? inst->getParam(id) : st.def;
         const u64 wid = uiId(UiSamplerKnob, id, uidKey);
         const Rect kr{cell.x, cell.y, cell.w, cell.h - lblH};
-        if (ui_.knobNx(wid, kr, &v, st)) commit(id, v, wid, label);
+        // THE CONTROL MENU'S ONE OPT-IN ITEM THIS PANEL CAN ANSWER. Reset and
+        // Type-in the widget layer performs itself; Learn is the app's own
+        // device-parameter MIDI learn, on the identical address the generic
+        // parameter grid binds (app_devices.cpp) -- FL Studio's "link to
+        // controller", on the twenty knobs that most want it. There is no
+        // Assign item here: a sampler has no modulation matrix to assign into,
+        // and an item that could only refuse is worse than no item.
+        Ui::MenuOffer mo;
+        if (ownTrack && has(id)) mo.items |= Ui::MenuLearn;
+        if (ui_.offer(mo).knobNx(wid, kr, &v, st)) commit(id, v, wid, label);
+        if (ui_.menuFired(wid, Ui::MenuLearn)) {
+            if (!ownTrack)
+                status_ = "Only a track's devices can be MIDI-mapped - the address "
+                          "space has no return or master scope";
+            else
+                cycleMidiLearn(addr::deviceParam(ses_.tracks[devOwner_].uid, dm.uid,
+                                                 inst->paramInfo(id).id));
+        }
         microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, label,
                  nx::muted.alpha((st.absent ? 0.40f : 0.85f) * dim), Align::Center);
         if (ui_.hovered(kr)) {
@@ -412,7 +447,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             if (k) rend_.hairlineV(seg.x, r0.y + 2 * s, r0.bottom() - 2 * s);
             const bool on = k == cur;
             const u64 wid = uiId(UiSamplerPanel, 40 + id * 2 + k, uidKey);
-            if (ui_.segButton(wid, seg, on, nx::violet) && has(id))
+            if (ui_.grab(slop(seg)).segButton(wid, seg, on, nx::violet) && has(id))
                 commit(id, (f32)k, wid, what);
             microFit(ui_, fSmall_, ui_.lastRect, k ? onName : offName,
                      (on ? nx::text : nx::muted.alpha(cur < 0 ? 0.45f : 1.f)).alpha(dim),
@@ -544,15 +579,18 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
             // --- the handles -------------------------------------------------
             //
-            // HIT ZONES. A drawn edge is one pixel and the usability floor is
-            // eight, so each handle claims a 9 logical-pixel band centred on its
-            // edge and takes another 3 of slop through Ui::grab() -- 15 device
-            // pixels of catch around a 1px line, and the pixels it DRAWS never
-            // move. The two bands overlap once the region is under 9px wide, so
-            // the NEARER edge is hit-tested last and last setHot() wins: at the
-            // degenerate width the handle you are aiming at is the one you get,
-            // instead of whichever happened to be drawn second.
-            const f32 hw = 4.5f * s;             // half the grab band
+            // HIT ZONES. A drawn edge is one pixel, so each handle claims a
+            // 10 logical-pixel band centred on it and takes another 3 of slop
+            // through Ui::grab() -- SIXTEEN logical pixels of catch around a
+            // 1px line, and the pixels it DRAWS never move. It was 9 + 3 = 15,
+            // which cleared the 8px floor a drag edge is held to and missed the
+            // 16px floor a click target is held to by one pixel; these handles
+            // are both, so they are held to the larger. The two bands overlap
+            // once the region is under 10px wide, so the NEARER edge is
+            // hit-tested last and last setHot() wins: at the degenerate width
+            // the handle you are aiming at is the one you get, instead of
+            // whichever happened to be drawn second.
+            const f32 hw = 5.f * s;              // half the grab band
             const f32 sx = xOf(st0), ex = xOf(en0);
             const Rect startHit{sx - hw, well.y, hw * 2.f, well.h};
             const Rect endHit  {ex - hw, well.y, hw * 2.f, well.h};
@@ -588,32 +626,148 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 ui_.dragAccum = 0.f;
                 ui_.dragStart = (f64)(hotE ? en0 : st0);
             }
+            // MOVING THE REGION, spelled once so the drag, the wheel and the
+            // reset all land in the same three clamps. `d` is a signed offset
+            // in file fractions applied to `base`, which is where the gesture
+            // started (a drag) or where the value is now (a notch).
+            const auto moveTo = [&](u64 who, f32 base, f32 d) {
+                if (who == idStart) {
+                    commit(pStart, clampv(base + d, 0.f,
+                                          std::max(0.f, en0 - kMinRegion)),
+                           idStart, "Start");
+                } else if (who == idEnd) {
+                    commit(pEnd, clampv(base + d, std::min(1.f, st0 + kMinRegion),
+                                        1.f), idEnd, "End");
+                } else {
+                    // The length is invariant across the gesture, so it can be
+                    // read live rather than stashed: clamping the start never
+                    // changes it.
+                    const f32 len = en0 - st0;
+                    const f32 nv = clampv(base + d, 0.f, std::max(0.f, 1.f - len));
+                    commit(pStart, nv, idBody, "region");
+                    commit(pEnd, clampv(nv + len, 0.f, 1.f), idBody, "region");
+                }
+            };
+
             if (ui_.active == idStart || ui_.active == idEnd || ui_.active == idBody) {
                 if (in.dx != 0.f && plot.w > 1.f) {
-                    // Shift is the fine sweep here for the same reason it is on
-                    // every other continuous control in the program.
-                    ui_.dragAccum += in.dx * (in.shift() ? 0.25f : 1.f);
-                    const f32 d = ui_.dragAccum / plot.w;
-                    if (ui_.active == idStart) {
-                        const f32 nv = clampv((f32)ui_.dragStart + d, 0.f,
-                                              std::max(0.f, en0 - kMinRegion));
-                        commit(pStart, nv, idStart, "Start");
-                    } else if (ui_.active == idEnd) {
-                        const f32 nv = clampv((f32)ui_.dragStart + d,
-                                              std::min(1.f, st0 + kMinRegion), 1.f);
-                        commit(pEnd, nv, idEnd, "End");
-                    } else {
-                        // The length is invariant across the gesture, so it can
-                        // be read live rather than stashed: clamping the start
-                        // never changes it.
-                        const f32 len = en0 - st0;
-                        const f32 nv = clampv((f32)ui_.dragStart + d, 0.f,
-                                              std::max(0.f, 1.f - len));
-                        commit(pStart, nv, idBody, "region");
-                        commit(pEnd, clampv(nv + len, 0.f, 1.f), idBody, "region");
-                    }
+                    // FINE IS SHIFT **OR** CTRL. Shift was here first and stays;
+                    // Ctrl is FL Studio's spelling and is what the widget layer
+                    // added to every knob and trough in this panel
+                    // (uw-WIDGET-API.md §0). These two handles are the only
+                    // continuous controls in the file the widget layer does not
+                    // own, so they are the only ones that had to be told.
+                    ui_.dragAccum += in.dx * ((in.shift() || in.ctrl()) ? 0.25f : 1.f);
+                    moveTo(ui_.active, (f32)ui_.dragStart, ui_.dragAccum / plot.w);
                 }
                 if (in.released[0]) ui_.active = 0;
+            }
+
+            // THE WHEEL, AT THE WIDGET LAYER'S OWN RATE. One notch is five
+            // logical pixels of drag, which is what a wheel does to every knob
+            // and trough beside these handles; Ctrl quarters it, as it does
+            // there. A hand-rolled control in a panel full of widget-layer ones
+            // has to answer the same gestures or it reads as broken rather than
+            // as different -- and trimming a sample to the frame is exactly
+            // what a wheel is for.
+            if (canEdit && (hotS || hotE || hotB) && in.wheel != 0.f && plot.w > 1.f) {
+                const u64 who = hotS ? idStart : hotE ? idEnd : idBody;
+                const f32 step = (5.f * s / plot.w) * (in.ctrl() ? 0.25f : 1.f);
+                moveTo(who, who == idEnd ? en0 : st0, in.wheel > 0.f ? step : -step);
+                in.wheel = 0.f;                  // not the strip's notch to spend
+            }
+
+            // DOUBLE-CLICK IS BACK TO THE DEFAULT, which is the verb every knob
+            // in this panel already answers and which these two handles were the
+            // only continuous controls in the file to be missing. Start goes to
+            // 0, End to 1, and the region body -- whose "default" is the whole
+            // file -- opens both at once, in one undo entry.
+            if (canEdit && in.dblClick && (hotS || hotE || hotB)) {
+                const u64 gest = uiId(UiSamplerWave, 4, uidKey);
+                if (hotS)      commit(pStart, 0.f, gest, "Start");
+                else if (hotE) commit(pEnd,   1.f, gest, "End");
+                else {
+                    commit(pStart, 0.f, gest, "region");
+                    commit(pEnd,   1.f, gest, "region");
+                }
+                status_ = hotS ? "Sampler: Start back to the head of the file"
+                        : hotE ? "Sampler: End back to the tail of the file"
+                               : "Sampler: the region is the whole file again";
+                ui_.active = 0;
+            }
+
+            // RIGHT-CLICK ERASES, and on this surface there are two things to
+            // erase and they are not the same size.
+            //
+            //   on a HANDLE   the TRIM comes off -- that edge goes back to the
+            //                 end of the file it belongs to. This is the FL
+            //                 rule taken exactly: the button that sets a value
+            //                 sets it, the other button takes it away.
+            //   anywhere else the SAMPLE comes off. It is the loudest verb in
+            //                 the panel, so it takes an undo point, it names
+            //                 the file it dropped, and it says Ctrl+Z in the
+            //                 same breath -- §9, and the difference between a
+            //                 gesture you can recover from and one you cannot.
+            //
+            // TWO STAGES, AND THE ORDER IS THE POINT. Dropping a sample is the
+            // loudest verb in the panel and the first cut put it one stray
+            // right-click away from a trim: the whole well answered it, and a
+            // handle is fifteen pixels of a three-hundred-pixel well. Measured
+            // in gamescope, a right-click aimed squarely at the Start handle
+            // dropped a four-second chord -- so the rule is now an escalation,
+            // and the second stage is only reachable from a state the first one
+            // leaves you in:
+            //
+            //   on a HANDLE            that edge's trim comes off
+            //   on a TRIMMED region    the whole trim comes off (region = file)
+            //   on an UNTRIMMED one    the SAMPLE comes off
+            //
+            // Right-click twice to empty the device, which is a thing a hand
+            // does deliberately and never by accident, and each stage says what
+            // it did and what the next one would do.
+            //
+            // AND THE TEST IS GEOMETRIC, not `hot`. isHot() answers with LAST
+            // frame's resolution, which is right for drawing and wrong for a
+            // destructive verb: when the pointer's arrival and the button press
+            // arrive in one frame -- which is what a fast right-click is -- the
+            // handle has not been hot yet, and the well's branch is what
+            // catches the press. The same rects, tested now, cannot lag.
+            if (in.pressed[2] && well.contains(in.mx, in.my)) {
+                const f32 dS2 = std::fabs(in.mx - sx), dE2 = std::fabs(in.mx - ex);
+                const bool onS = canEdit && startHit.inset(-3.f * s).contains(in.mx, in.my);
+                const bool onE = canEdit && endHit.inset(-3.f * s).contains(in.mx, in.my);
+                const u64 gest = uiId(UiSamplerWave, 5, uidKey);
+                // Nearer edge wins when the two bands overlap, which is the
+                // same tie-break the hover ordering makes.
+                if ((onS && !onE) || (onS && onE && dS2 <= dE2)) {
+                    if (st0 > 0.f) {
+                        commit(pStart, 0.f, gest, "Start");
+                        status_ = "Sampler: Start trim cleared";
+                    } else {
+                        status_ = "Sampler: Start is already at the head of the file";
+                    }
+                } else if (onE) {
+                    if (en0 < 1.f) {
+                        commit(pEnd, 1.f, gest, "End");
+                        status_ = "Sampler: End trim cleared";
+                    } else {
+                        status_ = "Sampler: End is already at the tail of the file";
+                    }
+                } else if (canEdit && (st0 > 0.f || en0 < 1.f)) {
+                    commit(pStart, 0.f, gest, "region");
+                    commit(pEnd,   1.f, gest, "region");
+                    status_ = "Sampler: the region is the whole file again - "
+                              "right-click again to drop the sample itself";
+                } else {
+                    const std::string& fp = smp->samplePath();
+                    const std::string base = fp.empty()
+                        ? std::string("the recorded take")
+                        : fp.substr(fp.rfind('/') + 1);
+                    undoPoint("clear sample");
+                    smp->clearSample();
+                    samplerWave_.reset();
+                    status_ = "Sampler: dropped " + base + " - Ctrl+Z puts it back";
+                }
             }
 
             // Drawn after the input, so an edge lands where the drag left it in
@@ -645,18 +799,35 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             else if (hotB || ui_.active == idBody)
                 ui_.cursor = Cursor::Hand;
             if (hotS || hotE) {
-                char t[160], tm[32];
+                char t[256], tm[32];
                 const f32 v = hotS ? st0 : en0;
                 fmtSecs(tm, sizeof tm, durSec * (f64)v);
-                snprintf(t, sizeof t, "%s %.4f - %s into the file. Drag to trim; "
-                                      "hold Shift for fine. (id %d)",
+                snprintf(t, sizeof t, "%s %.4f - %s into the file. Drag to trim, "
+                                      "Shift or Ctrl for fine, wheel to nudge; "
+                                      "double-click or right-click clears the "
+                                      "trim. (id %d)",
                          hotS ? "Start" : "End", (double)v, tm, hotS ? pStart : pEnd);
                 ui_.tip = t;
-            } else if (hotB) {
-                char t[160], tm[32];
+            } else if (hotB || ui_.hovered(well)) {
+                // ONE TIP FOR THE WHOLE WELL, and it names the stage the
+                // right-click is actually at. A sentence that said "drops the
+                // sample" while the first right-click would only clear a trim
+                // is the kind of small lie the rest of this panel refuses.
+                const bool trimmed = st0 > 0.f || en0 < 1.f;
+                char t[272], tm[32];
                 fmtSecs(tm, sizeof tm, durSec * (f64)(en0 - st0));
-                snprintf(t, sizeof t, "The playing region: %s. Drag to move it "
-                                      "without changing its length.", tm);
+                if (hotB)
+                    snprintf(t, sizeof t, "The playing region: %s. Drag or wheel "
+                             "to move it without changing its length; "
+                             "double-click opens it to the whole file. "
+                             "Right-click %s.", tm,
+                             trimmed ? "clears the trim" : "drops the sample");
+                else
+                    snprintf(t, sizeof t, "%s of the file the region does not "
+                             "play. Right-click %s.",
+                             trimmed ? "The part" : "All",
+                             trimmed ? "clears the trim, and again drops the sample"
+                                     : "drops this sample - Ctrl+Z puts it back");
                 ui_.tip = t;
             }
         }
@@ -860,16 +1031,27 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 rend_.line(b.cx() - k * d * 0.6f, b.cy() + k,
                            b.cx() + k * d * 0.6f, b.cy(), 1.1f * s, nx::muted);
             };
-            if (ui_.segButton(uiId(UiSamplerPanel, 60, uidKey), lb, false, nx::violet)) load(-1);
+            if (ui_.grab(slop(lb)).segButton(uiId(UiSamplerPanel, 60, uidKey), lb,
+                                            false, nx::violet)) load(-1);
             chev(lb, true);
-            if (ui_.segButton(uiId(UiSamplerPanel, 61, uidKey), rb, false, nx::violet)) load(+1);
+            if (ui_.grab(slop(rb)).segButton(uiId(UiSamplerPanel, 61, uidKey), rb,
+                                            false, nx::violet)) load(+1);
             chev(rb, false);
+            // THE WHEEL WALKS THE BANK, which is Spectra's stepper rule applied
+            // to the one stepper in this panel: a wheel over a control that
+            // steps should step it, and a wheel that scrolled the device strip
+            // instead was the panel disagreeing with its own neighbour.
+            if (ui_.hovered(pr) && in.wheel != 0.f) {
+                load(in.wheel > 0.f ? +1 : -1);
+                in.wheel = 0.f;
+            }
             microFit(ui_, fSmall_, {lb.right(), pr.y, rb.x - lb.right(), pr.h},
                      presetNameOf(*inst, samplerPreset_), nx::text, Align::Center, 2 * s);
             if (ui_.hovered(pr)) {
                 char t[128];
-                snprintf(t, sizeof t, "Preset %d of %d - the arrows step through them. "
-                                      "No preset names a file; what it plays is yours.",
+                snprintf(t, sizeof t, "Preset %d of %d - the arrows and the wheel "
+                                      "step through them. No preset names a file; "
+                                      "what it plays is yours.",
                          samplerPreset_ + 1, np);
                 ui_.tip = t;
             }

@@ -15,13 +15,23 @@
 
 namespace lat {
 
-inline u64 uiId(int kind, int a = 0, int b = 0) {
+// `c` is the FOURTH slot, and it is optional in the strict sense: with it left
+// alone the hash is bit-identical to the three-argument one this has always
+// been, because a zero c contributes a zero xor after the final rotate. So no
+// existing id anywhere in the program moved when it was added. It exists for
+// the gesture ids arrange.cpp mints -- kind, verb, item AND a stroke counter,
+// which is one number more than three fields can carry.
+inline u64 uiId(int kind, int a = 0, int b = 0, int c = 0) {
     u64 h = 0x9E3779B97F4A7C15ull;
     h ^= (u64)(u32)kind * 0x100000001B3ull;
     h = (h << 7) | (h >> 57);
     h ^= (u64)(u32)a * 0xC2B2AE3D27D4EB4Full;
     h = (h << 11) | (h >> 53);
     h ^= (u64)(u32)b * 0x165667B19E3779F9ull;
+    if (c) {
+        h = (h << 13) | (h >> 51);
+        h ^= (u64)(u32)c * 0x27D4EB2F165667C5ull;
+    }
     return h ? h : 1;
 }
 
@@ -88,12 +98,22 @@ enum UiKind : int {
     // 24/25's, same cure: fresh kinds, named.
     UiDetailLaunch = 45,
     UiRackPanel    = 46,
+    // The horizontal splitter between the main view and the detail panel
+    // (app.cpp). One id for both views — only one panel is on screen at a time.
+    UiDetailSplit  = 47,
     // The sampler's editor (app_sampler.cpp), in Spectra's shape and at the
     // numbers it was born with: panel chrome (close, segment clusters, the
     // preset arrows), one per knob, and the waveform region's handles.
     UiSamplerPanel = 50,
     UiSamplerKnob  = 51,
     UiSamplerWave  = 52,
+    // The widget layer's OWN families, and the first entries here that are not
+    // a view's: the control menu's sheet and rows, and the text field that
+    // menu opens over a control. They are spent inside widgets.cpp, which is
+    // why they are numbered away from the views' block -- a view may not
+    // collide with them and has no reason to name them.
+    UiCtlMenu   = 60,
+    UiCtlTypeIn = 61,
 };
 
 // ---------------------------------------------------------------------------
@@ -139,8 +159,8 @@ enum class Pill {
 // THE RULE, and it is a restriction rather than a licence: a badge appears only
 // where the answer is not obvious. Not on buttons, not on faders, not on an
 // item you are already holding, not next to a resize cursor that has already
-// said what it is. Six answers, and every one of them names a verb the surface
-// under the pointer cannot otherwise say.
+// said what it is. Seven answers, and every one of them names a verb the
+// surface under the pointer cannot otherwise say.
 //
 // It is positional, not temporal -- it is under the pointer or it is not -- so
 // there is nothing here for reduced motion to freeze, and no state to hold.
@@ -151,6 +171,11 @@ enum class Badge {
     Split,      //  blade : a double-click cuts what is under the pointer
     Delete,     //  x : removal is the primary verb on this thing
     Duplicate,  //  + over a copy : this drag is leaving a copy behind
+    // arrow into a ring : dropping HERE patches what is in your hand to the
+    // control under the pointer. Add was the nearest of the six and it is not
+    // this one: a drop makes nothing -- both ends already exist, and what the
+    // gesture creates is the wire between them.
+    Assign,
 };
 
 struct Ui {
@@ -188,6 +213,49 @@ struct Ui {
     // Fluent form, for the call sites: `ui.grab(3.f * s).squareToggle(...)`.
     Ui&  grab(f32 devicePx) { hitPad = devicePx; return *this; }
 
+    // EXACTLY THE DEFICIT, CAPPED AT 3 DEVICE PIXELS:
+    //
+    //     clamp((16*dpi - min(w, h)) * 0.5, 0, 3*dpi)
+    //
+    // The instrument-editor pass arrived at this and it is right, so it lives
+    // here rather than in the two files that worked it out. Halved because slop
+    // grows both sides; zero for a control that already clears the floor, so a
+    // row of mixed sizes does not end up with the big controls elbowing the
+    // small ones; capped because past 3 px neighbours steal each other's hover
+    // and the aim gets worse rather than better.
+    //
+    // TWO RULES THAT MATTER MORE THAN THE NUMBER, and neither is enforceable
+    // from in here:
+    //
+    //   * SHOULDER TO SHOULDER, GROW THE CONTAINER, NOT THE CONTROL. setHot is
+    //     last-drawn-wins, so padding adjacent segments makes the last one
+    //     swallow its neighbour's own face -- the control gets bigger and the
+    //     row gets less accurate. The instrument pass took its matrix selectors
+    //     from stealing 2 px to slop=0.0 by giving the ROW four more pixels.
+    //   * WHERE SLOP IS UNAVOIDABLE, DRAW THE DESTRUCTIVE CONTROL FIRST. Then
+    //     the harmless neighbours steal from IT, and the overlap costs a missed
+    //     mute instead of a deleted clip. It is a draw-order decision and this
+    //     is the only place it is written down.
+    f32  slopFor(const Rect& b) const;
+    Ui&  grabTo16(const Rect& b) { return grab(slopFor(b)); }
+
+    // WHO OWNS THE KEYBOARD.
+    //
+    // The shell's global shortcuts run at the TOP of the frame and every modal
+    // surface is drawn in the middle of it, so a popover that reads Enter reads
+    // it after the shell has already spent it -- which is how pressing Enter in
+    // Spectra's preset list also launched a clip. A surface that owns the
+    // keyboard sets `keyModal` while it draws; the flag is carried one frame
+    // (keyModalPrev) so the shell, which asks first, gets last frame's answer.
+    // One frame of lag is exactly right: a popover opened BY a key press was
+    // opened after the shortcuts ran anyway, and one that has been up for a
+    // frame is one the user is looking at.
+    bool keyModal = false;
+    bool keyModalPrev = false;
+    // What App::handleShortcuts asks. Text editing and the control menu are in
+    // it by construction, so neither has to be remembered anywhere else.
+    bool keysOwned() const { return keyModal || keyModalPrev || editId || menu.open; }
+
     // Inline text editing.
     u64  editId = 0;
     std::string editBuf;
@@ -196,6 +264,29 @@ struct Ui {
 
     // Tooltip requested this frame.
     std::string tip;
+
+    // THE WIDGET LAYER'S VOICE, and the answer to "does a refusal explain, or
+    // does it silently do nothing?".
+    //
+    // Set on the frame a widget REFUSES a gesture it understood: a type-in that
+    // is not a number, a Reset on a control that has no default. Cleared every
+    // beginFrame(), drained into the status line by App::drawStatusBar -- which
+    // is drawn last, so every widget in the frame has already had its say. A
+    // view may set it for its own refusals; last writer in the frame wins, and
+    // one pointer produces at most one refusal per frame in practice.
+    std::string refusal;
+
+    // --- measurement, for tools/drive-lib.sh's scanx() ----------------------
+    //
+    // NXTAKT_DEBUG_HOT: the rect that actually claimed hot, logged from
+    // endFrame() whenever it changes. app_spectra.cpp and app_sampler.cpp each
+    // grew a probe of their own that answers "which control" from the tip;
+    // this one answers the question those cannot -- HOW BIG IS IT, including
+    // the hit slop -- because setHot() is the only place in the program that
+    // knows. Off unless the variable is set; one line per change, never per
+    // frame.
+    Rect hotRect{};
+    f32  hotSlop = 0.f;
 
     // Where the last button()/squareToggle() actually drew, after §5's hover
     // lift and press scale. A caller that paints its own glyph inside a button
@@ -223,24 +314,51 @@ struct Ui {
     int  textJobN = 0;
     bool deferText = false;
 
-    void beginFrame() { hotNext = 0; cursor = Cursor::Arrow; badge = Badge::None; tip.clear(); hitPad = 0.f; }
+    // menuBegin() runs FIRST, before anything in the frame has drawn: an open
+    // control menu resolves its own click here and then shields the rest of the
+    // program from the pointer for the whole frame. See widgets.cpp.
+    void beginFrame() { hotNext = 0; cursor = Cursor::Arrow; badge = Badge::None; tip.clear();
+                        hitPad = 0.f; refusal.clear();
+                        keyModalPrev = keyModal; keyModal = false;
+                        menuBegin(); }
     // flushText() first, as a backstop: a view that opens a deferral window and
     // returns before closing it would otherwise lose its labels for the frame.
     // It is a no-op when nothing is queued, which is every frame that plays by
     // the rules.
-    void endFrame()   { flushText(); hitPad = 0.f; hot = hotNext;
-                        if (!in->down[0] && active && active != editId) active = 0; }
+    //
+    // menuEnd() un-parks the pointer the shield moved, so App::draw's
+    // setCursor / drawBadge / drawMenu all see the real one again.
+    void endFrame()   { flushText(); hitPad = 0.f; menuEnd(); hot = hotNext;
+                        if (!in->down[0] && active && active != editId) active = 0;
+                        probeHot(); }
 
     bool hovered(const Rect& b) const { return b.contains(in->mx, in->my); }
     // The clip test is against the UNPADDED rect's clip, not the padded one:
     // the pad is aim slack around a control, never a licence to be caught
     // outside the panel that owns it.
+    //
+    // THE SHIELD. While a control menu is open nothing else in the program is
+    // reachable, and this one line is the whole enforcement: no widget claims
+    // hot, so no widget takes `active`, so no drag can start under an open
+    // menu. The pointer is separately parked off-screen (menuBegin) for the
+    // handful of surfaces that hit-test with a bare hovered() instead.
     bool setHot(u64 id, const Rect& b) {
         const f32 pad = hitPad;
         hitPad = 0.f;
+        // The offer is consumed HERE, by the first setHot() after it, exactly
+        // as hitPad is -- which is what makes "applies to the next control and
+        // is then cleared" true for EVERY widget rather than only for the ones
+        // that can open a menu. Cleared even when the widget is shielded or
+        // misses: an offer that survived a knob the pointer was not over would
+        // reappear on an unrelated knob later in the frame.
+        lastOffer = pendingOffer;
+        pendingOffer = MenuOffer{};
+        if (menuShield) return false;
         const Rect h = pad > 0.f ? b.inset(-pad) : b;
         if (h.contains(in->mx, in->my) && r->currentClip().contains(in->mx, in->my)) {
             hotNext = id;
+            hotRect = h;
+            hotSlop = pad;
             return true;
         }
         return false;
@@ -287,6 +405,65 @@ struct Ui {
     // has to react per keystroke (a filter narrowing as you type) reads the
     // live text through here rather than reaching into editBuf itself.
     const std::string* liveText(u64 id) const { return editId == id ? &editBuf : nullptr; }
+
+    // -----------------------------------------------------------------------
+    // THE CONTROL MENU
+    //
+    // FL Studio's right-click-a-knob, and the reason it is here rather than in
+    // the five panels that draw knobs: "Reset" and "Type in value" are the same
+    // two verbs on every continuous control in the program, and a menu built
+    // per panel would be five menus that drift. Two items are therefore owned
+    // by the widget and need no code at the call site at all; the other three
+    // are things only the caller can know about (does this control have a
+    // modulation matrix behind it, a MIDI address, a third state to cycle) and
+    // are opted into.
+    //
+    // It is a TIER-2 SHEET (docs/DESIGN.md §4: menus are one of the few
+    // surfaces entitled to overlap content), in the idiom app_spectra.cpp's
+    // preset popover established -- sheet shadow, panel2 fill, glass2, lit
+    // edge -- because a second menu material would be a second menu.
+    // -----------------------------------------------------------------------
+    enum MenuItem : u32 {
+        MenuReset  = 1u << 0,   // always offered; the widget performs it
+        MenuTypeIn = 1u << 1,   // always offered; the widget performs it
+        MenuAssign = 1u << 2,   // opt-in; reported to the caller
+        MenuLearn  = 1u << 3,   // opt-in; reported to the caller
+        MenuCustom = 1u << 4,   // opt-in; reported to the caller, caller labels it
+    };
+    struct MenuOffer {
+        u32 items = 0;                              // the three opt-ins, or'd
+        const char* assign = "Assign to matrix slot";
+        const char* learn  = "Learn MIDI CC";
+        const char* custom = nullptr;               // required with MenuCustom
+    };
+    // Fluent and ONE-SHOT, exactly like grab(): it applies to the next control
+    // call and is cleared by it, so an offer can never leak onto a neighbour.
+    //   ui.offer({Ui::MenuLearn}).knobNx(id, r, &v, st);
+    //   if (ui.menuFired(id, Ui::MenuLearn)) cycleMidiLearn(addr);
+    Ui& offer(const MenuOffer& o) { pendingOffer = o; return *this; }
+
+    // True on exactly ONE frame: the frame the item was picked. By then the
+    // menu is closed and the pointer is unshielded, so the handler runs in an
+    // ordinary frame. Read it immediately after the widget call.
+    bool menuFired(u64 id, u32 item) const {
+        return menuCtl_ == id && (menuItem_ & item) != 0;
+    }
+    // Is this control's menu on screen right now? For a caller that wants to
+    // keep a knob looking live while its menu is up.
+    bool menuOpenFor(u64 id) const { return menu.open && menu.ctl == id; }
+
+    // The frame's menu, drawn beside drawBadge and for drawBadge's reason: it
+    // has to be the last thing in the frame, because a menu that anything can
+    // paint over is not a menu.
+    void drawMenu(Renderer& rr, Font& f);
+
+    // --- type-in -----------------------------------------------------------
+    //
+    // Open the numeric field over the control `id`. The menu calls this for
+    // you; it is public so a surface can offer its own route in. While it is
+    // open the control draws a field over its own rect and takes no drag.
+    void beginTypeIn(u64 id, f64 value);
+    bool typingIn(u64 id) const { return typeInId == id; }
 
     // --- the NX vocabulary (§5) -------------------------------------------
     //
@@ -413,6 +590,22 @@ struct Ui {
     // the value is changing.
     bool knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st);
 
+    // A thin arc OUTSIDE the value arc, from `lo` to `hi` in the same 0..1
+    // travel knobNx drags in, offset from the knob's current position. Draws
+    // nothing when the span is empty. This is a STATIC decoration -- the caller
+    // computes lo/hi from stored state, never from a running signal -- and the
+    // widget layer keeps it that way by taking numbers and not a callback.
+    //
+    // It lives here, and not in the one editor that draws it, because the
+    // sweep angles and the cap radius it has to be concentric with are
+    // knobNx's own file-locals: a caller that placed the ring itself would be
+    // mirroring three constants across a module boundary, and the mirror would
+    // rot the first time the sweep moved. `b` and `st` are the SAME two the
+    // matching knobNx() call was given, which is what makes the two concentric
+    // by construction rather than by agreement.
+    void knobRing(const Rect& b, const KnobStyle& st, f32 v, f32 lo, f32 hi,
+                  const Col& c);
+
     // A recessed horizontal trough whose fill IS the value.
     //
     // §1's light-rides-motion rule, literally: the specular band's phase is the
@@ -420,8 +613,13 @@ struct Ui {
     // stands still when the value does. Nothing here is time-driven, so there
     // is nothing for reduced motion to freeze -- and sheen() refuses to draw
     // under it anyway.
+    // `def`, when finite, is what a double-click resets to and what the control
+    // menu's Reset writes. NAN -- the default, so every existing call site is
+    // unchanged -- means this trough has no meaningful default, and BOTH of
+    // those routes then say so out loud (Ui::refusal) rather than being a
+    // gesture that quietly did nothing.
     bool trough(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, const Col& fill,
-                f32 dim = 1.f);
+                f32 dim = 1.f, f32 def = NAN);
 
     // The frame's badge, drawn beside the pointer. ONE call site, and it is the
     // same one that consumes `cursor` (App::draw, beside win_.setCursor) --
@@ -445,6 +643,61 @@ struct Ui {
     void bevel(const Rect& b, f32 radius, const Col& fill, f32 lightness = 0.06f);
     void playTriangle(const Rect& b, const Col& c);
     void stopSquare(const Rect& b, const Col& c);
+
+    // --- machinery. Not for call sites. -------------------------------------
+    //
+    // Ui has no access control by design (it is a bag of frame state), so the
+    // line is drawn here in words: everything below is written by widgets.cpp
+    // and read by widgets.cpp, and a view that touches it is reaching past the
+    // API above into the layer's own bookkeeping.
+    static constexpr int kMenuRows = 5;
+    struct Menu {
+        bool open = false;
+        u64  ctl  = 0;                       // the control that owns it
+        Rect box{};                          // the sheet, fixed while open
+        f32  rowH = 0.f;
+        int  n = 0;
+        u32  item[kMenuRows]{};
+        bool live[kMenuRows]{};              // false: drawn refusing
+        char label[kMenuRows][40]{};
+        char why[kMenuRows][80]{};           // what a refused row says when picked
+        int  cursor = -1;                    // keyboard highlight, -1 = none
+    };
+    Menu      menu{};
+    MenuOffer pendingOffer{};                // one-shot, taken by the next setHot()
+    MenuOffer lastOffer{};                   // what that setHot() took
+    u64       menuCtl_ = 0;                  // the item that fired THIS frame
+    u32       menuItem_ = 0;
+    bool      menuShield = false;            // the pointer is parked; setHot refuses
+    f32       menuParkX = 0.f, menuParkY = 0.f;
+
+    u64         typeInId = 0;                // the control being typed into
+    std::string typeInBuf;
+    // "The text is selected." Every type-in box in every DAW opens with the
+    // current value highlighted so the first digit REPLACES it; textField has
+    // no selection model, so this is that behaviour without one -- the first
+    // printable key (or Backspace) clears the buffer, and any caret move gives
+    // up the pretence and edits in place. It is drawn in violet while it holds,
+    // so "typing replaces this" is visible rather than a rule to be learned.
+    bool        typeInFresh = false;
+
+    void menuBegin();
+    void menuEnd();
+    void probeHot() const;
+    // Open `id`'s menu at the pointer. `def` non-finite means "no default", and
+    // Reset is then drawn refusing with `noDefWhy` as its explanation.
+    void menuOpen(u64 id, f64 def, const char* noDefWhy);
+    // MenuReset, spelled once: true when the control should write `def`. A
+    // non-finite `def` is a control with no default, and this reports `why`
+    // through refusal instead of returning true -- which is the difference
+    // between a menu item that explains itself and one that does nothing.
+    bool wantReset(u64 id, f64 def, const char* why);
+    // The type-in field, over `b`, while it is open for `id`. Returns
+    //    0  not typing -- the control runs its normal input and draw
+    //    1  committed; *out is the parsed value, clamped to lo..hi
+    //   -1  cancelled, or refused (refusal already says why)
+    // Either non-zero answer means the field has closed.
+    int typeInRun(u64 id, const Rect& b, f64 lo, f64 hi, f64* out);
 };
 
 } // namespace lat

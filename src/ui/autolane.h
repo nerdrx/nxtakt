@@ -23,6 +23,8 @@
 #include "session.h"
 #include "timeaxis.h"
 #include "widgets.h"
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace lat {
@@ -78,6 +80,41 @@ inline f32 dpiOf(const Ui& ui) {
 // a mistake waiting to be made.
 inline constexpr f32 kPtSize = 5.f;
 inline constexpr f32 kPtGrab = 8.f;
+// The lane's drawable value band, as an inset on the lane's rect. It was a
+// literal inside AutoLaneView::draw and is named here because a SECOND hit test
+// now needs it: the arrangement's right-drag erase (FL's most-used gesture)
+// sweeps points out from OUTSIDE the lane, between frames of the lane's own
+// draw, and a sweep that disagreed with the lane about where a point is drawn
+// would erase the wrong one -- or nothing, which is worse, because a gesture
+// that quietly does nothing is indistinguishable from a broken mouse.
+inline constexpr f32 kAutoLaneInsetY = 3.f;
+
+// Where a value sits, and what a y means, on a lane drawn into `r` at scale `s`.
+// The two are exact inverses over the band and both clamp, so a cursor above the
+// lane reads as `hi` rather than as a value off the top.
+inline f32 autoLaneValToY(const Rect& r, f32 s, f32 lo, f32 hi, f32 v) {
+    const f32 y0 = r.y + kAutoLaneInsetY * s;
+    const f32 h  = std::max(1.f, r.h - 2.f * kAutoLaneInsetY * s);
+    const f32 span = hi - lo;
+    const f32 t = span > 1e-9f ? clampv((v - lo) / span, 0.f, 1.f) : 0.f;
+    return y0 + (1.f - t) * h;
+}
+
+// The nearest breakpoint within `rad` of (mx,my), Chebyshev, or -1 -- the same
+// answer AutoLaneView's own pointAt gives, for the same reason: the target is a
+// square, so "inside it, or nearly" is a square too.
+inline int autoLanePointAt(const std::vector<AutoPoint>& pts, const TimeAxis& ta,
+                           const Rect& r, f32 s, f32 lo, f32 hi, f32 mx, f32 my, f32 rad) {
+    int found = -1;
+    f32 best = rad;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const f32 x = beatToX(ta, pts[i].beat);
+        const f32 y = autoLaneValToY(r, s, lo, hi, pts[i].value);
+        const f32 d = std::max(std::fabs(mx - x), std::fabs(my - y));
+        if (d <= best) { best = d; found = (int)i; }
+    }
+    return found;
+}
 // One arrow press of value, as a fraction of the target's range: coarse enough
 // to see, fine enough to trim a fade with.
 inline constexpr f32 kValueNudge = 1.f / 64.f;

@@ -138,6 +138,31 @@ public:
     //     step, velocity = last-used); click note = select; drag note = move
     //     (pitch + beat); drag right edge = resize; right-click note = delete;
     //     double-click empty = add, double-click note = delete (Live habit)
+    //   * THE FL GESTURES (2026-08-26 usability pass). The owner is a long-time
+    //     FL Studio user and these five are the ones his hands already know:
+    //       - LEFT-DRAG PAINTS. A press on empty space still writes one note,
+    //         and dragging on from it writes one into every further cell the
+    //         pointer sweeps -- FL's paint brush. This REPLACES the old
+    //         press-drag-add (which grabbed the fresh note and let you place
+    //         it): the two gestures are the same pixels and only one of them
+    //         can have them. Placing a note is now click-then-drag, two
+    //         gestures that were always available, and sweeping a hi-hat line
+    //         is one, which it was not.
+    //       - RIGHT-DRAG ERASES. Right-click still deletes the note under the
+    //         pointer; holding the button and sweeping deletes every note the
+    //         pointer crosses, along the whole segment travelled and not just
+    //         where the frames happened to land.
+    //       - ALT FREES THE SNAP while a note is being moved or resized (Shift
+    //         does too, except during a Shift-clone, where Shift is already
+    //         spoken for). Alt is the documented one; it is FL's.
+    //       - MIDDLE-DRAG PANS both axes, anywhere over the editor.
+    //       - SHIFT+DRAG CLONES the selection, and so does Ctrl+drag. A shift
+    //         PRESS on a note is ambiguous -- FL clones, this roll (and every
+    //         other DAW) toggles set membership -- so the verdict waits for
+    //         motion: released without moving, it toggles as it always did;
+    //         moved, it leaves a copy behind and drags the copy.
+    //     Ctrl+drag from empty space rubber-bands too, since that is where FL
+    //     puts the marquee; Shift keeps doing it as well.
     //   * the selection is a SET. Shift+click a note toggles it in or out;
     //     plain-clicking a note that is already part of a multi-selection keeps
     //     the set (so the click can start a group drag) and otherwise reduces
@@ -394,11 +419,40 @@ private:
     // velocity range too. It is still one drag, because it is still one
     // gesture: grab a stem, and every selected stem takes the height under the
     // cursor. Which FIELD that height lands in is shownNoteLane()'s answer.
-    enum class Drag { None, Move, Resize, NoteVal, Band } drag_ = Drag::None;
+    //
+    // `Paint` and `Erase` are the two SWEEPS, and they are drags rather than
+    // per-frame handlers for one reason: a sweep has to consume the SEGMENT
+    // between the last pointer position and this one, not the point it landed
+    // on. At 60 fps a quick flick moves 40 px a frame, which is a whole cell at
+    // any usable zoom -- a hit test on the landing point alone skips notes, and
+    // a brush that skips is worse than no brush.
+    //
+    // `Pending` is the shift/ctrl press on a note whose meaning is not known
+    // yet: released where it started it is a membership toggle, moved it is a
+    // clone. See the FL block at the top of this header.
+    enum class Drag { None, Move, Resize, NoteVal, Band, Paint, Erase, Pending } drag_ = Drag::None;
     int  dragNote_ = -1;
     f32  dragY_ = 0.f;
     f64  dragBeat_ = 0.0;
     int  dragPitch_ = 0;
+    // Where the last Paint/Erase sweep got to, in screen pixels. The segment
+    // from here to the pointer is what this frame consumes.
+    f32  sweepX_ = 0.f, sweepY_ = 0.f;
+    // The cell the brush last wrote into, so holding still inside one cell
+    // writes one note and not one per frame. -1 / -1 means "nothing yet".
+    int  paintPitch_ = -1;
+    f64  paintBeat_ = -1.0;
+    // Middle-drag pan. Lives beside the wheel rather than in `drag_` because it
+    // is handled with the scroll, before the axes are built -- a pan that took
+    // effect a frame late would lag the hand by a frame at every speed.
+    bool panning_ = false;
+    // The undecided shift/ctrl press: where it landed, and which modifier made
+    // it (Shift toggles on a click, Ctrl selects).
+    f32  pendX_ = 0.f, pendY_ = 0.f;
+    bool pendShift_ = false;
+    // This move is dragging a SHIFT-clone, so Shift is spoken for and must not
+    // also free the snap. Alt still does.
+    bool shiftClone_ = false;
     // Rubber-band anchor, held in CONTENT space rather than screen space
     // (a beat, and a pixel offset down the row stack) so that scrolling or
     // zooming mid-band leaves the corner on the material it was put on.

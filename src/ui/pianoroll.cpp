@@ -51,12 +51,29 @@ constexpr f64 kMaxLoopBeats = 64.0; // ceiling for Ctrl+U, 16 bars in 4/4
 // It was a flat 4 logical px -- 4.0 device px at scale 1.0, half the 8 px floor
 // -- and every miss on it is a MOVE, which is the loudest possible wrong answer
 // because it takes the note somewhere else instead of doing nothing. 8, capped
-// at a third of the note so a 1/32 at low zoom is still mostly grabbable to
-// move. There is no left-edge resize in this roll and this pass does not add
-// one: a note's start is what a move sets, and two edges on a 12 px row would
-// leave a body too small to grab.
+// at a share of the note so a 1/32 at low zoom is still grabbable to move.
+// There is no left-edge resize in this roll and this pass does not add one: a
+// note's start is what a move sets, and two edges on a 12 px row would leave a
+// body too small to grab.
+//
+// The share was 0.35 and is 0.5 as of the FL pass, which is the finding the
+// brief predicted: at the fit zoom a 1/16 is 32 px and the band is the full 8,
+// but a 1/32 at 128 px/beat is 16 px wide and got 5.6 -- under the 8 px floor
+// -- and a note drawn at the 3 px minimum got ONE PIXEL of tail against two of
+// body. Grabbing what looks like the end of a short note therefore MOVED it,
+// silently, which is exactly the class of bug the last audit found on the
+// arrangement's fades. Half is the honest answer at every width: the right half
+// of a note resizes, the left half moves, and no note is ever mostly-move with
+// a tail nobody can hit.
 constexpr f32 kNoteEdgeGrab  = 8.f;
-constexpr f32 kNoteEdgeShare = 0.35f;
+constexpr f32 kNoteEdgeShare = 0.5f;
+// How finely a Paint or Erase sweep samples the segment it travelled since the
+// last frame, in DEVICE px. Small enough that it cannot step over a grid cell
+// (the narrowest a cell is ever drawn is kGridStep * kZoomMin = 2 px) and over
+// a note row (12 logical px), and capped so a pointer teleport -- a warp, a
+// dropped frame under load -- costs a bounded walk rather than a stall.
+constexpr f32 kSweepStep   = 2.f;
+constexpr int kSweepMaxHits = 512;
 // How far from a stem's x the lane will pick it up. 6 gave a 12 logical px
 // band; 8 gives 16, which is the floor. It is a nearest-match, so a wider band
 // never picks the wrong stem -- it only stops picking NONE.
@@ -170,8 +187,14 @@ inline f64 clampBeat(f64 raw, f64 len, f64 lengthBeats) {
 
 // Length from a dragged right edge: whole grid steps, never under one step and
 // never past the end of the clip.
-inline f64 clampLen(f64 rawRight, f64 beat, f64 lengthBeats) {
-    const f64 len  = std::max(kGridStep, quantNear(rawRight - beat));
+//
+// `snap` is false while Alt (FL) or Shift is held, and then the length is what
+// the pointer says to the pixel. The floor stays a whole grid step either way:
+// a note shorter than the smallest thing the grid can express is a note nobody
+// can see, find or grab again, and "free" was never a licence to make one.
+inline f64 clampLen(f64 rawRight, f64 beat, f64 lengthBeats, bool snap = true) {
+    const f64 want = snap ? quantNear(rawRight - beat) : (rawRight - beat);
+    const f64 len  = std::max(kGridStep, want);
     const f64 room = std::max(kGridStep, lengthBeats - beat);
     return std::min(len, room);
 }
@@ -518,6 +541,40 @@ int noteAt(const std::vector<NoteModel>& notes, const RowMap& rows,
     return found;
 }
 
+// Is there already a note sounding this pitch at this beat? The brush's
+// duplicate guard, and it asks about the MUSIC rather than about the cell: a
+// half-note already covering the cell under the pointer means there is nothing
+// to add there, even though the cell it *starts* in is a different one. Without
+// that, sweeping along a row of long notes buries each of them under a stack of
+// sixteenths nobody asked for and nobody can see.
+bool pitchBusyAt(const std::vector<NoteModel>& notes, int pitch, f64 beat) {
+    for (const NoteModel& nt : notes)
+        if ((int)nt.pitch == pitch && beat >= nt.beat - 1e-9 &&
+            beat < nt.beat + nt.len - 1e-9)
+            return true;
+    return false;
+}
+
+// Walks the SEGMENT a sweep travelled since the last frame and calls `fn` at
+// every sample along it, ends included. A brush that only tested the point the
+// frame landed on would skip a cell at any speed a hand actually moves: 60 fps
+// and a leisurely 500 px/s is 8 px a frame, and one grid cell at low zoom is 2.
+//
+// Returns the number of samples taken, which is only interesting to the cap.
+template <class F>
+int sweepSegment(f32 x0, f32 y0, f32 x1, f32 y1, F&& fn) {
+    const f32 dx = x1 - x0, dy = y1 - y0;
+    const f32 dist = std::sqrt(dx * dx + dy * dy);
+    int steps = (int)std::ceil(dist / kSweepStep);
+    if (steps < 1) steps = 1;
+    if (steps > kSweepMaxHits) steps = kSweepMaxHits;
+    for (int i = 0; i <= steps; ++i) {
+        const f32 t = (f32)i / (f32)steps;
+        fn(x0 + dx * t, y0 + dy * t);
+    }
+    return steps;
+}
+
 // ---------------------------------------------------------------------------
 // the automation lane
 //
@@ -585,7 +642,24 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
 
     laneSel_ = clampv(laneSel_, 0, (int)ptrs.size() - 1);
     int shown = laneSel_;
-    if (ui.selector(uiId(UiRollLaneRow, 0), r0, &shown, ptrs.data(), (int)ptrs.size())) {
+    // THE KEY BLOCK'S FOUR TARGETS ARE SHORT. Three rows share whatever height
+    // the lane has, and the lane is a third of a 151 px editor: 14.8 device px
+    // each at DPI 1.0, under the 16 px floor, and they cannot be made taller
+    // from here -- the editor cannot be resized (ur-filed-app.cpp.diff), and at
+    // the 54 px lane a taller panel would give it these rows are 16.7 and pass.
+    //
+    // grabTo16 is the widget layer's own spelling of the floor (uw-WIDGET-API
+    // §1.8): exactly enough slop to reach 16 device px, halved because slop
+    // grows both sides, and ZERO once the rect already clears it -- so at DPI
+    // 1.5, where these rows are 18.7 tall, nothing is padded at all.
+    //
+    // Only the two SELECTORS get it. The rows are stacked a pixel apart, so a
+    // pad on one reaches into its neighbour and the last setHot to test a pixel
+    // keeps it; padding the pair sends the shared pixel to the row below, and
+    // both of them merely CYCLE a name, so nothing is spent either way. The "+"
+    // button under them is deliberately left unpadded -- see there.
+    if (ui.grabTo16(r0).selector(uiId(UiRollLaneRow, 0), r0, &shown, ptrs.data(),
+                                 (int)ptrs.size())) {
         laneSel_ = shown;
         // The point indices belong to the lane that was on show, so switching
         // lanes drops them rather than carrying a stale set across.
@@ -621,7 +695,8 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
         tnames.reserve(targets.entries.size());
         for (const AutoTargets::Entry& e : targets.entries) tnames.push_back(e.label.c_str());
         targetSel_ = clampv(targetSel_, 0, (int)tnames.size() - 1);
-        ui.selector(uiId(UiRollLaneRow, 1), tgtR, &targetSel_, tnames.data(), (int)tnames.size());
+        ui.grabTo16(tgtR).selector(uiId(UiRollLaneRow, 1), tgtR, &targetSel_,
+                                   tnames.data(), (int)tnames.size());
         const AutoTargets::Entry& sel = targets.entries[(size_t)targetSel_];
         if (sel.automated)
             rr.circle(tgtR.right() - 3.5f * s, tgtR.y + 3.5f * s, 1.8f * s, nx::violetSoft);
@@ -634,6 +709,17 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
     // "+" ellipsises, and the dot is the same control the device strip already
     // uses for bypass — a lit plate means the thing is doing something.
     const Rect onR{addR.right() + 2.f * s, r2.y, r2.right() - addR.right() - 2.f * s, r2.h};
+    // NO PAD ON "+", and none on the toggle beside it. Slop is claimed by the
+    // LAST setHot to test a pixel, so a pad here would let the button that ADDS
+    // AN ENVELOPE steal the bottom row of pixels from the target selector above
+    // it -- a click aimed at "which parameter" landing on "automate it". The
+    // theft has to run the other way: the two harmless cyclers are padded, the
+    // consequential button is not, and the pixel they share goes to the cycler.
+    // The cost is that this row measures 20.0 x 14.8 device px at DPI 1.0 and
+    // fails the 16 px floor on its short side. It cannot be fixed from here:
+    // three rows share the lane's height, the lane is 32% of a 151 px editor,
+    // and the editor cannot be resized (ur-filed-app.cpp.diff). At the 54 px
+    // lane a taller panel would give it, the row is 16.7 and passes.
     if (!targets.entries.empty() && ui.button(uiId(UiRollLaneRow, 2), addR, "+")) {
         const std::string& addr = targets.entries[(size_t)targetSel_].address;
         int found = -1;
@@ -723,6 +809,10 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         bandBase_.clear();
         dragNote_ = -1;
         drag_ = Drag::None;
+        panning_ = false;
+        shiftClone_ = false;
+        paintPitch_ = -1;
+        paintBeat_ = -1.0;
         scrollX_ = scrollY_ = 0.f;
         zoom_ = 0.f;                 // -> fit to width below
         addedLastPress_ = false;
@@ -826,6 +916,24 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         }
     }
 
+    // MIDDLE-DRAG PANS, both axes (FL, and every map on the internet). It is
+    // handled HERE, with the wheel and before the axes are built, because a pan
+    // is a scroll: routing it through `drag_` down in the interaction block
+    // would apply this frame's hand movement to next frame's axes and lag the
+    // content behind the pointer by a frame at every speed.
+    //
+    // It starts anywhere over the editor -- grid, lane or keyboard column --
+    // because the whole surface is the thing being moved, and the keyboard
+    // column is exactly where a hand goes to shove the pitch axis around.
+    if (in.pressed[1] && overBody) panning_ = true;
+    if (panning_ && !in.down[1])   panning_ = false;
+    if (panning_) {
+        scrollX_ -= in.dx;
+        // The pitch axis only exists for a pattern; on a waveform the vertical
+        // half of the gesture has nothing to move and is simply not taken.
+        if (midiClip) scrollY_ -= in.dy;
+    }
+
     const f32 contentW = (f32)(lenBeats * (f64)pxPerBeat);
     const f32 contentH = (f32)rows.count * rowH;
 
@@ -920,6 +1028,34 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         }
         return any;
     };
+    // Which note the LANE is pointing at, at this x.
+    //
+    // It used to be "the nearest stem within kStemGrab", full stop, which made
+    // the lane a row of 16 px targets with the rest of it dead: at the zoom a
+    // four-beat clip opens at, eight sixteenth-notes gave eight 16 px bands and
+    // 48 px of nothing between each pair, and a press in the nothing did
+    // nothing and said nothing. A note's stem stands for the NOTE, and the note
+    // occupies its own span of the time axis, so that span is the target --
+    // which is also what makes sweeping the lane paint the velocities of the
+    // notes it passes, the way FL does. The nearest-stem rule stays as the
+    // fallback for the gaps between notes, so nothing that used to be grabbable
+    // stopped being.
+    auto laneNoteAt = [&](f32 mx) -> int {
+        const f64 b = xToBeat(ta, mx);
+        int found = -1;
+        for (size_t i = 0; i < clip.notes.size(); ++i) {
+            const NoteModel& nt = clip.notes[i];
+            if (b >= nt.beat - 1e-9 && b < nt.beat + nt.len - 1e-9) found = (int)i;
+        }
+        if (found >= 0) return found;                 // later notes win, as they draw
+        int best = -1;
+        f32 bestD = kStemGrab * s;
+        for (size_t i = 0; i < clip.notes.size(); ++i) {
+            const f32 d = std::fabs(mx - beatToX(ta, clip.notes[i].beat));
+            if (d <= bestD) { bestD = d; best = (int)i; }
+        }
+        return best;
+    };
 
     // The rubber band, when one is in flight: computed with the interaction and
     // drawn later, inside the grid's clip. The LANE's band is the lane's own,
@@ -927,16 +1063,137 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     Rect bandRect{};
     bool showBand = false;
 
-    if (drag_ != Drag::None) {
-        // Band is the one drag with nothing under it.
+    // ALT FREES THE SNAP while a note is moved or resized -- FL's modifier, and
+    // the documented one here. Shift does it too, because this roll already
+    // meant "off the grid" by Shift in places and the brief says to keep both
+    // spellings alive; the one exception is a drag that is already a
+    // SHIFT-CLONE, where Shift is spoken for and using it twice would mean a
+    // clone could never land on the grid.
+    const bool freeSnap = in.alt() || (in.shift() && !shiftClone_);
+
+    // The undecided shift/ctrl press on a note, resolved. It is checked before
+    // the general drag block because its RELEASE is the interesting half: every
+    // other drag ends by simply forgetting itself, and this one has to do the
+    // click it was holding in reserve.
+    if (drag_ == Drag::Pending) {
+        if (dragNote_ < 0 || dragNote_ >= (int)clip.notes.size()) {
+            drag_ = Drag::None;
+            dragNote_ = -1;
+            if (ui.active == gridId) ui.active = 0;
+        } else if (!in.down[0]) {
+            // Released where it started: the click it always was. Shift toggles
+            // membership (this roll's rule, and every other DAW's); Ctrl, which
+            // has no click meaning of its own here, selects.
+            if (pendShift_) {
+                sel_.toggle(dragNote_);
+                if (sel_.has(dragNote_)) preview_.push((int)clip.notes[(size_t)dragNote_].pitch);
+            } else if (!sel_.has(dragNote_)) {
+                sel_.one(dragNote_);
+                preview_.push((int)clip.notes[(size_t)dragNote_].pitch);
+            } else {
+                sel_.primary = dragNote_;
+            }
+            drag_ = Drag::None;
+            dragNote_ = -1;
+            if (ui.active == gridId) ui.active = 0;
+        } else if (std::fabs(in.mx - pendX_) + std::fabs(in.my - pendY_) > 3.f * s) {
+            // Moved: SHIFT+DRAG CLONES (FL), and so does Ctrl+drag. Every
+            // selected note is copied where it stands and the COPIES become the
+            // selection, so what the hand goes on to drag is the copy and the
+            // original stays where it was put.
+            if (!sel_.has(dragNote_)) sel_.one(dragNote_);
+            const NoteModel anchor = clip.notes[(size_t)dragNote_];
+            SelKeys keys;
+            keys.notes.reserve(sel_.items.size());
+            for (int i : sel_.items) {
+                if (i < 0 || i >= (int)clip.notes.size()) continue;
+                if (i == dragNote_) keys.primary = (int)keys.notes.size();
+                keys.notes.push_back(clip.notes[(size_t)i]);
+            }
+            if (keys.notes.empty()) {
+                drag_ = Drag::None;
+                dragNote_ = -1;
+            } else {
+                for (const NoteModel& c : keys.notes) clip.notes.push_back(c);
+                // A copy is identical to its original in every field, so which
+                // of the pair the set lands on is a distinction without a
+                // difference -- one of them moves, one of them stays, and they
+                // were the same note a moment ago.
+                sortTrackingSet(clip.notes, keys, sel_);
+                dragNote_ = sel_.primary;
+                if (dragNote_ < 0) {
+                    drag_ = Drag::None;
+                } else {
+                    // Measured from the PRESS, not from here: the copy has to
+                    // sit under the hand the way the original did, or it jumps
+                    // by the three pixels that armed the clone.
+                    drag_ = Drag::Move;
+                    shiftClone_ = pendShift_;
+                    dragBeat_ = xToBeat(ta, pendX_) - anchor.beat;
+                    dragY_ = pendY_;
+                    dragPitch_ = (int)anchor.pitch;
+                    changed = true;
+                    lastEdit_ = kEditNote;
+                }
+            }
+        }
+    } else if (drag_ != Drag::None) {
+        // Band is the one drag with nothing under it; Erase is the one held on
+        // the RIGHT button.
         const bool needsNote = drag_ == Drag::Move || drag_ == Drag::Resize ||
                                drag_ == Drag::NoteVal;
-        if (!in.down[0] ||
+        const bool held = drag_ == Drag::Erase ? in.down[2] : in.down[0];
+        if (!held ||
             (needsNote && (dragNote_ < 0 || dragNote_ >= (int)clip.notes.size()))) {
             drag_ = Drag::None;
             dragNote_ = -1;
             bandBase_.clear();
+            shiftClone_ = false;
+            paintPitch_ = -1;
+            paintBeat_ = -1.0;
             if (ui.active == gridId) ui.active = 0;
+        } else if (drag_ == Drag::Erase) {
+            // RIGHT-DRAG ERASES: every note the pointer crossed since the last
+            // frame, not merely the one it is over now. Back to front is not
+            // needed -- eraseNote renumbers what follows and the next sample is
+            // a fresh hit test either way.
+            sweepSegment(sweepX_, sweepY_, in.mx, in.my, [&](f32 x, f32 y) {
+                if (!grid.contains(x, y)) return;
+                const int hit = noteAt(clip.notes, rows, ta, pa, x, y, minNoteW);
+                if (hit >= 0) eraseNote(hit);
+            });
+            sweepX_ = in.mx;
+            sweepY_ = in.my;
+        } else if (drag_ == Drag::Paint) {
+            // LEFT-DRAG PAINTS: one note per grid cell the pointer sweeps
+            // through, snapped exactly as a written note is and skipping any
+            // cell whose pitch is already sounding there. The cell the brush
+            // last wrote into is remembered, so holding still writes once.
+            sweepSegment(sweepX_, sweepY_, in.mx, in.my, [&](f32 x, f32 y) {
+                if (!grid.contains(x, y)) return;
+                int pitch = rows.pitchAt(yToRow(pa, y));
+                if (pitch < 0) return;
+                if (snapping) pitch = key.snapPitch(pitch, 0);
+                const f64 b = quantFloor(xToBeat(ta, x));
+                if (b < 0.0 || b >= clip.lengthBeats) return;
+                if (pitch == paintPitch_ && b == paintBeat_) return;
+                paintPitch_ = pitch;
+                paintBeat_ = b;
+                if (pitchBusyAt(clip.notes, pitch, b)) return;
+                NoteModel nn;
+                nn.beat = b;
+                nn.len = kGridStep;
+                nn.pitch = (u8)pitch;
+                nn.vel = lastVel_;
+                clip.notes.push_back(nn);
+                const int idx = sortTracking(clip.notes, nn);
+                sel_.one(idx);
+                preview_.push(pitch);
+                changed = true;
+                lastEdit_ = kEditNote;
+            });
+            sweepX_ = in.mx;
+            sweepY_ = in.my;
         } else if (drag_ == Drag::Band) {
             // Live, not on release: the selection is whatever the band touches
             // *now*, so dragging back over a note un-takes it and there is no
@@ -985,8 +1242,13 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             // the whole selection as one delta, so a chord keeps its shape and
             // the group stops when its extreme member reaches a wall. With one
             // note selected this is the old clampBeat/pitch clamp exactly.
+            // Alt (FL) or Shift hands the beat back to the pointer, to the
+            // pixel. Only the TIME half: the pitch axis is rows and there is
+            // nothing between two of them to be freed onto.
+            const f64 wantBeat = xToBeat(ta, in.mx) - dragBeat_;
             const GroupDelta d = clampGroupDelta(
-                clip.notes, sel_.items, quantNear(xToBeat(ta, in.mx) - dragBeat_) - nt.beat,
+                clip.notes, sel_.items,
+                (freeSnap ? wantBeat : quantNear(wantBeat)) - nt.beat,
                 np - (int)nt.pitch, clip.lengthBeats);
             if (d.beats != 0.0 || d.semis != 0) {
                 // Dragging across rows plays what is under the note, the way a
@@ -1008,7 +1270,8 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             // between absolute and proportional lengths, and neither is what
             // the hand on one note's right edge asked for.
             NoteModel& nt = clip.notes[(size_t)dragNote_];
-            const f64 nl = clampLen(xToBeat(ta, in.mx), nt.beat, clip.lengthBeats);
+            const f64 nl = clampLen(xToBeat(ta, in.mx), nt.beat, clip.lengthBeats,
+                                    !freeSnap);
             if (nl != nt.len) { nt.len = nl; changed = true; lastEdit_ = kEditNote; }
         } else if (drag_ == Drag::NoteVal) {
             // Absolute, and for the whole selection: every selected stem takes
@@ -1017,6 +1280,25 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             // answer, but absolute is what a group drag does in Live and it is
             // the one a user can aim. None of the three fields reorders the
             // vector, so no re-sort.
+            //
+            // ...and it PAINTS while it sweeps, which is the FL half. A drag
+            // that keeps re-applying to the note it started on while the
+            // pointer is three stems further along is editing something the
+            // hand is no longer pointing at -- so the drag simply keeps doing
+            // what the press did, note by note, as it crosses them.
+            //
+            // Only while the selection is one note or none. A MULTI-note
+            // selection is a deliberate group edit ("flatten these eight to
+            // here") and re-targeting mid-sweep would collapse it the moment
+            // the pointer wandered off its last member, which is the one thing
+            // a group drag must never do.
+            if (sel_.count() <= 1) {
+                const int over = laneNoteAt(in.mx);
+                if (over >= 0 && over != dragNote_) {
+                    sel_.one(over);
+                    dragNote_ = over;
+                }
+            }
             if (!sel_.has(dragNote_)) sel_.one(dragNote_);
             applyLaneValue(laneT(in.my));
         }
@@ -1028,14 +1310,27 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         addedLastPress_ = false;
 
         if (in.pressed[2]) {
-            if (hit >= 0) eraseNote(hit);                 // right-click deletes
+            // RIGHT-CLICK ERASES, and the press ARMS THE SWEEP whether or not
+            // there was a note under it: in FL the eraser is a brush, and
+            // starting it on empty space and dragging into a run of notes is
+            // how the gesture is actually made.
+            if (hit >= 0) eraseNote(hit);
+            drag_ = Drag::Erase;
+            dragNote_ = -1;
+            sweepX_ = in.mx;
+            sweepY_ = in.my;
         } else if (hit >= 0 && in.dblClick && !prevAdded) {
             eraseNote(hit);                               // double-click deletes
-        } else if (hit >= 0 && in.shift()) {
-            // Shift+click is about membership and starts no drag: a group that
-            // moved because a note was being added to it would be unusable.
-            sel_.toggle(hit);
-            if (sel_.has(hit)) preview_.push((int)clip.notes[(size_t)hit].pitch);
+        } else if (hit >= 0 && (in.shift() || in.ctrl())) {
+            // Ambiguous until it moves: a click toggles membership (Shift) or
+            // selects (Ctrl); a drag clones. Nothing is decided here -- see the
+            // Drag::Pending block above, which is where both endings live.
+            drag_ = Drag::Pending;
+            dragNote_ = hit;
+            pendShift_ = in.shift();
+            pendX_ = in.mx;
+            pendY_ = in.my;
+            ui.active = gridId;
         } else if (hit >= 0) {
             // A plain click on a note that is already part of a multi-selection
             // keeps the set, so the same press can start a group drag; on
@@ -1055,11 +1350,13 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             dragPitch_ = (int)nt.pitch;
             if (in.mx >= x1 - edge) { drag_ = Drag::Resize; dragBeat_ = 0.0; }
             else { drag_ = Drag::Move; dragBeat_ = xToBeat(ta, in.mx) - nt.beat; }
-        } else if (in.shift()) {
-            // Rubber band. Plain empty-drag still adds a note — press-drag-add
-            // is the gesture the roll is built around — so the band is what
-            // Shift buys on empty space. The anchor is kept in content space so
-            // scrolling or zooming mid-band does not drag the corner with it.
+        } else if (in.shift() || in.ctrl()) {
+            // Rubber band. Plain empty-drag PAINTS notes now, so the band is
+            // what a modifier buys on empty space: Shift, which is what this
+            // roll has always used, and Ctrl, which is where FL puts its
+            // marquee -- both, because a hand that reaches for either is
+            // reaching for the same thing. The anchor is kept in content space
+            // so scrolling or zooming mid-band does not drag the corner with it.
             drag_ = Drag::Band;
             dragNote_ = -1;
             bandBeat_ = xToBeat(ta, in.mx);
@@ -1083,9 +1380,17 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
                 const int idx = sortTracking(clip.notes, nn);
                 sel_.one(idx);                   // a fresh note is the selection
                 dragNote_ = idx;
-                // Press-drag-add: the new note is grabbed by the same gesture,
-                // so drawing a note and placing it is one movement.
-                drag_ = Drag::Move;
+                // THE BRUSH IS DOWN. Dragging on from here writes a note into
+                // every further cell the pointer sweeps -- FL's paint. This is
+                // where press-drag-add used to grab the fresh note and let you
+                // place it; the two gestures want the same pixels and painting
+                // is the one the owner's hands know. Placing is still a click
+                // and then a drag, which it always was.
+                drag_ = Drag::Paint;
+                sweepX_ = in.mx;
+                sweepY_ = in.my;
+                paintPitch_ = pitch;
+                paintBeat_ = b;
                 dragBeat_ = xToBeat(ta, in.mx) - nn.beat;
                 dragY_ = in.my;
                 dragPitch_ = pitch;
@@ -1097,14 +1402,9 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             }
         }
     } else if (hotLane && !env && midiClip && in.pressed[0]) {
-        // Nearest stem within a few pixels; ties go to the later note, matching
-        // the draw order.
-        int best = -1;
-        f32 bestD = kStemGrab * s;
-        for (size_t i = 0; i < clip.notes.size(); ++i) {
-            const f32 d = std::fabs(in.mx - beatToX(ta, clip.notes[i].beat));
-            if (d <= bestD) { bestD = d; best = (int)i; }
-        }
+        // The note this x belongs to: its own span first, the nearest stem
+        // after. See laneNoteAt.
+        const int best = laneNoteAt(in.mx);
         if (best >= 0) {
             // A stem that belongs to the current selection drags the whole set
             // (the same rule the grid uses); any other stem takes the selection
@@ -1432,8 +1732,11 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     // --- cursor ------------------------------------------------------------
     // The lane REPORTS rather than sets, so its answer keeps the place it had
     // in this ordered block instead of overtaking a grid drag that outranks it.
-    if (drag_ == Drag::Resize)        ui.cursor = Cursor::ResizeH;
+    if (panning_)                     ui.cursor = Cursor::Grab;
+    else if (drag_ == Drag::Resize)   ui.cursor = Cursor::ResizeH;
     else if (drag_ == Drag::Move)     ui.cursor = Cursor::Grab;
+    else if (drag_ == Drag::Paint)    ui.cursor = Cursor::Hand;
+    else if (drag_ == Drag::Erase)    ui.cursor = Cursor::Hand;
     else if (lane_.dragging())        ui.cursor = Cursor::Grab;
     else if (drag_ == Drag::NoteVal)  ui.cursor = Cursor::ResizeV;
     else if (hotLane && env)          ui.cursor = lane_.pointHovered() ? Cursor::Grab
@@ -1469,14 +1772,22 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             noteAt(clip.notes, rows, ta, pa, in.mx, in.my, minNoteW) < 0) {
             ui.badge = Badge::Add;
             if (ui.tip.empty())
-                ui.tip = "click to write a note here; Shift+drag rubber-bands a "
-                         "selection";
+                ui.tip = "drag to paint notes; right-drag erases; "
+                         "Shift or Ctrl+drag selects a block";
         } else if (hotLane && !env && midiClip) {
-            ui.badge = Badge::Draw;
+            // The lane's own refusal, said rather than performed. A press in a
+            // gap between two notes has nothing to set and used to do nothing
+            // at all -- no mark, no message, no reason.
+            const bool onNote = laneNoteAt(in.mx) >= 0;
+            ui.badge = onNote ? Badge::Draw : Badge::None;
             if (ui.tip.empty())
-                ui.tip = std::string("drag a stem to set ") +
-                         kNoteLaneNames[(int)noteLane] +
-                         " on every selected note";
+                ui.tip = onNote
+                             ? std::string("drag to paint ") +
+                                   kNoteLaneNames[(int)noteLane] +
+                                   " across the notes you sweep; with several "
+                                   "selected they all take the height instead"
+                             : std::string("no note here - each stem stands under "
+                                           "a note in the grid above");
         }
     }
     if (probeOn() && changed) {

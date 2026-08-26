@@ -37,7 +37,12 @@ inline constexpr f32 kArrHeaderW   = 138.f;  // the track column on the left
 // two gestures are not aimed at the same pixels. Nothing is modal and nothing
 // asks which one you meant.
 inline constexpr f32 kArrRulerH    = 20.f;   // the bar band, unchanged
-inline constexpr f32 kArrMarkerH   = 15.f;   // the marker band, above it
+// 16 and not 15, and the one pixel is the whole of the reason: a flag's hit
+// rect is exactly this band's height, and 15 logical px is 15.0 DEVICE px at
+// scale 1.0 -- under the 16 px floor for a thing that is CLICKED. A flag is
+// clicked (it jumps) as well as dragged, so it answers to the clickable floor
+// and not the drag one, and the band it lives in is what supplies the height.
+inline constexpr f32 kArrMarkerH   = 16.f;   // the marker band, above it
 inline constexpr f32 kArrRulerTotal = kArrRulerH + kArrMarkerH;
 // An automation lane needs enough height to aim at and no more (§7.4).
 inline constexpr f32 kArrAutoLaneH = 44.f;
@@ -71,14 +76,23 @@ inline constexpr f32 kArrFadeShare = 0.4f;
 // fresh brace from that point, so the only way to move one end was to redraw
 // the whole thing. This is the zone those uprights always looked like they had.
 inline constexpr f32 kArrLoopGrab  = 5.f;
-// A marker flag's zone. THE EIGHT-PIXEL FLOOR, applied to a thing whose drawn
+// A marker flag's zone. THE SIXTEEN-PIXEL FLOOR, applied to a thing whose drawn
 // width is its NAME: a flag called "A" is four pixels of text and would be
 // unhittable at any zoom, so the zone is widened to the floor around the pole
 // rather than being whatever the label happened to measure. The slop reaches
 // outside it for kArrEdgeSlop's reason -- the pixels just beside a flag are
 // pixels a hand aiming at that flag lands on -- and it is what makes two flags
 // a few beats apart still separable: nearest-pole wins inside the overlap.
-inline constexpr f32 kArrMarkerGrab = 8.f;
+//
+// TEN, and not the eight it was, because the arithmetic is the floor rather
+// than a preference: a nameless flag's zone is kArrMarkerGrab wide with
+// kArrMarkerSlop on each side, so 8 + 3 + 3 = 14 DEVICE px at scale 1.0 --
+// under the 16 px floor for a thing that is CLICKED, which is the same failure
+// the disclosure triangle and the override chip were already fixed for.
+// 10 + 3 + 3 = 16 lands exactly on it. Nothing about the DRAWN block moves for
+// any flag whose name is wider than ten px, which is every flag the auto-namer
+// produces; only the nameless worst case grows, and only where it can be hit.
+inline constexpr f32 kArrMarkerGrab = 10.f;
 inline constexpr f32 kArrMarkerSlop = 3.f;
 // How wide one flag may get before its name is truncated. Past this a single
 // long name would cover the bars either side of it and hide its neighbours.
@@ -362,11 +376,37 @@ private:
     // The gestures. Each is a drag on one thing, and every one of them is
     // measured from the values the item had at the press -- so a drag is
     // absolute against its own start and cannot accumulate rounding.
+    //
+    // Pan / Paint / Erase / EraseMarker / ErasePoint are the four FL gestures
+    // this surface was missing. They are Drag states rather than loose bools so
+    // that every "is something already held" guard in the file covers them for
+    // free -- which is what stops a right-drag erase from also arming a brace,
+    // and a middle-drag pan from also selecting an item.
     enum class Drag {
-        None, Move, TrimL, TrimR, FadeIn, FadeOut, LaneH, Loop, Marker
+        None, Move, TrimL, TrimR, FadeIn, FadeOut, LaneH, Loop, Marker,
+        Pan, Paint, Erase, EraseMarker, ErasePoint
     } drag_ = Drag::None;
+    // The five drags that hold one ITEM. The frame arm that runs them used to be
+    // spelled "anything still dragging, minus the ones that are not", which is a
+    // list that has to be added to every time a gesture is added -- and the one
+    // time it was not, a marker drag fell into the item arm and the flag would
+    // not move (see the note over that arm). It is a whitelist now.
+    static bool itemDrag(Drag d) {
+        return d == Drag::Move || d == Drag::TrimL || d == Drag::TrimR ||
+               d == Drag::FadeIn || d == Drag::FadeOut;
+    }
     bool moved_ = false;              // past the movement threshold; see pendingEdit()
     u64  gesture_ = 0;
+    // ONE STROKE, ONE ID, AND NEVER THE SAME ID TWICE. The caller coalesces its
+    // undo entry on gesture(), and App::undoCoalesce refuses a second entry for
+    // an id it has already seen -- so a gesture id derived only from what was
+    // grabbed (the track, the marker's uid) meant that dragging the SAME clip
+    // twice in a row with nothing in between took ONE undo entry and the second
+    // drag could not be undone at all. Silent, and exactly the shape of loss a
+    // user only discovers after the fact. Every stroke below mixes this counter
+    // into its id, which costs nothing and makes two strokes distinguishable by
+    // construction.
+    u32  strokeSeq_ = 0;
     int  dragTrack_ = -1;             // the item's track at the press
     u64  dragUid_ = 0;
     f64  grabBeat_ = 0.0;             // cursor beat - item.start, at the press
@@ -381,6 +421,37 @@ private:
     // be a brace rather than a locate.
     f64  loopAnchor_ = 0.0;
     bool loopMoved_ = false;
+
+    // --- MIDDLE-DRAG PANS (FL's playlist, and every other timeline) ----------
+    // Absolute against its own start, like every other drag in this file: the
+    // scroll is recomputed from where the press was rather than integrated from
+    // per-frame deltas, so a dropped frame cannot walk the surface away from the
+    // hand and a wheel notch mid-pan cannot fight it.
+    f32  panGrabX_ = 0.f, panGrabY_ = 0.f;
+    f32  panOrigX_ = 0.f, panOrigY_ = 0.f;
+
+    // --- LEFT-DRAG PAINTS ---------------------------------------------------
+    // A sweep across empty lane lays down one block per BAR CELL. The FIRST one
+    // goes through ctx.wantCreate, because what a fresh note block is belongs to
+    // the caller and must have exactly one implementation; every one after it is
+    // a CLONE of what the caller made, which is both cheaper and more faithful
+    // (FL paints the same thing along the stroke, not N unrelated blanks).
+    int  paintTrack_ = -1;
+    f32  paintGrabX_ = 0.f;
+    f64  paintCell_  = -1e18;     // the cell last filled, so a jitter cannot restack
+    bool paintAwait_ = false;     // a wantCreate is out; adopt its result next frame
+    bool paintHave_  = false;     // paintTemplate_ is loaded
+    ArrangeClip paintTemplate_;   // what the rest of the stroke clones
+
+    // --- RIGHT-DRAG ERASES --------------------------------------------------
+    // The victim is named on one frame and removed on the next, which is the
+    // pendingEdit handshake and not an optimisation: the caller has to be able
+    // to take its undo point BEFORE the first thing disappears. `eraseLast_` is
+    // what stops the item under the press -- already being deleted through
+    // ctx.wantDelete -- from being counted twice.
+    u64  eraseNext_ = 0;
+    int  eraseNextTrack_ = -1;
+    u64  eraseLast_ = 0;
 
     // The markers. `markers_` is borrowed and rebound every frame; everything
     // else here is the view's own and survives across frames because a selection

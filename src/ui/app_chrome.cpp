@@ -4,6 +4,7 @@
 //
 #include "app.h"
 #include "app_internal.h"
+#include "keymap.h"
 #include "arrange.h"
 #include "pianoroll.h"
 #include "../core/project.h"
@@ -19,6 +20,46 @@
 #include <pwd.h>
 
 namespace lat {
+
+// A SET, in the browser.
+//
+// Until this pass the browser filtered .lattice out and the program had a save
+// key with no open: openProject() existed and was reachable from argv and from
+// nowhere else, so a set on disk could not be opened from the running GUI at
+// all. There is no file dialog in this program and there is not going to be
+// one; the browser IS the file dialog, and this is the one line that was
+// standing between it and doing the job.
+//
+// File-local rather than beside isAudioFile in app_internal.h: the browser is
+// the only thing that has to know, and this wave does not own that header.
+static bool isProjectFile(const std::string& n) {
+    return n.size() > 8 && n.compare(n.size() - 8, 8, ".lattice") == 0;
+}
+
+// ---------------------------------------------------------------------------
+// THE KEYS SHEET  (F1)
+//
+// The answer to "how would I add a note block in the arrange section? except
+// for audio i wouldn't know how to add anything there" -- asked, in earnest, by
+// someone who had been using the program for weeks. Every gesture that question
+// is about already worked. None of them was written down anywhere a running
+// program could show you, because the only documentation was `--help`, which is
+// a thing a GUI user never runs.
+//
+// So F1 draws src/ui/keymap.h, which is the SAME table --help prints. One list,
+// two renderers: a keys panel that can disagree with the help text is a keys
+// panel that will.
+//
+// Split for the same reason the control menu is: it has to eat the pointer
+// before anything else in the frame and draw after everything else. The input
+// half rides drawControlBar (drawn first, unconditionally); the draw half rides
+// drawStatusBar (the last chrome in the frame). Shielding is pointer parking
+// alone -- setHot() tests containment, and nothing contains (-1e4, -1e4).
+namespace {
+bool g_keysOpen = false;
+bool g_keysParked = false;
+f32  g_keysParkX = 0.f, g_keysParkY = 0.f;
+} // namespace
 
 // ---------------------------------------------------------------------------
 // control bar
@@ -237,6 +278,30 @@ void App::drawControlBar(const Rect& r) {
     debugSignatureCheck(eng_.local(), ses_);
     chromeDebugInit();
     chromeDebugDrive(win_.input());
+    // THE KEYS SHEET'S INPUT HALF. F1 toggles, Escape or any click closes, and
+    // while it is up the pointer is parked so no control anywhere in the
+    // program can be hovered or pressed through it. drawStatusBar puts the
+    // pointer back and draws the sheet.
+    {
+        Input& kin = win_.input();
+        if (kin.keyPressed[KeyF1]) { g_keysOpen = !g_keysOpen; kin.keyPressed[KeyF1] = false; }
+        if (g_keysOpen) {
+            if (kin.keyPressed[KeyEscape]) { g_keysOpen = false; kin.keyPressed[KeyEscape] = false; }
+            if (kin.pressed[0] || kin.pressed[2]) {
+                g_keysOpen = false;
+                kin.pressed[0] = kin.pressed[2] = false;
+                kin.down[0] = kin.down[2] = false;
+            }
+        }
+        if (g_keysOpen) {
+            // It owns the keyboard for as long as it is up: Space must not
+            // start the transport from behind a full-screen reference card.
+            ui_.keyModal = true;
+            g_keysParked = true;
+            g_keysParkX = kin.mx; g_keysParkY = kin.my;
+            kin.mx = kin.my = -1.0e4f;
+        }
+    }
     // THE BAR TIER (§4). Not a flat panel rect any more: --glass-bar over the
     // living background, with the 1px top highlight the tier is entitled to and
     // a hairline where it ends.
@@ -291,6 +356,19 @@ void App::drawControlBar(const Rect& r) {
 
     // --- tempo ---
     Rect tapR{x, cy, 34 * s, h};
+    // EVERY CONTROL IN THIS BAR NOW SAYS WHAT IT IS AND WHAT ITS GESTURES ARE.
+    //
+    // Before this pass four of the fifteen did (the signature, AUTO, ARR, MAP)
+    // and eleven were a three-letter label and nothing else -- which is fine
+    // for MET and useless for TAP, whose entire behaviour is "do it twice in
+    // time and I will work out a tempo". The status bar is already the one
+    // surface with room for a sentence, the tip already wins over `status_`
+    // while the pointer is on a control, and the widget layer's new vocabulary
+    // (wheel, Ctrl for fine, double-click to reset, right-click to type in)
+    // is invisible until something says it out loud. This bar is where a user
+    // looks first, so this bar is where it gets said.
+    if (ui_.isHot(uiId(1, 0)))
+        ui_.tip = "Tap tempo: click this twice in time with the music";
     if (ui_.button(uiId(1, 0), tapR, "TAP")) {
         static f64 lastTap = 0.0;
         const f64 now = nowSeconds();
@@ -312,6 +390,9 @@ void App::drawControlBar(const Rect& r) {
     // The number is edited through a copy, so the session still holds the old
     // tempo here and a plain undoPoint is enough; the drag coalesces on the
     // widget's id.
+    if (ui_.isHot(uiId(1, 1)))
+        ui_.tip = "Tempo - drag or wheel (Ctrl = fine)  -  double-click resets to 120  "
+                  "-  right-click to type a value";
     if (ui_.dragNumber(uiId(1, 1), tempoR, &bpm, 20.0, 999.0, 0.15, "%.2f",
                         Align::Center, nullptr, 0.0, /*def=*/120.0)) {
         undoPoint("tempo");
@@ -423,6 +504,7 @@ void App::drawControlBar(const Rect& r) {
 
     Rect metR{x, cy, 36 * s, h};
     chromeDebugMark("met", metR);
+    if (ui_.isHot(uiId(1, 2))) ui_.tip = "Metronome  (M)";
     if (ui_.button(uiId(1, 2), metR, "MET", ses_.metronome, pal::accent)) {
         undoPoint("metronome");
         ses_.metronome = !ses_.metronome;
@@ -437,6 +519,9 @@ void App::drawControlBar(const Rect& r) {
     // The selector writes into the session and only then reports the change,
     // so the entry needs the index handed back to it.
     const int wasQuantum = ses_.quantumIdx;
+    if (ui_.isHot(uiId(1, 3)))
+        ui_.tip = "Launch quantum: when a clip, a scene or a marker jump actually "
+                  "fires  -  click to step, right-click back, wheel to scrub";
     if (ui_.selector(uiId(1, 3), quantR, &ses_.quantumIdx, kQuantumNames, kQuantumCount)) {
         undoPointWith("launch quantum", ses_.quantumIdx, wasQuantum);
         send(Cmd::SetQuantum, ses_.quantumIdx);
@@ -464,6 +549,8 @@ void App::drawControlBar(const Rect& r) {
     Rect playR{x, cy, segW, h};
     chromeDebugMark("play", playR);
     const bool playing = es_.playing;
+    if (ui_.isHot(uiId(1, 4)))
+        ui_.tip = playing ? "Stop  (Space)" : "Play  (Space)";
     if (ui_.segButton(uiId(1, 4), playR, playing, pal::accent)) togglePlay();
     ui_.playTriangle(ui_.lastRect.insetXY(11 * s, 6 * s),
                      playing ? nx::text : pal::textDim.mix(nx::text, 0.5f));
@@ -471,6 +558,10 @@ void App::drawControlBar(const Rect& r) {
     rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
 
     Rect stopR{x, cy, segW, h};
+    // The one thing about this button a user cannot see: it does NOT rewind.
+    // Home does, and nothing on screen has ever said so.
+    if (ui_.isHot(uiId(1, 5)))
+        ui_.tip = "Stop - the playhead stays where it is  (Home returns it to the start)";
     if (ui_.segButton(uiId(1, 5), stopR, false, pal::accent)) send(Cmd::SetPlaying, 0);
     ui_.stopSquare(ui_.lastRect.insetXY(11 * s, 6 * s), pal::textDim.mix(nx::text, 0.5f));
     x += segW;
@@ -496,6 +587,10 @@ void App::drawControlBar(const Rect& r) {
     // --danger pill under a white dot, armed is the dark plate under a bright
     // red dot, and inert is plain glass under a dimmed one.
     const Col recPlate = anyRec ? pal::recRed : pal::armRed;
+    if (ui_.isHot(uiId(1, 6)))
+        ui_.tip = anyRec ? "Recording - click to stop the take"
+                : recIntent_ ? "Record armed: click a slot on an armed track to start a take"
+                             : "Record intent - arm it, then click a slot on an armed track";
     if (ui_.segButton(uiId(1, 6), recR, recIntent_ || anyRec, recPlate)) recIntent_ = !recIntent_;
     const Rect rr = ui_.lastRect;
     rend_.circle(rr.cx(), rr.cy(), 5 * s,
@@ -636,10 +731,27 @@ void App::drawControlBar(const Rect& r) {
         chromeDebugMark("tab", {vs.x + vs.w * 0.5f, vs.y, vs.w * 0.5f, vs.h});
         static const char* const kViews[2] = {"Session", "Arrange"};
         int vi = view_ == MainView::Session ? 0 : 1;
+        // tabPill hashes a sub-id per slot; either one hot means the pill is.
+        if (ui_.hovered(vs))
+            ui_.tip = "Session (clip grid) / Arrangement (timeline)  -  Tab switches";
         if (ui_.tabPill(uiId(1, 7), vs, kViews, 2, &vi))
             view_ = vi == 0 ? MainView::Session : MainView::Arrangement;
         rx = vs.x - sep;
         ctlSeam(rend_, rx + sep * 0.5f, r, s);
+    }
+    // THE "?" -- and it is here because F1 is worth nothing if nobody knows
+    // about F1. A key with no visible affordance is documentation about
+    // documentation. Twenty-two logical pixels square, immediately left of the
+    // view switch, in the mode-chip language so it reads as chrome and not as
+    // an action: it is the only control in this bar that is about the program
+    // rather than about the music.
+    {
+        const u64 id = uiId(UiControlBar, 53);
+        Rect qr{rx - 22 * s, cy, 22 * s, h};
+        if (ui_.isHot(id))
+            ui_.tip = "Keys and gestures  (F1)";
+        if (ctlChip(ui_, id, qr, fSmall_, "?", g_keysOpen)) g_keysOpen = !g_keysOpen;
+        rx = qr.x - gap;
     }
     {
         const f32 cpu = es_.cpu;
@@ -652,6 +764,11 @@ void App::drawControlBar(const Rect& r) {
         // either of them.
         const Col c = cpu > 85.f ? nx::danger : cpu > 60.f ? nx::amber : pal::textDim;
         ui_.microIn(fSmall_, cr, buf, c, Align::Center);
+        // A number with no label is a number nobody can act on. It is not a
+        // control, so it takes a hotspot rather than becoming one.
+        const u64 idCpu = uiId(UiControlBar, 52);
+        if (ui_.setHot(idCpu, cr) && ui_.isHot(idCpu))
+            ui_.tip = "Audio engine load - over 85% and the audio will glitch";
         rx = cr.x - gap;
     }
     {
@@ -678,8 +795,14 @@ void App::drawControlBar(const Rect& r) {
         f64 vel = (f64)kbd_.velocity();
         Rect vr{rx - 34 * s, cy, 34 * s, h};
         ctlWell(rend_, vr, s);
+        if (ui_.isHot(uiId(16, 0)))
+            ui_.tip = "Computer-keyboard velocity - drag or wheel  -  double-click "
+                      "resets to 100  -  right-click to type it";
+        // step = 1: a MIDI velocity has no fractional value, so the drag snaps
+        // to integers and one wheel notch is exactly one unit -- the widget
+        // layer spends a notch on a whole step wherever a caller declares one.
         if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f",
-                           Align::Center, nullptr, 0.0, /*def=*/100.0)) {
+                           Align::Center, nullptr, 1.0, /*def=*/100.0)) {
             kbd_.setVelocity((int)std::lround(vel));
             char buf[64];
             snprintf(buf, sizeof buf, "Keyboard velocity %d", kbd_.velocity());
@@ -690,6 +813,12 @@ void App::drawControlBar(const Rect& r) {
         char buf[24];
         snprintf(buf, sizeof buf, "KBD C%d", kbd_.octave());
         Rect kr{rx - 58 * s, cy, 58 * s, h};
+        if (ui_.isHot(uiId(1, 9)))
+            ui_.tip = kbdMidi_
+                ? "Computer MIDI keyboard is ON - the letter keys play the armed "
+                  "track, PgUp / PgDn move the octave  (Ctrl+Shift+K)"
+                : "Computer MIDI keyboard: play the armed track from the letter "
+                  "keys  (Ctrl+Shift+K)";
         if (ctlChip(ui_, uiId(1, 9), kr, fSmall_, buf, kbdMidi_)) toggleKbdMidi();
         rx = kr.x - gap;
     }
@@ -884,13 +1013,38 @@ void App::drawBrowser(const Rect& r) {
         else if (hot)              rend_.rect(row, pal::slotHover);
         if (hot) ui_.cursor = Cursor::Hand;
 
-        // Folder/file glyph
-        const Col ic = e.isDir ? pal::textDim : pal::accent.mix(pal::text, 0.4f);
-        if (e.isDir) rend_.roundRect({row.x + 8 * s, row.cy() - 4 * s, 9 * s, 8 * s}, 1.5f * s, ic);
-        else         rend_.circle(row.x + 12 * s, row.cy(), 3 * s, ic);
+        // Folder / sample / set, and three glyphs rather than two: a set is not
+        // a sample and dropping one on a slot is not a thing, so it may not
+        // look like one. Violet, because §1 spends violet on identity and a
+        // set is this program's own document.
+        const bool isSet = !e.isDir && !e.isAudio;
+        const Col ic = e.isDir ? pal::textDim
+                     : isSet   ? nx::violetSoft
+                               : pal::accent.mix(pal::text, 0.4f);
+        if (e.isDir)      rend_.roundRect({row.x + 8 * s, row.cy() - 4 * s, 9 * s, 8 * s}, 1.5f * s, ic);
+        else if (isSet)   rend_.roundRectOutline({row.x + 8 * s, row.cy() - 4 * s, 8 * s, 8 * s},
+                                                 1.5f * s, std::max(1.f, s), ic);
+        else              rend_.circle(row.x + 12 * s, row.cy(), 3 * s, ic);
 
         rend_.textIn(fBody_, {row.x + 22 * s, row.y, row.w - 26 * s, row.h}, e.name.c_str(),
-                     e.isDir ? pal::text : pal::textDim, Align::Left, 0);
+                     e.isDir || isSet ? pal::text : pal::textDim, Align::Left, 0);
+
+        // WHAT A FILE IN THIS LIST IS FOR. The browser has always supported
+        // both routes -- double-click into the selected slot, or drag onto any
+        // slot or arrangement lane -- and has never said either out loud, which
+        // is the same class of gap as "how would I add a note block in the
+        // arrange section": a working affordance that is invisible until it is
+        // found by accident. A folder gets its full path, because the row shows
+        // only the leaf.
+        if (hot)
+            ui_.tip = e.isDir
+                ? e.path
+                : isSet
+                ? std::string("Double-click opens the set \"") + e.name +
+                      "\" - this closes what you have open and cannot be undone"
+                : std::string("Double-click loads \"") + e.name +
+                      "\" into the selected slot  -  or drag it onto any slot, "
+                      "or onto a track in the arrangement";
 
         if (hot && in.pressed[0]) {
             browserSel_ = (int)i;
@@ -902,16 +1056,59 @@ void App::drawBrowser(const Rect& r) {
                 } else {
                     browseTo(e.path);
                 }
+                // A double-click on a FOLDER is one gesture, and the first
+                // click has just replaced the listing — so the second lands on
+                // a DIFFERENT row at the same pixel. If that row is a sample it
+                // gets loaded over the selected clip; if it is a set it arms
+                // "replace everything you have open". Driven: opening "Lattice
+                // Demo" loaded bass.wav over the melody pattern in the selected
+                // slot. Swallow the second click of the pair.
+                browserSwallowDbl_ = true;
                 break;
             }
-            drag_.kind = DragState::Kind::BrowserFile;
-            drag_.path = e.path;
-            drag_.startX = in.mx; drag_.startY = in.my;
-            drag_.armed = false;
+            // A set is not draggable: there is nowhere to drop it.
+            if (!isSet) {
+                drag_.kind = DragState::Kind::BrowserFile;
+                drag_.path = e.path;
+                drag_.startX = in.mx; drag_.startY = in.my;
+                drag_.armed = false;
+            }
         }
-        if (hot && in.dblClick && !e.isDir) loadClipInto(selTrack_, selSlot_, e.path);
+        if (hot && in.dblClick && !e.isDir && !browserSwallowDbl_) {
+            if (!isSet) {
+                loadClipInto(selTrack_, selSlot_, e.path);
+            } else {
+                // ARM, THEN CONFIRM. openProject() calls clearUndo() -- the
+                // history belonged to the set being replaced -- so this is the
+                // one gesture in the browser that cannot be taken back, and it
+                // is not going to happen on a single stray double-click. The
+                // second one has to be the same file inside five seconds, and
+                // the status line says exactly that in between, which is the
+                // difference between a confirmation and a trap.
+                //
+                // Function-local, because the arm is worth nothing the moment
+                // the window closes and App's header is not this wave's to
+                // grow for a five-second timer.
+                static std::string armedPath;
+                static f64 armedAt = 0.0;
+                const f64 now = nowSeconds();
+                if (armedPath == e.path && now - armedAt < 5.0) {
+                    armedPath.clear();
+                    openProject(e.path);
+                } else {
+                    armedPath = e.path;
+                    armedAt = now;
+                    status_ = "Open \"" + e.name + "\"? This closes the set you have "
+                              "open and cannot be undone - double-click it again to confirm";
+                }
+            }
+        }
     }
     rend_.popClip();
+
+    // Cleared once the button is up, so exactly the frames between the
+    // navigating click and the release of that same press are covered.
+    if (!in.down[0]) browserSwallowDbl_ = false;
 }
 
 
@@ -941,7 +1138,8 @@ void App::refreshBrowser() {
         be.path = full;
         be.isDir = S_ISDIR(st.st_mode);
         be.isAudio = !be.isDir && isAudioFile(n);
-        if (!be.isDir && !be.isAudio) continue;          // only show what we can use
+        // "What we can use" now includes a set. See isProjectFile above.
+        if (!be.isDir && !be.isAudio && !isProjectFile(n)) continue;
         browserItems_.push_back(be);
     }
     closedir(d);
@@ -1127,6 +1325,12 @@ void App::arrangeCommit(ArrangeContext& ctx, u32 changed) {
             it.length = m.lengthBeats;
             it.sourceUid = m.uid;
             it.src = std::move(m);
+            // Stamp the uid HERE, not by leaving it to arrangeRepair's
+            // assignUids below: `uid` is read on the next line, and reading it
+            // first gave 0 — so a freshly created clip was never selected, and
+            // the detail panel this gesture deliberately opens (the next click
+            // writes a note into it) came up on nothing at all.
+            if (!it.uid) it.uid = ses_.newUid();
             const u64 uid = it.uid;
             lane.push_back(std::move(it));
             arrangeRepair(lane);
@@ -1873,6 +2077,17 @@ void App::drawEngineBanner(const Rect& r) {
 // the quietest thing on screen -- present when looked at, invisible when not.
 void App::drawStatusBar(const Rect& r) {
     const f32 s = win_.dpiScale();
+    // THE WIDGET LAYER'S REFUSALS, drained here and nowhere else.
+    //
+    // A gesture the program understood and declined -- a type-in that is not a
+    // number, a Reset on a control with no default -- used to be a gesture that
+    // silently did nothing, because Ui has no status line to speak into. It
+    // sets Ui::refusal instead, and this is the one place with the room to say
+    // it. HERE and not in App::frame because the status bar is the last chrome
+    // in the frame: every widget has already run, so a refusal set anywhere on
+    // screen is in hand by now, and it is drained into status_ (which persists)
+    // rather than into the tip (which vanishes with the pointer).
+    if (!ui_.refusal.empty()) status_ = ui_.refusal;
     rend_.gradRect(r, 0.f, nx::glassBar, 0.55f);
     // §11: the divider is a hairline that fades at both ends, not a rule.
     rend_.hairlineH(r.x, r.right(), r.y, nx::hairlineInk, 1 * s);
@@ -2124,6 +2339,105 @@ void App::drawStatusBar(const Rect& r) {
         const f32 bh = std::round(engineBannerH() * s);
         drawEngineBanner({r.x, std::round(lay::controlBarH * s), r.w, bh});
     }
+
+    // The keys sheet's DRAW half. Last chrome in the frame, and the pointer
+    // goes back first so the sheet is drawn against the real one (and so the
+    // cursor and the badge, read after this, are not looking at (-1e4, -1e4)).
+    if (g_keysParked) {
+        Input& kin = win_.input();
+        kin.mx = g_keysParkX;
+        kin.my = g_keysParkY;
+        g_keysParked = false;
+    }
+    if (g_keysOpen) drawKeysSheet();
+}
+
+// ---------------------------------------------------------------------------
+// src/ui/keymap.h, drawn. See the note over g_keysOpen.
+//
+// TWO COLUMNS, split at a SECTION boundary rather than at the arithmetic
+// middle: a group cut in half across a gutter reads as two groups, and the
+// whole value of this panel is that "ANY KNOB, FADER OR NUMBER" is one block
+// you can take in at a glance.
+// ---------------------------------------------------------------------------
+void App::drawKeysSheet() {
+    const f32 s = win_.dpiScale();
+    const f32 W = (f32)win_.width(), H = (f32)win_.height();
+
+    const f32 rowH   = std::round(std::max(13.f * s, fSmall_.height() + 2.f * s));
+    const f32 padX   = nx::sp3 * s, padY = nx::sp2 * s;
+    const f32 keyW   = 108 * s;                    // the key column
+    const f32 colW   = std::min(470.f * s, (W - padX * 3.f) * 0.5f);
+    const f32 titleH = std::round(24 * s);
+
+    // The split. Walk the section headings and take the one whose row index is
+    // nearest half the table.
+    int split = keys::count;
+    {
+        const int half = keys::count / 2;
+        int best = 1 << 30;
+        for (int i = 0; i < keys::count; ++i) {
+            if (keys::table[i].keys || !keys::table[i].what) continue;   // not a heading
+            const int d = i > half ? i - half : half - i;
+            if (d < best) { best = d; split = i; }
+        }
+    }
+    const int leftN  = split;
+    const int rightN = keys::count - split;
+    const f32 bodyH  = rowH * (f32)(leftN > rightN ? leftN : rightN);
+
+    Rect box{0, 0, colW * 2.f + padX * 3.f, titleH + bodyH + padY * 2.f};
+    box.w = std::min(box.w, W - nx::sp2 * s * 2.f);
+    box.h = std::min(box.h, H - nx::sp2 * s * 2.f);
+    box.x = std::round((W - box.w) * 0.5f);
+    box.y = std::round((H - box.h) * 0.5f);
+
+    // §4's sheet material, the preset popover's mix -- one menu material in the
+    // program. A dimming wash under it, because this one covers the whole set
+    // and "everything behind this is inert" has to be visible.
+    rend_.rect({0, 0, W, H}, nx::bgTop.alpha(0.55f));
+    const f32 rad = nx::radiusSm * s;
+    rend_.shadow(box, rad, nx::shadowSheet);
+    rend_.roundRect(box, rad, nx::panel2.alpha(0.97f));
+    rend_.gradRect(box, rad, nx::glass2);
+    rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
+
+    ui_.microIn(fSmall_, {box.x + padX, box.y + padY * 0.5f, 200 * s, titleH},
+                "KEYS", nx::text, Align::Left, 0);
+    rend_.textIn(fSmall_, {box.x, box.y + padY * 0.5f, box.w - padX, titleH},
+                 "F1 or Esc to close", nx::muted.alpha(0.8f), Align::Right, 0);
+    rend_.hairlineH(box.x + padX, box.right() - padX,
+                    std::round(box.y + padY * 0.5f + titleH), nx::hairlineInk, s);
+
+    rend_.pushClip(box);
+    for (int col = 0; col < 2; ++col) {
+        const int from = col == 0 ? 0 : split;
+        const int to   = col == 0 ? split : keys::count;
+        const f32 cx   = box.x + padX + (f32)col * (colW + padX);
+        f32 y = box.y + padY + titleH;
+        for (int i = from; i < to; ++i) {
+            const keys::Row& kr = keys::table[i];
+            if (!kr.keys && !kr.what) { y += rowH * 0.5f; continue; }
+            if (!kr.keys) {
+                // A section: the micro-label idiom every column head in the
+                // program already wears, over a hairline that fades at both ends.
+                y += rowH * 0.4f;
+                ui_.microIn(fSmall_, {cx, y, colW, rowH}, kr.what,
+                            nx::violetSoft.alpha(0.9f), Align::Left, 0);
+                rend_.hairlineH(cx + ui_.microWidth(fSmall_, kr.what) + nx::sp1 * s,
+                                cx + colW, std::round(y + rowH * 0.5f));
+                y += rowH;
+                continue;
+            }
+            if (*kr.keys)
+                rend_.textIn(fSmall_, {cx, y, keyW - nx::sp1 * s, rowH}, kr.keys,
+                             nx::text, Align::Right, 0);
+            rend_.textIn(fSmall_, {cx + keyW, y, colW - keyW, rowH},
+                         kr.what ? kr.what : "", nx::muted.alpha(0.95f), Align::Left, 0);
+            y += rowH;
+        }
+    }
+    rend_.popClip();
 }
 
 
