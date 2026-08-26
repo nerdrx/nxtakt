@@ -74,8 +74,18 @@ xd()   { DISPLAY="$DISP" xdotool "$@"; }
 # resolves the path against the COMPOSITOR's cwd rather than ours, which once
 # produced a pile of "Failed to save screenshot to <cwd><abspath>" that read
 # like a driver fault and was a path bug.
+# GAMESCOPE_WAYLAND_DISPLAY is not optional when more than one agent is driving.
+# gamescopectl picks a compositor by WAYLAND SOCKET, not by $DISPLAY, and with
+# five agents in this repo there are routinely two or three gamescopes up: a
+# usability pass spent three screenshots photographing a SIBLING'S window and
+# only caught it because the probe log disagreed with the picture. The socket
+# our own instance published is in $LOG ("Running compositor on wayland display
+# 'gamescope-N'"), so there is no guessing involved.
 shot() {
-  DISPLAY="$DISP" gamescopectl screenshot "$OUT/$1.png" >/dev/null 2>&1 && { sleep 0.5; [[ -s "$OUT/$1.png" ]] && return 0; }
+  local sock
+  sock=$(grep -aoE "wayland display '[^']+'" "$LOG" 2>/dev/null | tail -1 | grep -oE "gamescope-[0-9]+")
+  DISPLAY="$DISP" GAMESCOPE_WAYLAND_DISPLAY="$sock" \
+      gamescopectl screenshot "$OUT/$1.png" >/dev/null 2>&1 && { sleep 0.5; [[ -s "$OUT/$1.png" ]] && return 0; }
   DISPLAY="$DISP" magick import -window root "$OUT/$1.png" 2>/dev/null && return 0
   DISPLAY="$DISP" import -window root "$OUT/$1.png" 2>/dev/null && return 0
   echo "  !! shot $1 FAILED (no gamescopectl, no ImageMagick)" >&2
