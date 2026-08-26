@@ -1349,6 +1349,15 @@ bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
     // under it and the cursor never changes over a socket with nothing in it.
     // It gets no menu either, for the same reason: there is nothing to reset,
     // type into, assign or learn.
+    // ...and an absent knob must still SPEND a pending offer, even though it
+    // claims no rect. setHot() is what consumes it, so skipping setHot() left
+    // the offer in front of this control armed for whatever drew NEXT — a
+    // live "Assign to matrix slot" row appearing on an unrelated knob. Harmless
+    // while callers derived their offer from has(id) (an absent id gave an
+    // empty offer), and not harmless the moment a RESERVED id made has() answer
+    // true about a parameter that means nothing. "Applies to the next control
+    // and is then cleared" is now true in the absent case too.
+    if (st.absent) pendingOffer = MenuOffer{};
     if (!st.absent && !typing) {
         const bool over = setHot(id, b);
         hotNow = isHot(id);

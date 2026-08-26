@@ -3468,28 +3468,28 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 65, "E3 Release",    1.f,     8000.f,  false, true  },
     { 66, "—",             0.f,     1.f,     false, false },
     { 67, "—",             0.f,     1.f,     false, false },
-    { 68, "M1 Src",        0.f,     16.f,    true,  false },
+    { 68, "M1 Src",        0.f,     17.f,    true,  false },
     { 69, "M1 Dst",        0.f,     19.f,    true,  false },
     { 70, "M1 Amt",       -1.f,     1.f,     false, false },
-    { 71, "M2 Src",        0.f,     16.f,    true,  false },
+    { 71, "M2 Src",        0.f,     17.f,    true,  false },
     { 72, "M2 Dst",        0.f,     19.f,    true,  false },
     { 73, "M2 Amt",       -1.f,     1.f,     false, false },
-    { 74, "M3 Src",        0.f,     16.f,    true,  false },
+    { 74, "M3 Src",        0.f,     17.f,    true,  false },
     { 75, "M3 Dst",        0.f,     19.f,    true,  false },
     { 76, "M3 Amt",       -1.f,     1.f,     false, false },
-    { 77, "M4 Src",        0.f,     16.f,    true,  false },
+    { 77, "M4 Src",        0.f,     17.f,    true,  false },
     { 78, "M4 Dst",        0.f,     19.f,    true,  false },
     { 79, "M4 Amt",       -1.f,     1.f,     false, false },
-    { 80, "M5 Src",        0.f,     16.f,    true,  false },
+    { 80, "M5 Src",        0.f,     17.f,    true,  false },
     { 81, "M5 Dst",        0.f,     19.f,    true,  false },
     { 82, "M5 Amt",       -1.f,     1.f,     false, false },
-    { 83, "M6 Src",        0.f,     16.f,    true,  false },
+    { 83, "M6 Src",        0.f,     17.f,    true,  false },
     { 84, "M6 Dst",        0.f,     19.f,    true,  false },
     { 85, "M6 Amt",       -1.f,     1.f,     false, false },
-    { 86, "M7 Src",        0.f,     16.f,    true,  false },
+    { 86, "M7 Src",        0.f,     17.f,    true,  false },
     { 87, "M7 Dst",        0.f,     19.f,    true,  false },
     { 88, "M7 Amt",       -1.f,     1.f,     false, false },
-    { 89, "M8 Src",        0.f,     16.f,    true,  false },
+    { 89, "M8 Src",        0.f,     17.f,    true,  false },
     { 90, "M8 Dst",        0.f,     19.f,    true,  false },
     { 91, "M8 Amt",       -1.f,     1.f,     false, false },
     { 92, "—",             0.f,     1.f,     false, false },
@@ -3512,8 +3512,27 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 106, "M6 Curve",     0.f,     2.f,     true,  false },
     { 107, "M7 Curve",     0.f,     2.f,     true,  false },
     { 108, "M8 Curve",     0.f,     2.f,     true,  false },
-    { 109, "—",            0.f,     1.f,     false, false },
-    { 110, "—",            0.f,     1.f,     false, false },
+    // --- v4, the arpeggiator ("v4 — the arpeggiator"). v3's generic reserved
+    // tail (109, 110) is spent on the two ids that open the block and the
+    // append runs to 124, so the whole feature is ONE contiguous run with no
+    // hole in it. The other eight reserved ids (46, 47, 52, 53, 66, 67, 92, 93)
+    // stay exactly where they are.
+    { 109, "Arp On",       0.f,     1.f,     true,  false },
+    { 110, "Arp Mode",     0.f,     9.f,     true,  false },
+    { 111, "Arp Rate",     0.01f,   40.f,    false, true  },
+    { 112, "Arp Sync",     0.f,     9.f,     true,  false },
+    { 113, "Arp Octaves",  1.f,     4.f,     true,  false },
+    { 114, "Arp Oct Mode", 0.f,     2.f,     true,  false },
+    { 115, "Arp Gate",     1.f,     200.f,   false, false },
+    { 116, "Arp Swing",    0.f,     100.f,   false, false },
+    { 117, "Arp Hold",     0.f,     1.f,     true,  false },
+    { 118, "Arp Retrig",   0.f,     1.f,     true,  false },
+    { 119, "Arp Vel Mode", 0.f,     2.f,     true,  false },
+    { 120, "Arp Fixed Vel",1.f,     127.f,   true,  false },
+    { 121, "Arp Steps",    1.f,     16.f,    true,  false },
+    { 122, "Arp Chance",   0.f,     100.f,   false, false },
+    { 123, "—",            0.f,     1.f,     false, false },
+    { 124, "—",            0.f,     1.f,     false, false },
 };
 static constexpr int kSpectraContractN =
     (int)(sizeof kSpectraContract / sizeof kSpectraContract[0]);
@@ -3526,15 +3545,36 @@ static constexpr int kSpectraContractN =
 // itself (src/plugin/spectra_presets.inc) is authored against the doc.
 // v3 appends BANK 2: 48 more presets in the same seven categories, after
 // bank 1 and never interleaved with it (a preset index is stored in no set,
-// but the user-preset contract freezes the factory ORDER). So the bank is
-// Init + 48 + 48 and the category sweep below runs TWICE.
-static constexpr int kSpectraPresetBanks = 2;
-static constexpr int kSpectraPresetN = 1 + 48 * kSpectraPresetBanks;
+// but the user-preset contract freezes the factory ORDER). v4 appends BANK 3,
+// the arpeggiators. So the bank is Init + 48 + 48 + 24 and the category sweep
+// below runs three times, over a PER-BANK table.
+// v4 appends BANK 3: 24 arpeggiator presets, after banks 1 and 2 and never
+// interleaved with them. It is a HALF-SIZE bank with its own distribution, and
+// the distribution is deliberate rather than a scaled copy: an arpeggiator
+// lives in Bass, Lead, Pluck and Sequence, so twenty of the twenty-four are
+// there; Pad and Keys get one each for the two things only they show — a
+// latched overlapping arp and a triplet ladder — and FX gets the Chance/Random
+// one. So the bank table is PER BANK and not one row repeated: a third
+// repetition of the 48-row distribution would be a different bank from the one
+// that shipped.
 struct SpectraPresetCat { const char* tag; int count; };
-static const SpectraPresetCat kSpectraPresetCats[] = {
+static const SpectraPresetCat kSpectraBank12[] = {
     { "BA", 9 }, { "LD", 9 }, { "PD", 8 }, { "KY", 7 },
     { "PL", 6 }, { "FX", 5 }, { "SQ", 4 },
 };
+static const SpectraPresetCat kSpectraBank3[] = {
+    { "BA", 6 }, { "LD", 6 }, { "PD", 1 }, { "KY", 2 },
+    { "PL", 4 }, { "FX", 1 }, { "SQ", 4 },
+};
+struct SpectraPresetBank { const SpectraPresetCat* cats; int n; int total; };
+static const SpectraPresetBank kSpectraPresetBanks[] = {
+    { kSpectraBank12, 7, 48 },
+    { kSpectraBank12, 7, 48 },
+    { kSpectraBank3,  7, 24 },
+};
+static constexpr int kSpectraPresetBankN =
+    (int)(sizeof kSpectraPresetBanks / sizeof kSpectraPresetBanks[0]);
+static constexpr int kSpectraPresetN = 1 + 48 + 48 + 24;
 static const char* spPresetName(const PluginInstance& s, int k) {
     const char* n = s.presetName(k);
     return n ? n : "(null)";
@@ -4690,8 +4730,8 @@ static void testSpectraPresets(PluginRegistry& reg) {
     if (!s) return;
 
     CHECK(s->presetCount() == kSpectraPresetN,
-          "presetCount() is %d (the contract's bank is Init + 48 x %d = %d rows)",
-          s->presetCount(), kSpectraPresetBanks, kSpectraPresetN);
+          "presetCount() is %d (the contract's bank is Init + 48 + 48 + 24 = %d rows)",
+          s->presetCount(), kSpectraPresetN);
     CHECK(s->presetName(-1) == nullptr && s->presetName(s->presetCount()) == nullptr,
           "presetName() is null out of range");
     CHECK(s->presetName(0) && std::strcmp(s->presetName(0), "Init") == 0,
@@ -4704,12 +4744,13 @@ static void testSpectraPresets(PluginRegistry& reg) {
     {
         bool ok = true;
         int row = 1;
-        for (int bank = 0; bank < kSpectraPresetBanks; ++bank)
-        for (const SpectraPresetCat& cat : kSpectraPresetCats) {
+        for (int bank = 0; bank < kSpectraPresetBankN; ++bank)
+        for (int ci = 0; ci < kSpectraPresetBanks[bank].n; ++ci) {
+            const SpectraPresetCat& cat = kSpectraPresetBanks[bank].cats[ci];
             // Alphabetical WITHIN each bank's own group of a category: bank 2
             // appends, so its BA rows sort among themselves and not into
             // bank 1's. The editor draws a header wherever the tag changes,
-            // which is why the popover shows the seven categories twice.
+            // which is why the popover shows the seven categories three times.
             const char* prev = nullptr;
             for (int j = 0; j < cat.count; ++j, ++row) {
                 const char* n = s->presetName(row);
@@ -4745,8 +4786,9 @@ static void testSpectraPresets(PluginRegistry& reg) {
             }
         }
         CHECK(ok && row == kSpectraPresetN,
-              "both banks are BA9 LD9 PD8 KY7 PL6 FX5 SQ4 in order, alphabetical "
-              "within each bank's category, names tagged and <= 20 chars");
+              "banks 1 and 2 are BA9 LD9 PD8 KY7 PL6 FX5 SQ4 and bank 3 (the arps) is "
+              "BA6 LD6 PD1 KY2 PL4 FX1 SQ4, in order, alphabetical within each bank's "
+              "category, names tagged and <= 20 chars (%d rows)", row);
     }
 
     // Init is the defaults, exactly. Not approximately: a preset that drifts
@@ -5811,9 +5853,12 @@ static void testSpectraV3Contract(PluginRegistry& reg) {
     auto s = reg.instantiate(*d, kSR, kBlock);
     if (!s) return;
 
-    CHECK(s->paramCount() == 111, "kSpParamCount went 100 -> 111 (it is %d)",
+    // v3 took the count to 111; v4 appends past it and this check follows the
+    // tip rather than freezing at the revision that wrote it — the property is
+    // "the append is dense and nothing moved", not "the list stopped here".
+    CHECK(s->paramCount() >= 111, "kSpParamCount went 100 -> 111 and up (it is %d)",
           s->paramCount());
-    CHECK(d->paramCount == 111, "the descriptor advertises 111 too (it is %d)",
+    CHECK(d->paramCount == s->paramCount(), "the descriptor advertises the same (%d)",
           d->paramCount);
 
     // The one default the whole revision is written around.
@@ -5859,12 +5904,14 @@ static void testSpectraV3Contract(PluginRegistry& reg) {
     s->setParam(69, 0.f);
 
     // Eight reserved ids remain, and 92/93 are two of them: they were the
-    // obvious home for the per-slot curves and could not hold eight.
+    // obvious home for the per-slot curves and could not hold eight. v3's own
+    // tail (109, 110) is spent by v4 and its replacement tail is 123/124, so
+    // the count of reserved ids is still ten and the LIST has moved by two.
     int reserved = 0;
-    for (int id : { 46, 47, 52, 53, 66, 67, 92, 93, 109, 110 })
+    for (int id : { 46, 47, 52, 53, 66, 67, 92, 93, 123, 124 })
         if (s->paramInfo(id).name == "\xE2\x80\x94") ++reserved;
     CHECK(reserved == 10, "ten ids are still registered reserved (\"—\", 0..1, default 0): "
-                          "the eight v2 left plus v3's own tail (%d found)", reserved);
+                          "the eight v2 left plus the current tail (%d found)", reserved);
     CHECK(s->paramInfo(92).name == "\xE2\x80\x94" && s->paramInfo(93).name == "\xE2\x80\x94",
           "92 and 93 stayed reserved — an id ARRAY must be contiguous and two ids "
           "cannot hold eight curves");
@@ -7257,6 +7304,1711 @@ static void testSpectraV3BeatLock(PluginRegistry& reg) {
             CHECK(spV2MaxDiff(a, b2) == 0.f,
                   "a One-shot drawn grid is identical from beat 0 and from beat 2 — its "
                   "origin is the NOTE, and sync sets only its speed");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spectra v4 (ids 109..124, one widened source enum and two new state records)
+// — the step-sequencer arpeggiator.
+//
+// House rule, unchanged since v1: everything below MEASURES. A mode's note
+// order is not asserted, it is READ OUT of the rendered audio one step at a
+// time; a gate is not asserted to be a percentage of the step, the sounding
+// length is counted in samples and divided by the step; swing is not asserted
+// to be B/3 at 100 %, the onset is found and the delay is measured.
+//
+// HOW A STEP IS READ OUT OF THE AUDIO. spV4Probe() below is table 7 at
+// position 0 — which that table's own generator says is EXACTLY a sine, the
+// fold's drive being zero there — with one unison voice, no detune, no spread,
+// the filter wide open and an envelope that is flat at 1 within half a
+// millisecond and gone within one. So a monophonic step is a pure tone whose
+// upward zero crossings COUNT its frequency, and its start and end are a square
+// amplitude edge. Chord mode is the one polyphonic case and is read with a
+// single-bin DFT at each candidate fundamental instead.
+//
+// THE CLOCK EVERY TIMING NUMBER COMES FROM. Arp Sync 6 is 1/8, one eighth note
+// is 0.25 s at 120 bpm, and 0.25 s is 12000 samples at 48 kHz. Every constant
+// below is derived from that one and is written out rather than hidden.
+// ---------------------------------------------------------------------------
+
+// Raw contract ids, exactly as spV3Slot uses them: ids are the frozen
+// interface, so a test that spells them is a test that catches a reorder.
+enum : int {
+    kApOn = 109, kApMode = 110, kApRate = 111, kApSync = 112, kApOctaves = 113,
+    kApOctMode = 114, kApGate = 115, kApSwing = 116, kApHold = 117,
+    kApRetrig = 118, kApVelMode = 119, kApFixedVel = 120, kApSteps = 121,
+    kApChance = 122
+};
+static constexpr int kApStep     = 12000;   // samples in a 1/8 step at 120 bpm
+static constexpr int kApSyncEigh = 6;       // the sync table's 1/8 index
+static const char* kApRowOn  = "05050505050505050505050505050505";  // the default
+static const char* kApRowFull = "ffffffffffffffff";                  // the default
+
+static std::unique_ptr<PluginInstance> spV4Probe(PluginRegistry& reg, const PluginDesc& d) {
+    auto s = reg.instantiate(d, kSR, kBlock);
+    if (!s) return s;
+    s->setParam(spIdx(*s, "A Table"), 7.f);          // Fold at position 0 = sine
+    s->setParam(spIdx(*s, "A Position"), 0.f);
+    s->setParam(spIdx(*s, "A Level"), 0.8f);
+    s->setParam(spIdx(*s, "A Unison"), 1.f);
+    s->setParam(spIdx(*s, "A Detune"), 0.f);
+    s->setParam(spIdx(*s, "A Spread"), 0.f);
+    s->setParam(spIdx(*s, "B Level"), 0.f);
+    s->setParam(spIdx(*s, "Attack"), 0.5f);
+    s->setParam(spIdx(*s, "Decay"), 5000.f);
+    s->setParam(spIdx(*s, "Sustain"), 1.f);
+    s->setParam(spIdx(*s, "Release"), 1.f);
+    s->setParam(spIdx(*s, "Cutoff"), 20000.f);
+    s->setParam(spIdx(*s, "Resonance"), 0.f);
+    s->setParam(spIdx(*s, "Master"), 1.f);
+    s->setParam(spIdx(*s, "Voices"), 16.f);
+    s->setParam(kApOn, 1.f);
+    s->setParam(kApSync, (f32)kApSyncEigh);
+    s->setParam(kApGate, 50.f);
+    return s;
+}
+
+// The MIDI note sounding in a window, from the sine's upward zero crossings.
+// -1 means "silent". Deliberately not an FFT: a pure tone's crossings are its
+// frequency exactly, and a wrong answer here would be a wrong answer nobody
+// could argue with.
+static int spV4NoteIn(const std::vector<f32>& x, int from, int n) {
+    if (spV3Peak(x, from, n) < 0.02f) return -1;
+    int first = -1, last = -1, cross = 0;
+    const int hi = (from + n) > (int)x.size() ? (int)x.size() : (from + n);
+    for (int i = (from < 1 ? 1 : from); i < hi; ++i) {
+        if (x[(size_t)(i - 1)] < 0.f && x[(size_t)i] >= 0.f) {
+            if (first < 0) first = i;
+            last = i;
+            ++cross;
+        }
+    }
+    if (cross < 3 || last <= first) return -1;
+    const f64 hz = (f64)(cross - 1) * kSR / (f64)(last - first);
+    return (int)std::lround(69.0 + 12.0 * std::log2(hz / 440.0));
+}
+
+// Step `k`'s note, read from the middle of its sounding half.
+static int spV4Step(const std::vector<f32>& x, int k) {
+    return spV4NoteIn(x, k * kApStep + 1500, 3000);
+}
+
+// One DFT bin, Hann-windowed, for the one polyphonic mode. Chord is the only
+// place a window holds more than one fundamental at once.
+static f64 spV4Bin(const std::vector<f32>& x, int from, int n, f64 hz) {
+    f64 re = 0.0, im = 0.0, wsum = 0.0;
+    const f64 w = 6.283185307179586 * hz / kSR;
+    for (int i = 0; i < n; ++i) {
+        const int k = from + i;
+        if (k < 0 || k >= (int)x.size()) continue;
+        const f64 win = 0.5 - 0.5 * std::cos(6.283185307179586 * (f64)i / (f64)n);
+        const f64 v = (f64)x[(size_t)k] * win;
+        re += v * std::cos(w * (f64)i);
+        im -= v * std::sin(w * (f64)i);
+        wsum += win;
+    }
+    if (wsum <= 0.0) return 0.0;
+    return 2.0 * std::sqrt(re * re + im * im) / wsum;
+}
+static f64 spV4Hz(int note) { return 440.0 * std::pow(2.0, ((f64)note - 69.0) / 12.0); }
+
+// The sounding length of step k, in samples, by an amplitude gate. The window
+// is 128 samples, so every note used for a timing measurement is high enough
+// that 128 samples hold a whole cycle.
+static int spV4Sounding(const std::vector<f32>& x, int from, int to) {
+    int n = 0;
+    for (int i = from; i + 128 <= to && i + 128 <= (int)x.size(); i += 32)
+        if (spV3Peak(x, i, 128) > 0.05f) n += 32;
+    return n;
+}
+// The first RISING edge at or after `from`: silence, then sound. A rising edge
+// and not "is it sounding", because a gate of 50 % leaves the second half of
+// every step lit and a level test would report the sample it started looking
+// at. The 128-sample window means the answer can be up to 128 samples early,
+// which every tolerance below allows for.
+static int spV4Onset(const std::vector<f32>& x, int from, int to) {
+    bool was = spV3Peak(x, from, 128) > 0.05f;
+    for (int i = from + 32; i + 128 <= to && i + 128 <= (int)x.size(); i += 32) {
+        const bool on = spV3Peak(x, i, 128) > 0.05f;
+        if (on && !was) return i;
+        was = on;
+    }
+    return -1;
+}
+
+// A chord, held for the whole render, pressed on one sample so that the first
+// note-on is the NEW CHORD and the rest join it.
+static std::vector<SpEvent> spV4Chord(std::initializer_list<u8> notes, int frame = 0) {
+    std::vector<SpEvent> ev;
+    for (u8 n : notes) ev.push_back({ frame, 0x90, n, 100 });
+    return ev;
+}
+
+// The melody the arp plays, step by step, over `steps` steps.
+static std::vector<int> spV4Melody(const std::vector<f32>& x, int steps) {
+    std::vector<int> m;
+    m.reserve((size_t)steps);
+    for (int k = 0; k < steps; ++k) m.push_back(spV4Step(x, k));
+    return m;
+}
+static std::string spV4Show(const std::vector<int>& m) {
+    std::string o;
+    char b[16];
+    for (size_t i = 0; i < m.size(); ++i) {
+        std::snprintf(b, sizeof b, "%s%d", i ? " " : "", m[i]);
+        o += b;
+    }
+    return o;
+}
+static bool spV4Eq(const std::vector<int>& a, std::initializer_list<int> b) {
+    if (a.size() != b.size()) return false;
+    size_t i = 0;
+    for (int v : b) if (a[i++] != v) return false;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Contract(PluginRegistry& reg) {
+    banner("Spectra v4: the spent reserved tail, the append and the widened source");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    // 125 ids total (0..124): 115 functional, 10 reserved. The whole parameter
+    // table is checked mechanically by testSpectraContract against the
+    // transcription above; what is checked HERE is the budget and the defaults
+    // the contract argues for in words.
+    CHECK(s->paramCount() == 125, "kSpParamCount is 125 (%d)", s->paramCount());
+    CHECK(s->paramCount() <= 128, "125 <= kMaxParams = 128: v4 fits and the cap is NOT raised");
+
+    // THE BIT-IDENTITY SWITCH. Everything else in the block is reachable only
+    // behind it.
+    CHECK(s->getParam(kApOn) == 0.f, "Arp On defaults to 0 — the revision's bit-identity switch");
+    CHECK(s->getParam(kApMode) == 0.f, "Arp Mode defaults to 0 (Up), so a v3 .nxp's zero lands on it");
+
+    // The defaults that are not simply the bottom of their range, each one
+    // named in the contract rather than left to be discovered.
+    CHECK(s->getParam(kApSync) == 7.f,
+          "Arp Sync defaults to 7 = 1/16 — the only v4 default that is not the "
+          "bottom of its range, and it costs nothing because Arp On is 0 (%g)",
+          (double)s->getParam(kApSync));
+    CHECK(s->getParam(kApRetrig) == 1.f,
+          "Arp Retrig defaults to 1: a player expects the first note they press to sound");
+    CHECK(s->getParam(kApGate) == 50.f, "Arp Gate defaults to 50 %%");
+    CHECK(s->getParam(kApRate) == 2.f, "Arp Rate defaults to 2 Hz, LFO Rate's default");
+    CHECK(s->getParam(kApOctaves) == 1.f, "Arp Octaves defaults to 1 — the played octave");
+    CHECK(s->getParam(kApSteps) == 16.f, "Arp Steps defaults to 16");
+    CHECK(s->getParam(kApChance) == 100.f, "Arp Chance defaults to 100 %% — the no-draw branch");
+    CHECK(s->getParam(kApFixedVel) == 100.f, "Arp Fixed Vel defaults to 100");
+    CHECK(s->getParam(kApVelMode) == 0.f, "Arp Vel Mode defaults to 0 (As Played)");
+    CHECK(s->getParam(kApHold) == 0.f, "Arp Hold defaults to 0");
+    CHECK(s->getParam(kApSwing) == 0.f, "Arp Swing defaults to 0 — the no-offset branch");
+
+    // THE FLOOR IS 1 AND NOT 0, and the reason is this device's own wire: a
+    // note-on with velocity 0 is a note-off, so a parameter that could express
+    // "no note" would express it.
+    s->setParam(kApFixedVel, 0.f);
+    CHECK(s->getParam(kApFixedVel) == 1.f,
+          "Arp Fixed Vel clamps to 1, never 0 — a generated 0 would be a generated note-off");
+
+    // The one widened enum, and the one that did NOT widen for the third
+    // revision running.
+    CHECK(s->paramInfo(68).max == 17.f, "M1 Src widens to 0..17 — 17 is Arp Step");
+    CHECK(s->paramInfo(69).max == 19.f,
+          "the destination enum does NOT widen: Arp Rate cannot stay locked to a bar "
+          "line if it is modulated, and a gate consumed once per step is not an "
+          "audio-rate target");
+
+    // The eight reserved ids v4 deliberately did not spend.
+    bool res = true;
+    for (int id : { 46, 47, 52, 53, 66, 67, 92, 93, 123, 124 })
+        if (s->paramInfo(id).name != "—") res = false;
+    CHECK(res, "46/47, 52/53, 66/67, 92/93 stay reserved and 123/124 are v4's own tail — "
+               "a reserved id belongs to the block it sits in");
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4State(PluginRegistry& reg) {
+    banner("Spectra v4: the two grid rows, their non-zero defaults, and the refusal line");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // THE EMPTY-STATE ROUND TRIP, restated for v4. Spectra had no state string
+    // before v3 and a set that uses none must still write none, so a v2 or v3
+    // project round-trips through a v4 build byte-identically. A row still at
+    // its default is not emitted.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        CHECK(s->stateString().empty(),
+              "a fresh v4 instance still writes NO state string (\"%s\")",
+              s->stateString().c_str());
+        s->setParam(kApOn, 1.f);
+        s->setParam(kApMode, 8.f);
+        s->setParam(kApSwing, 60.f);
+        CHECK(s->stateString().empty(),
+              "...and turning the arp on and moving its knobs still writes none: the "
+              "rows are STATE and the parameters are not (\"%s\")", s->stateString().c_str());
+        // Writing the defaults explicitly is still the default.
+        CHECK(s->setStateString(std::string("nxspc1;arpl=") + kApRowFull + ";arps=" + kApRowOn),
+              "the default rows parse");
+        CHECK(s->stateString().empty(),
+              "...and round-trip to the empty state, because they ARE the default (\"%s\")",
+              s->stateString().c_str());
+    }
+
+    // THE DEFAULTS ARE NOT ALL ZEROS, and that is a genuine divergence from the
+    // LFO grids this feature otherwise copies exactly: an all-zero step row is
+    // an arp that plays nothing, which is a broken default rather than an inert
+    // one. The inert switch is Arp On, not the grid. `05` and not `01` because
+    // the octave field is BIASED — code 2 is offset 0.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        // One step turned off is enough to make the row non-default, and then
+        // BOTH rows are emitted, because a state this build writes is complete.
+        CHECK(s->setStateString("nxspc1;arps=05050505050505050505050505050004"),
+              "a step row with step 15 turned off parses");
+        const std::string st = s->stateString();
+        CHECK(st == "nxspc1;arpl=ffffffffffffffff;arps=05050505050505050505050505050004",
+              "it is re-emitted with BOTH rows, level first, the untouched level row is "
+              "the all-f default, and the REST keeps the octave it was drawn with — "
+              "turning a step off and on again may not lose it (\"%s\")", st.c_str());
+        auto s2 = reg.instantiate(*d, kSR, kBlock);
+        if (s2) {
+            CHECK(s2->setStateString(st) && s2->stateString() == st,
+                  "and the round trip is an exact inverse");
+        }
+    }
+
+    // DEGRADED, NOT REFUSED. An octave code of 5, 6 or 7 clamps to 4 (offset
+    // +2) and bits 5..7 are masked off: these are values a LATER, WIDER build
+    // could legitimately write, and the versioning rule's job is to let a newer
+    // state land on an older build rather than break it.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        //  0xff = on(1) + code 7 (bits1..3) + tie(0x10) + every reserved bit.
+        //  The clamp takes code 7 -> 4 and the mask takes 0xe0 -> 0, leaving
+        //  0x19 = on, octave code 4 (+2), tie.
+        CHECK(s->setStateString("nxspc1;arps=ff050505050505050505050505050505"),
+              "an octave code of 7 with every reserved bit set is ACCEPTED");
+        const std::string st = s->stateString();
+        CHECK(st.find(";arps=19") != std::string::npos,
+              "...and lands as 0x19 — code clamped to 4, reserved bits masked (\"%s\")",
+              st.c_str());
+    }
+
+    // REFUSED, and the whole state refuses: these are strings this writer could
+    // not have produced, so nothing is applied and the device is left as it was.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setStateString("nxspc1;arpl=0123456789abcdef");
+        const std::string good = s->stateString();
+        const char* bad[] = {
+            "nxspc1;arpl=0123456789abcde",              // 15 digits
+            "nxspc1;arpl=0123456789abcdeff",            // 17
+            "nxspc1;arpl=0123456789ABCDEF",             // uppercase
+            "nxspc1;arpl=0123456789abcdeg",             // not hex
+            "nxspc1;arps=0505050505050505050505050505050",   // 31 digits
+            "nxspc1;arps=05050505050505050505050505050505f", // 33
+            "nxspc1;arps=050505050505050505050505050505G5",  // not hex
+            "nxspc1;arps=0505050505050505050505050505050A",  // UPPERCASE hex
+            "nxspc1;arps=050505050505050505050505050505FF",  // and again, tie bits
+            "nxspc1;arpl=ffffffffffffffff;arpl=0000000000000000",  // duplicate
+            "nxspc1;arps=05050505050505050505050505050505;arps=05050505050505050505050505050505",
+        };
+        int refused = 0;
+        for (const char* b : bad) if (!s->setStateString(b)) ++refused;
+        CHECK(refused == (int)(sizeof bad / sizeof bad[0]),
+              "all %d malformed arp rows are REFUSED — length, charset and CASE, on "
+              "both rows, plus a duplicate key (%d)",
+              (int)(sizeof bad / sizeof bad[0]), refused);
+        CHECK(s->stateString() == good,
+              "...and a refusal changed nothing at all (\"%s\")", s->stateString().c_str());
+    }
+
+    // loadPreset RESETS THE ARP STATE TOO — v3's extension of "a preset is
+    // COMPLETE however short it is written", covering the two new rows without
+    // amendment.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        s->setStateString("nxspc1;arpl=0123456789abcdef;arps=00010203040506070809000102030405");
+        CHECK(!s->stateString().empty(), "a drawn arp pattern is state");
+        s->loadPreset(0);                                  // Init
+        CHECK(s->stateString().empty(),
+              "loadPreset resets arpl and arps to their defaults, so switching to a "
+              "preset that mentions neither lands where a fresh instance would (\"%s\")",
+              s->stateString().c_str());
+    }
+
+    // THE SPARP MACRO'S PARSE SIDE, which is this file's half of it: the bank
+    // authors the two rows and spectra.cpp turns them into state. A row that
+    // turns the arp on and carries an SPARP must arrive as `arpl`/`arps` in the
+    // loaded state — and it must arrive the SAME whatever the instrument was
+    // doing before, because loadPreset resets every state block first.
+    {
+        auto a = reg.instantiate(*d, kSR, kBlock);
+        auto b = reg.instantiate(*d, kSR, kBlock);
+        if (a && b) {
+            b->setStateString("nxspc1;lfo2=0123456789abcdef;smooth2=250;cc=74;"
+                              "arpl=0123456789abcdef;arps="
+                              "1517151715171517151715171517151f");
+            int arps = 0, on = 0, same = 0;
+            for (int k = 0; k < a->presetCount(); ++k) {
+                a->loadPreset(k);
+                if (a->getParam(kApOn) != 1.f) continue;
+                ++on;
+                const std::string st = a->stateString();
+                if (st.find(";arps=") != std::string::npos &&
+                    st.find(";arpl=") != std::string::npos) ++arps;
+                b->loadPreset(k);
+                if (b->stateString() == st) ++same;
+            }
+            CHECK(on >= 24, "the factory bank carries %d rows with Arp On = 1", on);
+            CHECK(arps == on,
+                  "every one of them arrives with BOTH arp rows in its state: SPARP's "
+                  "two arguments are mandatory and both reach the device (%d of %d)",
+                  arps, on);
+            CHECK(same == on,
+                  "...and a preset lands on the same arp state from a patch with a drawn "
+                  "grid, a learned CC and a drawn arp pattern already in it (%d of %d)",
+                  same, on);
+        }
+    }
+
+    // Forward compatibility is unchanged: a key this build does not know is
+    // SKIPPED, and the arp rows around it still land.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (!s) return;
+        CHECK(s->setStateString("nxspc1;arpp=ffffffffffffffff;arpl=0123456789abcdef"),
+              "the pre-declared future third row (arpp) is SKIPPED, not refused");
+        CHECK(s->stateString() == "nxspc1;arpl=0123456789abcdef;arps=" + std::string(kApRowOn),
+              "...and the rows this build knows still landed (\"%s\")",
+              s->stateString().c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Modes(PluginRegistry& reg) {
+    banner("Spectra v4: the nine modes, read one step at a time out of the audio");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // The contract's own worked example, transposed up an octave so the sine's
+    // zero crossings are quick to count: N = [C5, E5, G5] = 72, 76, 79.
+    const auto chord = spV4Chord({ 72, 76, 79 });
+    auto run = [&](int mode, int steps) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) return std::vector<int>{};
+        s->setParam(kApMode, (f32)mode);
+        spRender(*s, chord, steps * kApStep, kBlock, L, R, 120.0);
+        return spV4Melody(L, steps);
+    };
+
+    struct Row { int mode; const char* name; std::initializer_list<int> want; };
+    const Row rows[] = {
+        { 0, "Up",                 { 72, 76, 79, 72, 76, 79 } },
+        { 1, "Down",               { 79, 76, 72, 79, 76, 72 } },
+        { 2, "Up-Down Inclusive",  { 72, 76, 79, 79, 76, 72 } },
+        { 3, "Up-Down Exclusive",  { 72, 76, 79, 76, 72, 76 } },
+        { 4, "Down-Up",            { 79, 76, 72, 76, 79, 76 } },
+        { 5, "As Played",          { 72, 76, 79, 72, 76, 79 } },
+        { 8, "Thumb",              { 72, 76, 72, 79, 72, 76 } },
+        { 9, "Pinky",              { 72, 79, 76, 79, 72, 79 } },
+    };
+    for (const Row& r : rows) {
+        const std::vector<int> got = run(r.mode, 6);
+        CHECK(spV4Eq(got, r.want), "mode %d %s plays %s (got %s)",
+              r.mode, r.name, spV4Show(std::vector<int>(r.want)).c_str(),
+              spV4Show(got).c_str());
+    }
+
+    // AS PLAYED IS THE INSERTION ORDER, and it is the one mode that can tell a
+    // rolled chord from a struck one. Pressed high-to-low it plays high-to-low.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            std::vector<SpEvent> ev = { { 0, 0x90, 79, 100 }, { 1, 0x90, 72, 100 },
+                                        { 2, 0x90, 76, 100 } };
+            s->setParam(kApMode, 5.f);
+            spRender(*s, ev, 6 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 6);
+            CHECK(spV4Eq(m, { 79, 72, 76, 79, 72, 76 }),
+                  "As Played follows the held stack's insertion order, not the pitch "
+                  "order (got %s)", spV4Show(m).c_str());
+        }
+    }
+
+    // ...and As Played SURVIVES A NOTE-OFF, because heldRemove compacts the
+    // stack in place and preserves order. This is a property of the existing
+    // stack, not a new one.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            std::vector<SpEvent> ev = { { 0, 0x90, 79, 100 }, { 1, 0x90, 72, 100 },
+                                        { 2, 0x90, 76, 100 },
+                                        { 3 * kApStep + 100, 0x80, 72, 0 } };
+            s->setParam(kApMode, 5.f);
+            s->setParam(kApRetrig, 0.f);          // do not restart on the note-off
+            spRender(*s, ev, 8 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 8);
+            CHECK(m[0] == 79 && m[1] == 72 && m[2] == 76 &&
+                  m[4] == 79 && m[5] == 76 && m[6] == 79,
+                  "releasing the middle-pressed note leaves the other two in the order "
+                  "they were pressed (got %s)", spV4Show(m).c_str());
+        }
+    }
+
+    // A SINGLE NOTE. Up-Down Exclusive and Down-Up have a natural cycle length
+    // of 2c-2 = 0 at c = 1, which is not a cycle; max(2c-2, 1) makes both
+    // degenerate to Up, and Thumb and Pinky get the same guard.
+    for (int mode : { 3, 4, 8, 9 }) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) continue;
+        s->setParam(kApMode, (f32)mode);
+        spRender(*s, spV4Chord({ 72 }), 4 * kApStep, kBlock, L, R, 120.0);
+        const std::vector<int> m = spV4Melody(L, 4);
+        CHECK(spV4Eq(m, { 72, 72, 72, 72 }),
+              "mode %d on ONE note degenerates to Up rather than to a cycle of length 0 "
+              "(got %s)", mode, spV4Show(m).c_str());
+    }
+
+    // CHORD (mode 7) is the one polyphonic mode: all of N on every step. Read
+    // with a single DFT bin at each of the three fundamentals, because zero
+    // crossings cannot see three tones at once.
+    {
+        auto up = spV4Probe(reg, *d);
+        auto ch = spV4Probe(reg, *d);
+        std::vector<f32> uL, uR, cL, cR;
+        if (up && ch) {
+            ch->setParam(kApMode, 7.f);
+            spRender(*up, chord, 2 * kApStep, kBlock, uL, uR, 120.0);
+            spRender(*ch, chord, 2 * kApStep, kBlock, cL, cR, 120.0);
+            const int at = 1500, n = 4096;
+            const f64 c72 = spV4Bin(cL, at, n, spV4Hz(72));
+            const f64 c76 = spV4Bin(cL, at, n, spV4Hz(76));
+            const f64 c79 = spV4Bin(cL, at, n, spV4Hz(79));
+            const f64 u72 = spV4Bin(uL, at, n, spV4Hz(72));
+            const f64 u76 = spV4Bin(uL, at, n, spV4Hz(76));
+            const f64 u79 = spV4Bin(uL, at, n, spV4Hz(79));
+            CHECK(u72 > 0.1 && u76 < 0.02 && u79 < 0.02,
+                  "the control: step 0 of Up holds ONE fundamental (%.3f / %.3f / %.3f)",
+                  u72, u76, u79);
+            CHECK(c72 > 0.1 && c76 > 0.1 && c79 > 0.1,
+                  "Chord sounds all of N on every step (%.3f / %.3f / %.3f)",
+                  c72, c76, c79);
+        }
+    }
+
+    // CHORD'S CYCLE LENGTH IS 1, which is not a special case in the arithmetic
+    // — it is the whole point: with M = 1 the octave axis advances on EVERY
+    // step, so Chord over two octaves alternates the chord at +0 and at +1.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApMode, 7.f);
+            s->setParam(kApOctaves, 2.f);
+            spRender(*s, spV4Chord({ 60 }), 4 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 4);
+            CHECK(spV4Eq(m, { 60, 72, 60, 72 }),
+                  "Chord x 2 octaves alternates chord-at-+0 and chord-at-+1 (got %s)",
+                  spV4Show(m).c_str());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Octaves(PluginRegistry& reg) {
+    banner("Spectra v4: the octave cycle, the note counter first, and the keyboard's edge");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    auto run = [&](int oct, int octMode, int mode, int steps,
+                   std::initializer_list<u8> notes, const char* rows = nullptr) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) return std::vector<int>{};
+        s->setParam(kApOctaves, (f32)oct);
+        s->setParam(kApOctMode, (f32)octMode);
+        s->setParam(kApMode, (f32)mode);
+        if (rows) s->setStateString(std::string("nxspc1;arps=") + rows);
+        spRender(*s, spV4Chord(notes), steps * kApStep, kBlock, L, R, 120.0);
+        return spV4Melody(L, steps);
+    };
+
+    // THE NOTE COUNTER ADVANCES FIRST. Two notes over two octaves is
+    // C E | C+12 E+12, not C C+12 E E+12: j = k mod M is the FAST axis and
+    // u = (k div M) mod L_oct is the slow one.
+    {
+        const std::vector<int> m = run(2, 0, 0, 8, { 60, 64 });
+        CHECK(spV4Eq(m, { 60, 64, 72, 76, 60, 64, 72, 76 }),
+              "the arp completes one full traversal of the note cycle before the octave "
+              "moves (got %s)", spV4Show(m).c_str());
+    }
+    // ...and the consequence the contract names rather than leaves to be found:
+    // Up-Down over two octaves bounces INSIDE octave 0, then inside octave 1.
+    {
+        const std::vector<int> m = run(2, 0, 3, 8, { 60, 64, 67 });
+        CHECK(spV4Eq(m, { 60, 64, 67, 64, 72, 76, 79, 76 }),
+              "Up-Down Exclusive over two octaves bounces inside each octave in turn, "
+              "not across the whole span (got %s)", spV4Show(m).c_str());
+    }
+    // Down: 0, -1, -2, -3.
+    {
+        const std::vector<int> m = run(3, 1, 0, 6, { 84 });
+        CHECK(spV4Eq(m, { 84, 72, 60, 84, 72, 60 }),
+              "Oct Mode Down walks 0, -1, -2 (got %s)", spV4Show(m).c_str());
+    }
+    // Alternate is an up-down-EXCLUSIVE cycle of length 2O-2, which is why
+    // O = 3 gives 0, +1, +2, +1 and not 0, +1, +2, +2, +1.
+    {
+        const std::vector<int> m = run(3, 2, 0, 8, { 48 });
+        CHECK(spV4Eq(m, { 48, 60, 72, 60, 48, 60, 72, 60 }),
+              "Oct Mode Alternate over three octaves is 0 +1 +2 +1 — 2O-2 and not 2O, "
+              "so it never sits on the top octave for two whole note-cycles (got %s)",
+              spV4Show(m).c_str());
+    }
+    // O = 1 is a cycle of length 1 in every mode, including Alternate.
+    {
+        const std::vector<int> m = run(1, 2, 0, 3, { 60 });
+        CHECK(spV4Eq(m, { 60, 60, 60 }), "one octave stays in the played octave (got %s)",
+              spV4Show(m).c_str());
+    }
+
+    // THE STEP ROW'S OWN OCTAVE COLUMN, which is the exact tool the contract
+    // delegates the full-span bounce to. Codes are biased: c - 2, so 0x01 is
+    // -2, 0x05 is 0 and 0x09 is +2.
+    {
+        //           step 0: 05 (+0) · 1: 07 (+1) · 2: 09 (+2) · 3: 03 (-1)
+        const std::vector<int> m =
+            run(1, 0, 0, 4, { 60 }, "05070903050505050505050505050505");
+        CHECK(spV4Eq(m, { 60, 72, 84, 48 }),
+              "the step row's octave field is BIASED by 2: codes 2,3,4,1 are +0,+1,+2,-1 "
+              "(got %s)", spV4Show(m).c_str());
+    }
+
+    // A PITCH OUTSIDE 0..127 MAKES THE STEP SILENT. It is not clamped — a
+    // clamped note is a wrong note played confidently — and the step still
+    // advances every index, which is the property the next check names.
+    {
+        //           step 1 asks for +2 octaves from C8 (108): 132, off the keyboard.
+        const std::vector<int> m =
+            run(1, 0, 0, 4, { 108 }, "05090505050505050505050505050505");
+        CHECK(m[0] == 108 && m[1] == -1 && m[2] == 108 && m[3] == 108,
+              "a step whose pitch leaves the keyboard is SILENT, not clamped, and the "
+              "steps around it are unmoved (got %s)", spV4Show(m).c_str());
+    }
+    {
+        // ...and it does not renumber the melody: with three notes and step 1
+        // pushed off the top, step 2 still plays the note step 2 owns.
+        const std::vector<int> m =
+            run(1, 0, 0, 6, { 105, 109, 112 }, "05090505050505050505050505050505");
+        CHECK(m[0] == 105 && m[1] == -1 && m[2] == 112 && m[3] == 105,
+              "an out-of-range step advances every index — the melody is not renumbered "
+              "(got %s)", spV4Show(m).c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Clock(PluginRegistry& reg) {
+    banner("Spectra v4: the step clock, per-step division, swing, gate and the step row");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // THE DIVISION NAMES ONE STEP, NOT THE CYCLE — the one place v4 reads the
+    // shared sync table differently from v3's Custom LFO shape, and the
+    // divergence is forced: Arp Steps is variable, so a whole-cycle reading
+    // would make the pattern-length knob a tempo knob.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApGate, 50.f);
+            spRender(*s, spV4Chord({ 84 }), 6 * kApStep, kBlock, L, R, 120.0);
+            int onsets = 0, firstGap = -1, prev = -1;
+            for (int i = 0; i + 128 < 6 * kApStep; i += 32) {
+                const bool on = spV3Peak(L, i, 128) > 0.05f;
+                const bool was = i > 0 && spV3Peak(L, i - 32, 128) > 0.05f;
+                if (on && !was) {
+                    if (prev >= 0 && firstGap < 0) firstGap = i - prev;
+                    prev = i;
+                    ++onsets;
+                }
+            }
+            CHECK(onsets == 6, "1/8 at 120 bpm fires six times in six step-lengths (%d)", onsets);
+            CHECK(firstGap > kApStep - 200 && firstGap < kApStep + 200,
+                  "one step is %d samples — the DIVISION IS THE STEP and not the cycle "
+                  "(measured %d)", kApStep, firstGap);
+        }
+    }
+    // ...and shortening the pattern does NOT speed it up. That is the whole
+    // argument for the per-step reading, so it is measured and not assumed.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApSteps, 3.f);
+            s->setParam(kApGate, 40.f);
+            spRender(*s, spV4Chord({ 84 }), 6 * kApStep, kBlock, L, R, 120.0);
+            const int a = spV4Onset(L, kApStep - 2000, 2 * kApStep);
+            const int b = spV4Onset(L, 2 * kApStep - 2000, 3 * kApStep);
+            CHECK(a >= 0 && b >= 0 && (b - a) > kApStep - 300 && (b - a) < kApStep + 300,
+                  "Arp Steps = 3 keeps the step length at %d samples: a length control "
+                  "that is secretly a tempo control is not a length control (%d)",
+                  kApStep, b - a);
+        }
+    }
+    // FREE RUNNING (Sync 0): Arp Rate gives steps per second and the transport
+    // is not read at all.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApSync, 0.f);
+            s->setParam(kApRate, 8.f);           // 8 steps a second = 6000 samples
+            s->setParam(kApGate, 40.f);
+            spRender(*s, spV4Chord({ 84 }), 5 * 6000, kBlock, L, R, 120.0);
+            const int a = spV4Onset(L, 6000 - 1500, 12000);
+            const int b = spV4Onset(L, 12000 - 1500, 18000);
+            CHECK(a >= 0 && b >= 0 && (b - a) > 5800 && (b - a) < 6200,
+                  "free-running at 8 Hz puts a step every 6000 samples (%d)", b - a);
+        }
+    }
+
+    // GATE is a fraction of the NOMINAL step.
+    for (int g : { 25, 50, 90 }) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) continue;
+        s->setParam(kApGate, (f32)g);
+        spRender(*s, spV4Chord({ 84 }), 4 * kApStep, kBlock, L, R, 120.0);
+        const int lit = spV4Sounding(L, kApStep, 2 * kApStep);
+        const f64 pct = 100.0 * (f64)lit / (f64)kApStep;
+        CHECK(pct > (f64)g - 6.0 && pct < (f64)g + 6.0,
+              "Arp Gate %d %% sounds %.1f %% of the step", g, pct);
+    }
+
+    // SWING delays ODD k by B * Swing / 300, so 100 % is exactly B/3 — the 2:1
+    // triplet, the universal meaning of full swing. Even steps do not move.
+    for (int sw : { 50, 100 }) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) continue;
+        s->setParam(kApSwing, (f32)sw);
+        s->setParam(kApGate, 40.f);
+        spRender(*s, spV4Chord({ 84 }), 4 * kApStep, kBlock, L, R, 120.0);
+        const int even = spV4Onset(L, 2 * kApStep - 400, 3 * kApStep);
+        const int odd  = spV4Onset(L, 3 * kApStep - 400, 4 * kApStep);
+        const f64 want = (f64)kApStep * (f64)sw / 300.0;
+        CHECK(even >= 2 * kApStep - 400 && even < 2 * kApStep + 400,
+              "swing %d %%: EVEN step 2 is not delayed (onset %d, step at %d)",
+              sw, even, 2 * kApStep);
+        CHECK(odd >= 0 && std::fabs((f64)(odd - 3 * kApStep) - want) < 400.0,
+              "swing %d %%: odd step 3 is delayed by B*Swing/300 = %.0f samples "
+              "(measured %d)", sw, want, odd - 3 * kApStep);
+    }
+    // ODD `k` IS DELAYED, AND `k` IS THE ABSOLUTE STEP NUMBER — never the
+    // pattern index. With an ODD pattern length the two disagree on every other
+    // loop, which is the only place the distinction is observable and therefore
+    // the only place it can be checked: at Steps = 3, k = 3 has pattern index 0
+    // and k = 4 has pattern index 1. The swing must follow k, so that it stays
+    // welded to the beat where a listener expects it rather than flipping every
+    // time an odd pattern wraps.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApSwing, 100.f);
+            s->setParam(kApSteps, 3.f);
+            s->setParam(kApGate, 40.f);
+            spRender(*s, spV4Chord({ 84 }), 6 * kApStep, kBlock, L, R, 120.0);
+            const f64 want = (f64)kApStep / 3.0;
+            const int k3 = spV4Onset(L, 3 * kApStep - 2000, 4 * kApStep + 6000);
+            const int k4 = spV4Onset(L, 4 * kApStep - 1000, 5 * kApStep + 6000);
+            CHECK(k3 >= 0 && std::fabs((f64)(k3 - 3 * kApStep) - want) < 400.0,
+                  "Steps = 3: k = 3 is ODD and IS delayed, though its pattern index 0 is "
+                  "even (delay %d, want %.0f)", k3 - 3 * kApStep, want);
+            CHECK(k4 >= 0 && std::fabs((f64)(k4 - 4 * kApStep)) < 400.0,
+                  "...and k = 4 is EVEN and is not, though its pattern index 1 is odd "
+                  "(delay %d)", k4 - 4 * kApStep);
+        }
+    }
+    // ...and the gate does NOT stretch with the swing: a swung pair keeps two
+    // notes of the same length and moves the second one.
+    {
+        auto flat = spV4Probe(reg, *d);
+        auto swung = spV4Probe(reg, *d);
+        std::vector<f32> fL, fR, sL, sR;
+        if (flat && swung) {
+            flat->setParam(kApGate, 40.f);
+            swung->setParam(kApGate, 40.f);
+            swung->setParam(kApSwing, 100.f);
+            spRender(*flat, spV4Chord({ 84 }), 4 * kApStep, kBlock, fL, fR, 120.0);
+            spRender(*swung, spV4Chord({ 84 }), 4 * kApStep, kBlock, sL, sR, 120.0);
+            const int a = spV4Sounding(fL, 3 * kApStep, 4 * kApStep);
+            const int b = spV4Sounding(sL, 3 * kApStep, 4 * kApStep + 4000);
+            CHECK(std::abs(a - b) < 400,
+                  "an odd step's sounding length is the same swung and unswung (%d vs %d) "
+                  "— a gate that stretched with swing would turn a feel control into a "
+                  "duration control", a, b);
+        }
+    }
+
+    // THE THREE STATES OF A STEP, and there are exactly three.
+    //
+    // REST: the previous note ends at its own gate, unaffected.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setStateString("nxspc1;arps=05040505050505050505050505050505");
+            spRender(*s, spV4Chord({ 84, 88, 91 }), 4 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 4);
+            CHECK(m[0] == 84 && m[1] == -1 && m[2] == 91 && m[3] == 84,
+                  "an OFF step is a rest and does not renumber the melody: step 2 still "
+                  "plays the third note (got %s)", spV4Show(m).c_str());
+        }
+    }
+    // ...and "the previous note ends at its OWN gate, unaffected" is a claim
+    // about the rest doing NOTHING, so it needs a note that outlives the rest to
+    // be visible at all. At gate 190 % step 0's note runs to 1.9 steps, straight
+    // through the rest at step 1.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApGate, 190.f);
+            s->setStateString("nxspc1;arps=05040405050505050505050505050505");
+            spRender(*s, spV4Chord({ 84 }), 4 * kApStep, kBlock, L, R, 120.0);
+            const int lit = spV4Sounding(L, 0, 3 * kApStep);
+            CHECK(lit > (int)(1.8 * kApStep) && lit < (int)(2.0 * kApStep),
+                  "a rest does not cut the note before it: step 0's note still ends at its "
+                  "own gate, 1.9 steps later (%d of %d)", lit, kApStep);
+        }
+    }
+    // TIE: the sounding note's off moves to this step's onset plus the gate. No
+    // new note-on, so the pitch is the PREVIOUS step's and the sound is
+    // continuous across the step boundary.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApGate, 50.f);
+            s->setStateString("nxspc1;arps=05150505050505050505050505050505");
+            spRender(*s, spV4Chord({ 84, 88, 91 }), 4 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 4);
+            CHECK(m[0] == 84 && m[1] == 84 && m[2] == 91,
+                  "a TIE holds the previous note through its step, and step 2 still plays "
+                  "the note step 2 owns (got %s)", spV4Show(m).c_str());
+            // Continuity: the gate boundary that would have fallen halfway
+            // through step 0 is gone, and the note runs to halfway through
+            // step 1 instead.
+            const int lit = spV4Sounding(L, 0, 2 * kApStep);
+            CHECK(lit > (int)(1.4 * kApStep) && lit < (int)(1.6 * kApStep),
+                  "...and it sounds for one and a half steps rather than half a step "
+                  "(%d of %d)", lit, kApStep);
+        }
+    }
+    // A TIE WITH NOTHING TO HOLD IS NOTHING: after a rest, after a step that
+    // left the keyboard, and at the very start.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            //  step 0 rest · step 1 tie · step 2 on
+            s->setStateString("nxspc1;arps=04150505050505050505050505050505");
+            spRender(*s, spV4Chord({ 84, 88, 91 }), 4 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 4);
+            CHECK(m[0] == -1 && m[1] == -1 && m[2] == 91,
+                  "a tie whose predecessor did not sound is SILENT, and the step after it "
+                  "is untouched (got %s)", spV4Show(m).c_str());
+        }
+    }
+    // A PATTERN THAT IS ALL TIES SOUNDS NOTHING AT ALL, because no step ever
+    // starts a note — which is why the 16-tie bound is unreachable in practice.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setStateString("nxspc1;arps=15151515151515151515151515151515");
+            spRender(*s, spV4Chord({ 84 }), 4 * kApStep, kBlock, L, R, 120.0);
+            CHECK(spV3Peak(L, 0, 4 * kApStep) < 0.001f,
+                  "an all-tie pattern is silent (%.6f)",
+                  (double)spV3Peak(L, 0, 4 * kApStep));
+        }
+    }
+
+    // GATE OVER 100 % ON A REPEATED NOTE NUMBER. The naive reading is a
+    // stuck-note bug: noteOff() releases the NEWEST matching voice, so a
+    // generated off arriving after the next step's on would release the note
+    // just started and leave the old one ringing for the rest of the session.
+    // The arp emits its off for the outgoing copy IMMEDIATELY BEFORE the on for
+    // the new one, at the same stamped sample — so a one-note Up arp at 200 %
+    // gate re-attacks cleanly and, when the keys go, everything stops.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApGate, 200.f);
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 },
+                                        { 6 * kApStep, 0x80, 84, 0 } };
+            spRender(*s, ev, 12 * kApStep, kBlock, L, R, 120.0);
+            CHECK(spV3Peak(L, 2 * kApStep, kApStep) > 0.05f,
+                  "gate 200 %% keeps a one-note arp sounding");
+            CHECK(spV3Peak(L, 9 * kApStep, 3 * kApStep) < 0.001f,
+                  "...and nothing is stranded once the key is released: a repeated note "
+                  "number never overlaps itself (%.6f)",
+                  (double)spV3Peak(L, 9 * kApStep, 3 * kApStep));
+        }
+    }
+    // ...and overlap between DIFFERENT note numbers is real, which is the only
+    // place overlap means anything. Two notes at 190 % gate hold two voices.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApGate, 190.f);
+            spRender(*s, spV4Chord({ 72, 79 }), 4 * kApStep, kBlock, L, R, 120.0);
+            const int at = 2 * kApStep + 500, n = 4096;
+            CHECK(spV4Bin(L, at, n, spV4Hz(72)) > 0.05 && spV4Bin(L, at, n, spV4Hz(79)) > 0.05,
+                  "gate 190 %% overlaps two DIFFERENT note numbers (%.3f / %.3f)",
+                  spV4Bin(L, at, n, spV4Hz(72)), spV4Bin(L, at, n, spV4Hz(79)));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Velocity(PluginRegistry& reg) {
+    banner("Spectra v4: the three velocity modes and the level row");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // The voices' own fixed routing is velAmp = 0.30 + 0.70*vel/127, downstream
+    // of all three modes and untouched by any of them, so the peak of a step is
+    // a linear readout of the velocity the arp generated.
+    auto peakOf = [&](int velMode, int fixed, const char* lvl,
+                      std::initializer_list<u8> notes, int step, int vel) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) return 0.f;
+        s->setParam(kApVelMode, (f32)velMode);
+        s->setParam(kApFixedVel, (f32)fixed);
+        if (lvl) s->setStateString(std::string("nxspc1;arpl=") + lvl);
+        std::vector<SpEvent> ev;
+        int i = 0;
+        for (u8 n : notes) ev.push_back({ i++, 0x90, n, (u8)(vel ? vel : 100) });
+        spRender(*s, ev, (step + 2) * kApStep, kBlock, L, R, 120.0);
+        return spV3Peak(L, step * kApStep + 1500, 3000);
+    };
+    auto velOf = [](f32 pk) { return (f64)((pk / 0.8f) - 0.30f) / 0.70f * 127.0; };
+
+    // 0 AS PLAYED — the velocity of the key that CONTRIBUTED the note, which is
+    // why the held stack grew a parallel velocity array. Two keys at two
+    // velocities keep them apart.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 40 }, { 1, 0x90, 91, 127 } };
+            spRender(*s, ev, 4 * kApStep, kBlock, L, R, 120.0);
+            const f64 v0 = velOf(spV3Peak(L, 1500, 3000));
+            const f64 v1 = velOf(spV3Peak(L, kApStep + 1500, 3000));
+            CHECK(std::fabs(v0 - 40.0) < 6.0 && std::fabs(v1 - 127.0) < 6.0,
+                  "As Played gives each generated note the velocity of the key that "
+                  "contributed it (%.0f then %.0f, played 40 then 127)", v0, v1);
+        }
+    }
+    // 1 FIXED — every generated note carries id 120, whatever was played.
+    {
+        const f64 a = velOf(peakOf(1, 60, nullptr, { 84, 91 }, 0, 127));
+        const f64 b = velOf(peakOf(1, 60, nullptr, { 84, 91 }, 1, 127));
+        CHECK(std::fabs(a - 60.0) < 6.0 && std::fabs(b - 60.0) < 6.0,
+              "Fixed overrides the played velocity on every step (%.0f, %.0f)", a, b);
+    }
+    // 2 PATTERN — the level row at the PATTERN index, ABSOLUTE and not a
+    // scaling of the played velocity. Digit 0 is velocity 1 and digit 15 is
+    // 127: the floor is 1 because 0 is a note-off on this device's wire, so a
+    // step drawn at the bottom would emit nothing instead of emitting quietly.
+    {
+        const char* row = "f0f8ffffffffffff";   // 15, 0, 15, 8, ...
+        const f64 v0 = velOf(peakOf(2, 100, row, { 84 }, 0, 20));
+        const f64 v1 = velOf(peakOf(2, 100, row, { 84 }, 1, 20));
+        const f64 v3 = velOf(peakOf(2, 100, row, { 84 }, 3, 20));
+        CHECK(std::fabs(v0 - 127.0) < 6.0, "level digit f is velocity 127 (%.0f)", v0);
+        CHECK(std::fabs(v1 - 1.0) < 6.0,
+              "level digit 0 is velocity 1 and NOT 0 — a step drawn at the bottom of the "
+              "row emits quietly rather than emitting nothing (%.1f)", v1);
+        const f64 want = 1.0 + (f64)(int)(126.0 * (8.0 / 15.0) + 0.5);
+        CHECK(std::fabs(v3 - want) < 6.0,
+              "level digit 8 is velocity %.0f = 1 + round(126*8/15) (%.0f)", want, v3);
+        CHECK(std::fabs(v0 - 127.0) < 6.0 && std::fabs(v1 - 1.0) < 6.0,
+              "...and Pattern is ABSOLUTE: a key played at 20 still reaches 127");
+    }
+    // The velocity floor a played key already has is downstream and untouched.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            spRender(*s, spV4Chord({ 84 }, 0), 2 * kApStep, kBlock, L, R, 120.0);
+            const f64 v = velOf(spV3Peak(L, 1500, 3000));
+            CHECK(std::fabs(v - 100.0) < 6.0,
+                  "the voices' 30 %% velocity floor is downstream of all three modes and "
+                  "is not touched (%.0f)", v);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4HoldRetrig(PluginRegistry& reg) {
+    banner("Spectra v4: Hold and Retrigger, all four combinations, and the line a knob may not cross");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // RETRIGGER = 1: a NEW CHORD — heldSet empty immediately before this
+    // note-on joined it — resets the position to step 0 at that note-on's
+    // stamped sample and sounds step 0 immediately.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            const int at = kApStep + 3000;      // deliberately NOT on a step boundary
+            std::vector<SpEvent> ev = { { at, 0x90, 84, 100 } };
+            spRender(*s, ev, 4 * kApStep, kBlock, L, R, 120.0);
+            const int on = spV4Onset(L, at - 200, at + kApStep);
+            CHECK(on >= at - 200 && on <= at + 200,
+                  "step 0 fires at the note-on's own stamped sample, not at the next grid "
+                  "line (pressed at %d, sounded at %d)", at, on);
+        }
+    }
+    // ...and ADDING A FINGER to a held chord does NOT retrigger, or rolling a
+    // chord on would stutter the pattern once per finger.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 },
+                                        { kApStep + 4000, 0x90, 91, 100 } };
+            spRender(*s, ev, 4 * kApStep, kBlock, L, R, 120.0);
+            const int on = spV4Onset(L, kApStep + 4200, 2 * kApStep + 2000);
+            CHECK(on >= 2 * kApStep - 200 && on <= 2 * kApStep + 300,
+                  "a note-on joining a NON-EMPTY set never moves the position: the next "
+                  "onset is still the grid's (%d, grid at %d)", on, 2 * kApStep);
+        }
+    }
+    // RETRIGGER = 0 is free-run: the pattern position is a pure function of the
+    // clock and no note-on ever moves it. This is the "locked to the bar line"
+    // setting.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApRetrig, 0.f);
+            const int at = kApStep + 3000;
+            std::vector<SpEvent> ev = { { at, 0x90, 84, 100 } };
+            spRender(*s, ev, 4 * kApStep, kBlock, L, R, 120.0);
+            CHECK(spV3Peak(L, at, kApStep - 3200) < 0.02f,
+                  "Retrig 0: pressing between grid lines sounds nothing until the grid "
+                  "gets there (%.4f)", (double)spV3Peak(L, at, kApStep - 3200));
+            const int on = spV4Onset(L, at, 3 * kApStep);
+            CHECK(on >= 2 * kApStep - 200 && on <= 2 * kApStep + 300,
+                  "...and it rejoins the grid wherever the grid has got to (%d)", on);
+        }
+    }
+
+    // HOLD = 1 LATCHES. Press a chord, release it, the arp keeps running.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApHold, 1.f);
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 }, { 1, 0x90, 91, 100 },
+                                        { 500, 0x80, 84, 0 }, { 600, 0x80, 91, 0 } };
+            spRender(*s, ev, 6 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 6);
+            CHECK(spV4Eq(m, { 84, 91, 84, 91, 84, 91 }),
+                  "Hold keeps the set playing after every key is released, and note-offs "
+                  "never remove from the latch (got %s)", spV4Show(m).c_str());
+        }
+    }
+    // ...and A NEW CHORD REPLACES THE LATCH: press one new note and the latch
+    // becomes that note alone.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApHold, 1.f);
+            s->setParam(kApRetrig, 0.f);
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 }, { 1, 0x90, 91, 100 },
+                                        { 500, 0x80, 84, 0 }, { 600, 0x80, 91, 0 },
+                                        { 3 * kApStep + 100, 0x90, 79, 100 },
+                                        { 3 * kApStep + 300, 0x80, 79, 0 } };
+            spRender(*s, ev, 7 * kApStep, kBlock, L, R, 120.0);
+            const std::vector<int> m = spV4Melody(L, 7);
+            CHECK(m[0] == 84 && m[1] == 91 && m[2] == 84 &&
+                  m[4] == 79 && m[5] == 79 && m[6] == 79,
+                  "a new chord CLEARS the latch first, so one new note becomes the whole "
+                  "of it (got %s)", spV4Show(m).c_str());
+        }
+    }
+    // Hold 1 -> 0 drops the latch, and the arp immediately plays heldSet —
+    // which here is empty, so it goes quiet after the sounding note's gate. AND
+    // IT EMITS NO NOTE-ON: a parameter change may STOP notes and may never
+    // START them.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApHold, 1.f);
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 }, { 500, 0x80, 84, 0 } };
+            std::vector<f32> bl((size_t)kBlock), br((size_t)kBlock);
+            L.assign((size_t)(6 * kApStep), 0.f);
+            size_t next = 0;
+            for (int i = 0; i < 6 * kApStep; i += kBlock) {
+                if (i >= 3 * kApStep) s->setParam(kApHold, 0.f);
+                while (next < ev.size() && ev[next].frame < i + kBlock) {
+                    const u8 m[3] = { ev[next].st, ev[next].a, ev[next].b };
+                    s->midi(m, 3, ev[next].frame - i);
+                    ++next;
+                }
+                s->setTransport(120.0, 0.0, true);
+                std::fill(bl.begin(), bl.end(), 0.f);
+                std::fill(br.begin(), br.end(), 0.f);
+                f32* o[2] = { bl.data(), br.data() };
+                s->process(nullptr, o, 2, kBlock);
+                for (int j = 0; j < kBlock && i + j < 6 * kApStep; ++j)
+                    L[(size_t)(i + j)] = bl[(size_t)j];
+            }
+            CHECK(spV3Peak(L, kApStep, kApStep) > 0.05f, "the latch was running");
+            CHECK(spV3Peak(L, 4 * kApStep, 2 * kApStep) < 0.02f,
+                  "Hold 1 -> 0 drops the latch and the arp goes quiet; it does not start "
+                  "a note the player is not holding (%.4f)",
+                  (double)spV3Peak(L, 4 * kApStep, 2 * kApStep));
+        }
+    }
+
+    // CC 123 empties heldSet — it already did — AND latchSet, so a panic a
+    // latch could outlive is not a panic.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApHold, 1.f);
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 }, { 500, 0x80, 84, 0 },
+                                        { 3 * kApStep + 100, 0xB0, 123, 0 } };
+            spRender(*s, ev, 7 * kApStep, kBlock, L, R, 120.0);
+            CHECK(spV3Peak(L, kApStep, kApStep) > 0.05f, "the latch was running");
+            CHECK(spV3Peak(L, 5 * kApStep, 2 * kApStep) < 0.001f,
+                  "CC 123 empties the LATCH as well as the held set, and the arp emits "
+                  "nothing until a note-on arrives (%.6f)",
+                  (double)spV3Peak(L, 5 * kApStep, 2 * kApStep));
+        }
+    }
+    // CC 120 does the same and additionally clears the arp's sounding-note
+    // bookkeeping, since the voices it referred to are gone.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApHold, 1.f);
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 }, { 500, 0x80, 84, 0 },
+                                        { 3 * kApStep + 100, 0xB0, 120, 0 } };
+            spRender(*s, ev, 7 * kApStep, kBlock, L, R, 120.0);
+            CHECK(spV3Peak(L, 4 * kApStep, 3 * kApStep) == 0.f,
+                  "CC 120 is a hard stop and the arp does not resume (%.9f)",
+                  (double)spV3Peak(L, 4 * kApStep, 3 * kApStep));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Transitions(PluginRegistry& reg) {
+    banner("Spectra v4: Arp On both ways — a parameter change may STOP notes and may never START them");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // A render that flips Arp On at a block boundary. Both transitions are
+    // block-granular BY CONSTRUCTION — parameters are not events in this device
+    // and never have been — which is why the bit-identity gate is stated over
+    // renders whose arp parameters are not automated mid-render.
+    auto flip = [&](f32 from, f32 to, int at, int frames, std::vector<f32>& L) {
+        auto s = spV4Probe(reg, *d);
+        if (!s) return false;
+        s->setParam(kApOn, from);
+        std::vector<f32> bl((size_t)kBlock), br((size_t)kBlock);
+        L.assign((size_t)frames, 0.f);
+        const u8 on[3] = { 0x90, 84, 100 };
+        bool sent = false;
+        for (int i = 0; i < frames; i += kBlock) {
+            if (i >= at) s->setParam(kApOn, to);
+            if (!sent) { s->midi(on, 3, 0); sent = true; }
+            s->setTransport(120.0, 0.0, true);
+            std::fill(bl.begin(), bl.end(), 0.f);
+            std::fill(br.begin(), br.end(), 0.f);
+            f32* o[2] = { bl.data(), br.data() };
+            s->process(nullptr, o, 2, kBlock);
+            for (int j = 0; j < kBlock && i + j < frames; ++j) L[(size_t)(i + j)] = bl[(size_t)j];
+        }
+        return true;
+    };
+
+    // 0 -> 1 WITH NOTES HELD. Every voice sounding from a direct note-on is
+    // RELEASED (an ENV release, not a cut) at frame 0; the held stack is
+    // untouched, so the arp starts from the truth and begins at the next onset.
+    {
+        std::vector<f32> L;
+        if (flip(0.f, 1.f, 2 * kApStep, 6 * kApStep, L)) {
+            CHECK(spV3Peak(L, kApStep, 1000) > 0.05f, "the directly-played note was sounding");
+            CHECK(spV3Peak(L, 2 * kApStep + 2000, 1000) < 0.02f,
+                  "Arp On 0 -> 1 releases it (%.4f)",
+                  (double)spV3Peak(L, 2 * kApStep + 2000, 1000));
+            CHECK(spV3Peak(L, 3 * kApStep, kApStep / 2) > 0.05f,
+                  "...and the arp then plays the still-held key from the next onset");
+        }
+    }
+    // 1 -> 0 WITH NOTES HELD. Every note the arp generated is released and the
+    // held key does NOT re-sound: a key that was never delivered to the voice
+    // engine cannot be resumed without synthesising a note-on the player did
+    // not play. The arp may invent MIDI; a knob may not. The player re-presses.
+    {
+        std::vector<f32> L;
+        if (flip(1.f, 0.f, 2 * kApStep, 6 * kApStep, L)) {
+            CHECK(spV3Peak(L, 500, 1000) > 0.05f, "the arp was running");
+            CHECK(spV3Peak(L, 3 * kApStep, 3 * kApStep) < 0.02f,
+                  "Arp On 1 -> 0 releases the generated notes and does NOT resume the "
+                  "held key (%.4f)", (double)spV3Peak(L, 3 * kApStep, 3 * kApStep));
+        }
+    }
+    // ...and the mono note-off fallback returns the instant Arp On goes to 0,
+    // while it is DISABLED with the arp on: a fallback would sound a note the
+    // arp did not schedule, which is inventing MIDI at a note-off.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(spIdx(*s, "Voice Mode"), 1.f);     // Mono
+            s->setParam(kApGate, 30.f);
+            s->setParam(kApMode, 7.f);                     // Chord: one note per step
+            std::vector<SpEvent> ev = { { 0, 0x90, 84, 100 },
+                                        { 100, 0x90, 91, 100 },
+                                        { kApStep + 6000, 0x80, 91, 0 } };
+            spRender(*s, ev, 3 * kApStep, kBlock, L, R, 120.0);
+            // The note-off lands inside the gap between two steps. With the
+            // fallback live it would sound 84 there; with the arp on nothing
+            // may start.
+            CHECK(spV3Peak(L, kApStep + 6200, 2000) < 0.02f,
+                  "with the arp on, an incoming note-off starts nothing (%.4f)",
+                  (double)spV3Peak(L, kApStep + 6200, 2000));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Chance(PluginRegistry& reg) {
+    banner("Spectra v4: Chance and Random are pure functions of a stable identity");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    auto melody = [&](int chance, int mode, std::initializer_list<u8> notes, int steps) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) return std::vector<int>{};
+        s->setParam(kApChance, (f32)chance);
+        s->setParam(kApMode, (f32)mode);
+        spRender(*s, spV4Chord(notes), steps * kApStep, kBlock, L, R, 120.0);
+        return spV4Melody(L, steps);
+    };
+
+    // C = 100 always passes and C = 0 never does: the draw lands in 0..99.
+    {
+        const std::vector<int> none = melody(0, 0, { 72, 76, 79 }, 8);
+        bool silent = true;
+        for (int v : none) if (v != -1) silent = false;
+        CHECK(silent, "Chance 0 never sounds a step (got %s)", spV4Show(none).c_str());
+    }
+    // A DROPPED DRAW IS SILENT BUT STILL ADVANCES EVERY INDEX. This is the
+    // load-bearing resolution: the surviving steps play exactly the notes they
+    // would have played at Chance 100, at exactly the same k.
+    {
+        const std::vector<int> full = melody(100, 0, { 72, 76, 79 }, 16);
+        const std::vector<int> half = melody(50, 0, { 72, 76, 79 }, 16);
+        int dropped = 0, moved = 0;
+        for (size_t i = 0; i < half.size(); ++i) {
+            if (half[i] == -1) ++dropped;
+            else if (half[i] != full[i]) ++moved;
+        }
+        CHECK(dropped > 2 && dropped < 14,
+              "Chance 50 drops some steps and not all (%d of 16)", dropped);
+        CHECK(moved == 0,
+              "and every surviving step plays the note its k owns — Chance drops notes, "
+              "it does not renumber the melody (%d moved)\n         100%%: %s\n          50%%: %s",
+              moved, spV4Show(full).c_str(), spV4Show(half).c_str());
+    }
+    // A TIE FOLLOWING A DROPPED STEP IS SILENT, because there is no previous
+    // note to hold.
+    {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            s->setParam(kApChance, 0.f);
+            s->setStateString("nxspc1;arps=05151515151515151515151515151515");
+            spRender(*s, spV4Chord({ 84 }), 4 * kApStep, kBlock, L, R, 120.0);
+            CHECK(spV3Peak(L, 0, 4 * kApStep) < 0.001f,
+                  "with every draw lost, the ties after them hold nothing (%.6f)",
+                  (double)spV3Peak(L, 0, 4 * kApStep));
+        }
+    }
+
+    // RANDOM IS A DRAW, NOT A WALK: its cycle length is still c, so the octave
+    // axis and the loop counter advance exactly as they do under Up, and every
+    // element it draws is in the set.
+    {
+        const std::vector<int> m = melody(100, 6, { 72, 76, 79 }, 16);
+        bool inSet = true, varied = false;
+        for (size_t i = 0; i < m.size(); ++i) {
+            if (m[i] != 72 && m[i] != 76 && m[i] != 79) inSet = false;
+            if (i && m[i] != m[0]) varied = true;
+        }
+        CHECK(inSet, "every Random draw lands inside the note set (got %s)",
+              spV4Show(m).c_str());
+        CHECK(varied, "...and it is a draw and not a constant (%s)", spV4Show(m).c_str());
+    }
+
+    // THE SET IS HASHED ASCENDING, DELIBERATELY, even in As Played mode.
+    // Playing C-E-G and playing G-E-C are the same chord, and a random pattern
+    // that changed because a player rolled the chord the other way would be a
+    // bug the player could hear and never explain. Two renders of the same
+    // notes in different play orders must be BYTE-IDENTICAL under Random and
+    // under Chance.
+    auto rolled = [&](int mode, int chance, bool up, std::vector<f32>& L) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> R;
+        if (!s) return false;
+        s->setParam(kApMode, (f32)mode);
+        s->setParam(kApChance, (f32)chance);
+        // ALL THREE ON THE SAME FRAME. The order they are handed to midi() is
+        // the order they enter the held stack, so the two renders differ in
+        // insertion order and in nothing else; pressing them a sample apart
+        // would make step 0 fire against a set of ONE note, which is a
+        // different chord and correctly a different render.
+        std::vector<SpEvent> ev;
+        if (up) ev = { { 0, 0x90, 72, 100 }, { 0, 0x90, 76, 100 }, { 0, 0x90, 79, 100 } };
+        else    ev = { { 0, 0x90, 79, 100 }, { 0, 0x90, 76, 100 }, { 0, 0x90, 72, 100 } };
+        spRender(*s, ev, 12 * kApStep, kBlock, L, R, 120.0);
+        return true;
+    };
+    {
+        std::vector<f32> a, b;
+        if (rolled(6, 100, true, a) && rolled(6, 100, false, b)) {
+            CHECK(spV3Peak(a, 0, (int)a.size()) > 0.05f, "the Random render is not silent");
+            CHECK(spV2MaxDiff(a, b) == 0.f,
+                  "Random mode: a chord rolled UP and the same chord rolled DOWN render "
+                  "bit-identically — the set is folded ASCENDING and the play order "
+                  "cannot reach the hash (max diff %.9f)", (double)spV2MaxDiff(a, b));
+        }
+    }
+    {
+        std::vector<f32> a, b;
+        if (rolled(0, 45, true, a) && rolled(0, 45, false, b)) {
+            CHECK(spV3Peak(a, 0, (int)a.size()) > 0.05f, "the Chance render is not silent");
+            CHECK(spV2MaxDiff(a, b) == 0.f,
+                  "Chance: the same chord in either play order drops the same steps "
+                  "(max diff %.9f)", (double)spV2MaxDiff(a, b));
+        }
+    }
+    // ...and the two draws are INDEPENDENT: salt 1 for the note and salt 2 for
+    // the chance, so a Random pattern at Chance 100 and the same pattern at
+    // Chance 50 agree wherever the second one sounds.
+    {
+        auto full = melody(100, 6, { 72, 76, 79 }, 16);
+        auto part = melody(50, 6, { 72, 76, 79 }, 16);
+        int moved = 0;
+        for (size_t i = 0; i < part.size(); ++i)
+            if (part[i] != -1 && part[i] != full[i]) ++moved;
+        CHECK(moved == 0,
+              "the note draw and the chance draw are salted apart: turning Chance down "
+              "does not change WHICH note a surviving step plays (%d moved)", moved);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4Source17(PluginRegistry& reg) {
+    banner("Spectra v4: Arp Step as a modulation source (17)");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // v3's voltmeter, verbatim: A Level from a base of 0, driven by one slot at
+    // amount 1, so the local peak of the output IS the source.
+    //
+    // ONE THING HAS TO CHANGE FOR v4 and it is worth stating: with the arp on,
+    // an incoming note-on never reaches the voices, so the voltmeter's carrier
+    // has to be a note THE ARP GENERATED. Gate 200 % makes one sound
+    // continuously, which is what lets a rest and a tie be read at all — the
+    // staircase is instance-wide and has to be audible while the arp is not
+    // starting anything.
+    auto probe = [&](const char* rows, const char* lvl, int chance, int steps,
+                     std::vector<f32>& L) {
+        auto s = spV3Probe(reg, *d);
+        std::vector<f32> R;
+        if (!s) return false;
+        spV3Slot(*s, 0, 17, 5, 1.f);                 // source 17 -> A Level
+        s->setParam(kApOn, 1.f);
+        s->setParam(kApSync, (f32)kApSyncEigh);
+        s->setParam(kApGate, 200.f);
+        s->setParam(kApChance, (f32)chance);
+        std::string st = std::string("nxspc1;arpl=") + lvl;
+        if (rows) st += std::string(";arps=") + rows;
+        s->setStateString(st);
+        spRender(*s, spV3Note(0, 84), steps * kApStep, kBlock, L, R, 120.0);
+        return true;
+    };
+
+    // The level row read out one step at a time, as d/15.
+    {
+        std::vector<f32> L;
+        if (probe(nullptr, "0f8fffffffffffff", 100, 6, L)) {
+            const f32 s0 = spV3Peak(L, 3000, 4000);
+            const f32 s1 = spV3Peak(L, kApStep + 3000, 4000);
+            const f32 s2 = spV3Peak(L, 2 * kApStep + 3000, 4000);
+            const f32 s3 = spV3Peak(L, 3 * kApStep + 3000, 4000);
+            CHECK(s1 > 0.05f, "the source-17 voltmeter reads something (%.4f)", (double)s1);
+            CHECK(s0 < 0.01f * s1, "step 0 (digit 0) reads 0 (%.4f)", (double)(s0 / s1));
+            CHECK(std::fabs(s2 / s1 - 8.f / 15.f) < 0.06f,
+                  "step 2 (digit 8) reads 8/15 = %.3f (%.3f)", 8.0 / 15.0,
+                  (double)(s2 / s1));
+            CHECK(std::fabs(s3 / s1 - 1.f) < 0.06f, "step 3 (digit f) reads 1.0 (%.3f)",
+                  (double)(s3 / s1));
+        }
+    }
+    // IT FOLLOWS THE STEP CLOCK, NOT THE NOTES. An OFF step and a tie both
+    // leave it reading the grid's level at the current index — a staircase
+    // that dropped to zero every rest would be a different and much worse
+    // control. Gate 200 % keeps step 0's note sounding across both.
+    {
+        std::vector<f32> L;
+        //  step 0 on · step 1 TIE · step 2 REST · step 3 on. The tie is what
+        //  keeps the carrier alive across both, which is exactly the reading
+        //  the contract's own off(k) = onset(k+m) + gate gives.
+        if (probe("05150405050505050505050505050505", "f84cffffffffffff", 100, 6, L)) {
+            const f32 s0 = spV3Peak(L, 3000, 4000);
+            const f32 s1 = spV3Peak(L, kApStep + 3000, 4000);
+            const f32 s2 = spV3Peak(L, 2 * kApStep + 3000, 4000);
+            const f32 s3 = spV3Peak(L, 3 * kApStep + 3000, 4000);
+            CHECK(s0 > 0.05f, "the carrier note is sounding (%.4f)", (double)s0);
+            CHECK(std::fabs(s1 / s0 - 8.f / 15.f) < 0.06f,
+                  "a TIE leaves it reading the level at that index (%.3f)", (double)(s1 / s0));
+            CHECK(std::fabs(s2 / s0 - 4.f / 15.f) < 0.06f,
+                  "a REST leaves it reading the level at that index (%.3f)", (double)(s2 / s0));
+            CHECK(std::fabs(s3 / s0 - 12.f / 15.f) < 0.06f,
+                  "and step 3's own digit follows immediately after (%.3f)", (double)(s3 / s0));
+        }
+    }
+    // AN EMPTY NOTE SET LEAVES IT RUNNING TOO. The arp sounds nothing for four
+    // steps and then a key arrives — and the level it reads is the level the
+    // CLOCK implies, not the level a staircase that had been waiting would
+    // read. This is the same "nothing accumulates" property the melody has.
+    {
+        auto s = spV3Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (s) {
+            spV3Slot(*s, 0, 17, 5, 1.f);
+            s->setParam(kApOn, 1.f);
+            s->setParam(kApSync, (f32)kApSyncEigh);
+            s->setParam(kApGate, 200.f);
+            s->setParam(kApRetrig, 0.f);              // the grid owns the phrase
+            s->setStateString("nxspc1;arpl=ffff4fffffffffff");   // digit 4 at step 4
+            // The key arrives in the middle of step 3, and with Retrig 0 it
+            // moves nothing: the arp first sounds at step 4's own onset.
+            spRender(*s, spV3Note(3 * kApStep + 6000, 84), 7 * kApStep, kBlock, L, R, 120.0);
+            const f32 s4 = spV3Peak(L, 4 * kApStep + 3000, 4000);
+            const f32 s5 = spV3Peak(L, 5 * kApStep + 3000, 4000);
+            CHECK(s5 > 0.05f, "the arp sounds once a key arrives (%.4f)", (double)s5);
+            CHECK(std::fabs(s4 / s5 - 4.f / 15.f) < 0.08f,
+                  "the staircase kept walking through four steps with no notes in the "
+                  "set: step 4 reads digit 4 and not digit 0 (%.3f)", (double)(s4 / s5));
+        }
+    }
+    // IT IS 0 WHENEVER ARP ON IS 0, which is the inert condition the
+    // bit-identity gate rests on: a slot pointed at source 17 with the arp off
+    // contributes exactly nothing, which is v3's contribution of exactly
+    // nothing.
+    {
+        auto off = spV3Probe(reg, *d);
+        auto ctl = spV3Probe(reg, *d);
+        std::vector<f32> aL, aR, bL, bR;
+        if (off && ctl) {
+            spV3Slot(*off, 0, 17, 5, 1.f);        // source 17, arp OFF
+            off->setStateString("nxspc1;arpl=0123456789abcdef");
+            spRender(*off, spV3Note(0, 84), 3 * kApStep, kBlock, aL, aR, 120.0);
+            spRender(*ctl, spV3Note(0, 84), 3 * kApStep, kBlock, bL, bR, 120.0);
+            CHECK(spV3Peak(aL, 0, (int)aL.size()) == 0.f,
+                  "with Arp On 0, a slot on source 17 contributes exactly 0 (%.9f)",
+                  (double)spV3Peak(aL, 0, (int)aL.size()));
+            CHECK(spV2MaxDiff(aL, bL) == 0.f,
+                  "...bit-identically to the same patch with no slot at all");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void spV4BusyPatch(PluginInstance& s) {
+    // The v3 busy patch plus a dense arp: nine modes are swept by the caller,
+    // and everything the arp owns is off its default — swing, a gate over
+    // 100 %, octave alternation, a pattern with rests and ties in it, a chance
+    // below 100, a shortened pattern and Pattern velocity.
+    spV3BusyPatch(s);
+    s.setParam(kApOn, 1.f);
+    s.setParam(kApSync, 7.f);              // 1/16
+    s.setParam(kApOctaves, 3.f);
+    s.setParam(kApOctMode, 2.f);           // Alternate
+    s.setParam(kApGate, 155.f);            // over 100 %
+    s.setParam(kApSwing, 62.f);
+    s.setParam(kApVelMode, 2.f);           // Pattern
+    s.setParam(kApSteps, 13.f);            // an ODD length, so the swing must
+                                           // stay welded to k and not to i
+    s.setParam(kApChance, 78.f);
+    s.setStateString("nxspc1;arpl=f8c4fac6f8c4fac6;arps=05150705040915150507051504050f05");
+}
+
+static std::vector<SpEvent> spV4Script(int frames) {
+    // A rolled chord, a finger added and removed mid-phrase, a second chord,
+    // controller traffic that is never on a block boundary at any of the sizes
+    // below, and a panic near the end.
+    std::vector<SpEvent> ev = {
+        {     0, 0x90, 45,  90 },
+        {   401, 0x90, 52, 110 },
+        {  1103, 0x90, 57,  40 },
+        {  3307, 0x90, 64,  70 },
+        {  9001, 0x80, 52,   0 },
+        { 15013, 0x90, 61, 120 },
+        { 21107, 0x80, 57,   0 },
+        { 27011, 0x80, 45,   0 },
+        { 27013, 0x80, 61,   0 },
+        { 27017, 0x80, 64,   0 },
+        { 29009, 0x90, 48, 100 },
+        { 29011, 0x90, 55,  60 },
+        { 29013, 0x90, 60,  80 },
+    };
+    ev.push_back({ 3000, 0xD0, 96, 0 });
+    for (int f = 137; f < frames; f += 379)
+        ev.push_back({ f, 0xB0, 1, (u8)((f / 379 * 13) & 0x7F) });
+    for (int f = 89; f < frames; f += 293) {
+        const int v14 = (f * 37) & 0x3FFF;
+        ev.push_back({ f, 0xE0, (u8)(v14 & 0x7F), (u8)((v14 >> 7) & 0x7F) });
+    }
+    std::sort(ev.begin(), ev.end(),
+              [](const SpEvent& a, const SpEvent& b) { return a.frame < b.frame; });
+    return ev;
+}
+
+static void testSpectraV4Determinism(PluginRegistry& reg) {
+    banner("Spectra v4: block-size invariance with the arp RUNNING — the acid test");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    const int kFrames = 40000;
+    const std::vector<SpEvent> ev = spV4Script(kFrames);
+
+    // THE ACID TEST. An arp that emitted at the top of the block would quantise
+    // every generated note to the block boundary, and the same MIDI in blocks
+    // of 1 and of 1024 would then produce different audio — the exact failure
+    // the note queue was built to prevent, arriving through a new door. Every
+    // mode, in Poly and in Legato, at five block sizes.
+    int allOk = 0, allRun = 0;
+    for (int mode = 0; mode < 10; ++mode) {
+        for (int vm = 0; vm < 2; ++vm) {
+            auto build = [&]() {
+                auto s = reg.instantiate(*d, kSR, kBlock);
+                if (s) {
+                    spV4BusyPatch(*s);
+                    s->setParam(kApMode, (f32)mode);
+                    s->setParam(spIdx(*s, "Voice Mode"), vm ? 2.f : 0.f);
+                    s->setParam(spIdx(*s, "Glide"), vm ? 40.f : 0.f);
+                }
+                return s;
+            };
+            auto ref = build();
+            if (!ref) return;
+            std::vector<f32> refL, refR, altL, altR;
+            spRender(*ref, ev, kFrames, kBlock, refL, refR, 120.0);
+            if (spV3Peak(refL, 0, kFrames) <= 0.02f) {
+                CHECK(false, "mode %d (%s): the arp render is silent", mode, vm ? "Legato" : "Poly");
+                continue;
+            }
+            bool ok = true;
+            for (int chunk : { 1, 7, 64, 300, 1024 }) {
+                auto alt = build();
+                if (!alt) break;
+                spRender(*alt, ev, kFrames, chunk, altL, altR, 120.0);
+                if (std::fmax(spV2MaxDiff(refL, altL), spV2MaxDiff(refR, altR)) != 0.f) {
+                    ok = false;
+                    CHECK(false, "mode %d (%s): blocks of %d differ from %d (max diff %.9f)",
+                          mode, vm ? "Legato" : "Poly", chunk, kBlock,
+                          (double)std::fmax(spV2MaxDiff(refL, altL), spV2MaxDiff(refR, altR)));
+                }
+            }
+            ++allRun;
+            if (ok) ++allOk;
+        }
+    }
+    CHECK(allOk == allRun && allRun == 20,
+          "all nine modes plus Chord, in Poly and Legato, are bit-identical at blocks of "
+          "1, 7, 64, 300 and 1024 — generated note-ons and note-offs land at STAMPED "
+          "SAMPLES (%d of %d)", allOk, allRun);
+
+    // TWO RENDERS OF THE SAME PROJECT ARE BYTE-IDENTICAL, and it is a gate.
+    // Random and Chance are splitmix64 over a stable identity — never a stream,
+    // never a clock — so no RNG state is carried between steps and voice
+    // stealing cannot perturb either.
+    {
+        auto build = [&]() {
+            auto s = reg.instantiate(*d, kSR, kBlock);
+            if (s) { spV4BusyPatch(*s); s->setParam(kApMode, 6.f); }   // Random
+            return s;
+        };
+        auto a = build();
+        auto b = build();
+        auto c = build();
+        std::vector<f32> aL, aR, bL, bR, cL, cR;
+        if (a && b && c) {
+            spRender(*a, ev, kFrames, kBlock, aL, aR, 120.0);
+            spRender(*b, ev, kFrames, kBlock, bL, bR, 120.0);
+            spRender(*c, ev, kFrames, 97, cL, cR, 120.0);
+            CHECK(spV3Peak(aL, 0, kFrames) > 0.02f, "the Random busy render is not silent");
+            CHECK(spV2MaxDiff(aL, bL) == 0.f && spV2MaxDiff(aR, bR) == 0.f,
+                  "two fresh instances render the same arp project identically");
+            CHECK(spV2MaxDiff(aL, cL) == 0.f,
+                  "...and so does a third at an irregular block size");
+        }
+    }
+
+    // The arp NEVER ENTERS THE EVENT QUEUE, so no density of arp output can
+    // push an incoming note-off out of it. A 1/16 arp at 999 bpm generating for
+    // forty thousand samples, with a note-off at the very end, must leave
+    // nothing sounding.
+    {
+        auto s = reg.instantiate(*d, kSR, kBlock);
+        if (s) {
+            spV4BusyPatch(*s);
+            s->setParam(kApMode, 7.f);            // Chord: the densest output
+            s->setParam(kApGate, 200.f);
+            s->setParam(kApChance, 100.f);
+            std::vector<SpEvent> e2 = { { 0, 0x90, 60, 100 }, { 1, 0x90, 64, 100 },
+                                        { 2, 0x90, 67, 100 },
+                                        { 20000, 0xB0, 123, 0 } };
+            std::vector<f32> L, R;
+            spRender(*s, e2, 60000, kBlock, L, R, 999.0);
+            CHECK(spV3Peak(L, 0, 20000) > 0.02f, "the dense arp was generating");
+            CHECK(spV3Peak(L, 40000, 20000) < 0.001f,
+                  "an incoming All Notes Off is still honoured under the densest arp "
+                  "output this device can make (%.6f)",
+                  (double)spV3Peak(L, 40000, 20000));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV4BeatLock(PluginRegistry& reg) {
+    banner("Spectra v4: the step clock is the ORCHESTRATOR RULING's second consumer");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // A LOCATE LANDS ON THE RIGHT STEP, without the arp having run there. This
+    // is what "every index is a modulus of k" buys, and it cannot be had from a
+    // counter that advances per step.
+    //
+    // Sync 5 is 1/4, so at 120 bpm a step is one beat. A render that STARTS at
+    // beat 5.0 with a four-step pattern is on pattern index 1, and Up over
+    // three notes is on note index 5 mod 3 = 2 — the TOP note. A render from
+    // beat 0 is on index 0, the bottom one.
+    auto at = [&](f64 beat0) {
+        auto s = spV4Probe(reg, *d);
+        std::vector<f32> L, R;
+        if (!s) return std::vector<int>{};
+        s->setParam(kApSync, 5.f);              // 1/4: one step = one beat
+        s->setParam(kApRetrig, 0.f);            // the grid owns the phrase
+        s->setParam(kApGate, 60.f);
+        spRenderBeat(*s, spV4Chord({ 72, 76, 79 }), 4 * 24000, kBlock, L, R, 120.0, beat0);
+        std::vector<int> m;
+        for (int k = 0; k < 4; ++k) m.push_back(spV4NoteIn(L, k * 24000 + 3000, 6000));
+        return m;
+    };
+    {
+        const std::vector<int> z = at(0.0), f = at(5.0);
+        CHECK(spV4Eq(z, { 72, 76, 79, 72 }),
+              "from beat 0 the arp starts on note index 0 (got %s)", spV4Show(z).c_str());
+        CHECK(spV4Eq(f, { 79, 72, 76, 79 }),
+              "from BEAT 5 it starts on 5 mod 3 = index 2 — the locate lands on the step "
+              "the bar implies, without the arp having run there (got %s)",
+              spV4Show(f).c_str());
+    }
+
+    // ...and the lock is still block-size invariant, because the beat ANCHORS
+    // the counter and never drives it. A phase read once per block would
+    // quantise the render.
+    {
+        auto mk = [&]() {
+            auto s = spV4Probe(reg, *d);
+            if (s) {
+                s->setParam(kApSync, 7.f);
+                s->setParam(kApRetrig, 0.f);
+                s->setParam(kApSwing, 55.f);
+                s->setParam(kApGate, 140.f);
+                s->setParam(kApMode, 3.f);
+            }
+            return s;
+        };
+        auto ref = mk();
+        std::vector<f32> rL, rR, aL, aR;
+        if (ref) {
+            spRenderBeat(*ref, spV4Chord({ 60, 64, 67, 71 }), 40000, kBlock, rL, rR, 132.0, 2.0);
+            CHECK(spV3Peak(rL, 0, 40000) > 0.02f, "the beat-locked arp render is not silent");
+            bool all = true;
+            for (int chunk : { 1, 7, 64, 300, 1024 }) {
+                auto alt = mk();
+                if (!alt) break;
+                spRenderBeat(*alt, spV4Chord({ 60, 64, 67, 71 }), 40000, chunk, aL, aR, 132.0, 2.0);
+                const f32 diff = spV2MaxDiff(rL, aL);
+                if (diff != 0.f) all = false;
+                CHECK(diff == 0.f, "beat-locked arp: blocks of %d bit-identical to %d "
+                                   "(max diff %.9f)", chunk, kBlock, (double)diff);
+            }
+            CHECK(all, "the arp adds nothing to the ruling and takes nothing from it: it "
+                       "reads beatAcc_ and divides by the beats in a step");
         }
     }
 }
@@ -10040,6 +11792,18 @@ int main() {
     testSpectraV3Refusal(reg);
     testSpectraV3BeatLock(reg);
     testSpectraV3Determinism(reg);
+    testSpectraV4Contract(reg);
+    testSpectraV4State(reg);
+    testSpectraV4Modes(reg);
+    testSpectraV4Octaves(reg);
+    testSpectraV4Clock(reg);
+    testSpectraV4Velocity(reg);
+    testSpectraV4HoldRetrig(reg);
+    testSpectraV4Transitions(reg);
+    testSpectraV4Chance(reg);
+    testSpectraV4Source17(reg);
+    testSpectraV4BeatLock(reg);
+    testSpectraV4Determinism(reg);
     testSamplerContract(reg);
     testSamplerEmpty(reg);
     testSamplerPlayback(reg);

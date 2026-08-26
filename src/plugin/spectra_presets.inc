@@ -2554,3 +2554,663 @@ SP(103, 2)       // M3 Curve = S-curve
 SPLFO(1, "fcf0c8f4f0c8f460", 0.03f)
 SPLFO(3, "147adfda8520147a", 0.6f)
 SP_END()
+
+// ===========================================================================
+// Bank 3 — the arpeggiator (v4). 24 presets, appended; rows above are byte-
+// identical. Every row here sets SP(109, 1) itself: SPARP is a STATE macro and
+// a state macro never sets a parameter. The step row is the star — ties hold a
+// note across steps, the -2..+2 octave column walks the line, and a step that
+// is off is a rest that still advances the pattern. Categories in contract
+// order, alphabetical within each; only non-default values are listed, so an
+// unwritten Arp Sync is 7 (1/16) and an unwritten Arp Retrig is 1.
+// ===========================================================================
+
+// --------------------------------------------------------- Bass (6), bank 3
+
+// BA Chug Tie — a tied bassline rather than a chord sweep: two roots held
+// across three steps each bar, short chugs between. Macro 1: opens the filter.
+SP_PRESET("BA Chug Tie")
+SP(  1, 0.22f)   // A Position
+SP( 17, 0.45f)   // Sub
+SP( 18, 260.f)   // Cutoff
+SP( 19, 0.55f)   // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 9.f)     // Drive
+SP( 22, 0.5f)    // Env2>Cutoff
+SP( 24, 0.5f)    // Attack
+SP( 25, 220.f)   // Decay
+SP( 26, 0.45f)   // Sustain
+SP( 27, 70.f)    // Release
+SP( 29, 140.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.55f)   // M1 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(115, 42.f)    // Arp Gate — short chugs; the ties do the holding
+SP(119, 1)       // Arp Vel Mode = Fixed
+SP(120, 104)     // Arp Fixed Vel
+SPARP("ffffffffffffffff", "05151505051505050515150505150505")
+SP_END()
+
+// BA Octave Walk — the octave column is the bassline: the pattern drops and
+// lifts an octave step by step so the line walks. Macro 1: opens the filter.
+SP_PRESET("BA Octave Walk")
+SP(  1, 0.18f)   // A Position
+SP( 17, 0.35f)   // Sub
+SP( 18, 320.f)   // Cutoff
+SP( 19, 0.6f)    // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 7.f)     // Drive
+SP( 22, 0.45f)   // Env2>Cutoff
+SP( 24, 0.5f)    // Attack
+SP( 25, 180.f)   // Decay
+SP( 26, 0.3f)    // Sustain
+SP( 27, 60.f)    // Release
+SP( 29, 120.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 71, 6)       // M2 Src = Velocity
+SP( 72, 11)      // M2 Dst = Cutoff
+SP( 73, 0.3f)    // M2 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(115, 58.f)    // Arp Gate
+SP(116, 14.f)    // Arp Swing
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("fac8fac8f9c7fbc9", "05050305070503050505030705030507")
+SP_END()
+
+// BA Rest Pocket — rests, not notes: six of the sixteen steps are off, so the
+// arp plays a pocket instead of a stream. Macro 1: opens the filter.
+SP_PRESET("BA Rest Pocket")
+SP(  1, 0.3f)    // A Position
+SP( 18, 380.f)   // Cutoff
+SP( 19, 0.68f)   // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 10.f)    // Drive
+SP( 22, 0.6f)    // Env2>Cutoff
+SP( 24, 0.4f)    // Attack
+SP( 25, 150.f)   // Decay
+SP( 26, 0.2f)    // Sustain
+SP( 27, 55.f)    // Release
+SP( 29, 110.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(110, 3)       // Arp Mode = Up-Down Exclusive
+SP(115, 36.f)    // Arp Gate
+SP(116, 56.f)    // Arp Swing
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("f0ca0d0bf0c0da0b", "05000505000500050500050005050005")
+SP_END()
+
+// BA Sub Thumb — Thumb mode is the point: the thumb note pedals an octave down
+// on every other step while the chord answers. Macro 1: opens the filter.
+SP_PRESET("BA Sub Thumb")
+SP(  1, 0.12f)   // A Position
+SP( 17, 0.55f)   // Sub
+SP( 18, 300.f)   // Cutoff
+SP( 19, 0.4f)    // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 6.f)     // Drive
+SP( 24, 0.5f)    // Attack
+SP( 25, 200.f)   // Decay
+SP( 26, 0.35f)   // Sustain
+SP( 27, 65.f)    // Release
+SP( 42, 1)       // Sub Shape = triangle
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.55f)   // M1 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(110, 8)       // Arp Mode = Thumb
+SP(115, 48.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("f9f9f9f0f9f9f9f0", "03050305030503000305030503050300")
+SP_END()
+
+// BA Swing Pump — a hard-swung pump with the latch on: press a chord, let go,
+// and the pattern keeps running under the next one. Macro 1: opens the filter.
+SP_PRESET("BA Swing Pump")
+SP(  1, 0.25f)   // A Position
+SP(  5, 3)       // A Unison
+SP(  6, 12.f)    // A Detune
+SP( 17, 0.3f)    // Sub
+SP( 18, 420.f)   // Cutoff
+SP( 19, 0.5f)    // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 8.f)     // Drive
+SP( 22, 0.5f)    // Env2>Cutoff
+SP( 25, 170.f)   // Decay
+SP( 26, 0.25f)   // Sustain
+SP( 27, 70.f)    // Release
+SP( 29, 130.f)   // E2 Decay
+SP( 39, 12)      // Voices
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP(109, 1)       // Arp On
+SP(110, 2)       // Arp Mode = Up-Down Inclusive
+SP(115, 40.f)    // Arp Gate
+SP(116, 62.f)    // Arp Swing
+SP(117, 1)       // Arp Hold
+SPARP("ffffffffffffffff", "05050305050503050505030505050305")
+SP_END()
+
+// BA Wide Legato — ties under a gate over 100 %: every note is still sounding
+// when the next arrives, so the arp glides. Macro 1: opens the filter.
+SP_PRESET("BA Wide Legato")
+SP(  1, 0.1f)    // A Position
+SP( 17, 0.5f)    // Sub
+SP( 18, 340.f)   // Cutoff
+SP( 19, 0.35f)   // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 5.f)     // Drive
+SP( 24, 4.f)     // Attack
+SP( 26, 0.9f)    // Sustain
+SP( 27, 180.f)   // Release
+SP( 38, 55.f)    // Glide
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 98, 2)       // Voice Mode = Legato
+SP(109, 1)       // Arp On
+SP(112, 6)       // Arp Sync = 1/8
+SP(115, 170.f)   // Arp Gate — over 100 %, so steps overlap and Legato glides
+SP(119, 1)       // Arp Vel Mode = Fixed
+SP(120, 92)      // Arp Fixed Vel
+SPARP("ffffffffffffffff", "05151515051515050315151505150505")
+SP_END()
+
+// --------------------------------------------------------- Lead (6), bank 3
+
+// LD Chord Stab — Chord mode is the point: every step fires the whole chord,
+// and the rests turn it into a stab rhythm. Macro 1: opens the filter.
+SP_PRESET("LD Chord Stab")
+SP(  1, 0.4f)    // A Position
+SP(  5, 3)       // A Unison
+SP(  6, 14.f)    // A Detune
+SP(  7, 0.6f)    // A Spread
+SP( 18, 3200.f)  // Cutoff
+SP( 19, 0.3f)    // Resonance
+SP( 21, 4.f)     // Drive
+SP( 22, 0.45f)   // Env2>Cutoff
+SP( 25, 120.f)   // Decay
+SP( 26, 0.f)     // Sustain
+SP( 27, 90.f)    // Release
+SP( 29, 90.f)    // E2 Decay
+SP( 39, 12)      // Voices
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.55f)   // M1 Amt
+SP(109, 1)       // Arp On
+SP(110, 7)       // Arp Mode = Chord
+SP(113, 2)       // Arp Octaves
+SP(114, 2)       // Arp Oct Mode = Alternate
+SP(115, 30.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("f0d00c0bf00d0a00", "05000500000500050500000500050000")
+SP_END()
+
+// LD Leap Runner — the octave column makes it leap: a twelve-step phrase that
+// jumps two octaves down and two up inside the bar. Macro 1: opens the filter.
+SP_PRESET("LD Leap Runner")
+SP(  0, 5)       // A Table = Digital
+SP(  1, 0.45f)   // A Position
+SP(  5, 2)       // A Unison
+SP(  6, 8.f)     // A Detune
+SP( 18, 2600.f)  // Cutoff
+SP( 19, 0.45f)   // Resonance
+SP( 21, 6.f)     // Drive
+SP( 22, 0.4f)    // Env2>Cutoff
+SP( 25, 140.f)   // Decay
+SP( 26, 0.25f)   // Sustain
+SP( 27, 80.f)    // Release
+SP( 29, 100.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(115, 52.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SP(121, 12)      // Arp Steps — twelve of the sixteen, a 3/4 phrase over 4/4
+SPARP("fbd9fcb8fdaefbca", "05070309050107050903050705050505")
+SP_END()
+
+// LD Pinky Cry — Pinky mode is the point: the top note answers every other
+// step, and the octave column lifts it further. Macro 1: opens the filter.
+SP_PRESET("LD Pinky Cry")
+SP(  0, 6)       // A Table = Vox
+SP(  1, 0.35f)   // A Position
+SP(  5, 3)       // A Unison
+SP(  6, 10.f)    // A Detune
+SP(  7, 0.5f)    // A Spread
+SP( 18, 2400.f)  // Cutoff
+SP( 19, 0.5f)    // Resonance
+SP( 22, 0.35f)   // Env2>Cutoff
+SP( 25, 200.f)   // Decay
+SP( 26, 0.4f)    // Sustain
+SP( 27, 120.f)   // Release
+SP( 29, 130.f)   // E2 Decay
+SP( 36, 12.f)    // LFO>Pitch
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP(109, 1)       // Arp On
+SP(110, 9)       // Arp Mode = Pinky
+SP(115, 72.f)    // Arp Gate
+SP(116, 24.f)    // Arp Swing
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("fbfbfcfbfdfbfcfb", "05070507050705070507050705070507")
+SP_END()
+
+// LD Random Spark — Random mode with Chance under it: the note is drawn and the
+// step may not fire at all, but the grid never slips. Macro 1: opens the filter.
+SP_PRESET("LD Random Spark")
+SP(  0, 4)       // A Table = Bell
+SP(  1, 0.5f)    // A Position
+SP( 18, 3600.f)  // Cutoff
+SP( 19, 0.4f)    // Resonance
+SP( 22, 0.5f)    // Env2>Cutoff
+SP( 25, 110.f)   // Decay
+SP( 26, 0.1f)    // Sustain
+SP( 27, 140.f)   // Release
+SP( 29, 80.f)    // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.55f)   // M1 Amt
+SP(109, 1)       // Arp On
+SP(110, 6)       // Arp Mode = Random
+SP(113, 2)       // Arp Octaves
+SP(115, 44.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SP(122, 68.f)    // Arp Chance
+SPARP("fc0bfd0af90cfb0d", "05050007050500050705000505070005")
+SP_END()
+
+// LD Step Filter — the level row is a filter staircase, not a velocity map:
+// source 17 walks the cutoff with the pattern. Macro 1: sets the filter floor.
+SP_PRESET("LD Step Filter")
+SP(  1, 0.3f)    // A Position
+SP(  5, 4)       // A Unison
+SP(  6, 16.f)    // A Detune
+SP(  7, 0.7f)    // A Spread
+SP( 18, 400.f)   // Cutoff
+SP( 19, 0.6f)    // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 5.f)     // Drive
+SP( 25, 400.f)   // Decay
+SP( 26, 0.7f)    // Sustain
+SP( 27, 150.f)   // Release
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.4f)    // M1 Amt
+SP( 71, 17)      // M2 Src = Arp Step
+SP( 72, 11)      // M2 Dst = Cutoff
+SP( 73, 0.6f)    // M2 Amt
+SP(102, 2)       // M2 Curve = S-curve
+SP(109, 1)       // Arp On
+SP(110, 2)       // Arp Mode = Up-Down Inclusive
+SP(115, 62.f)    // Arp Gate
+SPARP("159dfb7326aeec84", "05050507050505030505050705050505")
+SP_END()
+
+// LD Tie Anthem — ties make it sing: one note held across seven steps, then the
+// next, so a 1/16 grid plays a slow melody. Macro 1: opens the filter.
+SP_PRESET("LD Tie Anthem")
+SP(  1, 0.55f)   // A Position
+SP(  5, 5)       // A Unison
+SP(  6, 20.f)    // A Detune
+SP(  7, 0.8f)    // A Spread
+SP( 10, -12)     // B Coarse
+SP( 12, 0.35f)   // B Level
+SP( 18, 5200.f)  // Cutoff
+SP( 19, 0.2f)    // Resonance
+SP( 24, 6.f)     // Attack
+SP( 26, 0.85f)   // Sustain
+SP( 27, 260.f)   // Release
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP(109, 1)       // Arp On
+SP(115, 96.f)    // Arp Gate
+SP(119, 1)       // Arp Vel Mode = Fixed
+SP(120, 112)     // Arp Fixed Vel
+SPARP("ffffffffffffffff", "05151515151515150515151507151515")
+SP_END()
+
+// ---------------------------------------------------------- Pad (1), bank 3
+
+// PD Latch Drift — Hold latches the chord and Retrig 0 keeps the grid's place,
+// so chords change under a running phrase. Macro 1: opens the filter.
+SP_PRESET("PD Latch Drift")
+SP(  1, 0.3f)    // A Position
+SP(  5, 5)       // A Unison
+SP(  6, 22.f)    // A Detune
+SP(  7, 0.9f)    // A Spread
+SP( 18, 2200.f)  // Cutoff
+SP( 19, 0.25f)   // Resonance
+SP( 24, 120.f)   // Attack
+SP( 26, 1.f)     // Sustain
+SP( 27, 900.f)   // Release
+SP( 39, 14)      // Voices
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 71, 17)      // M2 Src = Arp Step
+SP( 72, 1)       // M2 Dst = A Pos
+SP( 73, 0.45f)   // M2 Amt
+SP(102, 2)       // M2 Curve = S-curve
+SP(109, 1)       // Arp On
+SP(110, 2)       // Arp Mode = Up-Down Inclusive
+SP(112, 5)       // Arp Sync = 1/4
+SP(113, 2)       // Arp Octaves
+SP(115, 145.f)   // Arp Gate — over 100 %, so the steps overlap into a pad
+SP(117, 1)       // Arp Hold
+SP(118, 0)       // Arp Retrig — the grid keeps its place across chord changes
+SP(121, 12)      // Arp Steps
+SPARP("8acfedbacd98fbac", "05050705050305070505030507050505")
+SP_END()
+
+// --------------------------------------------------------- Keys (2), bank 3
+
+// KY Bell Ladder — the octave column climbs and falls a two-octave ladder under
+// the played chord, on a triplet grid. Macro 1: opens the filter.
+SP_PRESET("KY Bell Ladder")
+SP(  0, 4)       // A Table = Bell
+SP(  1, 0.35f)   // A Position
+SP( 18, 4200.f)  // Cutoff
+SP( 19, 0.2f)    // Resonance
+SP( 22, 0.35f)   // Env2>Cutoff
+SP( 25, 260.f)   // Decay
+SP( 26, 0.2f)    // Sustain
+SP( 27, 300.f)   // Release
+SP( 29, 160.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 71, 6)       // M2 Src = Velocity
+SP( 72, 1)       // M2 Dst = A Pos
+SP( 73, 0.3f)    // M2 Amt
+SP(109, 1)       // Arp On
+SP(112, 9)       // Arp Sync = 1/8T
+SP(115, 66.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("fdb9fca8fdb9fca8", "05070907050305070907050305070503")
+SP_END()
+
+// KY Held Chime — ties hold half of a fourteen-step pattern, so the chime rings
+// long over short instead of even. Macro 1: opens the filter.
+SP_PRESET("KY Held Chime")
+SP(  0, 4)       // A Table = Bell
+SP(  1, 0.2f)    // A Position
+SP(  8, 2)       // B Table = Harmonic
+SP(  9, 0.3f)    // B Position
+SP( 12, 0.3f)    // B Level
+SP( 18, 3800.f)  // Cutoff
+SP( 19, 0.18f)   // Resonance
+SP( 25, 700.f)   // Decay
+SP( 26, 0.3f)    // Sustain
+SP( 27, 420.f)   // Release
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.45f)   // M1 Amt
+SP(109, 1)       // Arp On
+SP(110, 2)       // Arp Mode = Up-Down Inclusive
+SP(115, 84.f)    // Arp Gate
+SP(116, 18.f)    // Arp Swing
+SP(119, 1)       // Arp Vel Mode = Fixed
+SP(120, 88)      // Arp Fixed Vel
+SP(121, 14)      // Arp Steps
+SPARP("ffffffffffffffff", "05150515150515050515150515050505")
+SP_END()
+
+// -------------------------------------------------------- Pluck (4), bank 3
+
+// PL Grid Rest — six rests in sixteen: the gaps are the groove, and a step that
+// does not sound still advances the melody. Macro 1: opens the filter.
+SP_PRESET("PL Grid Rest")
+SP(  1, 0.4f)    // A Position
+SP( 18, 900.f)   // Cutoff
+SP( 19, 0.55f)   // Resonance
+SP( 22, 0.7f)    // Env2>Cutoff
+SP( 25, 90.f)    // Decay
+SP( 26, 0.f)     // Sustain
+SP( 27, 70.f)    // Release
+SP( 29, 70.f)    // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP(109, 1)       // Arp On
+SP(110, 3)       // Arp Mode = Up-Down Exclusive
+SP(115, 34.f)    // Arp Gate
+SP(116, 42.f)    // Arp Swing
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("0fc0d0ba0c0df0b0", "00050500050005050005000505000500")
+SP_END()
+
+// PL Harp Climb — the octave column is the shape: sixteen steps walking from an
+// octave below the chord to two above and back. Macro 1: opens the filter.
+SP_PRESET("PL Harp Climb")
+SP(  0, 2)       // A Table = Harmonic
+SP(  1, 0.25f)   // A Position
+SP( 18, 2800.f)  // Cutoff
+SP( 19, 0.3f)    // Resonance
+SP( 22, 0.5f)    // Env2>Cutoff
+SP( 23, 0.5f)    // Keytrack
+SP( 25, 140.f)   // Decay
+SP( 26, 0.f)     // Sustain
+SP( 27, 200.f)   // Release
+SP( 29, 90.f)    // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP(109, 1)       // Arp On
+SP(115, 54.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("9abcdeffedcba987", "03030505050707070909070705050303")
+SP_END()
+
+// PL Ratchet Tie — ties and rests together: a picked figure where some notes
+// ring across a step and others drop out. Macro 1: opens the filter.
+SP_PRESET("PL Ratchet Tie")
+SP(  0, 5)       // A Table = Digital
+SP(  1, 0.3f)    // A Position
+SP( 18, 1800.f)  // Cutoff
+SP( 19, 0.45f)   // Resonance
+SP( 21, 4.f)     // Drive
+SP( 22, 0.6f)    // Env2>Cutoff
+SP( 25, 120.f)   // Decay
+SP( 26, 0.05f)   // Sustain
+SP( 27, 90.f)    // Release
+SP( 29, 80.f)    // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP(109, 1)       // Arp On
+SP(115, 46.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("ff0cff0dfe0cff0e", "05150005151500050515000515150005")
+SP_END()
+
+// PL Step Morph — the level row walks the wavetables: source 17 drives A's
+// position up while B's slides down. Macro 1: opens the filter.
+SP_PRESET("PL Step Morph")
+SP(  0, 7)       // A Table = Fold
+SP(  1, 0.1f)    // A Position
+SP(  8, 3)       // B Table = Formant
+SP(  9, 0.85f)   // B Position
+SP( 12, 0.4f)    // B Level
+SP( 18, 3000.f)  // Cutoff
+SP( 19, 0.3f)    // Resonance
+SP( 25, 160.f)   // Decay
+SP( 26, 0.f)     // Sustain
+SP( 27, 160.f)   // Release
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 71, 17)      // M2 Src = Arp Step
+SP( 72, 1)       // M2 Dst = A Pos
+SP( 73, 0.7f)    // M2 Amt
+SP( 74, 17)      // M3 Src = Arp Step
+SP( 75, 2)       // M3 Dst = B Pos
+SP( 76, -0.7f)   // M3 Amt
+SP(103, 1)       // M3 Curve = Exp
+SP(109, 1)       // Arp On
+SP(115, 58.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("013579bdfdb97531", "05050505070505050505050503050505")
+SP_END()
+
+// ----------------------------------------------------------- FX (1), bank 3
+
+// FX Chance Rain — Random notes, a Chance of 42 % and half the steps resting:
+// the pattern rains rather than runs. Macro 1: opens the band.
+SP_PRESET("FX Chance Rain")
+SP(  0, 4)       // A Table = Bell
+SP(  1, 0.7f)    // A Position
+SP( 16, 0.15f)   // Noise
+SP( 18, 5000.f)  // Cutoff
+SP( 19, 0.55f)   // Resonance
+SP( 20, 1)       // Filter Type = BP12
+SP( 25, 180.f)   // Decay
+SP( 26, 0.f)     // Sustain
+SP( 27, 400.f)   // Release
+SP( 44, 0.5f)    // Noise Color
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.6f)    // M1 Amt
+SP( 71, 17)      // M2 Src = Arp Step
+SP( 72, 16)      // M2 Dst = Pan
+SP( 73, 0.8f)    // M2 Amt
+SP( 74, 13)      // M3 Src = Random
+SP( 75, 7)       // M3 Dst = A Pitch
+SP( 76, 0.05f)   // M3 Amt
+SP(109, 1)       // Arp On
+SP(110, 6)       // Arp Mode = Random
+SP(113, 3)       // Arp Octaves
+SP(114, 2)       // Arp Oct Mode = Alternate
+SP(115, 70.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SP(122, 42.f)    // Arp Chance
+SPARP("d3f1a2e0c4b2f1d0", "05000700050900050003050009000500")
+SP_END()
+
+// ----------------------------------------------------- Sequence (4), bank 3
+
+// SQ As Played Run — As Played mode is the point: the steps follow the order
+// your fingers landed, not the pitch order. Macro 1: opens the filter.
+SP_PRESET("SQ As Played Run")
+SP(  1, 0.35f)   // A Position
+SP(  5, 2)       // A Unison
+SP(  6, 9.f)     // A Detune
+SP( 18, 1500.f)  // Cutoff
+SP( 19, 0.5f)    // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 5.f)     // Drive
+SP( 22, 0.5f)    // Env2>Cutoff
+SP( 25, 160.f)   // Decay
+SP( 26, 0.3f)    // Sustain
+SP( 27, 90.f)    // Release
+SP( 29, 110.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(110, 5)       // Arp Mode = As Played
+SP(115, 62.f)    // Arp Gate
+SP(116, 58.f)    // Arp Swing
+SP(118, 0)       // Arp Retrig — free-run, the grid owns the phrase
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("fcb9fdc8fbb9fdca", "05050305050705050305050705030505")
+SP_END()
+
+// SQ Bass Tie Grid — a tied bassline written into the grid: long roots, short
+// answers, one leap up at the end of the bar. Macro 1: opens the filter.
+SP_PRESET("SQ Bass Tie Grid")
+SP(  1, 0.2f)    // A Position
+SP( 17, 0.4f)    // Sub
+SP( 18, 380.f)   // Cutoff
+SP( 19, 0.62f)   // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 9.f)     // Drive
+SP( 22, 0.55f)   // Env2>Cutoff
+SP( 24, 0.4f)    // Attack
+SP( 25, 200.f)   // Decay
+SP( 26, 0.4f)    // Sustain
+SP( 27, 60.f)    // Release
+SP( 29, 130.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.55f)   // M1 Amt
+SP( 71, 6)       // M2 Src = Velocity
+SP( 72, 11)      // M2 Dst = Cutoff
+SP( 73, 0.3f)    // M2 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(115, 44.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("fddafce9fddafcb7", "03151505031505050315151505150507")
+SP_END()
+
+// SQ Octave Stair — twelve steps stairing from two octaves down to two up and
+// back; the octave column is the whole melody. Macro 1: opens the filter.
+SP_PRESET("SQ Octave Stair")
+SP(  0, 5)       // A Table = Digital
+SP(  1, 0.3f)    // A Position
+SP( 18, 1900.f)  // Cutoff
+SP( 19, 0.48f)   // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 22, 0.45f)   // Env2>Cutoff
+SP( 25, 150.f)   // Decay
+SP( 26, 0.25f)   // Sustain
+SP( 27, 80.f)    // Release
+SP( 29, 100.f)   // E2 Decay
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.5f)    // M1 Amt
+SP( 98, 1)       // Voice Mode = Mono
+SP(109, 1)       // Arp On
+SP(115, 56.f)    // Arp Gate
+SP(116, 22.f)    // Arp Swing
+SP(119, 2)       // Arp Vel Mode = Pattern
+SP(121, 12)      // Arp Steps
+SPARP("89abcdefedcb9876", "01030507090705030103050705050505")
+SP_END()
+
+// SQ Step Duet — one grid, two jobs: the level row is the velocity map and the
+// filter walk at once, through source 17. Macro 1: sets the filter floor.
+SP_PRESET("SQ Step Duet")
+SP(  1, 0.15f)   // A Position
+SP(  5, 3)       // A Unison
+SP(  6, 11.f)    // A Detune
+SP(  7, 0.55f)   // A Spread
+SP( 18, 500.f)   // Cutoff
+SP( 19, 0.58f)   // Resonance
+SP( 20, 3)       // Filter Type = LP24
+SP( 21, 6.f)     // Drive
+SP( 25, 300.f)   // Decay
+SP( 26, 0.55f)   // Sustain
+SP( 27, 110.f)   // Release
+SP( 68, 9)       // M1 Src = Macro 1
+SP( 69, 11)      // M1 Dst = Cutoff
+SP( 70, 0.4f)    // M1 Amt
+SP( 71, 17)      // M2 Src = Arp Step
+SP( 72, 11)      // M2 Dst = Cutoff
+SP( 73, 0.65f)   // M2 Amt
+SP( 74, 17)      // M3 Src = Arp Step
+SP( 75, 12)      // M3 Dst = Resonance
+SP( 76, 0.25f)   // M3 Amt
+SP(102, 1)       // M2 Curve = Exp
+SP(109, 1)       // Arp On
+SP(110, 3)       // Arp Mode = Up-Down Exclusive
+SP(115, 64.f)    // Arp Gate
+SP(119, 2)       // Arp Vel Mode = Pattern
+SPARP("fc84fc84b962b962", "05050705050503050507050505030505")
+SP_END()

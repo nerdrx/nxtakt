@@ -68,6 +68,43 @@
 // instrument showing its other face, not as two different panels.
 //
 // ---------------------------------------------------------------------------
+// ...AND WHY v4 MAKES IT THREE, WHICH IS AN ARGUMENT AND NOT A HABIT
+//
+// v4 adds fourteen parameters and a sixteen-step, two-row drawable grid. Both
+// existing pages are FULL -- MAIN has seven columns with no spare cell and MOD
+// has seven with two -- and the dock's 200 logical pixels are not negotiable
+// from here. So there are exactly three ways to land an arpeggiator, and two
+// of them are refusals:
+//
+//   * PUT IT ON MOD. It does not fit, and making it fit means taking something
+//     off. The only candidates are the four macros or LFO 3, and both are
+//     reachable today: hiding a control that was reachable is the one cost
+//     this panel has never paid, in three revisions. Refused.
+//   * SCROLL, OR GROW THE DOCK. §5 wants working surfaces flat and fast, and
+//     the dock height is the constraint the whole layout is cut to. Refused,
+//     for the reason the two-page note above already gives.
+//   * A THIRD PAGE. §5's sliding indicator does not care whether there are two
+//     slots or three, and tabPill now hit-tests the UN-inset slot (widgets.cpp
+//     1.7), so the band can carry a third tab and still clear the 16px floor.
+//
+// WHAT THE THIRD PAGE COSTS, said out loud rather than left to be discovered:
+// each tab slot narrows, and the arp is one page turn away from the notes it
+// plays. The first is paid for in pixels -- the band widens from 88 to 108
+// logical px, so a slot is 36 wide and 16 tall rather than 44 and 16, and the
+// amber note beside it gives up twenty pixels it had to spare. The second is
+// the honest cost and it is small: nothing on MAIN or MOD is read WHILE
+// editing an arp pattern, which is exactly the test that made warp and the
+// matrix share a page and would have failed here.
+//
+// WHY THE ARP PAGE IS CUT DIFFERENTLY. MAIN and MOD are seven sections in
+// seven columns. The arp is fourteen parameters -- which fill exactly two of
+// those columns, band and both rows, with no cell left over -- and ONE control
+// that is the whole feature. So columns 0 and 1 are the instrument's settings
+// and columns 2..6 are the pattern, on the same colX[] grid as the other two
+// pages, with the seams inside the spanned block left undrawn (a hairline
+// through the middle of a sixteen-step grid is noise, not structure).
+//
+// ---------------------------------------------------------------------------
 // THE GUARD, and why every single lookup has one
 //
 // The panel draws against whatever PluginInstance it is pointed at. Normally
@@ -152,6 +189,30 @@ enum SpecParamV3 : int {
 };
 static_assert(pM1Curve + 7 == 108, "M8 Curve is id 108 per the contract");
 
+// The v4 append ("v4 -- the arpeggiator"). v3's two reserved ids are spent on
+// the switch and the mode, 111..122 are new, and 123/124 are the fresh reserved
+// tail -- unnamed, for the reason the v2 block gives.
+//
+// 109 AND 110 ARE THE v2 TRAP, ONE REVISION ON, AND IT IS WORSE HERE. A v3 DSP
+// registers both -- 0..1, default 0, hidden -- exactly as the reserved rule
+// instructs, so `has(109)` answers "present" about a parameter that means
+// nothing, and Arp On's real range is 0..1 with a default of 0 as well: the two
+// cannot be told apart by has(), by range, or by default. The honest test is
+// the one the title bar already makes -- does this DSP have the v4 block AT ALL
+// -- so it is made once, into `arpLive` (pc >= pCountV4), and EVERY control on
+// the arp page passes through it, including the ones whose ids are new and
+// which has() would have answered correctly. A guard that is right for twelve
+// ids and wrong for two is a guard nobody can check.
+enum SpecParamV4 : int {
+    pArpOn = 109, pArpMode = 110, pArpRate = 111, pArpSync = 112,
+    pArpOctaves = 113, pArpOctMode = 114, pArpGate = 115, pArpSwing = 116,
+    pArpHold = 117, pArpRetrig = 118, pArpVelMode = 119, pArpFixedVel = 120,
+    pArpSteps = 121, pArpChance = 122,
+    pCountV4 = 125
+};
+static_assert(pArpChance + 2 == 124, "the arp's reserved tail is 123 and 124");
+static_assert(pCountV4 == 125, "kSpParamCount goes 111 -> 125 in v4");
+
 // The eight tables, by index. UI labels, per the contract's own wording.
 const char* const kTables[8] = {"Basic", "PWM", "Harmonic", "Formant",
                                 "Bell",  "Digital", "Vox",  "Fold"};
@@ -178,11 +239,16 @@ const char* const kVoiceMode[3] = {"poly", "mono", "leg"};
 // v3 appends three MIDI sources (14/15/16) under the append-only rule, so this
 // list GREW at the end and every old value kept its number. How many of them a
 // device actually has is paramInfo(68).max, asked at the call site.
-const char* const kMatrixSrc[17] = {
+// v4 appends ONE more (17, Arp Step) under the same rule, so this list grew at
+// the end a second time and every old value kept its number again.
+const char* const kMatrixSrc[18] = {
     "Off",     "LFO 1",   "LFO 2",   "LFO 3",   "ENV 2",   "ENV 3",  "Velo",
     "KeyTrk",  "AfterT",  "Macro 1", "Macro 2", "Macro 3", "Macro 4", "Random",
-    "Wheel",   "Bend",    "MIDI CC"};
-constexpr int kSrcCount = 17;
+    "Wheel",   "Bend",    "MIDI CC", "ArpStep"};
+constexpr int kSrcCount = 18;
+// The matrix source Arp Step IS. Named once so the grab handle, the header
+// label and the inert sentence cannot drift apart.
+constexpr int kSrcArpStep = 17;
 const char* const kMatrixDst[20] = {
     "Off",     "A Pos",   "B Pos",   "A Warp",  "B Warp",  "A Level", "B Level",
     "A Pitch", "B Pitch", "Sub",     "Noise",   "Cutoff",  "Reso",    "Drive",
@@ -193,6 +259,15 @@ constexpr int kDstCount = 20;
 const char* const kCurveName[3] = {"lin", "exp", "S"};
 // LFO mode (ids 60/61/100). One-shot makes an LFO an envelope.
 const char* const kLfoMode[2] = {"loop", "1shot"};
+
+// v4's three enums, straight off the contract's tables. Arp Mode (id 110) is
+// TEN values and its ordering is frozen append-only forever; the spellings are
+// cut to what a 112px stepper carries and the tooltip says the long form.
+const char* const kArpMode[10] = {"Up",        "Down",   "Up-Dn Inc", "Up-Dn Exc",
+                                  "Down-Up",   "As Played", "Random", "Chord",
+                                  "Thumb",     "Pinky"};
+const char* const kArpOctMode[3] = {"up", "down", "alt"};
+const char* const kArpVelMode[3] = {"played", "fixed", "patt"};
 
 // ---------------------------------------------------------------------------
 // THE DESTINATION MAP -- which knob in this panel a matrix destination lands
@@ -277,6 +352,18 @@ int presetCatOf(const char* n) {
 }
 
 constexpr f32 kTwoPi = 6.28318530717958647692f;
+
+// NXTAKT_DEBUG_PROBE, read once -- app_devices.cpp's and app_chrome.cpp's
+// spelling. It is here because of a gap v4 made impossible to ignore: every
+// knob in this panel announces its writes through the widget layer's
+// probeValue(), and the FOUR drawable rows announce nothing at all, so a driven
+// grid stroke could only ever be asserted from a tooltip. drive.sh's header is
+// explicit that a screenshot proves what was DRAWN and the probe log proves
+// what was MEANT; the state string is what these rows mean.
+bool probeOn() {
+    static const bool on = env("DEBUG_PROBE") != nullptr;
+    return on;
+}
 
 // A wavetable arrives as a WAV and nothing else -- the plan's three
 // interpretation rules all start from one. The test is on the NAME because
@@ -439,6 +526,29 @@ struct SpecState {
     int  grid[3][kGridSteps]{};       // digit 0..15 per step
     int  smooth[3]{};                 // thousandths, 0..1000
 
+    // v4's two rows, and the ONE place this file's defaults are not zero.
+    //
+    // The contract says so loudly and gives the reason: "a missing block reads
+    // as its default, and every default is inert" is v3's rule, and for an LFO
+    // grid inert means all zeros -- but an all-zero arp STEP row is an arp that
+    // plays nothing, which is a broken default rather than an inert one. The
+    // rows are SHAPE; the inert switch is Arp On (109), which defaults to 0.
+    // So `arpl` defaults to sixteen f's and `arps` to `05` sixteen times --
+    // and 0x05 and not 0x01, because the octave field is BIASED (code 2 is
+    // offset 0), which is the trap a reader who skims the bit table falls into.
+    int  arpLvl[kGridSteps] = {15, 15, 15, 15, 15, 15, 15, 15,
+                               15, 15, 15, 15, 15, 15, 15, 15};
+    // THE STEP ROW IS KEPT RAW, and that is the important half.
+    //
+    // Bits 5..7 are reserved, and "a later, wider build writes them" is exactly
+    // who this panel is carrying bytes for. Masking them on READ is what the
+    // contract asks (they are ignored); masking them on WRITE would delete a
+    // future field the first time a user dragged a bar -- the same failure the
+    // unknown-RECORD rule exists to prevent, one level down. So the byte is
+    // stored whole, the interpretation masks and clamps, and a step the stroke
+    // never touched emits the bytes it arrived with.
+    int  arpRaw[kGridSteps] = {5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5};
+
     // THE CONTRACT'S KEY CHARSET, and a discrepancy inside the contract that
     // this reader must not turn into a refusal. The state-string section says
     // `key` matches `[a-z][a-z0-9]*`; the key TABLE four lines below it names
@@ -468,6 +578,29 @@ struct SpecState {
     }
     bool gridEmpty(int n) const {
         for (int i = 0; i < kGridSteps; ++i) if (grid[n][i]) return false;
+        return true;
+    }
+
+    // --- the arp rows, read ------------------------------------------------
+    // The two DEGRADATIONS the contract names -- an octave code of 5..7 clamps
+    // to 4, bits 5..7 are ignored -- live HERE and nowhere else, because they
+    // are reading rules and not storage rules. Both are values a later, wider
+    // build could legitimately write, which is why neither is a refusal.
+    bool arpOn(int i)  const { return (arpRaw[i] & 0x01) != 0; }
+    bool arpTie(int i) const { return arpOn(i) && (arpRaw[i] & 0x10) != 0; }
+    int  arpOct(int i) const { return std::min(4, (arpRaw[i] >> 1) & 7) - 2; }
+    // ...and written, through the one door, so the reserved bits cannot be
+    // dropped by a caller that forgot they were there.
+    void arpSet(int i, bool on, bool tie, int oct) {
+        arpRaw[i] = (arpRaw[i] & 0xE0) | (tie ? 0x10 : 0) |
+                    (clampv(oct + 2, 0, 4) << 1) | (on ? 0x01 : 0);
+    }
+    bool arpLvlDefault() const {
+        for (int i = 0; i < kGridSteps; ++i) if (arpLvl[i] != 15) return false;
+        return true;
+    }
+    bool arpStepDefault() const {
+        for (int i = 0; i < kGridSteps; ++i) if (arpRaw[i] != 0x05) return false;
         return true;
     }
 
@@ -517,6 +650,29 @@ struct SpecState {
                 smooth[n] = v;
             }
         }
+        // v4's two rows, on exactly the same terms. A LENGTH that is wrong, a
+        // character outside [0-9a-f] and an uppercase character are strings this
+        // writer could not have produced, so they refuse the whole state -- the
+        // contract's own list. Everything a wider build could legally write is
+        // handled by the accessors above instead, which is the line between a
+        // refusal and a degradation.
+        if (const std::string* al = find("arpl")) {
+            if ((int)al->size() != kGridSteps) return false;
+            for (int i = 0; i < kGridSteps; ++i) {
+                const int d = hexOf((*al)[(size_t)i]);
+                if (d < 0) return false;
+                arpLvl[i] = d;
+            }
+        }
+        if (const std::string* as = find("arps")) {
+            if ((int)as->size() != kGridSteps * 2) return false;
+            for (int i = 0; i < kGridSteps; ++i) {
+                const int hi = hexOf((*as)[(size_t)(i * 2)]);
+                const int lo = hexOf((*as)[(size_t)(i * 2 + 1)]);
+                if (hi < 0 || lo < 0) return false;
+                arpRaw[i] = hi * 16 + lo;      // whole, reserved bits included
+            }
+        }
         parsed = true;
         return true;
     }
@@ -546,6 +702,27 @@ struct SpecState {
                     return true;
                 }
             }
+            // v4's two. Same shape, same "at its default, so it gets no record
+            // at all" -- and the default here is a pattern rather than nothing,
+            // so a fresh instance still round-trips to the empty string the
+            // contract says a v2 project must.
+            if (k == "arpl") {
+                v.clear();
+                if (!arpLvlDefault())
+                    for (int i = 0; i < kGridSteps; ++i)
+                        v += "0123456789abcdef"[clampv(arpLvl[i], 0, 15)];
+                return true;
+            }
+            if (k == "arps") {
+                v.clear();
+                if (!arpStepDefault())
+                    for (int i = 0; i < kGridSteps; ++i) {
+                        const int b = arpRaw[i] & 0xff;
+                        v += "0123456789abcdef"[(b >> 4) & 0xf];
+                        v += "0123456789abcdef"[b & 0xf];
+                    }
+                return true;
+            }
             return false;
         };
         std::vector<std::pair<std::string, std::string>> out;
@@ -563,6 +740,8 @@ struct SpecState {
         char k[12];
         for (int n = 0; n < 3; ++n) { snprintf(k, sizeof k, "lfo%d", n + 1);    want(k); }
         for (int n = 0; n < 3; ++n) { snprintf(k, sizeof k, "smooth%d", n + 1); want(k); }
+        want("arpl");                          // the contract's own order:
+        want("arps");                          // the level row, then the step row
         if (out.empty()) return {};
         std::string s = kStateTag;
         for (const auto& r : out) { s += ';'; s += r.first; s += '='; s += r.second; }
@@ -652,7 +831,32 @@ struct SpectraGrid {
     int erase = -1;
     int eraseStep = 0;
 };
+// FOUR drawable level rows share this since v4, keyed by SLOT: 0..2 are LFO
+// 1..3's grids and 3 is the arp's level row. One struct because it is one
+// stroke -- the arp's level row is the LFO grid's gesture verbatim, which is
+// what "identical in feel" has to mean if it is to stay true.
 SpectraGrid g_gridDrag;
+
+// THE ARP STEP ROW'S OWN GESTURE, and it needs one because the row is not a
+// level row: a cell there carries a three-state on/tie/off AND an octave offset
+// of -2..+2, which are two edits of two different kinds. The whole argument for
+// separating them by the stroke's AXIS rather than by a modifier is at the
+// drawing site; this is only the bookkeeping it needs.
+struct SpectraArpStep {
+    bool active = false;
+    // 0 undecided, 1 horizontal (paint the state), 2 vertical (set the octave).
+    // Decided once per stroke and never revisited: an axis that could flip
+    // mid-stroke is a gesture that changes verb under your hand.
+    int  axis = 0;
+    int  cell = 0;              // the step the press landed in
+    f32  px = 0.f, py = 0.f;    // ...and where, which is what decides the axis
+    int  raw0 = 0;              // that step's byte BEFORE the press, for the revert
+    int  paint = 0;             // 0 rest, 1 sound, 2 tie -- the state being stamped
+    int  last = 0;              // the previous frame's step, so a span is filled
+    bool erase = false;
+    int  eraseStep = 0;
+};
+SpectraArpStep g_arpDrag;
 
 // DRAG-ASSIGN, in three states and no more:
 //   src < 0                      nothing in flight
@@ -931,9 +1135,12 @@ int App::spectraOpenIdx(const std::vector<DeviceModel>& devices) const {
 // inspection:
 //
 //     0          the close button
-//     2          the MAIN/MOD page tab (tabPill derives its slot ids itself)
+//     2          the MAIN/MOD/ARP page tab (tabPill derives its slot ids itself)
 //    60..63      the preset row: prev, next, the name chip, the popover latch
-//   100+id*4+k   a stepper on param `id` (k: 0 gesture, 1 prev, 2 next)
+//   100+id*4+k   a stepper on param `id` (k: 0 gesture, 1 prev, 2 next).
+//                v4's widest id is 122, so this band's top is 590 -- ten below
+//                the filter segments at 600, which is the whole reason the
+//                filter block was numbered at 600 and not at 550.
 //   600..605     the filter-type segments
 //    50..55      LFO1's shape segments (v1's numbers, kept; v3 added the sixth)
 //   630..645     LFO2 (630+) and LFO3 (640+) shape segments
@@ -949,10 +1156,21 @@ int App::spectraOpenIdx(const std::vector<DeviceModel>& devices) const {
 //   801, 802     the import row's A / B target segments
 //   803          the browse chip, 804 the revert-to-factory chip
 //   810..812     the three LFO grids, 820..822 their smooth troughs
-//   830..841     the source grab handles, indexed by matrix source value
+//   830..847     the source grab handles, indexed by matrix source value
+//                (v4's Arp Step is source 17, so this band's top moved 841 ->
+//                847 -- still clear of the save chip at 850)
 //   850          the save chip, 851 the inline name field
 //   860..867     the matrix's per-slot curve selectors
 //   870          LFO1's compact sync selector (the Custom layout only)
+//   880..882     the three LFO mode toggles
+//
+// ...and v4's band, 900+, chosen so it clears the stepper range's new top (590)
+// and the whole of v3's:
+//
+//   900          Arp On, 901 Arp Hold, 902 Arp Retrig
+//   904          the octave-mode micro-selector
+//   905          the velocity-mode micro-selector
+//   910          the arp level row, 911 the arp step row
 // ---------------------------------------------------------------------------
 
 void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
@@ -1010,6 +1228,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         g_drop.open = false;
         g_assign = SpectraAssign{};
         g_gridDrag = SpectraGrid{};
+        g_arpDrag = SpectraArpStep{};
         g_save.open = false;
         g_wt.err.clear();
         if (ui_.editId == dropId) ui_.editId = 0;
@@ -1096,27 +1315,38 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // comment. Switching pages closes the popover: the chip it hangs from is
     // a MAIN-page control.
     {
-        static const char* const kPages[2] = {"MAIN", "MOD"};
+        static const char* const kPages[3] = {"MAIN", "MOD", "ARP"};
         // 16 tall, and the slots ARE 16: tabPill's 2px inset is a drawing
         // inset for the sliding indicator and is no longer taken out of the
         // hit test (widgets.cpp). This band paid four pixels to work around
         // that and has them back — in a 200 logical pixel dock, four pixels is
         // a knob row's breathing room.
-        Rect tabR{title.x + 76 * s, title.y + 1.5f * s, 88 * s, 13 * s};
+        //
+        // 108 AND NOT 88, WHICH IS THE THIRD PAGE'S FIRST BILL. Three slots in
+        // the old 88px band would be 29 logical pixels wide apiece; they would
+        // still clear the floor (29 > 16, and the 13px height is what grabTo16
+        // pads), but a tab you have to aim at is a tab you stop using. Twenty
+        // pixels out of the amber note beside it -- which has 900 and needs 300
+        // -- buys 36 a slot, which is close enough to the 44 two tabs had that
+        // the hand does not notice the difference.
+        Rect tabR{title.x + 76 * s, title.y + 1.5f * s, 108 * s, 13 * s};
         int page = g_page;
         // grabTo16 because the band is 13 drawn: tabPill re-arms the slop for
-        // every slot, so both tabs come out at the 16px floor rather than the
-        // first one being padded and the second left short (widgets.cpp says
+        // every slot, so all THREE tabs come out at the 16px floor rather than
+        // the first one being padded and the rest left short (widgets.cpp says
         // why that asymmetry is worse than uniformly small).
-        if (ui_.grabTo16(tabR).tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 2, &page) &&
+        if (ui_.grabTo16(tabR).tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 3, &page) &&
             page != g_page) {
             closeDrop();
             g_assign = SpectraAssign{};      // a gesture does not survive the turn
+            g_arpDrag = SpectraArpStep{};
+            g_gridDrag = SpectraGrid{};
             g_page = page;
         }
         if (ui_.hovered(tabR))
             ui_.tip = "MAIN is the v1 face; MOD is the parity push - sub & noise, "
-                      "warp, LFO 2/3, ENV 3, the matrix, macros, voice mode";
+                      "warp, LFO 2/3, ENV 3, the matrix, macros, voice mode; ARP "
+                      "is v4's arpeggiator and its sixteen-step pattern";
     }
 
     // §9: say what happened, in amber, in one line. Three states can be on
@@ -1125,16 +1355,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // -- in which case every missing id draws as an inert socket below and
     // this line is the reason why.
     {
-        const Rect noteR{title.x + 172 * s, title.y, closeR.x - title.x - 178 * s, title.h};
+        const Rect noteR{title.x + 192 * s, title.y, closeR.x - title.x - 198 * s, title.h};
         char note[128];
         if (!real) {
             snprintf(note, sizeof note, "panel forced onto %s - %d of %d parameters",
-                     dm.desc.name.c_str(), pc, (int)pCountV2);
+                     dm.desc.name.c_str(), pc, (int)pCountV4);
             microFit(ui_, fSmall_, noteR, note, nx::amber.alpha(0.9f), Align::Left, 0);
-        } else if (pc < (int)pCountV3) {
+        } else if (pc < (int)pCountV4) {
             snprintf(note, sizeof note,
                      "DSP has %d of %d parameters - newer controls are inert sockets",
-                     pc, (int)pCountV3);
+                     pc, (int)pCountV4);
             microFit(ui_, fSmall_, noteR, note, nx::amber.alpha(0.9f), Align::Left, 0);
         }
     }
@@ -1191,8 +1421,17 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     const auto col = [&](int i) { return Rect{colX[i], body.y, kColW[i] * s, body.h}; };
     // Seams. §11: no solid dividers anywhere -- a hairline that fades at both
     // ends is the only legal one in the system.
-    for (int i = 1; i < kCols; ++i)
+    //
+    // THE ARP PAGE DRAWS TWO OF THE SIX, and that is a judgment rather than an
+    // omission. MOD's matrix spans columns 5 and 6 and KEEPS its seam, because
+    // the seam falls on the matrix's own middle and is the divider its two
+    // banks of four would otherwise have to draw. The arp's pattern spans FIVE
+    // columns and is one control: four hairlines through the middle of a
+    // sixteen-step grid would be structure that is not there.
+    for (int i = 1; i < kCols; ++i) {
+        if (g_page == 2 && i > 2) continue;
         rend_.hairlineV(colX[i] - colGap * 0.5f, body.y + 2 * s, body.bottom() - 2 * s);
+    }
 
     // --- the parameter access layer ---------------------------------------
     //
@@ -1214,6 +1453,14 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // return's or the master's knob has no clip envelope to record into.
         undoPoint(what);
         inst->setParam(id, v);
+        // NXTAKT_DEBUG_PROBE, the other half of the gap writeState() closes.
+        // knobNx announces its own writes from inside the widget layer, but a
+        // segButton, a stepper and a micro-selector all reach the model through
+        // HERE and announced nothing -- so every bool and every enum in this
+        // panel was a gesture that could only be asserted from a picture.
+        if (probeOn())
+            LOGI("NXTAKT_DEBUG_PROBE: spectra param %d (%s) -> %g", id, what,
+                 (double)v);
         if (ownTrack)
             autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid, dm.uid,
                                           inst->paramInfo(id).id), v, gesture);
@@ -1236,6 +1483,42 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     };
     const int srcMax = enumMax(pM1Src, 13);
 
+    // THE v4 GUARD, MADE ONCE.
+    //
+    // `has(id)` is the wrong question for the arp block and the enum comment
+    // above says why: 109 and 110 were RESERVED in v3, so a v3 DSP registers
+    // them at 0..1 with default 0 -- the same range and the same default the
+    // real Arp On and Arp Mode have. A panel that trusted has() would draw a
+    // live on/off switch wired to a hidden placeholder, which is the one
+    // failure mode worse than drawing nothing: it lies.
+    //
+    // So the honest test is the COUNT, exactly as it is for the three v3
+    // controls whose ids v2 had reserved, and it is made here rather than at
+    // fourteen call sites.
+    const bool arpLive = pc >= (int)pCountV4;
+
+    // ONE SENTENCE FOR EVERY INERT SOCKET, AND IT NAMES THE RIGHT ABSENCE.
+    // "This device has no parameter 109" is FALSE against a v3 DSP -- it has
+    // one, it just means nothing -- so a control gated on the count says that
+    // instead. Every guarded control in the panel now goes through here, so
+    // there is one place where the reason is written down.
+    const auto absentWhy = [&](int id, int needPc) {
+        char t[288];
+        if (needPc && pc < needPc && has(id))
+            snprintf(t, sizeof t,
+                     "id %d belongs to the v4 arp block (109..124) - this DSP has "
+                     "%d of %d parameters. Ids 109 and 110 were RESERVED in v3, so "
+                     "they exist here and mean nothing; the count is the honest test.",
+                     id, pc, needPc);
+        else if (needPc && pc < needPc)
+            snprintf(t, sizeof t,
+                     "id %d belongs to the v4 arp block (109..124) - this DSP has "
+                     "%d of %d parameters", id, pc, needPc);
+        else
+            snprintf(t, sizeof t, "This device has no parameter %d", id);
+        return std::string(t);
+    };
+
     // THE STATE STRING, read once a frame. Read once because stateString()
     // builds a fresh string every call (engine_handle.cpp says so at length),
     // and because a panel that asked twice could get two answers if anything
@@ -1256,6 +1539,9 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         if (!stateOk) return;
         const std::string s = sstate.emit();
         undoPoint(what, gesture);
+        if (probeOn())
+            LOGI("NXTAKT_DEBUG_PROBE: spectra state \"%s\" -> %s", what,
+                 s.empty() ? "(all blocks default)" : s.c_str());
         if (!inst->setStateString(s)) {
             status_ = "Spectra refused that state string - nothing was stored";
         } else if (inst->stateString() != s) {
@@ -1441,7 +1727,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             char msg[176];
             snprintf(msg, sizeof msg,
                      "Spectra: %s is waiting for a source - click any grip handle "
-                     "(the LFOs, ENV 2/3, the macros, wheel/bend/cc). Escape cancels.",
+                     "(the LFOs, ENV 2/3, the macros, wheel/bend/cc, the arp "
+                     "pattern). Escape cancels.",
                      kMatrixDst[clampv(dst, 0, kDstCount - 1)]);
             status_ = msg;
         }
@@ -1504,11 +1791,12 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 }
             }
         } else if (ui_.hovered(hr)) {
-            char t[128];
+            char t[160];
             snprintf(t, sizeof t,
-                     "%s is a v3 matrix source - this DSP's source enum stops "
-                     "at %s", kMatrixSrc[srcVal], kMatrixSrc[clampv(srcMax, 0,
-                     kSrcCount - 1)]);
+                     "%s is a %s matrix source - this DSP's source enum stops "
+                     "at %s", kMatrixSrc[srcVal],
+                     srcVal >= kSrcArpStep ? "v4" : "v3",
+                     kMatrixSrc[clampv(srcMax, 0, kSrcCount - 1)]);
             ui_.tip = t;
         }
         const Col ink = !live ? nx::muted.alpha(0.30f)
@@ -1540,10 +1828,15 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // whole slot": source, destination, amount and curve, in ONE undo entry,
     // announced. LFO 1's sync selector passes -1 and keeps step-back, because
     // a sync division is not a routing and there is nothing there to erase.
+    //
+    // `needPc` is the count gate the v4 block needs and v3's did not: see
+    // absentWhy() above. 0 means "has() is the whole question", which is every
+    // caller that predates v4.
     const auto enumSel = [&](int sub, const Rect& r0, int id,
                              const char* const* names, int count,
-                             const char* what, f32 dim, int clearSlot = -1) {
-        const bool live = has(id) && count > 0;
+                             const char* what, f32 dim, int clearSlot = -1,
+                             int needPc = 0) {
+        const bool live = has(id) && count > 0 && (!needPc || pc >= needPc);
         rend_.well(r0, nx::radiusXs * s, false);
         int idx = live ? clampv((int)std::lround(get(id, 0.f)), 0, count - 1) : 0;
         if (live) {
@@ -1596,9 +1889,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 ui_.tip = t;
             }
         } else if (ui_.hovered(r0)) {
-            char t[80];
-            snprintf(t, sizeof t, "%s: this device has no parameter %d", what, id);
-            ui_.tip = t;
+            ui_.tip = std::string(what) + ": " + absentWhy(id, needPc);
         }
         const Col ink = !live ? nx::muted.alpha(0.40f)
                       : idx == 0 ? nx::muted.alpha(0.55f * dim + 0.30f)
@@ -1639,19 +1930,22 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
     // A knob cell: the control, its readout (drawn by the widget) and its name
     // underneath. `st` carries the contract's own range, curve and centre.
-    // `spentReserved` is for the THREE v3 controls whose ids were RESERVED in
-    // v2 -- L2 Mode (60), L3 Mode (61) and Bend Range (99). `has(id)` cannot
-    // tell those apart from the real thing: a v2 DSP registers all three, at
-    // 0..1 with default 0, exactly as the reserved rule instructs, so the slot
-    // is filled and the guard says "present" about a parameter that means
-    // nothing. Two of the three cannot even be told apart by their range (L2/L3
-    // Mode is 0..1 in v3 as well). The honest test is the one the title bar
-    // already makes -- does this DSP have the v3 block at all -- so the caller
-    // passes it and the socket is drawn for the right reason.
+    //
+    // `needPc` is for every control whose id was RESERVED in an earlier
+    // revision -- v3's L2 Mode (60), L3 Mode (61) and Bend Range (99), and now
+    // v4's Arp On (109) and Arp Mode (110). `has(id)` cannot tell those apart
+    // from the real thing: the older DSP registers them, at 0..1 with default 0,
+    // exactly as the reserved rule instructs, so the slot is filled and the
+    // guard says "present" about a parameter that means nothing. Several cannot
+    // even be told apart by their range. The honest test is the one the title
+    // bar already makes -- does this DSP have that revision's block at all --
+    // so the caller passes the count and the socket is drawn for the right
+    // reason. It was a bool through v3 and is a NUMBER now, because there are
+    // two revisions to be short of and "true" no longer says which.
     const auto knob = [&](const Rect& cell, int id, const char* label,
-                          Ui::KnobStyle st, f32 dim, bool spentReserved = false) {
+                          Ui::KnobStyle st, f32 dim, int needPc = 0) {
         st.dim = dim;
-        st.absent = !has(id) || (spentReserved && pc < (int)pCountV3);
+        st.absent = !has(id) || (needPc && pc < needPc);
         // THE UNIT COMES FROM THE DEVICE, not from this file. The contract
         // fixes the range and the curve, so those are spelled out at the call
         // sites -- but "st", "ct", "Hz", "ms", "dB" are the plugin's own
@@ -1717,7 +2011,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // matrix assignment and the device-parameter MIDI learn. Offered per
         // knob rather than blanket, so a control that is not a matrix
         // destination does not grow an Assign item that would refuse.
-        if (ui_.offer(menuOfferFor(id, dst)).knobNx(wid, kr, &v, st))
+        // The offer is EMPTY for a socket, and that matters more than it looks.
+        // knobNx does not call setHot() when it is absent -- an absent control
+        // claims no rectangle at all, by design -- and setHot() is what consumes
+        // a pending offer (uw-WIDGET-API 1.3). So an offer handed to a socket
+        // would survive onto the NEXT knob in the frame. With has(109) true on a
+        // v3 DSP that is not hypothetical: an Assign or Learn item would appear
+        // on an unrelated control, offering a verb about a parameter that means
+        // nothing.
+        if (ui_.offer(st.absent ? Ui::MenuOffer{} : menuOfferFor(id, dst))
+               .knobNx(wid, kr, &v, st))
             commit(id, v, wid, label);
         menuHandle(wid, id, dst, label);
 
@@ -1740,9 +2043,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // where the parameter says its whole name, its range and its unit.
         if (ui_.hovered(kr) && g_assign.src < 0) {
             char t[192];
-            if (st.absent)
-                snprintf(t, sizeof t, "%s: this device has no parameter %d", label, id);
-            else {
+            if (st.absent) {
+                ui_.tip = std::string(label) + ": " + absentWhy(id, needPc);
+                return;
+            } else {
                 const ModReach mr = dst > 0 ? modReach(dst) : ModReach{};
                 char reach[64] = {};
                 if (mr.slots)
@@ -1767,7 +2071,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     const auto stepper = [&](const Rect& r0, int id, int count,
                              const char* const* names, f32 dim,
                              const char* absentText, const char* what,
-                             const char* tip) {
+                             const char* tip, int needPc = 0) {
         ui_.segCluster(r0);
         // 16 and not 14: an arrow is 16 logical px on its short side or it is
         // under the floor, and the name between them can spare the four.
@@ -1775,7 +2079,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         Rect lb{r0.x, r0.y, bw, r0.h}, rb{r0.right() - bw, r0.y, bw, r0.h};
         rend_.hairlineV(lb.right(), r0.y + 2 * s, r0.bottom() - 2 * s);
         rend_.hairlineV(rb.x, r0.y + 2 * s, r0.bottom() - 2 * s);
-        const bool live = has(id) && count > 0;
+        const bool live = has(id) && count > 0 && (!needPc || pc >= needPc);
         int idx = live ? clampv((int)std::lround(get(id, 0.f)), 0, count - 1) : 0;
         const auto step = [&](int d) {
             if (!live) return;
@@ -1817,11 +2121,57 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const Rect nameR{lb.right(), r0.y, rb.x - lb.right(), r0.h};
         microFit(ui_, fSmall_, nameR, live ? names[idx] : absentText,
                  (live ? nx::text : nx::muted.alpha(0.45f)).alpha(dim), Align::Center);
-        if (tip && ui_.hovered(r0)) {
-            if (live) ui_.tip = tip;
-            else ui_.tip = std::string("This device has no parameter ") +
-                           std::to_string(id);
+        if (tip && ui_.hovered(r0))
+            ui_.tip = live ? std::string(tip)
+                           : std::string(what) + ": " + absentWhy(id, needPc);
+        return idx;
+    };
+
+    // A BOOL IN A KNOB CELL. §5: a bit is a toggle and not a knob with two
+    // positions -- the noise-track rule, and v4 has three more of them. The
+    // geometry is the sync selector's: one 16px control centred in the knob
+    // band with its name underneath where a knob's name would be, so a row of
+    // toggles lines up with a row of knobs across the seven columns.
+    const auto boolCell = [&](const Rect& cell, int sub, int id, const char* label,
+                              const char* onText, const char* offText, f32 dim,
+                              int needPc, const char* tip) {
+        const bool live = has(id) && (!needPc || pc >= needPc);
+        const bool on   = live && get(id, 0.f) > 0.5f;
+        const Rect tg{cell.x + 2 * s, cell.y + (cell.h - lblH - subH) * 0.5f,
+                      std::max(8 * s, cell.w - 4 * s), subH};
+        ui_.segCluster(tg);
+        Rect g = tg;
+        if (live) {
+            const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
+            if (ui_.grab(slop(tg)).segButton(wid, tg, on, nx::violet))
+                commit(id, on ? 0.f : 1.f, wid, label);
+            g = ui_.lastRect;
         }
+        microFit(ui_, fSmall_, g, live ? (on ? onText : offText) : "-",
+                 (on ? nx::text : nx::muted).alpha(live ? dim : 0.40f), Align::Center);
+        microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, label,
+                 nx::muted.alpha(live ? 0.85f * dim : 0.40f), Align::Center);
+        if (ui_.hovered(tg) && g_assign.src < 0)
+            ui_.tip = live ? std::string(tip)
+                           : std::string(label) + ": " + absentWhy(id, needPc);
+        return on;
+    };
+
+    // ...and an enum in a knob cell, on the same geometry: enumSel's recessed
+    // micro-selector where the cap would be, its name where the knob's name
+    // would be. Three values in 46 logical pixels is a selector and not a
+    // three-segment cluster -- 15px a segment is under the floor, and the words
+    // do not survive it either.
+    const auto enumCell = [&](const Rect& cell, int sub, int id,
+                              const char* const* names, int count,
+                              const char* label, const char* what, f32 dim,
+                              int needPc) {
+        const bool live = has(id) && (!needPc || pc >= needPc);
+        const Rect sr{cell.x + 2 * s, cell.y + (cell.h - lblH - subH) * 0.5f,
+                      std::max(8 * s, cell.w - 4 * s), subH};
+        const int idx = enumSel(sub, sr, id, names, count, what, dim, -1, needPc);
+        microFit(ui_, fSmall_, {cell.x, cell.bottom() - lblH, cell.w, lblH}, label,
+                 nx::muted.alpha(live ? 0.85f * dim : 0.40f), Align::Center);
         return idx;
     };
 
@@ -1986,6 +2336,193 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     };
 
     // =======================================================================
+    // THE x0x STROKE, SPELLED ONCE.
+    //
+    // There are FOUR drawable level rows in this panel since v4 -- LFO 1/2/3's
+    // grids and the arp's -- and the brief for the fourth was "identical in
+    // feel to the LFO grid you already ship". A second copy of fifty lines is
+    // how two things stop being identical, quietly, three months later. So the
+    // stroke lives here and the four call sites differ only in which sixteen
+    // integers they hand it and what their tooltip says.
+    //
+    // THE GESTURES, and they are the three a step sequencer has had since the
+    // Roland x0x, plus the one the FL pass added:
+    //   drag        paints the level under the pointer into the step under it,
+    //               filling every step the stroke flew over
+    //   shift-drag  interpolates from where the press landed to where the
+    //               pointer is now, so a ramp is one stroke and not sixteen
+    //   right-drag  clears every step the stroke crosses
+    //   wheel       nudges the step under the pointer by one digit, CONSUMED
+    //
+    // THE WHEEL IS NEW AND IT IS NOT DECORATION. uw-WIDGET-API §0 made the
+    // wheel adjust every control in the program and consume the notch; a
+    // drawable row is a control, and the arp's is EIGHT HUNDRED logical pixels
+    // wide. A notch that fell through it would scroll the device strip out from
+    // under a hand that never moved, and the next notch -- aimed at the same
+    // step -- would land somewhere else. That is the coexistence rule's exact
+    // failure, at the largest target in the panel. The three LFO grids get it
+    // too, because they are the same control.
+    //
+    // Level is quantised to the contract's sixteen digits on the way in, so
+    // what is on screen is exactly what is in the string -- there is no finer
+    // value being kept behind the bar you can see.
+    struct LevelHit { bool hot = false; int step = 0; int level = 0; };
+    const auto levelRowGesture = [&](int* row, const Rect& gr, const Rect& p,
+                                     u64 wid, int slot, bool editable,
+                                     const char* drawWhat, const char* eraseWhat) {
+        LevelHit h;
+        const f32 cw16 = p.w / (f32)kGridSteps;
+        const auto stepAt = [&](f32 x) {
+            return clampv((int)std::floor((x - p.x) / std::max(1e-3f, cw16)),
+                          0, kGridSteps - 1);
+        };
+        const auto levelAt = [&](f32 y) {
+            return clampv((int)std::lround((1.f - (y - p.y) / std::max(1e-3f, p.h)) *
+                                           (f32)(kGridLevels - 1)), 0, kGridLevels - 1);
+        };
+        h.step  = stepAt(in.mx);
+        h.level = row[h.step];
+
+        // A CLICK IS A STROKE OF ONE STEP, and it has to be handled as one:
+        // a fast click delivers its press and its release in the SAME frame
+        // (the popover learned this the hard way -- see SpectraDrop::justOpened)
+        // and a paint loop that tested `in.down[0]` first would drop it on the
+        // floor, so a step you clicked would stay where it was.
+        bool pressedNow = false, erasedNow = false;
+        if (editable && ui_.setHot(wid, gr) && ui_.isHot(wid)) {
+            h.hot = true;
+            ui_.cursor = Cursor::Hand;
+            // Draw at rest, Delete with the right button down: the badge is the
+            // answer to "what will a click do here?", and while the erase
+            // stroke is in flight the answer is not "draw".
+            ui_.badge = (in.down[2] || in.pressed[2]) ? Badge::Delete : Badge::Draw;
+            if (in.pressed[2]) {
+                g_gridDrag.erase = slot;
+                g_gridDrag.eraseStep = h.step;
+                erasedNow = true;
+            }
+            if (in.pressed[0]) {
+                ui_.active = wid;                // so one stroke is one undo entry
+                g_gridDrag.lfo = slot;
+                g_gridDrag.startStep  = h.step;
+                g_gridDrag.startLevel = levelAt(in.my);
+                pressedNow = true;
+            }
+            // The wheel, and it names its own gesture id: `active` is dropped on
+            // any frame the left button is not held, so a wheel nudge that
+            // leaned on it would take one undo entry per notch.
+            if (in.wheel != 0.f && g_gridDrag.lfo < 0) {
+                const int lv = clampv(row[h.step] + (in.wheel > 0.f ? +1 : -1), 0, 15);
+                in.wheel = 0.f;
+                if (lv != row[h.step]) {
+                    row[h.step] = lv;
+                    h.level = lv;
+                    writeState(drawWhat, wid);
+                }
+            }
+        }
+
+        // THE ERASE SWEEP. FL Studio's right-drag over a step sequencer clears
+        // every step the stroke flies over, and a right-click that cleared only
+        // the step it happened to land on was this grid's half of that gesture:
+        // it worked, and it made clearing sixteen steps sixteen aimed clicks.
+        // One stroke now, span-filled between frames the same way the paint
+        // stroke is, and coalesced on the same widget id -- so an erase sweep
+        // is ONE undo entry however many steps it crossed.
+        if (g_gridDrag.erase == slot) {
+            if (in.down[2] || erasedNow) {
+                const int s1 = stepAt(in.mx);
+                bool changed = false;
+                for (int i = std::min(g_gridDrag.eraseStep, s1);
+                     i <= std::max(g_gridDrag.eraseStep, s1); ++i)
+                    if (row[i]) { row[i] = 0; changed = true; }
+                g_gridDrag.eraseStep = s1;
+                if (changed) writeState(eraseWhat, wid);
+            }
+            if (!in.down[2]) g_gridDrag.erase = -1;
+        }
+        if (g_gridDrag.lfo == slot) {
+            if (in.down[0] || pressedNow) {
+                const int s1 = stepAt(in.mx), l1 = levelAt(in.my);
+                bool changed = false;
+                if (in.shift()) {
+                    const int a = g_gridDrag.startStep, b = s1;
+                    const int la = g_gridDrag.startLevel, lb = l1;
+                    for (int i = std::min(a, b); i <= std::max(a, b); ++i) {
+                        const f32 u = a == b ? 1.f : (f32)(i - a) / (f32)(b - a);
+                        const int lv = clampv((int)std::lround((f32)la +
+                                              ((f32)lb - (f32)la) * u), 0, 15);
+                        if (row[i] != lv) { row[i] = lv; changed = true; }
+                    }
+                } else {
+                    // A FREE STROKE FILLS THE STEPS IT FLEW OVER. The pointer
+                    // is sampled once a frame and a hand moves faster than
+                    // that, so painting only the step under the cursor leaves
+                    // holes in a quick sweep -- and a sequencer that drops
+                    // steps when you draw fast is a sequencer you stop drawing
+                    // on. The span from the last sample to this one is filled
+                    // with the same interpolation shift-drag uses; a stroke
+                    // that stayed in one step is the one-step case of it.
+                    const int a  = clampv(g_gridDrag.startStep, 0, kGridSteps - 1);
+                    const int la = clampv(g_gridDrag.startLevel, 0, 15);
+                    for (int i = std::min(a, s1); i <= std::max(a, s1); ++i) {
+                        const f32 u = a == s1 ? 1.f : (f32)(i - a) / (f32)(s1 - a);
+                        const int lv = clampv((int)std::lround((f32)la +
+                                              ((f32)l1 - (f32)la) * u), 0, 15);
+                        if (row[i] != lv) { row[i] = lv; changed = true; }
+                    }
+                    // ...and the next frame's span starts where this one ended.
+                    // (Shift-drag deliberately does NOT do this: a line has one
+                    // anchor, and moving it would make the line follow the hand
+                    // instead of standing where it was started.)
+                    g_gridDrag.startStep  = s1;
+                    g_gridDrag.startLevel = l1;
+                }
+                if (changed) writeState(drawWhat);
+            }
+            if (!in.down[0]) g_gridDrag.lfo = -1;
+        }
+        h.level = row[h.step];
+        return h;
+    };
+
+    // A DRAWABLE LEVEL ROW'S BARS. The other half of the same control, also
+    // shared: sixteen bars growing from the floor, a hairline on every fourth
+    // seam so the row reads as four beats of four without a number on screen,
+    // and §1's one lamp on the TOP of each bar -- the edge that moves, so light
+    // rides the value here as it does on the knobs.
+    //
+    // `beyondFrom` is v4's addition and costs the LFO grids nothing (they pass
+    // 16): the arp has a pattern LENGTH, and steps past it are still stored --
+    // the contract truncates the READ and never the storage -- so they are
+    // drawn, faintly, rather than blanked. A grid that hid the steps it was not
+    // playing would make shortening a pattern look like deleting one.
+    const auto levelRowBars = [&](const int* row, const Rect& gr, const Rect& p,
+                                  bool editable, int beyondFrom) {
+        const f32 cw16 = p.w / (f32)kGridSteps;
+        for (int i = 1; i < kGridSteps; ++i)
+            if (i % 4 == 0)
+                rend_.hairlineV(std::round(p.x + cw16 * (f32)i), gr.y + 2 * s,
+                                gr.bottom() - 2 * s);
+        for (int i = 0; i < kGridSteps; ++i) {
+            const f32 a = (i >= beyondFrom) ? 0.30f : 1.f;
+            const int d = clampv(row[i], 0, 15);
+            const f32 bx = p.x + cw16 * (f32)i + 0.5f * s;
+            const f32 bw = std::max(1.f, cw16 - 1.f * s);
+            const f32 bh = p.h * (f32)d / 15.f;
+            if (bh <= 0.5f) {
+                rend_.rect({bx, p.bottom() - std::max(1.f, nx::snapPx(s)), bw,
+                            std::max(1.f, nx::snapPx(s))}, nx::line.alpha(0.55f * a));
+                continue;
+            }
+            const Rect bar{bx, p.bottom() - bh, bw, bh};
+            rend_.rect(bar, nx::violet.alpha((editable ? 0.55f : 0.30f) * a));
+            rend_.rect({bar.x, bar.y, bar.w, std::max(1.f, nx::snapPx(s))},
+                       nx::cyan.alpha((editable ? 0.75f : 0.30f) * a));
+        }
+    };
+
+    // =======================================================================
     // THE DRAWN LFO -- a 16-step grid and its smooth, and the one control in
     // this panel that is NOT a parameter.
     //
@@ -1996,15 +2533,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // carrying every record it does not understand across untouched -- see
     // SpecState for why that half is the important half.
     //
-    // THE GESTURES, and they are the three a step sequencer has had since the
-    // Roland x0x:
-    //   drag        paints the level under the pointer into the step under it
-    //   shift-drag  interpolates from where the press landed to where the
-    //               pointer is now, so a ramp is one stroke and not sixteen
-    //   right-click clears one step to zero
-    // Level is quantized to the contract's sixteen digits on the way in, so
-    // what is on screen is exactly what is in the string -- there is no finer
-    // value being kept behind the bar you can see.
+    // THE GESTURES are levelRowGesture()'s, above -- this block is the well,
+    // the smooth trough and the sentence, and nothing else.
     //
     // WHERE IT SITS. A grid wants two of a column's three cells and a row of
     // its own, which LFO 2 and LFO 3 have free (the contract gives them no
@@ -2018,135 +2548,18 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const Rect p = gr.insetXY(2 * s, 2 * s);
         const bool editable = stateOk;
         const u64 wid = uiId(UiSpectraPanel, 810 + n, uidKey);
-        const f32 cw16 = p.w / (f32)kGridSteps;
-        const auto stepAt = [&](f32 x) {
-            return clampv((int)std::floor((x - p.x) / std::max(1e-3f, cw16)),
-                          0, kGridSteps - 1);
-        };
-        const auto levelAt = [&](f32 y) {
-            return clampv((int)std::lround((1.f - (y - p.y) / std::max(1e-3f, p.h)) *
-                                           (f32)(kGridLevels - 1)), 0, kGridLevels - 1);
-        };
-
-        // A CLICK IS A STROKE OF ONE STEP, and it has to be handled as one:
-        // a fast click delivers its press and its release in the SAME frame
-        // (the popover learned this the hard way -- see SpectraDrop::justOpened)
-        // and a paint loop that tested `in.down[0]` first would drop it on the
-        // floor, so a step you clicked would stay where it was.
-        bool pressedNow = false;
-        bool erasedNow = false;
-        if (editable && ui_.setHot(wid, gr) && ui_.isHot(wid)) {
-            ui_.cursor = Cursor::Hand;
-            // Draw at rest, Delete with the right button down: the badge is the
-            // answer to "what will a click do here?", and while the erase
-            // stroke is in flight the answer is not "draw".
-            ui_.badge  = (in.down[2] || in.pressed[2]) ? Badge::Delete : Badge::Draw;
-            if (in.pressed[2]) {
-                g_gridDrag.erase = n;
-                g_gridDrag.eraseStep = stepAt(in.mx);
-                erasedNow = true;
-            }
-            if (in.pressed[0]) {
-                ui_.active = wid;                // so one stroke is one undo entry
-                g_gridDrag.lfo = n;
-                g_gridDrag.startStep  = stepAt(in.mx);
-                g_gridDrag.startLevel = levelAt(in.my);
-                pressedNow = true;
-            }
-            char t[176];
+        const LevelHit lh = levelRowGesture(sstate.grid[n], gr, p, wid, n, editable,
+                                            "draw LFO steps", "erase LFO steps");
+        if (lh.hot) {
+            char t[192];
             snprintf(t, sizeof t,
                      "LFO %d steps: drag to paint, shift-drag for a line, "
-                     "right-DRAG to erase. Step %d of 16, level %.2f - "
-                     "the whole cycle is the sync division.",
-                     n + 1, stepAt(in.mx) + 1,
-                     (double)sstate.grid[n][stepAt(in.mx)] / 15.0);
+                     "right-DRAG to erase, wheel nudges. Step %d of 16, level "
+                     "%.2f - the whole cycle is the sync division.",
+                     n + 1, lh.step + 1, (double)lh.level / 15.0);
             ui_.tip = t;
         }
-
-        // THE ERASE SWEEP. FL Studio's right-drag over a step sequencer clears
-        // every step the stroke flies over, and a right-click that cleared only
-        // the step it happened to land on was this grid's half of that gesture:
-        // it worked, and it made clearing sixteen steps sixteen aimed clicks.
-        // One stroke now, span-filled between frames the same way the paint
-        // stroke is, and coalesced on the same widget id -- so an erase sweep
-        // is ONE undo entry however many steps it crossed.
-        if (g_gridDrag.erase == n) {
-            if (in.down[2] || erasedNow) {
-                const int s1 = stepAt(in.mx);
-                bool changed = false;
-                for (int i = std::min(g_gridDrag.eraseStep, s1);
-                     i <= std::max(g_gridDrag.eraseStep, s1); ++i)
-                    if (sstate.grid[n][i]) { sstate.grid[n][i] = 0; changed = true; }
-                g_gridDrag.eraseStep = s1;
-                if (changed) writeState("erase LFO steps", wid);
-            }
-            if (!in.down[2]) g_gridDrag.erase = -1;
-        }
-        if (g_gridDrag.lfo == n) {
-            if (in.down[0] || pressedNow) {
-                const int s1 = stepAt(in.mx), l1 = levelAt(in.my);
-                bool changed = false;
-                if (in.shift()) {
-                    const int a = g_gridDrag.startStep, b = s1;
-                    const int la = g_gridDrag.startLevel, lb = l1;
-                    for (int i = std::min(a, b); i <= std::max(a, b); ++i) {
-                        const f32 u = a == b ? 1.f : (f32)(i - a) / (f32)(b - a);
-                        const int lv = clampv((int)std::lround((f32)la +
-                                              ((f32)lb - (f32)la) * u), 0, 15);
-                        if (sstate.grid[n][i] != lv) { sstate.grid[n][i] = lv; changed = true; }
-                    }
-                } else {
-                    // A FREE STROKE FILLS THE STEPS IT FLEW OVER. The pointer
-                    // is sampled once a frame and a hand moves faster than
-                    // that, so painting only the step under the cursor leaves
-                    // holes in a quick sweep -- and a sequencer that drops
-                    // steps when you draw fast is a sequencer you stop drawing
-                    // on. The span from the last sample to this one is filled
-                    // with the same interpolation shift-drag uses; a stroke
-                    // that stayed in one step is the one-step case of it.
-                    const int a = clampv(g_gridDrag.startStep, 0, kGridSteps - 1);
-                    const int la = clampv(g_gridDrag.startLevel, 0, 15);
-                    for (int i = std::min(a, s1); i <= std::max(a, s1); ++i) {
-                        const f32 u = a == s1 ? 1.f : (f32)(i - a) / (f32)(s1 - a);
-                        const int lv = clampv((int)std::lround((f32)la +
-                                              ((f32)l1 - (f32)la) * u), 0, 15);
-                        if (sstate.grid[n][i] != lv) { sstate.grid[n][i] = lv; changed = true; }
-                    }
-                    // ...and the next frame's span starts where this one ended.
-                    // (Shift-drag deliberately does NOT do this: a line has one
-                    // anchor, and moving it would make the line follow the hand
-                    // instead of standing where it was started.)
-                    g_gridDrag.startStep  = s1;
-                    g_gridDrag.startLevel = l1;
-                }
-                if (changed) writeState("draw LFO steps");
-            }
-            if (!in.down[0]) g_gridDrag.lfo = -1;
-        }
-
-        // The bars. Every fourth seam is a hairline, so sixteen steps read as
-        // four beats of four without a single number on screen.
-        for (int i = 1; i < kGridSteps; ++i)
-            if (i % 4 == 0)
-                rend_.hairlineV(std::round(p.x + cw16 * (f32)i), gr.y + 2 * s,
-                                gr.bottom() - 2 * s);
-        for (int i = 0; i < kGridSteps; ++i) {
-            const int d = clampv(sstate.grid[n][i], 0, 15);
-            const f32 bx = p.x + cw16 * (f32)i + 0.5f * s;
-            const f32 bw = std::max(1.f, cw16 - 1.f * s);
-            const f32 bh = p.h * (f32)d / 15.f;
-            if (bh <= 0.5f) {
-                rend_.rect({bx, p.bottom() - std::max(1.f, nx::snapPx(s)), bw,
-                            std::max(1.f, nx::snapPx(s))}, nx::line.alpha(0.55f));
-                continue;
-            }
-            const Rect bar{bx, p.bottom() - bh, bw, bh};
-            rend_.rect(bar, nx::violet.alpha(editable ? 0.55f : 0.30f));
-            // §1's one lamp: the lit edge is the TOP of the bar, which is also
-            // the edge that moves, so light rides the value here too.
-            rend_.rect({bar.x, bar.y, bar.w, std::max(1.f, nx::snapPx(s))},
-                       nx::cyan.alpha(editable ? 0.75f : 0.30f));
-        }
+        levelRowBars(sstate.grid[n], gr, p, editable, kGridSteps);
         if (!editable && ui_.hovered(gr))
             ui_.tip = "This device's state string does not parse - the grid is "
                       "read-only rather than overwrite what it could not read";
@@ -3220,10 +3633,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // a build that ignored the pitch wheel was a broken instrument. The two
         // half-cells this row used to waste are what pays for it.
         st.lo = 0.f; st.hi = 24.f; st.def = 2.f; st.fmt = "%.0f";
-        knob({c.x + cw * 2.f, r2, cw, rowH}, pBendRange, "bend", st, 1.f, true);
+        knob({c.x + cw * 2.f, r2, cw, rowH}, pBendRange, "bend", st, 1.f,
+             (int)pCountV3);
     }
 
-    } else {
+    } else if (g_page == 1) {
     // =======================================================================
     // MOD -- the parity push's face. Same grid, same guard, same idioms: a
     // column is header / selector band / two knob rows, absent ids draw as
@@ -3476,14 +3890,31 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // and a source you can only reach by stepping a selector is a source
         // drag-assign cannot offer. Guarded like everything else: against a v2
         // DSP whose source enum stops at Random, all three are inert and say so.
+        //
+        // v4 ADDS A FOURTH, AND IT IS HERE FOR A DIFFERENT REASON. Arp Step
+        // (source 17) HAS a section of its own -- the arp's level row, which is
+        // literally what the source reads -- and it carries a grab handle
+        // there. But the arp lives on a PAGE OF ITS OWN, and a drag cannot
+        // survive a page turn (the tab clears g_assign, deliberately: a gesture
+        // belongs to the surface it started on). So a handle that existed only
+        // on the ARP page could never be dropped on anything, because every
+        // modulatable knob in this instrument is on MAIN or MOD. Two handles,
+        // one source, never on screen at the same time -- so they share the id
+        // 830 + 17 without ever colliding, and the wire can be made from either
+        // page.
         {
-            static const char* const kMidiLbl[3] = {"wheel", "bend", "cc"};
-            for (int i = 0; i < 3; ++i) {
-                const Rect g{c.x + 92 * s + 62 * s * (f32)i, c.y, 62 * s, headH};
+            static const char* const kSrcLbl[4] = {"wheel", "bend", "cc", "arp"};
+            // 54 apiece from 82 lands the last one exactly on the block's right
+            // edge, which is what four have to be to fit where three were: the
+            // row GREW into the space it had rather than the labels shrinking,
+            // because a 12px grip beside a 38px name is already the smallest
+            // either half can be.
+            for (int i = 0; i < 4; ++i) {
+                const Rect g{c.x + 82 * s + 54 * s * (f32)i, c.y, 54 * s, headH};
                 const bool live = has(pM1Src) && (14 + i) <= srcMax;
-                microFit(ui_, fSmall_, {g.x, g.y, 44 * s, g.h}, kMidiLbl[i],
+                microFit(ui_, fSmall_, {g.x, g.y, 38 * s, g.h}, kSrcLbl[i],
                          nx::muted.alpha(live ? 0.80f : 0.35f), Align::Right, 0);
-                srcHandle({g.x + 46 * s, g.y, 12 * s, g.h}, 14 + i);
+                srcHandle({g.x + 40 * s, g.y, 12 * s, g.h}, 14 + i);
             }
         }
 
@@ -3603,6 +4034,605 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                              kMatrixSrc[src], kMatrixDst[dst]);
                 ui_.tip = t;
             }
+        }
+    }
+
+    } else {
+    // =======================================================================
+    // ARP -- v4's face, and the only page in this panel that is not seven
+    // sections in seven columns.
+    //
+    // The arithmetic that decided the cut is in the file header: fourteen
+    // parameters fill exactly TWO of these columns, band and both knob rows,
+    // with no cell left over -- so columns 0 and 1 are the instrument and
+    // columns 2..6 are the pattern, which is the feature. Same colX[], same
+    // guard, same idioms; four of the six seams are left undrawn because a
+    // hairline through the middle of a sixteen-step grid is structure that is
+    // not there.
+    //
+    // ONE PAGE-WIDE RULE, and it is §5's disabled weight rather than a new
+    // idea: with Arp On at 0 the contract says every id below it is READ BY
+    // NOTHING, so every control here except the switch draws at 0.55 -- the
+    // same weight the synced rate knob and the ignored Voices knob already
+    // wear. 0.55 and not 0.40, because 0.40 is what ABSENT looks like in this
+    // panel and these controls are present, they are just not doing anything.
+    //
+    // THE PATTERN GRID IS THE EXCEPTION and stays at full weight, because it is
+    // authored BEFORE the switch is thrown as often as after -- and because
+    // dimming eight hundred pixels of the page's one hero would read as broken
+    // rather than as quiet.
+    // =======================================================================
+    const bool arpOn  = arpLive && get(pArpOn, 0.f) > 0.5f;
+    const f32  adim   = (arpLive && !arpOn) ? 0.55f : 1.f;
+    const int  nSteps = arpLive
+        ? clampv((int)std::lround(get(pArpSteps, 16.f)), 1, kGridSteps) : kGridSteps;
+
+    // =======================================================================
+    // A1. ARP -- the switch, the note order, the pattern's dimensions
+    // =======================================================================
+    {
+        const Rect c = col(0);
+        // ARPEGGIATOR and not ARP: the first control under this header is the
+        // on/off switch whose own label is "arp", and a header that repeated it
+        // would make the column read "ARP / arp / on".
+        const f32 y0 = sect(c, "ARPEGGIATOR", 1.f);
+        // The note order gets the selector band: it is the one control that
+        // decides what the arp IS, and the only one in the column whose names
+        // need 112 logical pixels to be words instead of abbreviations.
+        stepper({c.x, y0, c.w, subH}, pArpMode, 10, kArpMode, adim, "no arp",
+                "Arp Mode",
+                "The note order over the set you are holding: Up, Down, Up-Down "
+                "inclusive (both ends repeated) and exclusive (played once), "
+                "Down-Up, As Played, Random, Chord (every note on every step), "
+                "Thumb and Pinky. Up-Down bounces INSIDE each octave in turn - "
+                "the step row's octave lane is how you write the full-span "
+                "bounce. Wheel steps, arrows cycle.", (int)pCountV4);
+
+        const f32 cw = c.w / 3.f;
+        const f32 r1 = y0 + subH + gap, r2 = r1 + rowH + gap;
+
+        boolCell({c.x, r1, cw, rowH}, 900, pArpOn, "arp", "on", "off", 1.f,
+                 (int)pCountV4,
+                 "The switch, and the revision's bit-identity gate: at 0 the notes "
+                 "you play reach the voices exactly as they did in v3 and nothing "
+                 "else on this page is read at all - which is why everything else "
+                 "on this page dims while it is off.");
+        boolCell({c.x + cw, r1, cw, rowH}, 901, pArpHold, "hold", "held", "off",
+                 adim, (int)pCountV4,
+                 "Latch. On, the arp keeps playing after every key is released; a "
+                 "chord STARTED FROM SILENCE replaces the latched set, and notes "
+                 "added before you let go join it. Turning it off drops the latch "
+                 "and the arp plays what is physically held, which may be nothing.");
+        boolCell({c.x + cw * 2.f, r1, cw, rowH}, 902, pArpRetrig, "retrig",
+                 "on", "free", adim, (int)pCountV4,
+                 "On, a chord started from silence restarts the pattern at step 0 "
+                 "on that note's own stamped sample; adding a finger to a chord "
+                 "already down does not. Off is free-run - the position is a pure "
+                 "function of the clock and no note-on ever moves it, which is the "
+                 "setting that welds the pattern to the bar line.");
+
+        Ui::KnobStyle st;
+        st.lo = 1.f; st.hi = 4.f; st.def = 1.f; st.fmt = "%.0f";
+        const Rect octCell{c.x, r2, cw, rowH};
+        knob(octCell, pArpOctaves, "octs", st, adim, (int)pCountV4);
+        if (arpLive && g_assign.src < 0 &&
+            ui_.hovered({octCell.x, octCell.y, octCell.w, octCell.h - lblH}))
+            ui_.tip = "How many octaves the cycle spans. The NOTE counter advances "
+                      "first, so the arp completes one traversal of the note cycle "
+                      "before the octave moves - and 1 keeps the arp in the octave "
+                      "you played.";
+        enumCell({c.x + cw, r2, cw, rowH}, 904, pArpOctMode, kArpOctMode, 3,
+                 "oct dir", "Arp Oct Mode", adim, (int)pCountV4);
+        st.lo = 1.f; st.hi = 16.f; st.def = 16.f;
+        const Rect stepsCell{c.x + cw * 2.f, r2, cw, rowH};
+        knob(stepsCell, pArpSteps, "steps", st, adim, (int)pCountV4);
+        if (arpLive && g_assign.src < 0 &&
+            ui_.hovered({stepsCell.x, stepsCell.y, stepsCell.w, stepsCell.h - lblH})) {
+            char t[320];
+            snprintf(t, sizeof t,
+                     "Pattern length, 1..16 - now %d. It truncates the READ and "
+                     "never the storage: both rows are always sixteen entries long, "
+                     "so shortening and re-lengthening a pattern is lossless. The "
+                     "steps past it are drawn faintly rather than blanked, and the "
+                     "violet line in the grid is where the pattern loops.", nSteps);
+            ui_.tip = t;
+        }
+    }
+
+    // =======================================================================
+    // A2. CLOCK / VELOCITY -- the step clock on the top row, what a step
+    // sounds like on the bottom, with the hairline this panel uses whenever
+    // one column carries two sections.
+    // =======================================================================
+    {
+        const Rect c = col(1);
+        const f32 y0 = sect(c, "CLOCK / VELOCITY", 1.f);
+        const int sync = stepper({c.x, y0, c.w, subH}, pArpSync, 10, kSyncDiv, adim,
+                                 "no sync", "Arp Sync",
+                                 "The division table of id 33, verbatim - but read "
+                                 "differently, and this is the single most "
+                                 "confusable thing in v4: here the division is the "
+                                 "length of ONE STEP, not of the whole cycle. It "
+                                 "has to be, because Steps is variable, and a "
+                                 "length knob that was secretly a tempo knob would "
+                                 "not be a length knob. Index 0 is free-running and "
+                                 "the rate knob owns the readout.", (int)pCountV4);
+
+        const f32 cw = c.w / 3.f;
+        const f32 r1 = y0 + subH + gap, r2 = r1 + rowH + gap;
+        Ui::KnobStyle st;
+        // THE RATE KNOB SWAPS ITS READOUT, exactly as the three LFO rate knobs
+        // do: when the arp is synced the number in hertz is not what it is
+        // doing, so the readout becomes the division and the knob drops to the
+        // disabled weight. Same range, default and curve as LFO Rate, which the
+        // contract says is deliberate so that this readout can be reused.
+        const bool freeRun = !arpLive || sync == 0;
+        st.lo = 0.01f; st.hi = 40.f; st.def = 2.f; st.log = true; st.fmt = "%.2f";
+        if (!freeRun) st.text = kSyncDiv[clampv(sync, 0, 9)];
+        knob({c.x, r1, cw, rowH}, pArpRate, "rate", st,
+             adim * (freeRun ? 1.f : 0.55f), (int)pCountV4);
+        st.text = nullptr; st.log = false;
+        st.lo = 1.f; st.hi = 200.f; st.def = 50.f; st.fmt = "%.0f";
+        const Rect gateCell{c.x + cw, r1, cw, rowH};
+        knob(gateCell, pArpGate, "gate", st, adim, (int)pCountV4);
+        if (arpLive && g_assign.src < 0 &&
+            ui_.hovered({gateCell.x, gateCell.y, gateCell.w, gateCell.h - lblH}))
+            ui_.tip = "Sounding length as a percentage of the NOMINAL step - swing "
+                      "moves a note, it does not stretch it. Past 100% a step is "
+                      "still sounding when the next one starts, which stacks "
+                      "DIFFERENT notes and cleanly re-attacks the same one; under "
+                      "Mono or Legato it is a glide rather than a stack.";
+        st.lo = 0.f; st.hi = 100.f; st.def = 0.f;
+        const Rect swCell{c.x + cw * 2.f, r1, cw, rowH};
+        knob(swCell, pArpSwing, "swing", st, adim, (int)pCountV4);
+        if (arpLive && g_assign.src < 0 &&
+            ui_.hovered({swCell.x, swCell.y, swCell.w, swCell.h - lblH}))
+            ui_.tip = "Delays odd-numbered steps by Swing/300 of a step, so 100% is "
+                      "exactly a third - the 2:1 triplet feel. It counts ABSOLUTE "
+                      "steps and not pattern index, so an odd-length pattern does "
+                      "not flip the swing every loop. 0 selects a no-offset branch "
+                      "outright and is bit-exact.";
+
+        rend_.hairlineH(c.x, c.right(), r2 - 2 * s);
+        // The selector's RETURN, not a second read of the parameter: a click
+        // that changed the mode has already happened by the time enumCell
+        // returns, so the Fixed knob's weight follows it on the same frame
+        // rather than one behind. The sync stepper above returns its value for
+        // exactly the same reason.
+        const int avmode = enumCell({c.x, r2, cw, rowH}, 905, pArpVelMode,
+                                    kArpVelMode, 3, "vel", "Arp Vel Mode", adim,
+                                    (int)pCountV4);
+        st.lo = 1.f; st.hi = 127.f; st.def = 100.f;
+        // Fixed Vel is IGNORED unless Vel Mode is Fixed, and says so the way
+        // every ignored control in this panel says it. Its floor is 1 and not
+        // 0 because this device reads a note-on at velocity 0 as a note-off,
+        // so a generated 0 would be a generated silence.
+        knob({c.x + cw, r2, cw, rowH}, pArpFixedVel, "fixed", st,
+             adim * (avmode == 1 ? 1.f : 0.55f), (int)pCountV4);
+        st.lo = 0.f; st.hi = 100.f; st.def = 100.f;
+        const Rect chCell{c.x + cw * 2.f, r2, cw, rowH};
+        knob(chCell, pArpChance, "chance", st, adim, (int)pCountV4);
+        if (arpLive && g_assign.src < 0 &&
+            ui_.hovered({chCell.x, chCell.y, chCell.w, chCell.h - lblH}))
+            ui_.tip = "The probability that a step which would sound a NEW note "
+                      "actually does. A rest is already silent and a tie is not a "
+                      "new note, so neither is tested; a step that loses its draw "
+                      "is silent but still advances the pattern. 100% selects the "
+                      "branch out entirely - no hash is computed and the render is "
+                      "bit-exact.";
+    }
+
+    // =======================================================================
+    // A3. THE PATTERN -- two rows over the same sixteen columns, spanning
+    // columns 2..6, and the centrepiece of the whole feature.
+    //
+    // IT IS STATE AND NOT PARAMETERS, on the LFO grid's own terms and at the
+    // same stated cost: a drawn pattern cannot be automated and cannot be a
+    // matrix destination. It is shape. So it is read and written through
+    // stateString()/setStateString() as the `arpl` and `arps` records, and
+    // every record and every reserved BIT this build does not understand is
+    // carried across untouched -- see SpecState, where that half is argued.
+    //
+    // WHY THE STEP ROW IS ON TOP. It answers the first question -- which steps
+    // sound -- and the level row answers the second. That is the order every
+    // step sequencer since the x0x has drawn them in, and FL's own step row
+    // sits above its velocity graph. The two rows share one column grid, one
+    // set of beat seams and one twenty-pixel lane gutter, so a step and its
+    // level are the same x on screen.
+    //
+    // WHY THE STEP ROW IS A FIVE-LANE MINI PIANO ROLL, WHICH IS THE WHOLE
+    // INTERACTION ARGUMENT:
+    //
+    //   A cell carries TWO edits of two different KINDS. Rest/sound/tie is a
+    //   three-state CYCLE; the octave is a small ORDERED range, -2..+2. A
+    //   cycle wants a click. An ordered range wants a drag along the axis it
+    //   is drawn on -- and once the octave is DRAWN AS A POSITION inside the
+    //   cell, that drag is direct manipulation and needs no rule at all: the
+    //   block ends up where you left it, and sixteen of them read as a
+    //   contour, which is "which steps jump an octave" answered by looking.
+    //
+    //   So the two edits are separated by the stroke's AXIS, not by a modifier:
+    //     click            cycle rest -> sound -> tie -> rest
+    //     drag sideways    stamp the state the press produced across every step
+    //                      the stroke flies over (FL's paint, and the level
+    //                      row's own stroke one row down)
+    //     drag up / down   move THIS step between the five octave lanes; the
+    //                      press's cycle is reverted first, so the stroke is
+    //                      the one edit you meant
+    //     wheel            nudge the octave by one lane, consumed
+    //     right-drag       clear every step the stroke crosses to a plain rest
+    //
+    //   THE THREE ALTERNATIVES, and why each lost:
+    //
+    //   * A MODIFIER (Ctrl-drag = octave) is the cheap answer and it costs a
+    //     rule nobody can see. This panel refused that argument once already,
+    //     about inferring the wavetable drop target from which half of the well
+    //     the pointer was over. Ctrl is also spoken for: the FL pass gave it to
+    //     FINE on every knob and trough in the program, and a modifier meaning
+    //     "precision" on one control and "a different parameter" on the one
+    //     beside it is worse than no modifier at all.
+    //   * A SECOND SUB-ROW halves the target. At DPI 1.0 a cell here is 50 x 48
+    //     logical pixels; split it and you get 50 x 32 and 50 x 16, and the
+    //     sixteen of them are shoulder to shoulder in BOTH axes -- so hit slop
+    //     cannot make up the difference without a cell stealing its neighbour's
+    //     face, which is exactly what widgets.h warns about.
+    //   * A SEPARATE OCTAVE STRIP under the grid is that cost plus a third row
+    //     in a 200-pixel dock, and it breaks the property that was actually
+    //     asked for: the two facts about a step would be in two places, so no
+    //     single glance could answer both.
+    //
+    //   WHAT THE AXIS RULE COSTS, said out loud rather than left to be found:
+    //   a stroke meant to paint that starts with a wobble can lock vertical.
+    //   The lock needs four logical pixels and HORIZONTAL WINS A TIE -- paint
+    //   is the common stroke and a paint that became a pitch edit is the
+    //   expensive mistake, where the reverse is a nudge you can see. And the
+    //   whole stroke is ONE undo entry, so a mislock is one Ctrl+Z.
+    //
+    // A TIE IS DRAWN AT THE LANE OF THE NOTE IT HOLDS, never at its own stored
+    // octave: the contract says a tie's octave is ignored because there is no
+    // new note to offset, so drawing it anywhere else would put a number on
+    // screen the instrument does not read. A run of ties therefore draws as ONE
+    // long bar. A tie with nothing to hold is drawn hollow and AMBER, because
+    // the contract says it is silent and amber is this program's word for
+    // refused -- the grid tells you the pattern is wrong before you play it.
+    // =======================================================================
+    {
+        const Rect c{colX[2], body.y, colX[6] + kColW[6] * s - colX[2], body.h};
+        const f32 y0 = sect(c, "ARP PATTERN", 1.f);
+
+        // The source handle, in the matrix header's own idiom -- a right-aligned
+        // name and the grip beside it -- because that is how every draggable
+        // source in this panel says what it is. Its twin is in the matrix header
+        // on the MOD page; see the note there for why one source needs two.
+        {
+            const bool srcLive = has(pM1Src) && kSrcArpStep <= srcMax;
+            const Rect hr{c.right() - 12 * s, c.y, 12 * s, headH};
+            microFit(ui_, fSmall_, {hr.x - 62 * s, c.y, 60 * s, headH}, "arp step",
+                     nx::muted.alpha(srcLive ? 0.80f : 0.35f), Align::Right, 0);
+            srcHandle(hr, kSrcArpStep);
+        }
+
+        const Rect blk{c.x, y0, c.w, std::max(32 * s, c.bottom() - y0)};
+        const bool editable = stateOk && arpLive;
+
+        // THE LANE GUTTER, twenty logical pixels out of eight hundred. Both rows
+        // give it up so their sixteen columns still line up exactly, and it is
+        // what makes the two rows self-labelling: "+2 / 0 / -2" beside the step
+        // row says what the five lanes are without a legend parked somewhere
+        // else, and "lvl" beside the other says which row is which.
+        const f32  gut   = 26 * s;
+        // THE STEP ROW TAKES THE LARGER SHARE, and the first driven shot is
+        // why. The level row's default is sixteen digits of `f` -- a full-height
+        // bar on every step -- so at an even split the pattern read as a slab of
+        // violet with a thin strip of steps above it, which is the wrong way
+        // round for a control whose first question is "which steps sound". The
+        // step row also has five lanes to spend its height on and the level row
+        // has one axis; 56/44 gives the lanes 13 pixels each instead of 9.
+        const f32  stepH = clampv(blk.h * 0.56f, 30 * s, 74 * s);
+        const Rect sRow{blk.x, blk.y, blk.w, stepH};
+        const Rect lRow{blk.x, sRow.bottom() + 3 * s, blk.w,
+                        std::max(14 * s, blk.bottom() - sRow.bottom() - 3 * s)};
+        rend_.well(sRow, nx::radiusXs * s, true);
+        rend_.well(lRow, nx::radiusXs * s, true);
+        const Rect sIn = sRow.insetXY(2 * s, 2 * s);
+        const Rect lIn = lRow.insetXY(2 * s, 2 * s);
+        const Rect pS{sIn.x + gut, sIn.y, std::max(16 * s, sIn.w - gut), sIn.h};
+        const Rect pL{lIn.x + gut, lIn.y, std::max(16 * s, lIn.w - gut), lIn.h};
+        const f32  cwS   = pS.w / (f32)kGridSteps;
+        const f32  laneH = pS.h / 5.f;
+        const f32  th1   = std::max(1.f, nx::snapPx(s));
+        const auto laneY  = [&](int lane) { return pS.y + laneH * ((f32)lane + 0.5f); };
+        const auto laneOf = [&](int oct)  { return 2 - clampv(oct, -2, 2); };
+        const auto stepAtS = [&](f32 x) {
+            return clampv((int)std::floor((x - pS.x) / std::max(1e-3f, cwS)),
+                          0, kGridSteps - 1);
+        };
+        const auto laneAtY = [&](f32 y) {
+            return clampv((int)std::floor((y - pS.y) / std::max(1e-3f, laneH)), 0, 4);
+        };
+        const int hoverStep = stepAtS(in.mx);
+
+        // --- the step row's stroke -----------------------------------------
+        const u64 swid = uiId(UiSpectraPanel, 911, uidKey);
+        bool sHot = false, sPressed = false, sErased = false;
+        if (editable && ui_.setHot(swid, sRow) && ui_.isHot(swid)) {
+            sHot = true;
+            ui_.cursor = Cursor::Hand;
+            ui_.badge = (in.down[2] || in.pressed[2]) ? Badge::Delete : Badge::Draw;
+            if (in.pressed[2]) {
+                g_arpDrag.erase = true;
+                g_arpDrag.eraseStep = hoverStep;
+                sErased = true;
+            }
+            if (in.pressed[0]) {
+                ui_.active = swid;               // so one stroke is one undo entry
+                g_arpDrag.active = true;
+                g_arpDrag.axis = 0;
+                g_arpDrag.cell = hoverStep;
+                g_arpDrag.last = hoverStep;
+                g_arpDrag.px = in.mx;
+                g_arpDrag.py = in.my;
+                g_arpDrag.raw0 = sstate.arpRaw[hoverStep];
+                // THE PRESS CYCLES ON THE FRAME IT HAPPENED, for two reasons and
+                // both are about honesty: a click that waited for its release
+                // would be a control with no feedback under the finger, and the
+                // paint stroke needs a VALUE to stamp -- which is exactly "the
+                // state this click produced". A stroke that turns out to be
+                // vertical puts this back before it touches the octave, and both
+                // edits ride ONE undo entry, so the cycle nobody meant never
+                // survives the gesture.
+                const int next = !sstate.arpOn(hoverStep) ? 1
+                               : (!sstate.arpTie(hoverStep) ? 2 : 0);
+                g_arpDrag.paint = next;
+                sstate.arpSet(hoverStep, next != 0, next == 2,
+                              sstate.arpOct(hoverStep));
+                writeState("arp step");
+                sPressed = true;
+            }
+            // The wheel is the precise route to the octave and the cheap one:
+            // one notch, one lane, consumed. It names its own gesture id because
+            // `active` is dropped on any frame the left button is not held, and
+            // a nudge that leaned on it would take one undo entry per notch.
+            if (in.wheel != 0.f && !g_arpDrag.active) {
+                const int d = in.wheel > 0.f ? +1 : -1;
+                in.wheel = 0.f;                  // not the strip's notch to spend
+                if (!sstate.arpOn(hoverStep))
+                    ui_.refusal = "That step is a rest - click it to place a note "
+                                  "before offsetting one";
+                else if (sstate.arpTie(hoverStep))
+                    ui_.refusal = "A tie holds the previous note, so it has no "
+                                  "octave of its own - the contract ignores it";
+                else {
+                    const int o = clampv(sstate.arpOct(hoverStep) + d, -2, 2);
+                    if (o != sstate.arpOct(hoverStep)) {
+                        sstate.arpSet(hoverStep, true, false, o);
+                        writeState("arp step octave", swid);
+                    }
+                }
+            }
+        }
+
+        // The erase sweep, the level row's verb on the other row: FL's
+        // right-drag clears everything the stroke flies over, in one undo entry
+        // however many steps it crossed.
+        if (g_arpDrag.erase) {
+            if (in.down[2] || sErased) {
+                const int s1 = stepAtS(in.mx);
+                bool changed = false;
+                for (int i = std::min(g_arpDrag.eraseStep, s1);
+                     i <= std::max(g_arpDrag.eraseStep, s1); ++i) {
+                    // A cleared step is a PLAIN rest: no note, no tie, no offset.
+                    // The reserved bits are the one thing that survives, for the
+                    // reason SpecState gives.
+                    const int want = (sstate.arpRaw[i] & 0xE0) | 0x04;
+                    if (sstate.arpRaw[i] != want) {
+                        sstate.arpRaw[i] = want;
+                        changed = true;
+                    }
+                }
+                g_arpDrag.eraseStep = s1;
+                if (changed) writeState("clear arp steps", swid);
+            }
+            if (!in.down[2]) g_arpDrag.erase = false;
+        }
+        if (g_arpDrag.active) {
+            if (in.down[0] || sPressed) {
+                // THE AXIS LOCK. Four logical pixels, decided once per stroke and
+                // never revisited -- an axis that could flip mid-stroke is a
+                // gesture that changes verb under your hand.
+                const f32 lock = 4.f * s;
+                if (g_arpDrag.axis == 0) {
+                    if (std::fabs(in.mx - g_arpDrag.px) >= lock)      g_arpDrag.axis = 1;
+                    else if (std::fabs(in.my - g_arpDrag.py) >= lock) g_arpDrag.axis = 2;
+                }
+                bool changed = false;
+                if (g_arpDrag.axis == 1) {
+                    const int s1 = stepAtS(in.mx);
+                    for (int i = std::min(g_arpDrag.last, s1);
+                         i <= std::max(g_arpDrag.last, s1); ++i) {
+                        // Painting is a RHYTHM edit and each step keeps its OWN
+                        // octave: the stroke said nothing about pitch, so it
+                        // writes nothing about pitch.
+                        const int before = sstate.arpRaw[i];
+                        sstate.arpSet(i, g_arpDrag.paint != 0, g_arpDrag.paint == 2,
+                                      sstate.arpOct(i));
+                        if (sstate.arpRaw[i] != before) changed = true;
+                    }
+                    g_arpDrag.last = s1;
+                } else if (g_arpDrag.axis == 2) {
+                    // THE REVERT AND THE SET ARE ONE STEP, tested against the
+                    // NET result: putting the press's cycle back and then
+                    // writing the octave would otherwise report a change on
+                    // every frame of a stroke that had not moved, and every
+                    // frame of a mouse held still would be a state write.
+                    const int i = g_arpDrag.cell;
+                    const int before = sstate.arpRaw[i];
+                    sstate.arpRaw[i] = g_arpDrag.raw0;       // the press's cycle, undone
+                    if (sstate.arpTie(i))
+                        ui_.refusal = "A tie holds the previous note, so it has no "
+                                      "octave of its own - the contract ignores it";
+                    else
+                        // A vertical drag on a REST places a note at that lane,
+                        // which is what the gesture looks like it is doing.
+                        // Refusing it would be a rule nobody can see.
+                        sstate.arpSet(i, true, false, 2 - laneAtY(in.my));
+                    if (sstate.arpRaw[i] != before) changed = true;
+                }
+                if (changed) writeState("arp steps");
+            }
+            if (!in.down[0]) { g_arpDrag.active = false; g_arpDrag.axis = 0; }
+        }
+
+        // --- the step row, drawn -------------------------------------------
+        {
+            const Col gc = nx::muted.alpha(editable ? 0.50f : 0.28f);
+            const f32 gx = sIn.x, gw2 = std::max(4 * s, gut - 4 * s);
+            // Three of the five lanes are labelled and not five: at twelve
+            // pixels a glyph and nine a lane, five would collide -- and +2 / 0 /
+            // -2 is enough to read the other two off.
+            microFit(ui_, fSmall_, {gx, laneY(0) - 5.5f * s, gw2, 11 * s}, "+2",
+                     gc, Align::Right, 0);
+            microFit(ui_, fSmall_, {gx, laneY(2) - 5.5f * s, gw2, 11 * s}, "0",
+                     gc, Align::Right, 0);
+            microFit(ui_, fSmall_, {gx, laneY(4) - 5.5f * s, gw2, 11 * s}, "-2",
+                     gc, Align::Right, 0);
+        }
+        // The lanes themselves are QUIET AT REST: only the zero lane is drawn,
+        // because that is the one a reader needs to tell +1 from -1. All five
+        // appear while an octave stroke is actually in flight -- the control
+        // showing its own scale exactly while it is being used, and never on a
+        // timer.
+        {
+            const bool octLive = g_arpDrag.active && g_arpDrag.axis == 2;
+            for (int lane = 0; lane < 5; ++lane) {
+                if (lane != 2 && !octLive) continue;
+                rend_.hairlineH(pS.x + 2 * s, pS.right() - 2 * s,
+                                std::round(laneY(lane)),
+                                nx::line.alpha(lane == 2 ? 0.55f : 0.42f));
+            }
+        }
+        for (int i = 1; i < kGridSteps; ++i)
+            if (i % 4 == 0)
+                rend_.hairlineV(std::round(pS.x + cwS * (f32)i), sRow.y + 2 * s,
+                                sRow.bottom() - 2 * s);
+        {
+            const f32 blockH = clampv(laneH - 3.f * s, 3.f * s, 11.f * s);
+            int heldLane = -1;                  // the lane of the note a tie holds
+            for (int i = 0; i < kGridSteps; ++i) {
+                const f32 a = (editable ? 1.f : 0.55f) * (i >= nSteps ? 0.30f : 1.f);
+                // FOUR PIXELS OF AIR EACH SIDE, and not one. A row of sixteen
+                // blocks all sitting on the zero lane -- which is what a fresh
+                // pattern IS -- merges into a single horizontal line at a 1px
+                // gap, and a step sequencer whose sixteen steps read as one bar
+                // is a step sequencer nobody can count. The blocks are 42 wide
+                // in a 50-wide cell; the hit cell is still the whole 50.
+                const f32 bx = pS.x + cwS * (f32)i + 4.f * s;
+                const f32 bw = std::max(2.f, cwS - 8.f * s);
+                if (!sstate.arpOn(i)) {
+                    // A REST IS DRAWN, faintly, on the zero lane: an empty cell
+                    // and a cell that is not there would otherwise be one picture.
+                    rend_.rect({bx, std::round(laneY(2)) - th1 * 0.5f, bw, th1},
+                               nx::line.alpha(0.55f * a));
+                    heldLane = -1;              // a rest ends the note it followed
+                    continue;
+                }
+                if (sstate.arpTie(i)) {
+                    if (heldLane < 0) {
+                        const Rect b{bx, laneY(2) - blockH * 0.5f, bw, blockH};
+                        rend_.roundRectOutline(b, nx::radiusXs * s, th1,
+                                               nx::amber.alpha(0.80f * a));
+                    } else {
+                        // Bridged LEFT across the seam, so a run of ties is one
+                        // bar rather than a row of separate blocks.
+                        const Rect b{bx - 8.f * s, laneY(heldLane) - blockH * 0.5f,
+                                     bw + 8.f * s, blockH};
+                        // NO CYAN CAP, and that is the tell rather than a
+                        // shade: §1's lamp marks the edge that MOVES, and a tie
+                        // has no attack and no octave of its own to move. So a
+                        // sounding step wears the lamp, a held one does not, and
+                        // the two are told apart at a glance by light and by the
+                        // seam they do or do not close.
+                        rend_.rect(b, nx::violet.alpha(0.34f * a));
+                        rend_.rect({b.x, b.y, b.w, th1}, nx::violet.alpha(0.75f * a));
+                        rend_.rect({b.x, b.bottom() - th1, b.w, th1},
+                                   nx::violet.alpha(0.75f * a));
+                    }
+                    continue;
+                }
+                const int lane = laneOf(sstate.arpOct(i));
+                const Rect b{bx, laneY(lane) - blockH * 0.5f, bw, blockH};
+                rend_.rect(b, nx::violet.alpha(0.62f * a));
+                // §1's one lamp again: the lit edge is the top of the block,
+                // which is the edge that moves when the octave changes.
+                rend_.rect({b.x, b.y, b.w, th1}, nx::cyan.alpha(0.85f * a));
+                heldLane = lane;
+            }
+        }
+
+        // --- the level row -------------------------------------------------
+        microFit(ui_, fSmall_, {lIn.x, lRow.cy() - 5.5f * s,
+                                std::max(4 * s, gut - 4 * s), 11 * s}, "lvl",
+                 nx::muted.alpha(editable ? 0.50f : 0.28f), Align::Right, 0);
+        const u64 lwid = uiId(UiSpectraPanel, 910, uidKey);
+        const LevelHit alh = levelRowGesture(sstate.arpLvl, lRow, pL, lwid, 3,
+                                             editable, "draw arp levels",
+                                             "erase arp levels");
+        levelRowBars(sstate.arpLvl, lRow, pL, editable, nSteps);
+
+        // WHERE THE PATTERN LOOPS, on both rows, because Steps is a control two
+        // columns away and a number in a knob cell is not an answer to "what is
+        // this grid doing".
+        if (nSteps < kGridSteps) {
+            const f32 mx = std::round(pS.x + cwS * (f32)nSteps);
+            rend_.rect({mx - th1 * 0.5f, sRow.y + 2 * s, th1, sRow.h - 4 * s},
+                       nx::violet.alpha(0.75f));
+            rend_.rect({mx - th1 * 0.5f, lRow.y + 2 * s, th1, lRow.h - 4 * s},
+                       nx::violet.alpha(0.75f));
+        }
+
+        // --- the sentences -------------------------------------------------
+        if (sHot) {
+            const char* what = !sstate.arpOn(hoverStep) ? "rest"
+                             : sstate.arpTie(hoverStep) ? "tie" : "sound";
+            char oct[32] = {};
+            if (sstate.arpTie(hoverStep))
+                snprintf(oct, sizeof oct, ", held over");
+            else if (sstate.arpOn(hoverStep))
+                snprintf(oct, sizeof oct, ", octave %+d", sstate.arpOct(hoverStep));
+            char t[320];
+            snprintf(t, sizeof t,
+                     "Step %d of 16: %s%s. Click cycles rest - sound - tie; drag "
+                     "SIDEWAYS paints that state across the steps you cross; drag "
+                     "UP/DOWN moves this step between the five octave lanes "
+                     "(-2..+2); the wheel nudges it; right-DRAG clears to rests.",
+                     hoverStep + 1, what, oct);
+            ui_.tip = t;
+        }
+        if (alh.hot) {
+            char t[320];
+            snprintf(t, sizeof t,
+                     "Arp level row, step %d of 16 at %.2f: drag to paint, "
+                     "shift-drag for a line, right-DRAG to erase, wheel nudges. "
+                     "It is the velocity when Vel Mode is Pattern AND it is matrix "
+                     "source 17 (Arp Step) whenever the arp is on - so unlike an "
+                     "LFO grid it is never dead, whatever Vel Mode says.",
+                     alh.step + 1, (double)alh.level / 15.0);
+            ui_.tip = t;
+        }
+        if (!editable && (ui_.hovered(sRow) || ui_.hovered(lRow))) {
+            char t[320];
+            if (!arpLive)
+                snprintf(t, sizeof t,
+                         "The arp pattern is v4 STATE - the arpl and arps records "
+                         "of the state string, not parameters, so it cannot be "
+                         "automated and cannot be a matrix destination. This DSP "
+                         "has %d of %d parameters, so the arp block (109..124) is "
+                         "not there yet and the grid is inert.", pc, (int)pCountV4);
+            else
+                snprintf(t, sizeof t,
+                         "This device's state string does not parse - the grid is "
+                         "read-only rather than overwrite what it could not read");
+            ui_.tip = t;
         }
     }
 
@@ -3868,7 +4898,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             char msg[192];
             snprintf(msg, sizeof msg,
                      "Spectra: %s was not assigned - the source is a grip handle "
-                     "(the LFOs, ENV 2/3, the macros, wheel/bend/cc)", dn);
+                     "(the LFOs, ENV 2/3, the macros, wheel/bend/cc, the arp "
+                     "pattern)", dn);
             status_ = msg;
             g_assign.wantDest = g_assign.wantParam = -1;
         } else {
@@ -3947,8 +4978,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 //   NXTAKT_DEBUG_SPECTRAPRESET=   load a factory preset by index or by any
 //     <index | name fragment>     part of its name, through the preset row's
 //                                 own path.
-//   NXTAKT_DEBUG_SPECTRAPAGE=<n>  start on page n (0 MAIN, 1 MOD) -- the tab
-//                                 the mouse would click.
+//   NXTAKT_DEBUG_SPECTRAPAGE=<n>  start on page n (0 MAIN, 1 MOD, 2 ARP) --
+//                                 the tab the mouse would click.
 //   NXTAKT_DEBUG_SPECTRADROP=1    open the preset popover on the first frame,
 //                                 through the chip's own openDrop path, so the
 //                                 keyboard navigation the screenshots assert
@@ -3993,7 +5024,7 @@ void App::debugSeedSpectra() {
     // what the hook just chose.
     if (const char* p = env("DEBUG_SPECTRAPAGE")) {
         g_pageUid = d.uid;
-        g_page = clampv(atoi(p), 0, 1);
+        g_page = clampv(atoi(p), 0, 2);          // 0 MAIN, 1 MOD, 2 ARP
         LOGI("NXTAKT_DEBUG_SPECTRAPAGE: page %d", g_page);
     }
     if (const char* p = env("DEBUG_SPECTRADROP")) {

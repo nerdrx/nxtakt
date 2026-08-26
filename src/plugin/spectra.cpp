@@ -376,17 +376,37 @@ enum : int {
     kPBendRange = 99,
     kPL1Mode = 100,
     kPM1Curve = 101,                 // slot k: id 101 + k
-    kSpParamCount = 111
+
+    // --- v4, the arpeggiator (docs/SPECTRA-PARAMS.md, "v4 — the
+    // arpeggiator"). It spends v3's generic reserved tail (109, 110) and
+    // appends 111..124, so the whole feature is ONE contiguous run 109..124
+    // with no hole and no lookup table. The other eight reserved ids stay
+    // where they are: a reserved id belongs to the block it sits in, and an
+    // arpeggiator is not a sub, a warp, an ENV3 or a matrix.
+    //
+    // Both spent ids satisfy the v2 condition without strain — Arp On
+    // defaults to 0 and 0 is off, Arp Mode defaults to 0 and 0 is Up — so a
+    // v3 `.nxp` file, which writes every id including the reserved ones as 0,
+    // lands on exactly the v4 defaults.
+    kPArpOn = 109, kPArpMode = 110,
+    kPArpRate = 111, kPArpSync, kPArpOctaves, kPArpOctMode, kPArpGate,
+    kPArpSwing, kPArpHold, kPArpRetrig, kPArpVelMode, kPArpFixedVel,
+    kPArpSteps, kPArpChance,          // ...122; 123 and 124 are the tail
+    kSpParamCount = 125
 };
 
 // The matrix enums, verbatim from the contract's source and destination lists.
-// v3 appends three MIDI sources; the destination enum does NOT widen (nothing
-// v3 adds is a modulatable target — a drawn grid is a shape, a bend range is a
-// performance calibration, and a curve is the slot's own response).
+// v3 appends three MIDI sources and v4 appends one more; the destination enum
+// does NOT widen, for the third revision running (nothing v3 or v4 adds is a
+// modulatable target — a drawn grid is a shape, a bend range is a performance
+// calibration, a curve is the slot's own response, and the two v4 candidates
+// are refusals rather than omissions: a modulated Arp Rate cannot stay locked
+// to a bar line, and Arp Gate is consumed once per step at a stamped sample
+// rather than read at audio rate).
 enum : int {
     kSOff = 0, kSLfo1, kSLfo2, kSLfo3, kSEnv2, kSEnv3, kSVel, kSKey, kSAft,
     kSMac1, kSMac2, kSMac3, kSMac4, kSRandom,
-    kSWheel, kSBend, kSCC, kSrcCount
+    kSWheel, kSBend, kSCC, kSArpStep, kSrcCount
 };
 
 // The three matrix response curves (ids 101..108). f(0) = 0 and f(1) = 1 for
@@ -416,10 +436,82 @@ enum : int {
     kDL1Rate, kDL2Rate, kDL3Rate, kDstCount
 };
 
+// ---------------------------------------------------------------------------
+// v4: the arpeggiator's own enums and its two grid rows.
+//
+// The MODE enum (id 110) is append-only forever. `M(mode, c)` is the cycle
+// length over a note set of size c and the element at cycle position j is the
+// note the step sounds, before the octave cycle and the step row's octave
+// offset are added.
+enum : int {
+    kArpUp = 0, kArpDown, kArpUpDownInc, kArpUpDownExc, kArpDownUp,
+    kArpAsPlayed, kArpRandom, kArpChord, kArpThumb, kArpPinky, kArpModeCount
+};
+
+// Vel Mode (119) and Oct Mode (114).
+enum : int { kArpVelPlayed = 0, kArpVelFixed, kArpVelPattern };
+enum : int { kArpOctUp = 0, kArpOctDown, kArpOctAlt };
+
+// A note is held through at most 16 consecutive tie steps; the 17th forces the
+// note off at its own onset. Unreachable in practice — a pattern whose every
+// step is a tie sounds nothing at all, because no step ever STARTS a note — so
+// this exists only so that no reading of the grid can produce an unbounded
+// note, the one failure here a user could not recover from by releasing a key.
+constexpr int kArpMaxTie = 16;
+
+// THE STEP ROW'S AUDIO-SIDE PACKING, and why it is four bits and not five.
+//
+// The wire format is a byte per step: on (bit 0), a biased three-bit octave
+// code (bits 1..3, offset = code - 2), tie (bit 4), three reserved bits. After
+// masking the reserved bits off and clamping the octave code to 0..4 — the
+// contract's "degraded, not refused" — a step has exactly FIFTEEN reachable
+// states: five octave codes for a rest, and five more for each of on-untied
+// and on-tied. Tie is "read only when Step On = 1", so a rest has no tie bit;
+// its OCTAVE is kept, because turning a step off and on again must not lose
+// the octave the author drew on it.
+//
+// Fifteen fits in a nibble, so sixteen steps fit in ONE u64 and the audio
+// thread takes the whole row in a single atomic load and can never see it
+// half-updated. That is v3's gridBits_ argument, applied to a row v3's
+// four-bit packing would not otherwise have held.
+//
+//   code 0 + c     rest, octave code c                (c = 0..4)
+//   code 5 + c     on, octave offset c-2, no tie
+//   code 10 + c    on, octave offset c-2, tie
+inline u8 spArpPack(u8 raw) {
+    int c = (int)((raw >> 1) & 7u);
+    if (c > 4) c = 4;                                   // 5, 6, 7 clamp to +2
+    if (!(raw & 0x01u)) return (u8)c;                   // rest; tie is not read
+    return (u8)((raw & 0x10u) ? 10 + c : 5 + c);
+}
+// The byte a v4 build writes back for a packed nibble: reserved bits 0, octave
+// code un-clamped because it was clamped on the way in.
+inline u8 spArpUnpack(u8 code) {
+    if (code < 5)  return (u8)((u32)code << 1);
+    if (code < 10) return (u8)(0x01u | ((u32)(code - 5) << 1));
+    return (u8)(0x01u | ((u32)(code - 10) << 1) | 0x10u);
+}
+inline bool spArpOn(u8 code)  { return code >= 5; }
+inline bool spArpTie(u8 code) { return code >= 10; }
+inline int  spArpOct(u8 code) {
+    return (code < 5 ? (int)code : (code < 10 ? (int)code - 5 : (int)code - 10)) - 2;
+}
+// `05` — on, octave offset 0, no tie — is the row's default byte, and it packs
+// to 7. Stated as a constant because a reader who skims the bit table will
+// assume the default is `01`: the octave field is BIASED, so the byte that
+// means "on, unshifted, untied" is 0x05 and code 2 is offset 0.
+constexpr u8 kArpStepDefault = 7;
+
 // LFO Sync, in beats per cycle. Index 0 is "free" and is never read from here.
 // 4/4 is assumed for the bar values, exactly as the Delay's table assumes it
 // and for the same reason: the time signature is not on the plugin contract.
 // APPEND-ONLY: the index is what a project file stores.
+//
+// v4 CITES this table and reads it PER STEP; v3's Custom LFO shape reads it as
+// the length of the whole sixteen-step cycle. The divergence is forced and is
+// argued in the contract in two places: an arp's rate control has named the
+// step in every instrument ever built, and Arp Steps (121) is variable, so a
+// whole-cycle reading would make the pattern-length knob a tempo knob.
 constexpr int kSpSyncCount = 10;
 constexpr f32 kSpSyncBeats[kSpSyncCount] = {
     0.f,          // 0 free
@@ -527,14 +619,36 @@ struct SpState {
     u64 wt[2] = { 0, 0 };            // custom table content hash per osc
     std::string wtPath[2];           // recovery hint only, never identity
 
+    // --- v4: the arp's two rows. THEIR DEFAULTS ARE NOT ZERO, and that is a
+    // genuine divergence from the LFO grids this feature otherwise copies
+    // exactly. v3's rule is "a missing block reads as its default, and every
+    // default is inert" — and for an LFO grid inert means all zeros. An
+    // all-zero arp step row is an arp that plays NOTHING, which is a broken
+    // default rather than an inert one. So the rows default to a usable
+    // pattern and the inert switch is Arp On (109), not the grid.
+    //
+    // `arpSt` holds the PACKED nibble (spArpPack), not the wire byte: the
+    // clamp and the reserved-bit mask are the contract's degradation and they
+    // happen once, on the way in.
+    u8  arpLv[kSpSteps] = { 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15 };
+    u8  arpSt[kSpSteps] = { 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7 };   // 0x05 packed:
+                                                                 // on, +0, no tie
+
     bool gridDrawn(int n) const {
         for (int i = 0; i < kSpSteps; ++i) if (grid[n][i]) return true;
         return false;
     }
-    // "Emit nothing when no v3 feature is in use" — the round-trip gate.
+    bool arpDrawn() const {
+        for (int i = 0; i < kSpSteps; ++i)
+            if (arpLv[i] != 15 || arpSt[i] != kArpStepDefault) return true;
+        return false;
+    }
+    // "Emit nothing when no v3 feature is in use" — the round-trip gate, and
+    // v4 keeps it: an arp row that is still its default is not emitted, so a
+    // v2 or v3 project round-trips through a v4 build byte-identically.
     bool inUse() const {
         for (int n = 0; n < 3; ++n) if (gridDrawn(n) || smooth[n] != 0) return true;
-        return cc >= 0 || wt[0] != 0 || wt[1] != 0;
+        return cc >= 0 || wt[0] != 0 || wt[1] != 0 || arpDrawn();
     }
 };
 
@@ -577,6 +691,7 @@ struct SpPreset {
 #define SPWTA(h)
 #define SPWTB(h)
 #define SPCC(n)
+#define SPARP(l, s)
 const SpPreset kSpPresets[] = {
 #include "spectra_presets.inc"
 };
@@ -587,6 +702,7 @@ const SpPreset kSpPresets[] = {
 #undef SPWTA
 #undef SPWTB
 #undef SPCC
+#undef SPARP
 
 constexpr int kSpPresetCount = (int)(sizeof kSpPresets / sizeof kSpPresets[0]);
 
@@ -620,6 +736,32 @@ inline void spPresetHash(SpState& st, int osc, const char* h) {
     if (h && spParseHex64(std::string(h), v)) st.wt[osc] = v;
 }
 
+// v4's one new macro: the level row then the step row, in that order — the
+// order they appear in the contract and in the state string. BOTH ARGUMENTS
+// ARE MANDATORY; a preset that wants a default row writes the default string
+// rather than omitting the argument, because a two-argument macro with an
+// optional argument is a preprocessor trap and this file has enough of those.
+//
+// The pairing rule is the bank's, not this file's: SPARP does not set Arp On,
+// and a row carrying one without `SP(109, 1)` is a checker failure rather than
+// a silent no-op. A malformed argument is a BUILD-time fact about the bank and
+// is left at the default here, exactly as SPLFO's is.
+inline void spPresetArp(SpState& st, const char* lvl, const char* stp) {
+    if (!lvl || !stp) return;
+    const std::string l(lvl), s(stp);
+    if (l.size() != (size_t)kSpSteps || s.size() != (size_t)(2 * kSpSteps)) return;
+    u8 lv[kSpSteps], sv[kSpSteps];
+    for (int i = 0; i < kSpSteps; ++i) {
+        const int d = spHexLo(l[(size_t)i]);
+        const int hi = spHexLo(s[(size_t)(2 * i)]);
+        const int lo = spHexLo(s[(size_t)(2 * i + 1)]);
+        if (d < 0 || hi < 0 || lo < 0) return;
+        lv[i] = (u8)d;
+        sv[i] = spArpPack((u8)(16 * hi + lo));
+    }
+    for (int i = 0; i < kSpSteps; ++i) { st.arpLv[i] = lv[i]; st.arpSt[i] = sv[i]; }
+}
+
 const std::vector<SpState>& spPresetStates() {
     static const std::vector<SpState> v = [] {
         std::vector<SpState> o;
@@ -632,6 +774,7 @@ const std::vector<SpState>& spPresetStates() {
 #define SPWTA(h)        spPresetHash(cur, 0, (h));
 #define SPWTB(h)        spPresetHash(cur, 1, (h));
 #define SPCC(n)         cur.cc = (i16)(n);
+#define SPARP(l, s)     spPresetArp(cur, (l), (s));
 #include "spectra_presets.inc"
 #undef SP_PRESET
 #undef SP
@@ -640,6 +783,7 @@ const std::vector<SpState>& spPresetStates() {
 #undef SPWTA
 #undef SPWTB
 #undef SPCC
+#undef SPARP
         return o;
     }();
     return v;
@@ -786,8 +930,41 @@ public:
             std::snprintf(nm, sizeof nm, "M%d Curve", k + 1);
             addIntParam(nm, "", 0, 2, 0);
         }
-        addReserved();                                                // 109
-        addReserved();                                                // 110
+        // --- v4, the arpeggiator: v3's generic reserved tail spent on the two
+        // ids that OPEN the block (the switch and the mode — the readable
+        // choice as well as the only pair whose defaults are 0-means-nothing),
+        // then the 111..124 append. One contiguous run, 109..124.
+        //
+        // ARP ON IS THE REVISION'S BIT-IDENTITY SWITCH. It defaults to 0 and 0
+        // selects the v3 MIDI path OUTRIGHT — incoming notes reach noteOn()
+        // unchanged and no arp code is reached at all — which is why v4 has no
+        // stated exception to "a v3 state renders bit-identically", the one
+        // thing it does that v3 could not.
+        addIntParam("Arp On",       "",    0, 1, 0);                  // 109 (v4)
+        addIntParam("Arp Mode",     "",    0, kArpModeCount - 1, 0);  // 110 (v4)
+        addParam   ("Arp Rate",     "Hz",  0.01f, 40.f, 2.f, true);   // 111
+        // Default 7 = 1/16, the only rate anyone reaches for first, and the
+        // only v4 default that is not simply the bottom of its range. It costs
+        // exactly nothing in render terms because Arp On is 0.
+        addIntParam("Arp Sync",     "",    0, kSpSyncCount - 1, 7);   // 112
+        addIntParam("Arp Octaves",  "oct", 1, 4, 1);                  // 113
+        addIntParam("Arp Oct Mode", "",    0, 2, 0);                  // 114
+        addParam   ("Arp Gate",     "%",   1.f, 200.f, 50.f);         // 115
+        addParam   ("Arp Swing",    "%",   0.f, 100.f, 0.f);          // 116
+        addIntParam("Arp Hold",     "",    0, 1, 0);                  // 117
+        // Default 1: a keyboard player expects the first note they press to
+        // sound when they press it. An author who wants the grid to own the
+        // phrase sets 0.
+        addIntParam("Arp Retrig",   "",    0, 1, 1);                  // 118
+        addIntParam("Arp Vel Mode", "",    0, 2, 0);                  // 119
+        // THE FLOOR IS 1, NOT 0. This device treats a note-on with velocity 0
+        // as a note-off, so a generated 0 would be a generated note-off and the
+        // arp would silently emit nothing.
+        addIntParam("Arp Fixed Vel","",    1, 127, 100);              // 120
+        addIntParam("Arp Steps",    "",    1, kSpSteps, kSpSteps);    // 121
+        addParam   ("Arp Chance",   "%",   0.f, 100.f, 100.f);        // 122
+        addReserved();                                                // 123
+        addReserved();                                                // 124
 
         // The pair of oscillator handles this instance owns for the life of it.
         // See the seam's note: they are handles and not indices, so two devices
@@ -862,6 +1039,19 @@ public:
         trBeatWas_  = 0.0;
         trBeatSeen_ = false;
         trPlayWas_  = false;
+        // v4, same rules once more: fixed origins, zeroed counters, no clocks.
+        // Every index the arp uses is a modulus of a step number that is a
+        // floor of this clock, so there is nothing else here to reset.
+        arp_          = ArpCfg{};
+        arpFree_      = 0.0;
+        arpOrigin_    = 0.0;
+        arpNextOnset_ = 0.0;
+        arpFiredK_    = -1;
+        arpFresh_     = true;
+        arpReanchor_  = false;
+        arpStepLvl_   = 0.f;       // 0 after prepare() until the first onset
+        nLatch_       = 0;
+        arpDropSounds();
         resolveTables();
         return true;
     }
@@ -951,6 +1141,21 @@ public:
             std::snprintf(buf, sizeof buf, ";wtpath%c=", osc ? 'B' : 'A');
             o += buf;
             smEsc(o, pth);
+        }
+        // v4's two rows, level then step — the order the contract lists them
+        // in and the order SPARP takes them in. A row still at its default is
+        // NOT emitted, which is what keeps the empty-state round-trip gate:
+        // a v2 or v3 project that never touched the arp still writes no
+        // `state` key at all.
+        if (st_.arpDrawn()) {
+            o += ";arpl=";
+            for (int i = 0; i < kSpSteps; ++i) o += kHex[st_.arpLv[i] & 15u];
+            o += ";arps=";
+            for (int i = 0; i < kSpSteps; ++i) {
+                const u8 v = spArpUnpack(st_.arpSt[i]);
+                o += kHex[(v >> 4) & 15u];
+                o += kHex[v & 15u];
+            }
         }
         return o;
     }
@@ -1213,12 +1418,22 @@ public:
             // queue() for why it is last and not first.
             if (haveOvf_ && n == nframes - 1) applyOverflow();
 
+            // v4: THE ARP, and it is here for one reason — ordering at a
+            // coincident sample is fixed, incoming MIDI first and then the arp,
+            // so a note-on arriving on a step boundary is in the set that step
+            // plays and can retrigger the pattern to that step. The arp calls
+            // the same voice bodies an incoming event calls, at THIS sample,
+            // with this sample's absolute position as the identity stamp; it
+            // never enters the event queue, so no density of arp output can
+            // push an incoming note-off out of it.
+            if (arp_.on) arpTick(n);
+
             // The LFO values for THIS sample, read before they are advanced,
             // so the control tick and the audio path see the same numbers.
             const Glob g = { globLfo(0, lfo_,  b, shVal_),
                              globLfo(1, lfo2_, b, shVal2_),
                              globLfo(2, lfo3_, b, shVal3_),
-                             after_, wheel_, bend_, ccVal_ };
+                             after_, wheel_, bend_, ccVal_, arpStepLvl_ };
 
             // v3: a One-shot LFO is PER VOICE, so this sample's value is
             // gathered for every sounding voice here — before the control tick
@@ -1335,7 +1550,7 @@ private:
     // The per-sample globals every voice reads: the three LFO values, the
     // channel pressure and v3's three MIDI sources, gathered once so retarget()
     // and renderVoice() see the same numbers.
-    struct Glob { f32 l1, l2, l3, after, wheel, bend, cc; };
+    struct Glob { f32 l1, l2, l3, after, wheel, bend, cc, arpStep; };
 
     // A queued note event. Five bytes of payload and a frame stamp; nothing in
     // here allocates and the queue is a fixed array, so midi() stays realtime.
@@ -1349,6 +1564,70 @@ private:
     enum : u8 { kEvOn = 0, kEvOff, kEvNotesOff, kEvSoundOff, kEvPressure,
                 kEvCC, kEvBend };
     struct PendEv { int frame; u8 type, a, b, ch; };
+
+    // ---------------------------------------------------------------------
+    // v4: THE ARPEGGIATOR
+    //
+    // Read the contract's "v4 — the arpeggiator" section before this code; the
+    // three sentences that decide the whole shape of it are:
+    //
+    //  1. NOTHING ACCUMULATES. Every index the arp uses is a modulus of the
+    //     absolute step number `k`, and `k` is a floor of the clock. Not the
+    //     note-cycle position, not the octave-cycle position, not the loop
+    //     counter, not the randomness. That is what makes a locate land on the
+    //     step the bar implies without the arp having run there, and what
+    //     stops a rest, a tie, an out-of-range pitch or a lost Chance draw
+    //     from renumbering the melody.
+    //  2. GENERATED EVENTS LAND AT STAMPED SAMPLES. The arp runs inside the
+    //     per-sample event loop and calls the same noteOn()/noteOff() voice
+    //     bodies an incoming event calls, at that sample, with that sample's
+    //     absolute position as the identity stamp. An arp that emitted at the
+    //     top of the block would quantise every note to the block boundary.
+    //     Ordering at a coincident sample is fixed: incoming MIDI first, then
+    //     the arp; and within the arp, note-offs before note-ons.
+    //  3. THE ARP NEVER ENTERS THE EVENT QUEUE, so no density of arp output
+    //     can push an incoming note-off out of it, and it consumes no slot.
+    //
+    // The one bookkeeping that IS stateful is the list of notes the arp has
+    // started and not yet stopped — you cannot turn off what you did not
+    // remember turning on — plus the tie chain that extends them. Neither is
+    // an index the melody derives from, and both are cleared by every event
+    // that invalidates them (a panic, a re-anchor, a retrigger, Arp On going
+    // either way).
+    // ---------------------------------------------------------------------
+
+    // Everything the arp reads from parameters, once per block. A member and
+    // not a Blk field because noteOn() and noteOff() reach it too, and those
+    // are called from apply() which has no Blk.
+    struct ArpCfg {
+        bool on = false;
+        int  mode = kArpUp;
+        bool freeRun = false;        // Arp Sync == 0: the transport is not read
+        f64  beatsInv = 4.0;         // 1 / beats-per-step, when synced
+        f64  inc = 0.0;              // steps per sample, when free
+        int  octaves = 1;
+        int  octMode = kArpOctUp;
+        f64  gate = 0.5;             // Gate / 100, a fraction of the NOMINAL step
+        f64  swing = 0.0;            // Swing / 300, in steps
+        bool swingOn = false;        // Swing 0 selects the no-offset branch
+        bool hold = false;
+        bool retrig = true;
+        int  velMode = kArpVelPlayed;
+        int  fixedVel = 100;
+        int  steps = kSpSteps;
+        int  chance = 100;           // 100 selects the no-draw branch outright
+        u64  lvBits = 0;             // the two rows, one atomic load each
+        u64  stBits = 0;
+    };
+
+    // One note the arp has started and not yet stopped. `off` is in the Aeff
+    // domain (units of steps), so it survives a tempo change the way the clock
+    // does, and it already carries the tie run the note was born with.
+    struct ArpSound { f64 off; u8 note, ch; };
+    // Two generations of a 64-deep chord is the arithmetic worst case (gate
+    // caps at 200 %, so at most two steps can overlap, and the same-note rule
+    // means a repeat never stacks with itself).
+    static constexpr int kArpSounds = 128;
 
     // Everything read from the parameters once per block. Reading them once is
     // the one block-size dependence every device in this tree shares: a knob
@@ -1617,6 +1896,107 @@ private:
 
         b.master   = clampv(p(kPMaster), 0.f, 1.5f);
         b.incScale = (f32)(440.0 / sr_);
+
+        readArpParams();
+    }
+
+    // --- v4: the arp's block read -------------------------------------------
+    //
+    // ARP ON = 0 IS A SELECTED BRANCH AND NOT A COMPUTED ONE: nothing below the
+    // first `if` runs, no arp state advances, source 17 is exactly 0, and
+    // incoming notes reach noteOn() by the v3 path. That is the whole of the
+    // revision's bit-identity gate, and it holds by construction rather than by
+    // care.
+    //
+    // Both Arp On transitions are BLOCK-GRANULAR and not stamped, because
+    // parameters are not events in this device and never have been — they are
+    // read once per block — so the change lands at frame 0 of the block that
+    // observes it, exactly as v2's Voice Mode switch and v3's transport
+    // re-anchor already do. Every other property of the arp is invariant.
+    void readArpParams() {
+        const bool on      = (int)clampv(p(kPArpOn) + 0.5f, 0.f, 1.f) != 0;
+        const bool wasOn   = arp_.on;
+        const bool wasHold = arp_.hold;
+        // THE FIRST BLOCK AFTER prepare() IS NOT A TRANSITION. A set that was
+        // saved with the arp on has no "off" to come from, and a render that
+        // starts at bar 33 must SOUND the step bar 33 implies rather than wait
+        // for the next one — which is the locate property, arriving at frame 0
+        // of the first block instead of at a jump. So a fresh instance serves
+        // the step it lands on, and only a genuine mid-run 0 -> 1 waits.
+        const bool fresh   = arpFresh_;
+        arpFresh_ = false;
+
+        if (!on) {
+            // 1 -> 0 WITH NOTES HELD. Every note the arp generated is released
+            // at frame 0 and its bookkeeping is cleared, and notes still
+            // physically held do NOT re-sound: a key that was never delivered
+            // to the voice engine cannot be resumed without synthesising a
+            // note-on the player did not play. The arp may invent MIDI; a
+            // parameter change may not. The player re-presses.
+            if (wasOn) { arpReleaseSounds(); latchClear(); }
+            arp_.on      = false;
+            arp_.hold    = false;
+            arpStepLvl_  = 0.f;
+            arpReanchor_ = false;
+            return;
+        }
+
+        arp_.on       = true;
+        arp_.mode     = (int)clampv(p(kPArpMode) + 0.5f, 0.f, (f32)(kArpModeCount - 1));
+        const int sy  = (int)clampv(p(kPArpSync) + 0.5f, 0.f, (f32)(kSpSyncCount - 1));
+        arp_.freeRun  = sy == 0;
+        arp_.beatsInv = sy > 0 ? 1.0 / (f64)kSpSyncBeats[sy] : 4.0;
+        arp_.inc      = (f64)clampv(p(kPArpRate), 0.01f, 40.f) / sr_;
+        arp_.octaves  = (int)clampv(p(kPArpOctaves) + 0.5f, 1.f, 4.f);
+        arp_.octMode  = (int)clampv(p(kPArpOctMode) + 0.5f, 0.f, 2.f);
+        arp_.gate     = (f64)clampv(p(kPArpGate), 1.f, 200.f) * 0.01;
+        const f32 sw  = clampv(p(kPArpSwing), 0.f, 100.f);
+        arp_.swingOn  = sw > 0.f;             // Swing 0 selects the no-offset
+        arp_.swing    = (f64)sw / 300.0;      // branch outright, bit-exact
+        arp_.hold     = (int)clampv(p(kPArpHold) + 0.5f, 0.f, 1.f) != 0;
+        arp_.retrig   = (int)clampv(p(kPArpRetrig) + 0.5f, 0.f, 1.f) != 0;
+        arp_.velMode  = (int)clampv(p(kPArpVelMode) + 0.5f, 0.f, 2.f);
+        arp_.fixedVel = (int)clampv(p(kPArpFixedVel) + 0.5f, 1.f, 127.f);
+        arp_.steps    = (int)clampv(p(kPArpSteps) + 0.5f, 1.f, (f32)kSpSteps);
+        arp_.chance   = (int)clampv(p(kPArpChance) + 0.5f, 0.f, 100.f);
+        // ONE atomic load per row: sixteen nibbles in a u64, so the audio
+        // thread can never see a row half-written. See publishStateToAudio().
+        arp_.lvBits   = arpLvBits_.load(std::memory_order_relaxed);
+        arp_.stBits   = arpStBits_.load(std::memory_order_relaxed);
+
+        if (!wasOn) {
+            // 0 -> 1 WITH NOTES HELD. Every voice sounding from a direct
+            // note-on is RELEASED (an ENV release, not a cut) at frame 0. The
+            // held stack is untouched — it was maintained anyway — so the arp
+            // starts from the truth. arpOrigin_ is left alone whatever Retrig
+            // says, because a parameter change is not a new chord.
+            for (Voice& v : voices_) if (v.active && v.e1.stage != kRel) release(v);
+            arpDropSounds();
+            if (arp_.hold) latchSeedFromHeld(); else latchClear();
+            arpFiredK_ = arpCurK(arpAeff()) - (fresh ? 1 : 0);
+        } else if (arp_.hold != wasHold) {
+            // SWITCHING HOLD WHILE NOTES ARE HELD. 0 -> 1 seeds latchSet from
+            // heldSet (empty is legal: the arp stays quiet until a key
+            // arrives); 1 -> 0 drops it and the arp immediately plays heldSet,
+            // which may also be empty. NEITHER TRANSITION EMITS A NOTE-ON.
+            if (arp_.hold) latchSeedFromHeld(); else latchClear();
+        }
+
+        // A re-anchor is a block-boundary event by construction — the
+        // transport arrives once per block — so on one the arp emits note-offs
+        // for what is sounding and resumes at the new position. It NEVER
+        // replays skipped steps.
+        if (arpReanchor_ && !arp_.freeRun) {
+            arpReleaseSounds();
+            // Resume AT the new position: the step the bar implies is the step
+            // that sounds, which is the whole of what a locate landing on the
+            // right step means. Skipped steps are not replayed.
+            arpFiredK_ = arpCurK(arpAeff()) - 1;
+        }
+        arpReanchor_  = false;
+        // Swing, Sync and Rate are all knobs, so the next onset is recomputed
+        // every block rather than cached across a change.
+        arpNextOnset_ = arpOnset(arpFiredK_ + 1);
     }
 
     // The unison fan: detune spreads SYMMETRICALLY about the centre and the
@@ -1748,8 +2128,14 @@ private:
         // fallback in the ruling's point 3 automatic rather than a mode.
         const bool advancing = trBeatSeen_ && trBeat_ != trBeatWas_;
         if (trPlaying_ &&
-            (started || (advancing && std::fabs(trBeat_ - beatAcc_) > (1.0 / 64.0))))
+            (started || (advancing && std::fabs(trBeat_ - beatAcc_) > (1.0 / 64.0)))) {
             beatAcc_ = trBeat_;
+            // v4: the arp is the second consumer of this counter and a jump in
+            // it is a locate or a loop wrap. readArpParams() acts on the flag,
+            // which is why it is a flag and not the action: the arp's own
+            // parameters are not read yet at this point in the block.
+            arpReanchor_ = true;
+        }
         trBeatWas_  = trBeat_;
         trBeatSeen_ = true;
         trPlayWas_  = trPlaying_;
@@ -2013,18 +2399,75 @@ private:
     // The mono/legato held-note stack, newest last. Maintained in EVERY mode
     // (cheap, silent in Poly) so switching into Mono/Legato mid-phrase starts
     // from the truth rather than from an empty memory.
-    void heldPush(u8 n) {
+    //
+    // v4 GIVES IT TWO PARALLEL ARRAYS AND NOTHING ELSE. Velocity, because Vel
+    // Mode 0 (As Played) is the velocity of the key that contributed the note;
+    // channel, because the identity hash noteRandom(channel, note, absSample)
+    // that every generated note-on feeds needs it. Ordering, depth, the
+    // drop-oldest rule and the maintained-in-every-mode rule are untouched —
+    // this is data, not semantics. THE ARP READS THIS STACK AND NEVER WRITES
+    // IT: generated notes bypass heldPush/heldRemove entirely, because a stack
+    // that described notes nobody is holding would make Hold, Retrigger and
+    // the mono fallback each wrong in a different way.
+    void heldPush(u8 n, u8 vel, u8 ch) {
         if (nHeld_ >= kHeld) {          // drop the oldest: fallback wants newest
-            for (int i = 1; i < kHeld; ++i) held_[i - 1] = held_[i];
+            for (int i = 1; i < kHeld; ++i) {
+                held_[i - 1]    = held_[i];
+                heldVel_[i - 1] = heldVel_[i];
+                heldCh_[i - 1]  = heldCh_[i];
+            }
             --nHeld_;
         }
-        held_[nHeld_++] = n;
+        heldVel_[nHeld_] = vel;
+        heldCh_[nHeld_]  = ch;
+        held_[nHeld_++]  = n;
     }
     void heldRemove(u8 n) {
         int w = 0;
-        for (int i = 0; i < nHeld_; ++i)
-            if (held_[i] != n) held_[w++] = held_[i];
+        for (int i = 0; i < nHeld_; ++i) {
+            if (held_[i] == n) continue;
+            held_[w]    = held_[i];
+            heldVel_[w] = heldVel_[i];
+            heldCh_[w]  = heldCh_[i];
+            ++w;
+        }
         nHeld_ = w;
+    }
+
+    // --- v4: the latch set ---------------------------------------------------
+    //
+    // `latchSet` is the arp's OWN set and is in force only while Arp Hold = 1.
+    // It is not `heldSet`: note-offs never remove from it, and a NEW CHORD —
+    // spectra.cpp's existing `otherHeld == false`, the condition that says
+    // heldSet was empty immediately before this note-on joined it — clears it
+    // first. Press a chord, release it, the arp keeps running; press one new
+    // note and the latch becomes that note alone; press more before releasing
+    // and they join.
+    void latchClear() { nLatch_ = 0; }
+    void latchAdd(u8 n, u8 vel, u8 ch) {
+        int w = 0;                       // re-press moves a note to the end,
+        for (int i = 0; i < nLatch_; ++i) {   // exactly as heldPush does
+            if (latch_[i] == n) continue;
+            latch_[w] = latch_[i]; latchVel_[w] = latchVel_[i];
+            latchCh_[w] = latchCh_[i]; ++w;
+        }
+        nLatch_ = w;
+        if (nLatch_ >= kHeld) {
+            for (int i = 1; i < kHeld; ++i) {
+                latch_[i - 1] = latch_[i]; latchVel_[i - 1] = latchVel_[i];
+                latchCh_[i - 1] = latchCh_[i];
+            }
+            --nLatch_;
+        }
+        latchVel_[nLatch_] = vel;
+        latchCh_[nLatch_]  = ch;
+        latch_[nLatch_++]  = n;
+    }
+    void latchSeedFromHeld() {
+        nLatch_ = nHeld_;
+        for (int i = 0; i < nHeld_; ++i) {
+            latch_[i] = held_[i]; latchVel_[i] = heldVel_[i]; latchCh_[i] = heldCh_[i];
+        }
     }
 
     // Retarget a sounding mono voice's pitch: a glide when Glide > 0, a jump
@@ -2042,11 +2485,27 @@ private:
         }
     }
 
+    // An INCOMING note-on. The stack is updated in every mode and whatever the
+    // arp is doing — it is the record of physical keys — and then exactly one
+    // of two things happens: with the arp off the note reaches the voices as it
+    // always has, and with the arp on it does not reach them at all, because
+    // "incoming notes stop reaching the voices directly and the arp generates
+    // the notes instead" is what id 109 means.
     void noteOn(u8 note, u8 vel, u8 ch, u64 absSample) {
-        const int vm = (int)clampv(p(kPVoiceMode) + 0.5f, 0.f, 2.f);
-        const bool otherHeld = nHeld_ > 0;   // before this note joins
+        const bool otherHeld = nHeld_ > 0;   // before this note joins: the
+                                             // contract's NEW CHORD condition
         heldRemove(note);
-        heldPush(note);
+        heldPush(note, vel, ch);
+        if (arp_.on) { arpNoteOn(note, vel, ch, otherHeld); return; }
+        noteOnVoice(note, vel, ch, absSample, otherHeld);
+    }
+
+    // The voice half, shared by an incoming note-on and by one the arp
+    // invented. `otherHeld` is what selects a Legato overlap; for a generated
+    // note the arp passes "another generated note is still sounding", which is
+    // the same question asked of the set the arp actually owns.
+    void noteOnVoice(u8 note, u8 vel, u8 ch, u64 absSample, bool otherHeld) {
+        const int vm = (int)clampv(p(kPVoiceMode) + 0.5f, 0.f, 2.f);
 
         if (vm == 0) { polyNoteOn(note, vel, ch, absSample); return; }
 
@@ -2167,8 +2626,20 @@ private:
     // Newest matching voice first: a repeated note that stole its own older
     // voice should release the one actually sounding.
     void noteOff(u8 note) {
-        const int vm = (int)clampv(p(kPVoiceMode) + 0.5f, 0.f, 2.f);
         heldRemove(note);
+        // With the arp on, an incoming note-off changes the SET and nothing
+        // else: the arp's own note-offs are the truth, and note-offs never
+        // remove from the latch.
+        if (arp_.on) return;
+        noteOffVoice(note, true);
+    }
+
+    // The voice half. `fallback` is v2's mono note-off fallback to the most
+    // recent still-held note, and the arp passes false: with the arp running, a
+    // fallback would sound a note the arp did not schedule, which is inventing
+    // MIDI at a note-off. The fallback returns the instant Arp On goes to 0.
+    void noteOffVoice(u8 note, bool fallback) {
+        const int vm = (int)clampv(p(kPVoiceMode) + 0.5f, 0.f, 2.f);
 
         if (vm != 0) {
             Voice& v = voices_[0];
@@ -2179,7 +2650,7 @@ private:
                 if (o.active && o.note == note && o.e1.stage != kRel) release(o);
             }
             if (!v.active || v.note != note || v.e1.stage == kRel) return;
-            if (nHeld_ > 0) {
+            if (fallback && nHeld_ > 0) {
                 // Fall back to the most recent still-held note (contract). A
                 // glide, not a retrigger: a fallback is not a note-on, so the
                 // envelopes keep running — see the implementation notes.
@@ -2207,13 +2678,398 @@ private:
         if (v.e2.stage != kRel) v.e2.stage = kRel;
     }
 
+    // CC 123. It empties heldSet — it already did — and v4 adds that it also
+    // empties latchSet, so the arp's sounding generated notes release with
+    // everything else and the arp emits nothing until a note-on arrives. A
+    // panic a latch could outlive would not be a panic. The sounding-note
+    // bookkeeping is KEPT: those voices are releasing, not gone, and a later
+    // gate expiry hitting a voice already in release is a no-op.
     void allNotesOff() {
         for (Voice& v : voices_) if (v.active && v.e1.stage != kRel) release(v);
         nHeld_ = 0;
+        latchClear();
     }
+    // CC 120 does the same and additionally clears the arp's sounding-note
+    // bookkeeping, since the voices it referred to are gone.
     void allSoundOff() {
         for (Voice& v : voices_) v = Voice{};
         nHeld_ = 0;
+        latchClear();
+        arpDropSounds();
+    }
+
+    // -----------------------------------------------------------------------
+    // v4: the arpeggiator's engine
+    // -----------------------------------------------------------------------
+
+    // `A` — steps elapsed since the arp's origin, a real number and a function
+    // of the engine's clock and of nothing else.
+    //
+    //  * SYNCED (Arp Sync > 0): A = beatAcc_ / beatsPerStep, where beatAcc_ is
+    //    v3's OWN anchored beat counter, the same variable read the same way —
+    //    an f64 beat position advanced one sample at a time at the pushed
+    //    tempo, ANCHORED to the pushed transport beat and never driven by it.
+    //    See the ORCHESTRATOR RULING in this file's header; the arp is its
+    //    second consumer and adds nothing to it. This one expression covers
+    //    the ruling's point 3 as well without a branch: with no transport
+    //    running, beatAcc_ simply accumulates from prepare() at the pushed
+    //    tempo or its 120 fallback, which IS "A accumulates bpm/(60·B·sr) per
+    //    sample".
+    //  * FREE (Arp Sync = 0): A accumulates ArpRate/sr per sample from
+    //    prepare() and the transport is not read at all.
+    f64 arpAbs() const {
+        return arp_.freeRun ? arpFree_ : beatAcc_ * arp_.beatsInv;
+    }
+    // Aeff = A - arpOrigin_, clamped at 0 from below.
+    f64 arpAeff() const {
+        const f64 a = arpAbs() - arpOrigin_;
+        return a > 0.0 ? a : 0.0;
+    }
+
+    // onset(k) = k + (k & 1) * (Swing / 300). ODD `k` IS DELAYED and `k` is the
+    // ABSOLUTE step number, never the pattern index — so an odd-length pattern
+    // does not flip the swing on every loop and the swing stays welded to the
+    // beat where a listener expects it. Swing 0 selects the no-offset branch
+    // outright, bit-exact.
+    f64 arpOnset(i64 k) const {
+        const f64 base = (f64)k;
+        if (!arp_.swingOn || !(k & 1)) return base;
+        return base + arp_.swing;
+    }
+
+    // The largest k with onset(k) <= aeff, as a PURE FUNCTION of aeff — never a
+    // counter. Swing is at most 1/3 of a step, so the onsets stay strictly
+    // increasing and the answer is floor(aeff) or one less.
+    i64 arpCurK(f64 aeff) const {
+        const f64 fl = std::floor(aeff);
+        const i64 f = (i64)fl;
+        if (f < 0) return -1;
+        if (!arp_.swingOn || !(f & 1)) return f;
+        return (aeff - fl >= arp_.swing) ? f : f - 1;
+    }
+
+    // The identity the two draws are built on: THE NOTE SET, folded ASCENDING,
+    // and the absolute step number. Since k = L·Steps + i, the pair (step
+    // index, loop counter) IS k, so the identity is two terms and not three.
+    //
+    // Ascending DELIBERATELY, even in As Played mode: playing C-E-G and playing
+    // G-E-C are the same chord, and a random pattern that changed because a
+    // player rolled the chord the other way would be a bug the player could
+    // hear and never explain.
+    static u64 arpMix64(u64 x) {
+        x += 0x9E3779B97F4A7C15ull;
+        x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 27; x *= 0x94D049BB133111EBull;
+        x ^= x >> 31;
+        return x;
+    }
+    static u64 arpSetHash(const u8* asc, int c) {
+        u64 h = arpMix64((u64)c);
+        for (int i = 0; i < c; ++i) h = arpMix64(h ^ (u64)asc[i]);
+        return h;
+    }
+    static u64 arpHash(u64 setHash, i64 k, int salt) {
+        return arpMix64(setHash ^ (u64)k ^ ((u64)(u32)salt << 56));
+    }
+
+    // The mode's cycle length over a set of size c. `max(2c-2, 1)` because at
+    // c = 1 the natural formula gives a cycle of length 0, which is not a
+    // cycle: modes 3 and 4 degenerate to Up on a single note, and Thumb and
+    // Pinky get the same guard.
+    static int arpCycle(int mode, int c) {
+        switch (mode) {
+            case kArpUpDownInc: return 2 * c;
+            case kArpUpDownExc:
+            case kArpDownUp:    return c > 1 ? 2 * c - 2 : 1;
+            case kArpChord:     return 1;
+            case kArpThumb:
+            case kArpPinky:     return c > 1 ? 2 * (c - 1) : 1;
+            default:            return c;      // Up, Down, As Played, Random
+        }
+    }
+
+    // The element at cycle position j, as an INDEX into the ascending set (or,
+    // for As Played, into the insertion-order one). Chord is handled by the
+    // caller: its cycle length is 1 and it sounds ALL of N on every step, which
+    // is not a special case in the arithmetic — with M = 1 the octave axis
+    // advances on every step, so Chord over two octaves alternates the chord at
+    // +0 and the chord at +1, which is what a chord arp is for.
+    static int arpElement(int mode, int c, int j, u64 setHash, i64 k) {
+        switch (mode) {
+            case kArpUp:        return j;
+            case kArpDown:      return c - 1 - j;
+            case kArpUpDownInc: return j < c ? j : 2 * c - 1 - j;
+            case kArpUpDownExc: return j < c ? j : 2 * c - 2 - j;
+            case kArpDownUp:    return j < c ? c - 1 - j : j - c + 1;
+            case kArpAsPlayed:  return j;      // read from H, not N
+            case kArpRandom: {
+                // A multiply-shift over the top 24 bits, not a modulo: integer
+                // arithmetic with no bias argument to have and no float in the
+                // path. Random is a DRAW, not a walk — its cycle length is
+                // still c so the octave axis and the loop counter advance
+                // exactly as they do under Up, and it does not avoid immediate
+                // repeats, because a repeat-avoiding draw carries state.
+                const u64 h = arpHash(setHash, k, 1);
+                return (int)(u32)(((h >> 40) * (u64)(u32)c) >> 24);
+            }
+            case kArpThumb:     return (j & 1) ? 1 + (j - 1) / 2 : 0;
+            case kArpPinky:     return (j & 1) ? c - 1 : j / 2;
+            default:            return 0;
+        }
+    }
+
+    // The octave axis. Alternate is itself an up-down-EXCLUSIVE cycle, which is
+    // why its length is 2O-2 and not 2O: an inclusive one would sit on the top
+    // octave for two whole note-cycles.
+    static int arpOctLen(int octMode, int o) {
+        if (octMode != kArpOctAlt) return o;
+        return o > 1 ? 2 * o - 2 : 1;
+    }
+    static int arpOctOffset(int octMode, int o, int u) {
+        if (octMode == kArpOctUp)   return u;
+        if (octMode == kArpOctDown) return -u;
+        return u < o ? u : 2 * o - 2 - u;
+    }
+
+    // --- generated events ---------------------------------------------------
+
+    void arpDropSounds() { nArpSnd_ = 0; }
+
+    // Release everything the arp has started, and forget it. Used by the
+    // Arp On 1 -> 0 transition and by a transport re-anchor.
+    void arpReleaseSounds() {
+        for (int i = 0; i < nArpSnd_; ++i) noteOffVoice(arpSnd_[i].note, false);
+        arpDropSounds();
+    }
+
+    void arpEmitOn(u8 note, u8 vel, u8 ch, u64 absSample, f64 off) {
+        // "another generated note is still sounding" is the arp's own reading
+        // of the Legato-overlap condition, so gate > 100 % under Legato is a
+        // legato arp — which is the reason to reach for that combination.
+        noteOnVoice(note, vel, ch, absSample, nArpSnd_ > 0);
+        if (nArpSnd_ >= kArpSounds) {
+            noteOffVoice(arpSnd_[0].note, false);          // unreachable in
+            for (int i = 1; i < nArpSnd_; ++i) arpSnd_[i - 1] = arpSnd_[i];
+            --nArpSnd_;                                    // practice; see the cap
+        }
+        arpSnd_[nArpSnd_].note  = note;
+        arpSnd_[nArpSnd_].ch    = ch;
+        arpSnd_[nArpSnd_].off   = off;
+        ++nArpSnd_;
+    }
+
+    void arpRemoveSound(int i) {
+        for (int j = i + 1; j < nArpSnd_; ++j) arpSnd_[j - 1] = arpSnd_[j];
+        --nArpSnd_;
+    }
+
+    // Every generated note whose gate has expired, at this sample. Called once
+    // per sample and, inside a step that sounds, BEFORE the new note-ons — the
+    // contract's offs-before-ons.
+    void arpExpire(f64 aeff) {
+        for (int i = 0; i < nArpSnd_;) {
+            if (arpSnd_[i].off <= aeff) { noteOffVoice(arpSnd_[i].note, false); arpRemoveSound(i); }
+            else ++i;
+        }
+    }
+
+    // --- the note set -------------------------------------------------------
+    //
+    // Two sets exist and they are not the same set: heldSet is the physical
+    // keys, latchSet is the arp's own and is in force only while Hold = 1.
+    int arpSet(u8* asc, u8* ascVel, u8* ascCh,
+               u8* ord, u8* ordVel, u8* ordCh) const {
+        const u8* src   = arp_.hold ? latch_    : held_;
+        const u8* sVel  = arp_.hold ? latchVel_ : heldVel_;
+        const u8* sCh   = arp_.hold ? latchCh_  : heldCh_;
+        const int c     = arp_.hold ? nLatch_   : nHeld_;
+        for (int i = 0; i < c; ++i) { ord[i] = src[i]; ordVel[i] = sVel[i]; ordCh[i] = sCh[i]; }
+        // Insertion sort into ascending order. c is at most 64 and a step is at
+        // most a few dozen a second, so the quadratic is free and the code is
+        // one thing a reader can check.
+        for (int i = 0; i < c; ++i) {
+            int j = i;
+            const u8 n = ord[i], v = ordVel[i], ch = ordCh[i];
+            while (j > 0 && asc[j - 1] > n) {
+                asc[j] = asc[j - 1]; ascVel[j] = ascVel[j - 1]; ascCh[j] = ascCh[j - 1];
+                --j;
+            }
+            asc[j] = n; ascVel[j] = v; ascCh[j] = ch;
+        }
+        return c;
+    }
+
+    // --- one step -----------------------------------------------------------
+
+    void arpFireStep(i64 k, int frame, f64 aeff) {
+        const int i = (int)(k % (i64)arp_.steps);
+        const u8  lv = (u8)((arp_.lvBits >> (4 * i)) & 15u);
+        const u8  code = (u8)((arp_.stBits >> (4 * i)) & 15u);
+
+        // Matrix source 17 follows the STEP CLOCK and not the notes: an OFF
+        // step, a tie, a dropped Chance draw and an empty note set all leave it
+        // reading the grid's level at the current index. A staircase that
+        // dropped to zero every rest would be a different and much worse
+        // control.
+        arpStepLvl_ = spStepLevel(lv);
+
+        if (!spArpOn(code)) {           // REST. Tie is not read, and the
+            arpExpire(aeff);            // previous note ends at its own gate,
+            return;                     // unaffected.
+        }
+        if (spArpTie(code)) {
+            // HOLD the previous note through this step: no new note-on, no new
+            // note-off, and this step's octave offset is IGNORED — there is no
+            // new note to offset. The hold itself was already decided when the
+            // note STARTED (see arpTieRun below), because the contract's own
+            // formula is `off(k) = onset(k + m) + Gate/100` and a note whose
+            // gate is under 100 % would otherwise have ended before the tie
+            // step arrived to extend it. So a tie step does nothing here but
+            // advance the clock and the staircase — and A TIE WHOSE
+            // PREDECESSOR DID NOT SOUND IS SILENT falls out with no state at
+            // all: there is nothing to hold, so nothing is held.
+            arpExpire(aeff);
+            return;
+        }
+
+        // SOUND a new note.
+        u8 asc[kHeld], ascVel[kHeld], ascCh[kHeld];
+        u8 ord[kHeld], ordVel[kHeld], ordCh[kHeld];
+        const int c = arpSet(asc, ascVel, ascCh, ord, ordVel, ordCh);
+        if (c <= 0) { arpExpire(aeff); return; }
+
+        const bool needHash = arp_.mode == kArpRandom || arp_.chance < 100;
+        const u64 setHash = needHash ? arpSetHash(asc, c) : 0ull;
+
+        // Chance is tested ONLY on steps that would sound a new note, and a
+        // step that loses its draw is silent but still advances every index:
+        // Chance drops notes, it does not stall the melody. At 100 the branch
+        // is SELECTED OUT and no hash is computed at all.
+        if (arp_.chance < 100) {
+            const u64 h = arpHash(setHash, k, 2);
+            if (!((u32)(((h >> 40) * 100u) >> 24) < (u32)arp_.chance)) {
+                arpExpire(aeff);
+                return;
+            }
+        }
+
+        // The two axes, note fast and octave slow: the note counter advances
+        // FIRST, so the arp completes one full traversal of the note cycle
+        // before the octave moves. Up-Down over two octaves therefore bounces
+        // inside octave 0, then inside octave 1 — the contract names that
+        // consequence and delegates the full-span bounce to the step row's own
+        // octave column, which is exactly the control that expresses it.
+        const int M = arpCycle(arp_.mode, c);
+        const int j = (int)(k % (i64)M);
+        const int L = arpOctLen(arp_.octMode, arp_.octaves);
+        const int u = (int)((k / (i64)M) % (i64)L);
+        const int shift = 12 * (arpOctOffset(arp_.octMode, arp_.octaves, u) + spArpOct(code));
+
+        u8 pn[kHeld], pv[kHeld], pc[kHeld];
+        int nP = 0;
+        const int first = arp_.mode == kArpChord ? 0 : arpElement(arp_.mode, c, j, setHash, k);
+        const int last  = arp_.mode == kArpChord ? c - 1 : first;
+        for (int e = first; e <= last; ++e) {
+            const int idx = e < 0 ? 0 : (e >= c ? c - 1 : e);
+            const bool played = arp_.mode == kArpAsPlayed;
+            const int pitch = (int)(played ? ord[idx] : asc[idx]) + shift;
+            // A PITCH OUTSIDE 0..127 MAKES THE STEP SILENT. It is not clamped:
+            // a clamped note is a wrong note played confidently, and an arp
+            // four octaves up from a top-C chord should run out of keyboard
+            // rather than pile onto the last one. The step still advances every
+            // index; only the note is not emitted.
+            if (pitch < 0 || pitch > 127) continue;
+            pn[nP] = (u8)pitch;
+            pc[nP] = played ? ordCh[idx] : ascCh[idx];
+            const u8 asPlayed = played ? ordVel[idx] : ascVel[idx];
+            pv[nP] = arp_.velMode == kArpVelFixed   ? (u8)arp_.fixedVel
+                   : arp_.velMode == kArpVelPattern
+                        // Pattern is ABSOLUTE, not a scaling of the played
+                        // velocity, and its floor is 1: 0 is a note-off on this
+                        // device's wire, so a step drawn at the bottom of the
+                        // row would emit nothing instead of emitting quietly.
+                        ? (u8)(1 + (int)(126.f * spStepLevel(lv) + 0.5f))
+                        : (asPlayed > 0 ? asPlayed : (u8)1);
+            ++nP;
+        }
+        if (nP == 0) { arpExpire(aeff); return; }
+
+        // OFFS BEFORE ONS, in two waves. First the ordinary gate expiries;
+        // then, for every note number about to sound that is still sounding, ITS
+        // off — because noteOff() releases the NEWEST matching voice, so a
+        // generated off arriving AFTER the next step's on would release the note
+        // just started and leave the old one ringing forever. The honest
+        // consequence is that gate > 100 % cannot overlap a note with itself;
+        // overlap happens between DIFFERENT note numbers, which is the only
+        // place overlap means anything.
+        arpExpire(aeff);
+        for (int q = 0; q < nP; ++q) {
+            for (int s = 0; s < nArpSnd_;) {
+                if (arpSnd_[s].note == pn[q]) { noteOffVoice(pn[q], false); arpRemoveSound(s); }
+                else ++s;
+            }
+        }
+        // `off(k) = onset(k + m) + Gate/100`, m the run of tie steps that
+        // follows. A LOOKAHEAD and not an accumulation: which steps are ties is
+        // a pure function of (k + t) mod Steps, so this reads the grid and
+        // carries nothing.
+        const f64 off = arpOnset(k + arpTieRun(k)) + arp_.gate;
+        const u64 abs = absPos_ + (u64)frame;
+        for (int q = 0; q < nP; ++q) arpEmitOn(pn[q], pv[q], pc[q], abs, off);
+    }
+
+    // How many steps after k are ties, capped at kArpMaxTie so that no reading
+    // of the grid can produce an unbounded note — the only failure mode here a
+    // user could not recover from by releasing a key. The cap is unreachable in
+    // practice: a run of sixteen ties needs every step of the pattern to be one,
+    // and then no step ever STARTS a note, so the pattern is silent.
+    int arpTieRun(i64 k) const {
+        int m = 0;
+        while (m < kArpMaxTie) {
+            const int i = (int)((k + m + 1) % (i64)arp_.steps);
+            if (!spArpTie((u8)((arp_.stBits >> (4 * i)) & 15u))) break;
+            ++m;
+        }
+        return m;
+    }
+
+    // One sample of the arp, called from the per-sample event loop AFTER every
+    // incoming event for this sample has been applied — the contract's fixed
+    // ordering, incoming MIDI first and then the arp.
+    void arpTick(int frame) {
+        const f64 aeff = arpAeff();
+        if (aeff >= arpNextOnset_) {
+            i64 k = arpCurK(aeff);
+            // A guard and nothing more: eight steps inside one sample needs a
+            // rate three orders of magnitude past anything this device can be
+            // set to. If it ever happened, the arp resumes at the current step
+            // rather than replaying a burst.
+            if (arpFiredK_ < k - 8) arpFiredK_ = k - 1;
+            for (i64 s = arpFiredK_ + 1; s <= k; ++s) arpFireStep(s, frame, aeff);
+            arpFiredK_   = k;
+            arpNextOnset_ = arpOnset(k + 1);
+        } else if (nArpSnd_ > 0) {
+            arpExpire(aeff);
+        }
+        if (arp_.freeRun) arpFree_ += arp_.inc;
+    }
+
+    // An incoming note-on while the arp is on: the latch and the retrigger, and
+    // nothing else. One condition drives both, and it is the one the code
+    // already computed — heldSet was EMPTY immediately before this note-on
+    // joined it. A note-on joining a non-empty set never retriggers, because
+    // rolling a chord on would otherwise stutter the pattern once per finger.
+    void arpNoteOn(u8 note, u8 vel, u8 ch, bool otherHeld) {
+        const bool newChord = !otherHeld;
+        if (arp_.hold) {
+            if (newChord) latchClear();
+            latchAdd(note, vel, ch);
+        }
+        if (newChord && arp_.retrig) {
+            arpOrigin_    = arpAbs();     // at THIS note-on's stamped sample
+            arpFiredK_    = -1;
+            arpNextOnset_ = arpOnset(0);
+        }
     }
 
     void clearSchedule() {
@@ -2280,6 +3136,14 @@ private:
             case kSWheel:  return g.wheel;
             case kSBend:   return g.bend;
             case kSCC:     return g.cc;
+            // v4's one new source. Instance-wide, a HARD staircase (the arp
+            // grid has no smooth companion and does not get one in v4 — an
+            // author who wants it smoothed has the matrix curves for shaping
+            // and a destination's own lag for the rest), and exactly 0 whenever
+            // Arp On is 0 and after prepare() until the first step onset. That
+            // last sentence is the inert condition the bit-identity gate rests
+            // on.
+            case kSArpStep: return g.arpStep;
             default:       return 0.f;
         }
     }
@@ -2914,6 +3778,44 @@ private:
             st.wt[key[2] == 'B' ? 1 : 0] = h;
             return true;
         }
+        // --- v4. The two arp rows sit on both sides of the refusal /
+        // degradation line in one place each, and the contract draws it:
+        //
+        //   REFUSED — a wrong length, a character outside [0-9a-f], an
+        //   uppercase character. These are strings this writer could not have
+        //   produced, so the whole state refuses and the device is untouched.
+        //   (A duplicate key and a record with no `=` are refused by the
+        //   caller, for every key.)
+        //
+        //   DEGRADED — an octave code of 5, 6 or 7 clamps to 4, and bits 5..7
+        //   are masked off. These are values a LATER, WIDER build could
+        //   legitimately write, and the versioning rule's job is to let a newer
+        //   state land on an older build rather than break it — exactly the
+        //   argument v3 made for a Table value of 9 arriving as a clamped 8.
+        //   spArpPack() is where both happen.
+        if (key == "arpl") {
+            if ((int)val.size() != kSpSteps) return false;
+            u8 tmp[kSpSteps];
+            for (int i = 0; i < kSpSteps; ++i) {
+                const int d = spHexLo(val[(size_t)i]);
+                if (d < 0) return false;
+                tmp[i] = (u8)d;
+            }
+            for (int i = 0; i < kSpSteps; ++i) st.arpLv[i] = tmp[i];
+            return true;
+        }
+        if (key == "arps") {
+            if ((int)val.size() != 2 * kSpSteps) return false;
+            u8 tmp[kSpSteps];
+            for (int i = 0; i < kSpSteps; ++i) {
+                const int hi = spHexLo(val[(size_t)(2 * i)]);
+                const int lo = spHexLo(val[(size_t)(2 * i + 1)]);
+                if (hi < 0 || lo < 0) return false;
+                tmp[i] = spArpPack((u8)(16 * hi + lo));
+            }
+            for (int i = 0; i < kSpSteps; ++i) st.arpSt[i] = tmp[i];
+            return true;
+        }
         if (key == "wtpathA" || key == "wtpathB") {
             std::string pth;
             if (!smUnesc(val, pth) || pth.empty()) return false;
@@ -2935,6 +3837,17 @@ private:
             gridBits_[j].store(bits, std::memory_order_relaxed);
             smoothQ_[j].store(st_.smooth[j], std::memory_order_relaxed);
         }
+        // v4's two rows, on gridBits_'s terms exactly: sixteen nibbles in one
+        // u64 each, so a row is taken in a single load and can never be
+        // observed half-updated. The step row's eleven reachable states fit a
+        // nibble — see spArpPack.
+        u64 lb = 0, sb = 0;
+        for (int i = 0; i < kSpSteps; ++i) {
+            lb |= (u64)(st_.arpLv[i] & 15u) << (4 * i);
+            sb |= (u64)(st_.arpSt[i] & 15u) << (4 * i);
+        }
+        arpLvBits_.store(lb, std::memory_order_relaxed);
+        arpStBits_.store(sb, std::memory_order_relaxed);
     }
 
     // GUI thread. The one writer of st_ outside adoptCustom(), and therefore
@@ -3026,6 +3939,13 @@ private:
     static constexpr int kHeld = 64;    // mono/legato held-note stack
     u8    held_[kHeld] = {};
     int   nHeld_ = 0;
+    // v4's one addition to the stack, and it is DATA, not semantics: Vel Mode 0
+    // (As Played) needs the velocity and the per-note identity hash needs the
+    // channel. Written by heldPush and compacted by heldRemove alongside the
+    // note numbers; nothing about the stack's ordering, depth, drop-oldest rule
+    // or maintained-in-every-mode rule changes.
+    u8    heldVel_[kHeld] = {};
+    u8    heldCh_[kHeld]  = {};
 
     // --- v3 instance state ---
     //
@@ -3077,6 +3997,35 @@ private:
     // step boundary in a long set. See the file header for the anchoring rule.
     f64   beatAcc_ = 0.0, beatInc_ = 0.0, trBeatWas_ = 0.0;
     bool  trBeatSeen_ = false, trPlayWas_ = false;
+
+    // --- v4 instance state ---
+    //
+    // The two rows follow gridBits_ exactly: sixteen nibbles in one u64 each,
+    // taken in a single atomic load, for the reason gridBits_ exists — state
+    // arrives through setStateString(), which the daemon calls on its pump
+    // thread while the audio thread is inside process(), and a torn step nibble
+    // would be a step nobody drew and would be NONDETERMINISTIC.
+    std::atomic<u64> arpLvBits_{0xffffffffffffffffull};   // default: level 1.0
+    std::atomic<u64> arpStBits_{0x7777777777777777ull};   // default: on, +0, no tie
+
+    ArpCfg arp_;
+    // The free-running clock, in steps, advanced only while the arp is on —
+    // id 109's own words are that with Arp On 0 "the arp does not exist" and
+    // "every id below is read by nothing", and Arp Rate is one of those ids.
+    // The SYNCED clock needs no member: it is beatAcc_ / beatsPerStep.
+    f64   arpFree_      = 0.0;
+    f64   arpOrigin_    = 0.0;   // the retrigger origin, in the A domain
+    f64   arpNextOnset_ = 0.0;   // onset(arpFiredK_ + 1); one compare a sample
+    i64   arpFiredK_    = -1;    // a CURSOR, not an index: every index the arp
+                                 // uses is a modulus of k, and this is only
+                                 // "which onsets have already been served"
+    bool  arpReanchor_   = false;
+    bool  arpFresh_      = true;   // no readArpParams() since prepare()
+    f32   arpStepLvl_    = 0.f;  // matrix source 17
+    ArpSound arpSnd_[kArpSounds] = {};
+    int   nArpSnd_ = 0;
+    u8    latch_[kHeld] = {}, latchVel_[kHeld] = {}, latchCh_[kHeld] = {};
+    int   nLatch_ = 0;
 
     // Did slot 8 resolve for this oscillator? Decided on the GUI thread by
     // resolveTables(); the audio thread never asks, it just takes the pointer

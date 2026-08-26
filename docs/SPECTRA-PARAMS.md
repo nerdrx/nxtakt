@@ -2072,3 +2072,86 @@ silently.
     user does after switching an arp on is not "fix the rate". Recorded here
     rather than buried, since it is the only v4 default that is not simply the
     bottom of its range.
+
+---
+
+# v4 implementation notes (NOT contract — the contract above stays frozen)
+
+Decisions the DSP took where the v4 contract leaves latitude, recorded in v2's
+and v3's habit so the editor and the preset bank read the same behaviour the
+voices run. Where any of these later needs to change, it changes here and in
+spectra.cpp together; the tables above do not move.
+
+- **The step row's audio-side packing, and the one contract-visible thing it
+  decides.** The audio thread takes each row in ONE atomic load, which is v3's
+  `gridBits_` rule and is not optional (state arrives through
+  `setStateString()` on the daemon's pump thread while the audio thread is
+  inside `process()`; a torn step nibble would be a step nobody drew, and it
+  would be nondeterministic). Sixteen steps in one u64 means four bits a step,
+  and a step has exactly **fifteen** reachable states after the contract's
+  degradation: five octave codes for a rest, and five more each for on-untied
+  and on-tied. Fifteen fits. The consequence a reader needs is that **a REST
+  KEEPS ITS OCTAVE**: `arps=…04…` round-trips as `04` and not as `00`, so
+  turning a step off and on again does not lose the octave it was drawn with.
+  Tie is the only field the contract says is conditional, and it is the only
+  one a rest drops.
+- **A degraded `arps` value is re-emitted NORMALISED**, unlike the `wt`
+  records, which are re-emitted verbatim. An octave code of 7 written by a
+  later build arrives as 4 and is saved as 4, and the reserved bits are saved
+  as 0. The two are not the same case: a `wt` hash is the NAME of a file this
+  machine may simply not have, and losing it would lose the set's intent, while
+  an out-of-range octave code is a value this build has decided what to do
+  with. Keeping it verbatim would mean saving a state whose sound this build
+  cannot reproduce.
+- **Record order.** `arpl` then `arps`, emitted after the `wt`/`wtpath`
+  records — the order the contract lists them in and the order `SPARP` takes
+  its two arguments in. Reading is order-free, as the format says.
+- **The tie is a LOOKAHEAD, not an accumulation**, and it has to be. The
+  contract's own formula is `off(k) = onset(k + m) + Gate/100`, and a note at a
+  gate under 100 % would have ENDED before the tie step arrived to extend it —
+  so `m`, the run of tie steps after `k`, is read off the grid when the note
+  starts. It is a pure function of `(k + t) mod Steps` and carries no state,
+  which is why the arp keeps nothing but the list of notes it has started. Two
+  small consequences: "a tie whose predecessor did not sound is silent" falls
+  out with no bookkeeping at all (there is nothing to hold, so nothing is
+  held), and the tie-chain bound is applied as `m <= 16` at the note's start
+  rather than as "the 17th forces the note off at its own onset". The two agree
+  everywhere the bound is reachable, and it is not reachable: a run of sixteen
+  ties needs every step of the pattern to be one, and then no step ever STARTS
+  a note.
+- **Ordering inside one sample, spelled out.** Incoming MIDI first (the queue,
+  then the overflow set at the block's last sample), then the arp. Inside the
+  arp at one sample: every gate expiry that is due, then the note-off for every
+  note number about to sound that is still sounding, then all the note-ons.
+  ALL offs before ALL ons, which is what obligation 2 asks for and is a
+  stronger reading than per-note interleaving — it has to be picked one way,
+  because `alloc()` steals the quietest voice and the two orders can allocate
+  differently.
+- **`otherHeld` for a generated note.** The Legato-overlap test in `noteOn()`
+  asks whether a key was already down. For a note the arp invented, the same
+  question about the set the arp owns is "is another GENERATED note still
+  sounding", and that is what is passed. At a gate of 100 % or less the
+  previous note is already off, so a step re-attacks; above 100 % it is a
+  legato glide, which is the reason to reach for Legato + gate > 100 %.
+- **The free-running clock advances only while Arp On = 1.** Id 109 says that
+  at 0 "the arp does not exist" and "every id below is read by nothing", and
+  Arp Rate is one of those ids — so a free clock ticking at Arp Rate with the
+  arp off would be reading it. The SYNCED clock needs no such decision: it is
+  `beatAcc_ / kSpSyncBeats[ArpSync]`, and `beatAcc_` is v3's and advances
+  regardless, which is exactly what makes a locate land right.
+- **The first block after `prepare()` is not a transition.** A set saved with
+  the arp on has no "off" to come from, and a render that starts at bar 33 must
+  SOUND the step bar 33 implies rather than wait for the next one. So a fresh
+  instance serves the step it lands on; only a genuine mid-run 0 -> 1 waits for
+  the next onset, which is what the contract's sentence is about. A transport
+  re-anchor resumes the same way — at the step the new position implies.
+- **Arp Chance rounds.** The parameter is a float percent and the draw compares
+  against an integer, so the read is `(int)(v + 0.5)` — the same spelling every
+  other stepped read in this file uses. 100 is the selected no-draw branch, and
+  99.6 rounds into it.
+- **The two rows are read once per block**, into the same `ArpCfg` the arp's
+  parameters land in, so a step and the pattern it is read from can never
+  disagree inside one block. A live edit therefore lands at a block boundary,
+  which is the cadence every parameter in this device already has.
+- **`kSpParamCount` is 125 and `kMaxParams` stays 128**, as the budget section
+  says. The next revision raises it; this one did not need to.
