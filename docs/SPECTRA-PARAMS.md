@@ -1116,3 +1116,959 @@ The sync division table does not change. The v1 fixed routings stay live and
 still sum with the matrix. The 64-override cap on a preset row stays 64.
 `kMaxParams` stays 128. The matrix stays eight slots — a ninth slot is ids and
 a new block, and v3 spends its ids on the curves the eight already have.
+
+---
+
+# v4 — the arpeggiator (FROZEN)
+
+Spends the last two of v3's reserved ids, appends ids 111..124, widens one
+enum, and adds two records to the state string. Everything above this line is
+untouched: the 42 v1 ids, the 58 v2 ids and the 11 v3 ids keep their meaning,
+their ranges, their defaults and their fixed routings, and the v2 rules (blocks
+with reserved tails, the Curve column, the state/versioning rule) plus v3's
+addition (an id ARRAY must be contiguous) govern this revision as written.
+
+**Gate, restated for v4, and it is stronger than v3's.** v3 had one stated
+exception — Bend Range's default of 2 — because pitch bend is a hardwired MIDI
+action. **v4 has no exception at all.** Every v4 parameter is reachable only
+behind Arp On (id 109), Arp On defaults to 0, and 0 selects the v3 path
+outright rather than computing something that happens to equal it. So: a v1,
+v2 or v3 state loaded into a v4 build, fed any MIDI stream a v3 build could act
+on, renders **bit-identical**. That is the release gate and it is named as one
+in the determinism section below.
+
+**What this feature is.** A STEP-SEQUENCER arpeggiator, not a plain one. v3
+already shipped 16-step drawable grids: the hex-grid state format, the `d/15`
+level mapping, the `.inc` state-macro discipline, the editor's drawable-row
+vocabulary and — the expensive part — a **beat-anchored step clock that is
+block-size invariant**. All five are reused verbatim here. A plain up/down arp
+would have been a smaller feature standing on none of it.
+
+## On spending reserved ids (v4's answer)
+
+Ten reserved ids stood before v4: 46, 47 (sub & noise), 52, 53 (warp), 66, 67
+(ENV3), 92, 93 (matrix) and 109, 110 (the v3 tail). **v4 spends 109 and 110 and
+leaves the other eight exactly where they are.** The reason is one sentence
+long and it follows from a rule v3 already wrote:
+
+- **A reserved id belongs to the block it sits in.** v3 spent 60 and 61 on
+  L2 Mode and L3 Mode — the LFOs the block owns — and spent 99 on Bend Range,
+  which sits in the voice block and is a voice-wide performance control. It did
+  not scatter the matrix curves into the warp block's spare pair to save two
+  indices. 46/47 are the sub and noise block's; 52/53 are warp's; 66/67 are
+  ENV3's; 92/93 are the matrix's. An arpeggiator is none of those things, and
+  an Arp Gate wedged between B Warp Amt and L2 Rate would cost every reader of
+  this file forever to save one id once.
+- **109 and 110 belong to nothing.** They are v3's generic tail — appended past
+  the last feature block, owned by no feature — and they sit **immediately
+  before 111**, which is where a v4 append starts. Spending them makes the
+  arpeggiator one contiguous run, 109..124, with no hole and no lookup table.
+  That is the same contiguity argument v3 used to refuse 92/93 for the curves,
+  read in the other direction.
+
+Both spent ids satisfy the v2 condition without strain: **Arp On defaults to 0
+and 0 is off**, and **Arp Mode defaults to 0 and 0 is Up**, so a v3 `.nxp` file
+— which writes every id including the reserved ones, all zero — lands on
+exactly the v4 defaults.
+
+**Reserved ids spent by v4: 109, 110.**
+**Reserved ids that remain: 46, 47, 52, 53, 66, 67, 92, 93 — eight, unchanged.**
+
+## Widened enum (append-only: every old value keeps its number and its meaning)
+
+| id(s) | was | becomes | notes |
+|-------|-----|---------|-------|
+| 68+3k (M1..M8 Src) | 0..16 int | 0..17 int | 17 **Arp Step** [0..1], instance-wide: the arp's level row read at the current step. Semantics in "Arp Step as a modulation source" below. |
+
+The destination enum (ids 69+3k, 0..19) does **not** widen in v4, for the third
+revision running. Nothing v4 adds is a modulatable target, and the two
+candidates are refusals rather than omissions: **Arp Rate is not a destination**
+because a modulated rate cannot stay locked to a bar line and the whole feature
+is built on being locked to one, and **Arp Gate is not a destination** because
+a gate is consumed once per step at a stamped sample, not read at audio rate —
+a destination that is sampled once per step is a different mechanism wearing
+the matrix's clothes. Both stay parameters, and both are automatable, which is
+the thing an author actually wanted.
+
+## Block: the arpeggiator — reserved ids 109, 110 and new ids 111..124
+
+| id | name | range | default | unit | curve | meaning |
+|----|------|-------|---------|------|-------|---------|
+| 109 | Arp On | 0..1 int | **0** | | lin | 0 = the arp does not exist: incoming notes reach the voices exactly as in v3, and every id below is read by nothing. 1 = incoming notes stop reaching the voices directly and the arp generates the notes instead. **This is the revision's bit-identity switch**; see the gate above and obligation 4 below. Was reserved in v3. |
+| 110 | Arp Mode | 0..9 int | 0 | | lin | The note order. Enum below, **append-only forever after**. Was reserved in v3. |
+| 111 | Arp Rate | 0.01..40 | 2 | Hz | log | Steps per second, used when Arp Sync = 0 and only then. Same range, default and curve as LFO Rate (id 32) — deliberately, so the editor reuses the readout. |
+| 112 | Arp Sync | 0..9 int | **7** | | lin | The division table of id 33, **verbatim and cited, not restated**: 0 free · 1 four bars · 2 two bars · 3 one bar · 4 1/2 · 5 1/4 · 6 1/8 · 7 1/16 · 8 1/4T · 9 1/8T. It is an append-only list and it does not change in v4. **The division is the length of ONE STEP** — see "The step clock", where that divergence from the LFO grid's whole-cycle reading is stated and argued. At index 0 the arp is free-running: Arp Rate (111) gives steps per second, the transport is not read, and the arp keeps time from prepare(). Default 7 = 1/16, the only rate anyone reaches for first; it costs nothing because Arp On is 0. |
+| 113 | Arp Octaves | 1..4 int | 1 | oct | lin | Length of the octave cycle. 1 = the arp stays in the played octave. |
+| 114 | Arp Oct Mode | 0..2 int | 0 | | lin | 0 Up · 1 Down · 2 Alternate. Composition with the note cycle below — the note counter advances first. |
+| 115 | Arp Gate | 1..200 | 50 | % | lin | Sounding length of a generated note as a percentage of the **nominal** step (never of the swung interval — see below). Over 100 % the note is still sounding when the next step starts; what that does to the voice allocator is stated below and it is not left to the allocator to decide. |
+| 116 | Arp Swing | 0..100 | 0 | % | lin | Delays odd-numbered steps. The exact expression, in beats, is below. 0 selects a no-offset branch outright. |
+| 117 | Arp Hold | 0..1 int | 0 | | lin | Latch. 1 = the arp keeps playing the set after every key is released. The latch set and its replacement rule are below. |
+| 118 | Arp Retrig | 0..1 int | **1** | | lin | 1 = a new chord restarts the pattern at step 0 on that note-on's stamped sample. 0 = free-run: the pattern position is a pure function of the clock and no note-on ever moves it. Default 1 because a keyboard player expects the first note they press to sound when they press it; an author who wants the grid to own the phrase sets 0. Costs nothing — Arp On is 0. |
+| 119 | Arp Vel Mode | 0..2 int | 0 | | lin | 0 As Played · 1 Fixed (id 120) · 2 Pattern (the level row). Exact mapping below. |
+| 120 | Arp Fixed Vel | 1..127 int | 100 | | lin | The velocity every generated note carries when Vel Mode = 1. **The floor is 1, not 0**: this device treats a note-on with velocity 0 as a note-off (spectra.cpp's `data[2] > 0` test), so a generated 0 would be a generated note-off and the arp would silently emit nothing. A parameter that can express "no note" is a parameter that will. |
+| 121 | Arp Steps | 1..16 int | 16 | | lin | Pattern length. The grid rows are ALWAYS sixteen entries long; Steps truncates the READ, never the storage, so shortening and re-lengthening a pattern is lossless. Same reason v3 stores all sixteen LFO levels. |
+| 122 | Arp Chance | 0..100 | 100 | % | lin | Global probability that a step which would sound a new note actually sounds it. 100 selects the no-draw branch outright — no hash is computed and the render is bit-exact. Composition with a future per-step probability is pre-declared below. |
+| 123 | — | | | | | reserved |
+| 124 | — | | | | | reserved |
+
+Registered exactly as the v2 rule says for the tail (name `—`, 0..1, default 0,
+hidden, never read).
+
+## The Mode enum (id 110) — ordering frozen, append-only forever
+
+Let `N = [n0 < n1 < … < n_{c-1}]` be the arp's current note set **sorted
+ascending**, `c ≥ 1` its size, and `H = [h0, …, h_{c-1}]` the same notes in the
+held stack's insertion order, oldest first. Every mode is a cycle of length
+`M(mode, c)`; the element at cycle position `j ∈ 0..M-1` is the note the step
+sounds, before the octave cycle and the step row's octave offset are added.
+
+| value | name | M(c) | element at j |
+|-------|------|------|--------------|
+| 0 | **Up** | `c` | `N[j]` |
+| 1 | **Down** | `c` | `N[c-1-j]` |
+| 2 | **Up-Down Inclusive** | `2c` | `j < c ? N[j] : N[2c-1-j]` — both endpoints repeated. |
+| 3 | **Up-Down Exclusive** | `max(2c-2, 1)` | `j < c ? N[j] : N[2c-2-j]` — endpoints played once. |
+| 4 | **Down-Up** | `max(2c-2, 1)` | `j < c ? N[c-1-j] : N[j-c+1]` — exclusive, from the top. |
+| 5 | **As Played** | `c` | `H[j]` |
+| 6 | **Random** | `c` | `N[idx]`, `idx` from the identity hash — see "Random and Chance". |
+| 7 | **Chord** | `1` | **all of N**, every note on every step. |
+| 8 | **Thumb** | `c ≤ 1 ? 1 : 2(c-1)` | `j` even → `N[0]`; `j = 2t+1` → `N[1+t]`. |
+| 9 | **Pinky** | `c ≤ 1 ? 1 : 2(c-1)` | `j = 2t` → `N[t]`; `j` odd → `N[c-1]`. |
+
+Worked, for `N = [C4, E4, G4]`: Up `C E G` · Down `G E C` · Up-Down Inclusive
+`C E G G E C` · Up-Down Exclusive `C E G E` · Down-Up `G E C E` · Thumb
+`C E C G` · Pinky `C G E G`.
+
+- **Why `max(2c-2, 1)`.** At `c = 1` the natural formula gives a cycle of
+  length 0, which is not a cycle. Modes 3 and 4 degenerate to Up on a single
+  note. Modes 2, 8 and 9 need no guard (`2c` and the `c ≤ 1` leg cover it).
+- **Why there is no "Down-Up Inclusive".** It is mode 2 started half a cycle
+  later, and offering a mode that is another mode's phase is offering a mode
+  nobody can tell apart in a preset list.
+- **As Played survives note-offs.** `heldRemove()` compacts the stack in place
+  and preserves order, so releasing the middle note of a chord leaves the other
+  two in the order they were pressed. This is a property of the existing stack,
+  not a new one.
+- **Chord's cycle length is 1**, which is not a special case in the arithmetic —
+  it is the whole point: with `M = 1` the octave axis advances on **every**
+  step (see the composition rule), so Chord over two octaves alternates the
+  chord at +0 and the chord at +1, which is what a chord arp is for.
+- **Random is a draw, not a walk.** Its cycle length is still `c` so that the
+  octave axis and the loop counter advance exactly as they do under Up; only
+  the element is drawn. It does **not** avoid immediate repeats: a
+  repeat-avoiding draw carries state, and state is what obligation 3 forbids.
+
+## The octave cycle (ids 113, 114) and how it composes with the note cycle
+
+Let `O = Arp Octaves` and let the octave axis have length
+
+```
+L_oct = (Oct Mode == 2 Alternate) ? (O <= 1 ? 1 : 2*O - 2) : O
+```
+
+with offset, in octaves, at axis position `u ∈ 0..L_oct-1`:
+
+- **0 Up** — `+u` → 0, +1, +2, +3
+- **1 Down** — `-u` → 0, −1, −2, −3
+- **2 Alternate** — `u < O ? +u : +(2*O - 2 - u)` → for O = 3: 0, +1, +2, +1.
+  The octave axis is itself an up-down-**exclusive** cycle, which is why its
+  length is `2O-2` and not `2O`; an inclusive one would sit on the top octave
+  for two whole note-cycles.
+
+**The note counter advances first.** With `k` the absolute step number
+(defined in the next section):
+
+```
+j = k mod M                      // note-cycle position — the FAST axis
+u = (k div M) mod L_oct          // octave-cycle position — the SLOW axis
+```
+
+so the arp completes one full traversal of the note cycle before the octave
+moves. `div` is floor division; `k` is never negative (see the step clock).
+
+**The consequence, stated because the other reading exists elsewhere.**
+Up-Down over two octaves bounces **inside octave 0, then inside octave 1** — it
+does not bounce across the whole two-octave span. Some instruments do the
+latter by flattening notes and octaves into one pool first. This contract does
+not, for two reasons: a flattened pool makes the note cycle's length depend on
+the octave mode, so "which counter advances first" stops having an answer; and
+an author who wants the full-span bounce already has an exact tool for it — the
+step row's per-step octave column, which is precisely what that column is for.
+Write the shape you want into sixteen steps and it plays the shape you wrote.
+
+**Final pitch** of a sounding step, with `i = k mod Steps` the pattern index and
+`stepOct(i) ∈ -2..+2` the step row's offset:
+
+```
+pitch = element + 12 * (octOffset(u) + stepOct(i))
+```
+
+**A pitch outside 0..127 makes the step silent.** It is not clamped. A clamped
+note is a wrong note played confidently, and an arp four octaves up from a top-C
+chord should run out of keyboard rather than pile onto the last one. The step
+still advances every index; only the note is not emitted.
+
+## The step clock (ids 111, 112, 115, 116)
+
+**The division names ONE STEP, not the cycle.** This is the one place v4
+deliberately reads the sync table differently from v3's Custom LFO shape, where
+"the division is the length of the WHOLE cycle". Both readings are stated in
+their own sections so neither is a surprise, and the divergence is forced:
+
+- An arp's rate control has named the step in every instrument ever built.
+  "1/16 arp" means 1/16 notes, not sixteen steps crammed into a sixteenth.
+- Arp Steps (121) is variable, 1..16. Under a whole-cycle reading, changing the
+  pattern length would change the step duration — so shortening a pattern from
+  16 to 12 would speed the arp up by a third. A length control that is secretly
+  a tempo control is not a length control.
+
+An LFO has no length parameter, which is exactly why the other reading is right
+for it.
+
+### The arp position `A`
+
+`A` is a real number: **steps elapsed since the arp's origin**. Everything the
+arp does is a function of `A`, and `A` is a function of the engine's clock and
+of nothing else.
+
+- **Synced (Arp Sync > 0) with a transport running** — `A = beatAcc_ / B`,
+  where `B = kSpSyncBeats[ArpSync]` beats per step and `beatAcc_` is
+  **v3's own anchored beat counter, the same variable, read the same way**: an
+  f64 beat position advanced ONE SAMPLE AT A TIME at the pushed tempo,
+  **anchored to the pushed transport beat and never driven by it**, re-anchoring
+  only when the transport starts or when a demonstrably advancing host disagrees
+  by more than 1/64 beat. See the ORCHESTRATOR RULING recorded in v3's
+  determinism obligation 1 and in spectra.cpp's header — the arp is the second
+  consumer of that ruling and adds nothing to it.
+- **Free (Arp Sync = 0)** — `A` accumulates `ArpRate / sr` per sample from
+  prepare(). The transport is not read at all.
+- **Synced with no transport running** — `A` accumulates
+  `bpm / (60 · B · sr)` per sample, with `bpm` the engine's pushed tempo or its
+  120 fallback. This is the ruling's point 3 verbatim: a bank authored at a
+  fixed tempo with the transport stopped must still play.
+
+Then, with `arpOrigin_` the retrigger origin (0 at prepare(), see Hold and
+Retrigger):
+
+```
+Aeff = A - arpOrigin_
+```
+
+`Aeff` is clamped at 0 from below; it can never be negative, because
+`arpOrigin_` is only ever set to a value of `A` that has already occurred.
+
+### The absolute step number `k`, and why it is a modulus and not a counter
+
+```
+k = floor(Aeff)          // the step whose onset most recently passed
+i = k mod Steps          // the pattern index, 0..Steps-1
+L = k div Steps          // the pattern's loop counter
+```
+
+**Every index the arp uses is a modulus of `k`.** Nothing accumulates: not the
+note-cycle position, not the octave-cycle position, not the loop counter, not
+the random stream. This is a deliberate architecture and it buys three things
+that a stateful counter cannot:
+
+1. **A locate lands on the right step.** After the host jumps to bar 33, the arp
+   is at the step bar 33 implies, without having run there.
+2. **A step that does not sound does not renumber the melody.** An OFF step, a
+   tie, a step whose pitch left the keyboard and a step that lost its Chance
+   draw all still advance `k`. The step row is a RHYTHM laid over a melody; a
+   rhythm that renumbered the melody would be a different feature.
+3. **Obligation 3 becomes free.** Randomness keyed on `k` is keyed on a pure
+   function of the clock, so "two renders of the same project are byte-identical"
+   is true by construction rather than by discipline.
+
+### Swing (id 116) — which steps, and by how much
+
+**Odd `k` is delayed. Even `k` is not.** `k` is the ABSOLUTE step number, never
+the pattern index — so an odd-length pattern does not flip the swing on every
+loop, and the swing stays welded to the beat where a listener expects it.
+
+The onset of step `k`, in the `Aeff` domain (units of steps):
+
+```
+onset(k) = k + (k & 1) * (Swing / 300)
+```
+
+In **beats**, when synced with `B = kSpSyncBeats[ArpSync]` beats per step, the
+delay applied to an odd step is exactly
+
+```
+delay_beats = B * Swing / 300
+```
+
+and when free-running, `delay_seconds = (Swing / 300) / ArpRate`.
+
+At Swing = 100 the delay is `B/3`: a pair of steps spanning `2B` beats has its
+second onset at `4B/3`, which is the 2:1 triplet feel and the universal meaning
+of full swing. It stops there rather than running to a full step, because a
+control whose top end collapses the pair onto one onset has a top end nobody can
+use. **Swing = 0 selects a no-offset branch outright** — `onset(k) = k`,
+bit-exact — the same discipline as smooth 0 and Warp Amt 0.
+
+### Gate (id 115) and what overlap does to the voice allocator
+
+A note started at step `k` ends at
+
+```
+off(k) = onset(k) + Gate / 100                       // no tie
+off(k) = onset(k + m) + Gate / 100                   // tied through m steps
+```
+
+in `Aeff` units. **Gate is a fraction of the NOMINAL step and swing does not
+scale it** — a swung pair keeps two notes of the same length and moves the
+second one, which is what swing is; a gate that stretched with the swing would
+turn a rhythm control into a duration control.
+
+Gate > 100 % means step `k+1`'s note-on is emitted while step `k`'s note is
+still sounding. **The arp does not get its own voice allocator and does not
+ask for one.** It emits note-ons and note-offs; the ordinary v1 allocator —
+first free voice, else steal the quietest, capped by Voices (id 39) — handles
+them exactly as it handles a played chord. Two rules make that safe, and both
+are the arp's obligation, not the allocator's:
+
+- **Same note number, still sounding: the arp emits its note-off first, at the
+  same stamped sample, immediately before the new note-on.** Without this rule
+  the generated off for step `k` would arrive after step `k+1`'s on, and
+  `noteOff()` releases the NEWEST matching voice — so the arp would release the
+  note it had just started and leave the old one ringing forever. The
+  consequence is worth stating plainly: **gate > 100 % cannot overlap a note
+  with itself.** A one-note Up arp at 200 % gate re-attacks cleanly; overlap
+  happens between DIFFERENT note numbers, which is the only place overlap means
+  anything.
+- **In Mono and Legato (Voice Mode 1, 2) overlap is a glide, not a stack.**
+  Legato's overlapped note-ons do not retrigger envelopes, so an arp at
+  gate > 100 % under Legato is a legato arp — which is the reason to reach for
+  that combination.
+
+An author who asks for Chord × 4 octaves × 200 % gate can demand more voices
+than id 39 allows. That is a voice-steal, it steals the quietest, and it is the
+same answer a played chord gets. Nothing is special-cased.
+
+## Hold (117) and Retrigger (118) — the four combinations
+
+Two sets exist and they are not the same set:
+
+- **`heldSet`** — the physical held notes. This is spectra.cpp's existing
+  64-deep mono/legato stack, which the v2 notes already require be "maintained
+  in EVERY mode". The arp **reads it and never writes it**; see "What the arp
+  does to the held-note stack".
+- **`latchSet`** — the arp's own set, in force only while Arp Hold = 1.
+
+One condition drives both features, and it is a condition the code already
+computes: **`heldSet` was EMPTY immediately before this note-on joined it** —
+spectra.cpp's `otherHeld == false` in `noteOn()`. Call that a **new chord**.
+
+- **Latch rule (Hold = 1).** A new chord CLEARS `latchSet` first. Every note-on
+  then adds to `latchSet`. Note-offs never remove from it. So: press a chord,
+  release it, the arp keeps running; press one new note and the latch becomes
+  that note alone; press more notes before releasing and they join.
+- **Retrigger rule (Retrig = 1).** A new chord sets
+  `arpOrigin_ = A` at that note-on's **stamped sample**, and step 0 fires at
+  that same sample. A note-on joining a non-empty set never retriggers —
+  otherwise rolling a chord on would stutter the pattern once per finger.
+
+The four combinations, in full:
+
+| Hold | Retrig | behaviour |
+|------|--------|-----------|
+| 0 | 0 | **Free-run, unlatched.** The pattern position is a pure function of the clock; note-ons never move it. Pressing and releasing keys changes WHICH notes the steps play, from the next step onward. Release everything and the arp goes quiet after the sounding note's gate; press again and it rejoins the grid wherever the grid has got to. This is the "locked to the bar line" setting. |
+| 0 | 1 | **Retrigger, unlatched.** A new chord resets the position to step 0 at its stamped sample and sounds step 0 immediately. Adding a finger to a held chord does not. Release everything and the arp stops; the next press starts a new phrase from step 0. The default pair. |
+| 1 | 0 | **Latched, free-running.** A new chord replaces `latchSet` but does not move the position — the phrase changes notes without changing its place on the grid. Turning keys into a chord progression over a running pattern. |
+| 1 | 1 | **Latched, retriggering.** The same new-chord press both replaces `latchSet` and resets the position to step 0. One condition, two consequences, and they are independent because the two parameters are. |
+
+**Switching Hold while notes are held.** 0 → 1 seeds `latchSet` from the current
+`heldSet`; if that is empty, the arp stays quiet until a key arrives. 1 → 0
+drops `latchSet` and the arp immediately plays `heldSet`, which may be empty —
+in which case it goes quiet after the sounding note's gate. Neither transition
+emits a note-on: a parameter change may stop notes, never start them (see below).
+
+**CC 123 (all notes off)** empties `heldSet` — it already does — and **also
+empties `latchSet`**, and the arp's sounding generated notes release. **CC 120
+(all sound off)** does the same and additionally clears the arp's
+sounding-note bookkeeping, since the voices it referred to are gone. After
+either, the arp emits nothing until a note-on arrives. A panic that a latch
+could outlive would not be a panic.
+
+## Velocity (ids 119, 120) and the level row
+
+- **0 As Played** — the velocity of the key that contributed the note. This
+  requires the held stack to carry velocities, which it did not; see "What the
+  arp does to the held-note stack". In Chord mode every note carries its own.
+- **1 Fixed** — every generated note carries Arp Fixed Vel (id 120), whatever
+  was played.
+- **2 Pattern** — the level row supplies it, at the PATTERN index `i = k mod
+  Steps`:
+
+  ```
+  velocity = 1 + (int)(126 * L(d_i) + 0.5)          // L(d) = d / 15
+  ```
+
+  so digit 0 → velocity **1** and digit 15 → velocity **127**. The floor is 1
+  and not 0 for id 120's reason: 0 is a note-off on this device's wire, so a
+  step drawn at the bottom of the row would emit nothing instead of emitting
+  quietly. An author who wants a step silent turns the step OFF in the step row,
+  which is the control that means that.
+
+  Pattern is **absolute**, not a scaling of the played velocity. A mode that
+  multiplies the two is a legitimate fourth value and appends as `3` under the
+  append-only rule; v4 does not guess which one a bank wants.
+
+The velocity floor the voices already apply (`velAmp = 0.30 + 0.70·vel/127`,
+v1's fixed routing) is downstream of all three modes and is not touched.
+
+## Chance (id 122) and Random mode — pure functions of a stable identity
+
+Both draws come from one hash, built the way v3's Random-per-note source (13)
+and its one-shot S&H draw are built: **splitmix64 over a stable identity, never
+a stream, never a clock, no RNG state carried between draws.**
+
+The identity is **the note set, the step index and the loop counter**. Since
+`k = L · Steps + i`, the pair (step index, loop counter) IS `k`, so the identity
+is two terms and not three:
+
+```
+mix64(x):  x += 0x9E3779B97F4A7C15
+           x ^= x >> 30;  x *= 0xBF58476D1CE4E5B9
+           x ^= x >> 27;  x *= 0x94D049BB133111EB
+           x ^= x >> 31;  return x
+
+setHash = mix64(c)                                   // c = the note count
+for each note in N, ASCENDING:                       // never the played order
+    setHash = mix64(setHash ^ (u64)noteNumber)
+
+arpHash(k, salt) = mix64( setHash ^ (u64)k ^ ((u64)salt << 56) )
+```
+
+`salt = 1` for the Random-mode note draw, `salt = 2` for the Chance draw — two
+independent draws from one identity, the same idiom v3 used to salt a one-shot
+S&H by its LFO number. This is the finaliser spectra.cpp already carries; there
+is still no second hash in this device.
+
+**The set is hashed ASCENDING, deliberately**, even in As Played mode. Playing
+C-E-G and playing G-E-C are the same chord, and a random pattern that changed
+because a player rolled the chord the other way would be a bug the player could
+hear and never explain.
+
+**Random-mode index**, from `h = arpHash(k, 1)`:
+
+```
+idx = (u32)(((h >> 40) * (u64)c) >> 24)              // exactly 0..c-1
+```
+
+A multiply-shift over the top 24 bits, not a modulo — integer arithmetic with
+no bias argument to have and no float in the path.
+
+**Chance test**, from `h = arpHash(k, 2)`, with `C = Arp Chance` in 0..100:
+
+```
+sounds  iff  (u32)(((h >> 40) * 100u) >> 24) < C
+```
+
+The left side lands in 0..99, so `C = 100` always passes and `C = 0` never does.
+**At C = 100 the branch is SELECTED OUT** — no hash is computed at all. The two
+agree exactly; the selection is the bit-exactness discipline (Warp Amt 0,
+smooth 0, Linear curve), not a correction.
+
+- **Chance is tested only on steps that would sound a NEW note.** An OFF step is
+  already silent; a TIE is not a new note and is not tested.
+- **A step that loses its draw is silent but still advances every index.**
+  Chance drops notes; it does not stall the melody. The alternative — hold the
+  previous note when the draw fails — is a different feature (it is a tie), and
+  it would make the pattern position depend on the draw, which would cost
+  property 2 above.
+- **A tie following a dropped step is silent**, because a tie holds the previous
+  note and there is no previous note to hold.
+
+**Per-step probability: v4 specifies none, and here is the composition rule for
+the revision that does.** The step row leaves three bits per step spare (below).
+They cannot carry a probability with their natural sense, because the step row's
+default is a usable pattern rather than all zeros, and a zero probability field
+would mean "never" — so the row's own default would be an arp that plays
+nothing. A later revision therefore adds a **third row**, `arpp`, sixteen hex
+digits with the level row's exact shape and a default of sixteen `f`s, giving
+`q_i = d_i / 15`. The composition is a multiply:
+
+```
+p_i = (Chance / 100) * q_i
+```
+
+so a global Chance of 100 leaves the per-step value alone and a per-step of 1
+leaves Chance alone, and neither control can surprise the other. The identity
+hash needs no new term — it already carries `k`. This is written down now so
+that the row, when it lands, is an append and not a renegotiation.
+
+## The step grid — STATE, not parameters
+
+Two rows in the `nxspc1;…` block, following v3's LFO grid precedent exactly: the
+same one-line ASCII record, the same lowercase-hex charset, the same
+leftmost-is-step-0 ordering, the same `d/15` level mapping, the same
+"a missing block reads as its default", and the same cost, stated as plainly as
+v3 stated it — **a drawn arp pattern cannot be automated and cannot be a matrix
+destination.** It is shape, like a table is shape.
+
+### `arpl` — the level / velocity row
+
+| key | value | meaning |
+|-----|-------|---------|
+| `arpl` | exactly 16 characters from `[0-9a-f]` | The arp's level row. Leftmost digit is **step 0**; rightmost is step 15. Lowercase only, on write and on read — strict, so write and read are exact inverses. Digit `d` is level `L(d) = d/15`, digit 0 exactly 0.0 and digit 15 exactly 1.0. **Verbatim the `lfo1`/`lfo2`/`lfo3` encoding.** Read by Vel Mode 2 (Pattern) and by the Arp Step modulation source. |
+
+**Default when the record is absent: `ffffffffffffffff`** — level 1.0 on every
+step.
+
+### `arps` — the step row
+
+| key | value | meaning |
+|-----|-------|---------|
+| `arps` | exactly 32 characters from `[0-9a-f]` | The arp's step row. **Two digits per step, high nibble first**, sixteen pairs; the leftmost pair is step 0. Lowercase only. The pair for step `n` is `v = 16·hi + lo`, laid out below. |
+
+**Default when the record is absent: `05050505050505050505050505050505`** —
+`05` sixteen times: every step on, octave offset 0, no tie. **Not `01`** — the octave field is BIASED (code 2 is offset 0), so the byte that means "on, unshifted, untied" is `0x05` and not `0x01`. Stated because a reader who skims the bit table will assume the other one.
+
+| bit(s) | mask | field | meaning |
+|--------|------|-------|---------|
+| 0 | `0x01` | **Step On** | 1 = this step participates. 0 = rest. |
+| 1..3 | `0x0E` | **Octave** | code `c = (v >> 1) & 7`; offset = `c - 2`, so `c ∈ 0..4` is `-2..+2`. |
+| 4 | `0x10` | **Tie** | read only when Step On = 1. |
+| 5..7 | `0xE0` | reserved | written 0 by every v4 build, **IGNORED on read**. |
+
+The three states of a step, and there are exactly three:
+
+| Step On | Tie | behaviour |
+|---------|-----|-----------|
+| 1 | 0 | **Sound** a new note: this step's element, this step's octave offset, this step's velocity if Vel Mode = Pattern. |
+| 1 | 1 | **Hold** the previous note through this step. No new note-on, no new note-off; the sounding note's `off` moves to this step's onset plus the gate. This step's octave offset is **ignored** — there is no new note to offset. A tie whose predecessor did not sound (a rest, a dropped Chance draw, a pitch off the keyboard, or the very first step after the arp started) is **silent**: a tie with nothing to hold is nothing. |
+| 0 | — | **Rest.** Tie is not read. The previous note ends at its own gate, unaffected. |
+
+**Tie-chain bound.** A note is held through at most 16 consecutive tie steps;
+the 17th forces the note off at its own onset. A pattern in which every one of
+its `Steps` steps is a tie sounds nothing at all (no step ever starts a note),
+so the bound is unreachable in practice — it exists so that no reading of the
+grid can produce an unbounded note, which is the only failure mode here that a
+user cannot recover from by releasing a key.
+
+### What malformed means, and what merely-newer means
+
+The distinction v3 drew between a refusal and a degradation applies unchanged,
+and the two rows sit on opposite sides of it in one place each:
+
+- **Refused** (the whole `setStateString()` refuses, nothing is applied, the
+  device is left exactly as it was): a wrong length, any character outside
+  `[0-9a-f]`, any uppercase character, a duplicate `arpl` or `arps` key, a
+  record with no `=`. These are strings this writer could not have produced.
+- **Degraded, not refused**: an octave code of 5, 6 or 7 **clamps to 4**
+  (offset +2), and bits 5..7 are **masked off**. These are values a LATER,
+  wider build could legitimately write, and the versioning rule's job is to let
+  a newer state land on an older build rather than break it — exactly the
+  argument v3 made for a Table value of 9 arriving as a clamped 8.
+
+## src/plugin/spectra_presets.inc — the `SPARP` macro
+
+The v1/v2/v3 macros are unchanged. v4 adds one, in the established style:
+
+```
+SP_PRESET("SQ Thumb Ladder")
+SP(109,  1)          // Arp On
+SP(110,  8)          // Arp Mode = Thumb
+SP(112,  7)          // Arp Sync = 1/16
+SP(113,  2)          // Arp Octaves
+SP(115,  85.f)       // Arp Gate
+SP(116,  58.f)       // Arp Swing
+SP(119,  2)          // Arp Vel Mode = Pattern
+SPARP("f9c6f8c4fac6f8c4", "05051505070515050505150507050005")
+SP_END()
+```
+
+| macro | signature | rules |
+|-------|-----------|-------|
+| `SPARP` | `SPARP("<16 lowercase hex>", "<32 lowercase hex>")` | The level row then the step row, in that order — the order they appear in this document and in the state string. **Both arguments are mandatory.** A preset that wants a default row writes the default string (`ffffffffffffffff`, or `05` sixteen times) rather than omitting the argument: a two-argument macro with an optional argument is a preprocessor trap and this file has enough of those. At most one `SPARP` per preset. |
+
+**Placement** is `SPLFO`'s: anywhere between `SP_PRESET` and `SP_END`, in any
+order relative to the `SP` rows, convention parameters-first-state-after, and it
+does **not** count against the 64-override cap, which is a cap on `SP` rows.
+
+**A state macro never sets a parameter**, v3's rule, unchanged and worth
+restating because `SPARP` is where a bank author will trip on it next:
+**`SPARP(…)` does not set Arp On.** The row must say `SP(109, 1)` itself. The
+bank's range checker enforces the pairing exactly as it enforces v3's: **an
+`SPARP` in a preset that does not set id 109 to 1 is a checker failure, not a
+silent no-op.**
+
+The checker does **not** require `SP(119, 2)` (Vel Mode = Pattern) alongside an
+`SPARP`, and the asymmetry with v3's grid-requires-Custom-shape rule is
+deliberate rather than an oversight. v3's pairing exists because a drawn LFO
+grid with a non-Custom shape is read by nothing at all. An arp level row is
+never read by nothing: it feeds Vel Mode 2 **and** the Arp Step modulation
+source (17), which is live whenever the arp is on regardless of Vel Mode. So the
+condition that makes a row dead is Arp On = 0, and that is the condition the
+checker tests.
+
+**`loadPreset` resets the arp state too.** v3's extension of "a preset is
+COMPLETE however short it is" covers the two new rows without amendment:
+`loadPreset` resets every id to its default AND every state block — `lfo*`,
+`smooth*`, `cc`, `wt*`, and now `arpl` and `arps` — to its default, then applies
+the row's overrides and state macros. Switching from a patch with a drawn arp
+pattern to a preset that mentions none lands on exactly the state a fresh
+instance would have.
+
+## Arp Step as a modulation source (matrix source 17)
+
+| value | name | domain | wire |
+|-------|------|--------|------|
+| 17 | Arp Step | [0..1] | `L(d_i)` — the level row's digit at the current pattern index `i = k mod Steps`, as `d/15`. **Instance-wide**, like Aftertouch (8) and the three v3 MIDI sources. |
+
+- **It follows the STEP CLOCK, not the notes.** An OFF step, a tie, a dropped
+  Chance draw and an empty note set all leave it reading the grid's level at the
+  current index. That is what makes it useful: it is a tempo-locked sixteen-step
+  staircase that the filter or the position can walk in lockstep with the
+  pattern the arp is playing, and a staircase that dropped to zero every rest
+  would be a different and much worse control.
+- **It is a hard staircase.** There is no smoothing: the arp grid has no
+  `smooth` companion and does not get one in v4. An author who wants it smoothed
+  has the matrix curves (101..108) for shaping and a destination's own lag for
+  the rest.
+- **It is 0 whenever Arp On is 0**, and 0 after prepare() until the first step
+  onset. This is the inert condition that matters and it is the one the
+  bit-identity gate rests on: with the arp off, a slot pointed at source 17
+  contributes exactly nothing, which is the same as v3's contribution of exactly
+  nothing.
+- **Cadence** is v2's, unchanged: per voice per sample for ordinary
+  destinations, sampled at the absolute-timed control tick for destinations 11,
+  12 and 17..19.
+
+## What the arp does to the held-note stack, and to the voice engine
+
+**To the stack: nothing. It reads it and never writes it.** The 64-deep stack
+that Mono and Legato maintain stays the record of PHYSICAL keys, in every voice
+mode, exactly as the v2 notes require. Generated note-ons and note-offs bypass
+`heldPush`/`heldRemove` entirely and enter the voice engine at the point
+`noteOn()`/`noteOff()` do their voice work. If generated notes were pushed onto
+that stack, the stack would describe notes nobody is holding, and Hold,
+Retrigger and the mono fallback — all three of which read it — would each be
+wrong in a different way.
+
+**One addition to the stack, and it is data, not semantics:** it gains parallel
+velocity and channel arrays, written by `heldPush` and compacted by
+`heldRemove` alongside the note numbers. Vel Mode 0 (As Played) needs the
+velocity, and the identity hash `noteRandom(channel, note, absSample)` that
+every generated note-on feeds needs the channel. Nothing about the stack's
+ordering, depth, drop-oldest rule or maintained-in-every-mode rule changes.
+
+**The mono note-off fallback is disabled while Arp On = 1.** In Mono and Legato,
+v2 falls back to the most recent still-held note when a note-off arrives. With
+the arp running, the arp's own note-offs are the truth, and a fallback to a
+physical key would sound a note the arp did not schedule — inventing MIDI at a
+note-off, which is precisely what obligation 2 exists to prevent. The fallback
+returns the instant Arp On goes to 0.
+
+**Arp On 0 → 1 with notes held.** Every voice sounding from a direct note-on is
+**released** (an ENV release, not a cut) at frame 0 of the block in which the
+change is observed. The held stack is untouched — it was maintained anyway — so
+the arp starts from the truth. `latchSet` is seeded from `heldSet` if Hold = 1.
+`arpOrigin_` is left alone if Retrig = 0; if Retrig = 1 it is left alone too,
+because a parameter change is not a new chord. The arp begins at the next onset.
+
+**Arp On 1 → 0 with notes held.** Every note the arp generated is released at
+frame 0 and its bookkeeping is cleared. **Notes still physically held do NOT
+re-sound.** A key that was never delivered to the voice engine cannot be resumed
+without synthesising a note-on the player did not play, and this contract draws
+the line there: **the arp may invent MIDI; a parameter change may not.** The
+player re-presses. This is the same class of concession v2 made for a mid-phrase
+Voice Mode switch, and it is stated for the same reason.
+
+**Why both transitions are block-granular and not stamped.** Parameters are not
+events in this device and never have been — they are read once per block into
+`Blk` — so the transition lands at frame 0 of the block that observes it. That
+is block-size dependent by construction, exactly as v2's Voice Mode switch and
+v3's transport re-anchor already are, and it is why the bit-identity gate below
+is stated over renders in which the arp's own parameters are not automated
+mid-render. Every other property in this section is invariant.
+
+## v4 id map
+
+| block | ids | functional | note |
+|-------|-----|-----------|------|
+| v1 (frozen) | 0..41 | 42 | |
+| v2 blocks (frozen) | 42..99 | 50 | |
+| v3 blocks (frozen) | 100..110 | 9 | two reserved ids spent below |
+| — reserved spent | 109, 110 | +2 | Arp On, Arp Mode |
+| arpeggiator | 111..122 | 12 | continuous with 109..110 above it |
+| v4 reserved tail | 123..124 | 0 | |
+
+**Arp block, first..last: 109..124** — fourteen functional ids (109..122) and a
+two-id reserved tail (123, 124), one contiguous run with no hole in it.
+
+**125 ids total (0..124): 115 functional, 10 reserved.** `kSpParamCount` goes
+111 → 125.
+
+### Budget — v4 fits, and it is the last revision that will
+
+**125 ≤ kMaxParams = 128 (internal_base.h). v4 fits and the cap is NOT raised.**
+
+**But it leaves THREE.** The v2 rule that every revision has followed says new
+ids arrive in blocks with reserved tails; three ids cannot hold a block and a
+tail, and v4's own tail is two of the three. So, filed here in advance, in full,
+so that the next author does not have to re-derive it:
+
+> **The next revision must raise `kMaxParams` from 128 to 256.** It is one line
+> in `src/plugin/internal_base.h`. The precedent is the whole history of the
+> constant: 16 → 64 when Spectra v1 arrived with 42 ids, 64 → 128 when v2
+> arrived with 100. The justification is the one that header already writes
+> down and it does not weaken with the number: **this is a per-instance array
+> bound, not an id space.** Ids ARE indices and a saved set stores them, so
+> raising the cap cannot disturb any existing device — every id that was 0..15
+> is still 0..15, no device gains or loses a parameter, and no state file
+> changes by a byte. The cost is 128 further unused slots per internal
+> instance: a `ParamInfo` (two `std::string`, three `f32`, three `bool`, a
+> `u32` — about 88 bytes) plus an `atomic<f32>`, so roughly 12 KB per instance,
+> a few hundred kilobytes across a project with thirty devices in it. What it
+> buys is the property the fixed array exists for and which no other layout
+> gives: `addParam()` can never allocate, so a device's parameter list is built
+> without a heap call and `process()` reads a member array with no indirection.
+
+v4 does not make that raise, because v4 does not need it and a cap raised
+speculatively is a cap nobody checks. It is written here rather than left to be
+discovered, which is this document's habit.
+
+# Determinism obligations (v4)
+
+Every one of these is a gate, not an aspiration, and they extend rather than
+replace v3's nine. The rule they all serve is still the one v1 wrote: the same
+input renders the same audio, in blocks of 1 and of 1024, in the daemon and in
+process. **v4 is the first feature in this instrument that invents its own
+MIDI**, so obligations 2 and 4 below are new in kind and not only in subject.
+
+1. **The step clock derives from the transport beat when synced and from
+   accumulated phase when free — never from wall time.** Synced with a
+   transport, `A = beatAcc_ / kSpSyncBeats[ArpSync]`, where `beatAcc_` is the
+   f64 beat counter v3 introduced: advanced ONE SAMPLE AT A TIME at the pushed
+   tempo, **anchored to the pushed transport beat and never driven by it**,
+   re-anchoring only when the transport starts or when a demonstrably advancing
+   host disagrees by more than 1/64 of a beat. This is the ORCHESTRATOR RULING
+   recorded in v3's obligation 1 and in spectra.cpp's header, **cited and reused
+   verbatim, not re-derived** — the arp is its second consumer and changes
+   nothing about it. Free-running, or synced with no transport, `A` accumulates
+   per sample from prepare(), which is the ruling's own point 3. Either way the
+   clock is the engine's, never the wall's. A re-anchor is a block-boundary
+   event by construction — the transport arrives once per block — so on a
+   re-anchor the arp emits note-offs for what is sounding and resumes at the new
+   position; **it never replays skipped steps**, and the bit-identity gate is
+   stated over renders whose transport does not re-anchor mid-render, exactly as
+   v3's is.
+
+2. **Generated note-ons and note-offs land at STAMPED SAMPLES inside the block,
+   exactly as incoming MIDI does. This is the acid test and it is stated as
+   one.** The arp runs inside the per-sample event loop: `Aeff` advances one
+   sample at a time, and when it crosses an onset the arp calls the same
+   `noteOn()`/`noteOff()` bodies an incoming event calls, at that sample, with
+   that sample's absolute position as the identity stamp. **A project containing
+   an arp must render `cmp`-identical at block sizes 1, 7, 64, 1024 and at the
+   host's own irregular blocking.** An arp that emitted at the top of the block
+   would quantise every note to the block boundary, and the same MIDI in blocks
+   of 1 and of 1024 would produce different audio — which is the exact failure
+   the note queue was built to prevent, arriving through a new door.
+   - **Ordering at a coincident sample is fixed**: incoming MIDI first, then the
+     arp. A note-on arriving on a step boundary is in the set that step plays,
+     and can retrigger the pattern to that step. Within the arp at one sample,
+     **note-offs precede note-ons**, which is what makes the same-note
+     re-attack rule above work.
+   - **The arp cannot overflow the event queue, because it never enters it.**
+     Generated events are applied directly at their sample and consume no
+     queue slot, so no density of arp output can push an incoming note-off out
+     of the queue.
+
+3. **Random mode and Chance are pure functions of a stable identity — the note
+   set, the step index and the pattern's loop counter — hashed the way v3's
+   Random-per-note source (13) and its one-shot S&H draw are hashed: splitmix64
+   over the identity, never a stream, never a clock.** The construction is
+   spelled out above; `setHash` folds the note numbers ASCENDING so a rolled
+   chord is the same chord, and `k` carries the step index and the loop counter
+   together because `k = L·Steps + i`. No RNG state is carried between steps, no
+   draw depends on a previous draw, and voice stealing cannot perturb either.
+   **Two renders of the same project must be byte-identical, and this is a
+   gate**: the regression suite renders every arp preset twice in one process
+   and once in a fresh process and `cmp`s all three.
+
+4. **Bit-identity, and it is the release gate.** With Arp On at its default (0),
+   **every existing patch and all 97 factory presets render byte-identically to
+   v3.** Not "mathematically equal" — `cmp`-identical WAV, over the full 97-row
+   bank plus Init, at 44.1, 48 and 96 kHz, at block sizes 1, 7, 64 and 1024,
+   against renders taken from the v3 tip. This holds by construction and not by
+   care: Arp On = 0 selects the v3 MIDI path outright (incoming notes reach
+   `noteOn()` unchanged), source 17 is unreachable because matrix slots default
+   to Off, the held stack's new velocity and channel arrays change no
+   arithmetic, and no v4 default is anything other than inert. **v4 has no
+   stated exception**, which is the one thing it does that v3 could not.
+
+5. **The arp writes nothing the rest of the instrument reads.** It reads the
+   held-note stack and never writes it; it allocates no voices and asks for no
+   allocator of its own; it adds no destination to the matrix. So the voice
+   engine's determinism arguments — v1's allocator, v2's block-size invariance,
+   v3's per-note identity — are unchanged by this revision rather than extended
+   by it, and none of them had to be re-proved.
+
+6. **Swing 0, Chance 100 and Arp On 0 are SELECTED branches, not computed
+   ones.** No offset arithmetic at Swing 0, no hash evaluated at Chance 100, no
+   arp code reached at all with Arp On 0 — the same discipline Warp Amt 0,
+   Noise Color 1.0, smooth 0 and the Linear matrix curve already follow, and for
+   the same reason: mathematically equal is not bit-identical, and the gate is
+   the second one.
+
+7. **Every index the arp uses is a modulus of the absolute step number `k`, and
+   `k` is a floor of the clock.** Nothing in the arp accumulates: not the note
+   position, not the octave position, not the loop counter, not the randomness.
+   A locate therefore lands on the step the bar implies without the arp having
+   run there, and a step that does not sound cannot renumber the ones that do.
+   This is the property that makes obligations 1 and 3 hold together rather than
+   separately.
+
+8. **No arp arithmetic goes through a locale-sensitive formatter or a
+   transcendental.** The two new state records are hex; the level mapping is
+   `d/15`; the swing offset is `Swing/300`; the gate is `Gate/100`; the two
+   random draws are integer multiply-shifts. There is no `pow`, no `exp`, no
+   table and no `printf` of a float anywhere in the arp, so there is no libm
+   version and no `de_DE` in this path.
+
+# What v4 does NOT change
+
+Stated so nobody rediscovers it. The destination enum (0..19) does not widen,
+for the third revision running. The sync division table does not change — v4
+cites it and reads it per-step, which is a reading and not an edit. The eight
+factory tables, their generation and their mip policy do not change. The v1
+fixed routings stay live and still sum with the matrix. The matrix stays eight
+slots and gains no ninth. The LFO Custom grid, its smooth, and its whole-cycle
+reading of the division are untouched. The 64-override cap on a preset row stays
+64. The `.nxp` format, the user-preset contract and the path escaping are
+untouched. `kMaxParams` stays 128 — see the budget above for why that is the
+last time this sentence can be written.
+
+# v4 resolutions — where the brief was ambiguous or impossible
+
+Recorded in v3's habit, because v3's author was right that this list is the
+useful part. Each is a place the design was under-determined or self-
+contradictory, and each was **resolved and written down** rather than invented
+silently.
+
+1. **"Reuse the LFO sync-division table verbatim" vs. what a division means.**
+   v3's Custom LFO shape reads the division as the length of the WHOLE
+   sixteen-step cycle. An arp cannot: Arp Steps (121) is variable, so a
+   whole-cycle reading makes the pattern-length knob a tempo knob. **Resolved:
+   the TABLE is verbatim and shared; the READING is per-step for the arp and
+   per-cycle for the LFO.** Both readings are stated in their own sections. The
+   divergence is real and is the single most confusable thing in v4, which is
+   why it is argued in two places rather than mentioned in one.
+
+2. **Which of the ten reserved ids to spend.** The brief says to spend them
+   "where they sit contiguously and sensibly". Only 109/110 do both: the other
+   eight sit in pairs inside four unrelated feature blocks, and v3's own
+   practice (60/61 went to the LFOs their block owns) says a reserved id belongs
+   to its block. **Resolved: spend 109 and 110, leave eight.** Scattering an
+   arpeggiator across sub, warp, ENV3 and matrix to save four indices would have
+   cost every future reader more than the indices are worth — v3's own argument
+   for refusing 92/93.
+
+3. **Which two arp params may take 109/110.** The v2 rule requires that a spent
+   reserved id's default be 0 and that 0 mean "no effect", because a v3 `.nxp`
+   writes every id including the reserved ones as 0. Only seven arp params have
+   a default of 0. **Resolved: Arp On (0 = off) and Arp Mode (0 = Up).** The
+   choice is also the readable one — the two ids that open the block are the
+   switch and the mode.
+
+4. **Up-Down across multiple octaves: bounce per octave, or across the whole
+   span?** Both exist in shipping instruments. The brief asks "which counter
+   advances first", which presupposes two composed counters, and a flattened
+   note×octave pool has no answer to that question. **Resolved: two axes, note
+   fast, octave slow — so Up-Down bounces inside each octave in turn.** The
+   consequence is named in the contract, and the full-span bounce is delegated
+   to the step row's per-step octave column, which is exactly the control that
+   expresses it.
+
+5. **"Chord = every held note on every step" leaves the octave cycle
+   undefined.** With no note axis to traverse, the octave axis has nothing to
+   wait for. **Resolved: Chord's note-cycle length is 1**, which falls out of the
+   composition rule with no special case and gives the musically right answer —
+   Chord × 2 octaves alternates chord-at-+0 and chord-at-+1.
+
+6. **Up-Down Exclusive and Down-Up have a cycle length of 0 on a single note.**
+   `2c-2 = 0` at `c = 1`. **Resolved: `max(2c-2, 1)`**, so both degenerate to Up.
+   Thumb and Pinky get the same guard at `c = 1`.
+
+7. **Gate > 100 % on a repeated note number is undefined, and the naive reading
+   is a stuck-note bug.** `noteOff()` releases the NEWEST matching voice, so a
+   generated off arriving after the next step's on would release the wrong
+   voice and leave the old one ringing for the rest of the session. **Resolved:
+   the arp emits its note-off for the outgoing copy immediately before the
+   note-on for the new one, at the same stamped sample, offs-before-ons.** The
+   honest consequence — gate > 100 % cannot overlap a note with itself — is
+   stated in the contract rather than left to be found.
+
+8. **Whether the gate scales with swing.** Undetermined by the brief.
+   **Resolved: gate is a fraction of the NOMINAL step and swing does not scale
+   it**, so a swung pair keeps two equal-length notes and moves the second one.
+   A gate that stretched with swing would silently turn a feel control into a
+   duration control.
+
+9. **What Swing = 100 % means.** "Delayed by how much" has two conventions: a
+   third of a step (the triplet feel) or a whole step (the pair collapses).
+   **Resolved: `delay_beats = B · Swing / 300`, so 100 % is exactly `B/3`, the
+   2:1 triplet.** The other convention's top end is unusable, and a control
+   whose last 20 % nobody can turn to is a badly scaled control.
+
+10. **Whether a step that does not sound advances the melody.** OFF steps, ties,
+    dropped Chance draws and out-of-range pitches all raise it. **Resolved:
+    every index is a modulus of `k`, so all four advance everything.** The
+    alternative — a counter that only ON steps advance — needs state, and state
+    cannot survive a locate. This resolution is the load-bearing one: it is what
+    makes determinism obligations 1, 3 and 7 a single property instead of three
+    negotiated ones.
+
+11. **Per-step probability.** The brief makes it optional ("if you specify
+    one"). The step row's three spare bits cannot carry it: the row's default is
+    a usable pattern rather than all zeros, and a zero probability field would
+    make the default row an arp that plays nothing. **Resolved: v4 specifies
+    none, and pre-declares the shape of the one that lands later** — a third row
+    `arpp` with the level row's exact encoding and an all-`f` default, composing
+    as `p_i = (Chance/100) · q_i`, needing no new hash term. Naming the future
+    record now makes it an append instead of a renegotiation.
+
+12. **A default that is not all zeros.** v3's rule is "a missing block reads as
+    its default, and every default is inert" — and for the LFO grids inert means
+    all zeros. An all-zero arp step row is an arp that plays nothing, which is a
+    broken default rather than an inert one. **Resolved: the arp rows' defaults
+    are `ffffffffffffffff` and `05`×16, and the inert switch is Arp On (109),
+    not the grid.** The rows are shape; the parameter is the off switch. Stated
+    loudly in both places because it is a genuine divergence from the LFO
+    precedent this feature otherwise copies exactly.
+
+13. **What the checker must enforce alongside `SPARP`.** v3's rule is that a
+    state macro never sets a parameter and the checker enforces the pairing.
+    **Resolved: `SPARP` requires `SP(109, 1)` and does NOT require
+    `SP(119, 2)`** — the level row is never dead when the arp is on, because it
+    feeds matrix source 17 whatever Vel Mode says. The asymmetry with the LFO
+    rule is argued in place so it does not read as an oversight.
+
+14. **Whether a parameter change may start notes.** Turning the arp off with
+    keys held, and turning Hold off with a latch running, both raise it.
+    **Resolved: a parameter change may STOP notes and may never START them.**
+    The arp is licensed to invent MIDI; a knob is not. So Arp On 1 → 0 releases
+    the generated notes and does not resume the held keys — the player
+    re-presses. The line is drawn once and both transitions follow it.
+
+15. **What the arp does to the held-note stack.** The stack is shared with Mono
+    and Legato and is documented as the record of what is held. **Resolved: the
+    arp reads it and never writes it**, generated notes bypass
+    `heldPush`/`heldRemove` entirely, and the stack gains only parallel velocity
+    and channel arrays (data, not semantics) so that Vel Mode 0 and the per-note
+    identity hash have what they need. The one behavioural consequence — **the
+    mono note-off fallback is disabled while the arp is on** — is stated in the
+    contract, because a fallback would sound a note the arp did not schedule,
+    which is inventing MIDI at a note-off.
+
+16. **Arp Sync's default.** Consistency with LFO Sync says 0 (free); musical
+    sense says 1/16. **Resolved: 7 (1/16)**, because Arp On defaults to 0 so the
+    default costs exactly nothing in render terms, and because the first thing a
+    user does after switching an arp on is not "fix the rate". Recorded here
+    rather than buried, since it is the only v4 default that is not simply the
+    bottom of its range.
