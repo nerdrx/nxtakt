@@ -2155,3 +2155,1089 @@ spectra.cpp together; the tables above do not move.
   which is the cadence every parameter in this device already has.
 - **`kSpParamCount` is 125 and `kMaxParams` stays 128**, as the budget section
   says. The next revision raises it; this one did not need to.
+
+---
+
+# v5 — the wavetable editor (FROZEN)
+
+Spends **no parameter ids**, widens **no enum**, adds **one** state record per
+oscillator, adds **one** rung to the resolution ladder and **one** directory to
+the tree. Everything above this line is untouched: the 42 v1 ids, the 58 v2 ids,
+the 11 v3 ids and the 16 v4 ids keep their meaning, their ranges, their defaults
+and their fixed routings, and every rule this file has accumulated — blocks with
+reserved tails, the Curve column, the state/versioning rule, contiguous id
+arrays, "a reserved id belongs to its block" — governs this revision as written
+and is not amended by it.
+
+**Gate, restated for v5, and it is v4's with nothing subtracted.** v5 adds no
+parameter, so there is no switch to default to off and no default to argue
+about. A v1, v2, v3 or v4 state loaded into a v5 build renders **bit-identical**,
+because the only thing v5 can change about a render is which 32×2048 floats sit
+behind slot 8, and a state that does not name a table does not name one. **v5
+has no exception**, for the same reason v4 had none and one better: v4 had to
+argue that Arp On = 0 selects the old path, and v5 does not have a switch to
+argue about.
+
+**What this feature is.** The last Serum-parity gap, deferred twice in this file
+("a wavetable *editor* (draw/harmonic pen) — v4 at the earliest") and taken here.
+Two pens over one 32-frame table, a frame-range morph, and a durable home for the
+result. It is deliberately the SMALLEST feature that makes a drawn table a first-
+class citizen: **a drawn table is a custom table**, indistinguishable from an
+imported one in every layer below the editor, and that identity is the whole
+design.
+
+**What v5 is NOT.** It is not a second kind of table. There is no "drawn" flag,
+no drawn slot, no drawn code path in the voice, and no way for the DSP to ask
+where a table came from. The editor edits FRAMES; provenance is not a property of
+a wavetable, content is — which is v3's identity rule read out loud.
+
+## The claim v3 pre-paid, and whether it holds
+
+The brief's reasoning is that a drawn table needs no contract change at all,
+because v3's identity is a content hash and the `.nxwt` cache is keyed by hash.
+Checked against the v3 text, rung by rung, **it holds in three places and fails
+in exactly one**, and the one is the whole of this revision's real work:
+
+- **Identity — holds.** "The content hash" is defined over the resampled f32
+  frames "as they stand after slicing, resampling to 2048, DC removal and set
+  normalisation, and BEFORE any mip is built". A drawn table does no slicing and
+  no resampling — it is authored at 2048 — and it is DC-removed and set-normalised
+  at commit (below), so it arrives at the fold in exactly the canonical state the
+  rule names. `contentHash(frames, 32)` applies with no amendment, and a drawn
+  table and an imported table with the same samples are **the same table**, which
+  is correct and is not a coincidence.
+- **State — holds.** `wtA=<16 hex>` names a hash. It has never named a file.
+- **The wire — holds.** `wt::hashesInDeviceState()` qualifies a record on three
+  bounds — the key begins `wt`, the value is exactly 16 lowercase hex digits, and
+  the store actually holds the hash — and a drawn table satisfies all three the
+  moment `wt::adopt()` has taken it. `PoolKindWavetable` ships the frames, the
+  daemon `ingest()`s them and **recomputes the hash**, refusing a disagreement.
+  The daemon cannot tell a drawn table from an imported one and must not be able
+  to.
+- **Durability — FAILS.** The resolution ladder's fourth rung is "a re-import
+  from the `wtpath` record". For an imported table that rung is the recovery: the
+  WAV is the original and the cache is a copy. **For a drawn table there is no
+  original.** Writing the only copy of a user's authored work into a directory
+  this document itself calls a cache — a thing whose defining property is that
+  deleting it is safe — is the one place the free ride runs out.
+
+So: v3's mechanism carries a drawn table end to end. What it does not carry is
+the fact that the bytes are now irreplaceable. That is what the next section
+decides.
+
+## The durability decision
+
+**A drawn table is SAVED, not cached.** It is written to a user-owned wavetable
+library that is not the cache, is not deleted by clearing the cache, and is named
+in the resolution ladder ahead of the cache.
+
+```
+$XDG_DATA_HOME/nxtakt/drawn/<16 lowercase hex>.nxwt
+```
+
+falling back to `$HOME/.local/share/nxtakt/drawn/`, then the passwd entry's home,
+then `/tmp` — the ladder `wt::userCacheDir()` already walks, because this tree has
+one answer to "where does nxtakt keep a user file" and a drawn wavetable is DATA.
+Published as `wt::drawnDir()`, beside `wt::userCacheDir()` and `wt::factoryDir()`.
+
+**It is a SIBLING of `wavetables/`, not a subdirectory of it, and that is the
+entire point of the path.** The cache is `.../nxtakt/wavetables/`; the gesture
+that clears it — the user's `rm -rf`, a future Clear Cache button, a packaging
+script — names that directory, and a drawn library inside it would be swept up by
+every one of them. `.../nxtakt/drawn/` cannot be reached by any correct spelling
+of "clear the wavetable cache".
+
+**The resolution ladder gains one rung, and the append is the whole contract
+change.** v3's order was: the in-memory store; `wt::factoryDir()/<hash>.nxwt`; the
+user cache; a re-import from `wtpath`. It becomes:
+
+| # | rung | note |
+|---|------|------|
+| 1 | the in-memory table store | `wt::find()`; never reads a file |
+| 2 | `wt::factoryDir()/<hash>.nxwt` | frozen; a preset's tables live here |
+| 3 | **`wt::drawnDir()/<hash>.nxwt`** | **NEW.** The user's authored library |
+| 4 | `wt::userCacheDir()/<hash>.nxwt` | frozen; imports cached here |
+| 5 | recovery from `wtpath` | frozen in intent, widened by extension below |
+
+**A rung that fails for any reason falls through to the next**, and only the
+exhaustion of all five is a refusal — stated explicitly here because v3 wrote
+"if all of those fail" and left the middle unsaid. A `.nxwt` whose bytes do not
+fold to its own name is refused by `readNxwt` and is therefore a rung that
+failed, not a table that plays wrongly.
+
+**Rung 3 sits above the cache** for one reason that is not taste: rungs 2, 3 and
+4 are hash-keyed and therefore interchangeable when they hit, so their order can
+only be about which one should win when a machine holds two copies — and the
+answer is the one the user authored, because it is the copy that is not
+disposable and the copy whose absence is the failure worth noticing early.
+
+**Rung 5 widens by file extension.** If the `wtpath` record's decoded value ends
+in `.nxwt` (byte-exact, lowercase), recovery is `wt::readNxwt()` and not
+`wt::importFile()`; `readNxwt` already recomputes and compares the hash, so a
+file that is not the table it claims to be simply fails the rung. Any other tail
+is `importFile()` — WAV — exactly as in v3. **There is no fallback between the
+two arms**: an `.nxwt` that fails to read does not then get offered to the WAV
+reader, because a file that lies about being a wavetable cache is not a file to
+guess about. This widening is what lets a drawn table travel by file copy: a user
+who moves `~/.local/share/nxtakt/drawn/` to another machine, or hands one file to
+a collaborator, has a set that resolves.
+
+**A commit writes ONE file in ONE place.** `wt::adopt(t, /*cache=*/false)` takes
+the table into the store WITHOUT touching the user cache, and the commit writes
+`drawnDir()/<hash>.nxwt` itself. Two copies of an irreplaceable file under two
+policies is not redundancy, it is two things to keep in sync.
+
+**The write is atomic**: a temporary in the same directory, then `rename()` over
+the target — learn.cpp's `writeAtomic` discipline, the same one `savePreset()`
+uses — so a crash mid-commit cannot leave a half-written table under a name that
+claims a hash. There is no `.bak` generation: the filename IS the content hash,
+so a second commit of the same drawing writes the same bytes to the same name and
+a commit of a different drawing is a different file. **A drawn table is never
+overwritten and never has to be**, which is the property content-addressing was
+always going to buy and the reason it is worth saying out loud.
+
+**The user is told.** A commit is not silent and is not a cache write: the editor
+reports "Saved to `<path>`" with the real path, once, on every commit. A user who
+does not know a file exists cannot back it up, and this is the one file in this
+feature whose loss cannot be undone by any other machine.
+
+### The alternatives, and why each was rejected
+
+1. **Write to the cache and accept the loss.** Rejected. It puts the only copy
+   of authored work in the directory this document defines as safe to delete, and
+   it makes a routine maintenance gesture destroy work with no warning and no
+   recovery. There is a version of "accept the loss and say so loudly" that is
+   honest engineering; this is not it, because the fix costs one directory and
+   one ladder rung.
+2. **Carry the frames in the project file.** Rejected on size and on format. The
+   raw frames are 32 × 2048 × 4 = **262,144 bytes**; the project's `state` value
+   is escaped printable text, so the frames must be encoded — base64 is
+   **349,528 bytes** before escaping — and the project format is line-oriented
+   text where `state` is one line. A set with eight drawn Spectras is 5.6 MB on
+   sixteen lines. The deeper objection is that project.cpp's own header says the
+   `state` value is "an opaque scalar: stored verbatim, escaped by `esc()` like
+   any other string, never parsed here", and its round-trip guarantee is stated
+   over exactly that; a state that grows by a third of a megabyte per drawing is
+   still opaque and still round-trips, and is also a project file no human can
+   read, diff or repair. The `nxspc1;…` grammar shares its shape with the sampler
+   and the rack — "one line of printable ASCII" — and a third of a megabyte is not
+   that shape.
+3. **Carry them in the preset (`.nxp`).** Not a trade-off; **arithmetically
+   excluded.** The `.nxp` cap is 256 KiB and "a preset larger than that is
+   corruption". 32 × 2048 × 4 = 262,144 = **exactly 256 KiB**, so the RAW frames
+   fill the cap to the byte with no room for the version tag, the `uri`, the
+   `name` or a single `param` line — and they cannot be raw, because the format is
+   text. Rejected before encoding overhead is even counted.
+4. **A `wtframesA` record in the state string.** Rejected: it is option 2 wearing
+   a different key, and it additionally breaks the state string's own promise that
+   a Spectra with no v3/v4/v5 state writes the empty string and a state is one
+   readable line.
+5. **Write into `wt::factoryDir()`.** Rejected: it is read-only by contract
+   ("read-only as far as this file is concerned") and it is a **build output** —
+   `make` copies tables there and `make dist` ships them. A user's drawing in a
+   directory that `make` owns is a drawing that a rebuild deletes.
+6. **A durable user library, hash-named, ahead of the cache in the ladder.**
+   **Chosen.** 256 KiB per table, on disk, in a directory the user owns, in a
+   format the tree already reads and writes and already hash-verifies. It costs
+   one accessor, one ladder rung, one directory and one sentence in the release
+   notes.
+
+### What is still lost, stated plainly
+
+Deleting `~/.local/share/nxtakt/drawn/` destroys every drawn table on that
+machine, and no set, preset or project can bring one back. This is true of every
+file a user authors and it is not made less true by being content-addressed. The
+refusal contract is what a set does about it — Table stays 8, the `wtA` and
+`wtname` records are re-emitted verbatim, the oscillator renders factory table 0,
+the editor draws the amber idiom naming the table — and that is v3's contract
+applying without amendment, which is the correct amount of new behaviour for this
+case: none.
+
+## The two pens
+
+Both pens edit **one frame** of the table: 2048 f32 samples, `wt::kCycle`, the
+same length the hash folds and the mip builder reads. **There is no lower "pen
+resolution."** A pen that drew into 256 points and upsampled would need a defined
+upsample in the identity path, which is a second resampler and a second libm
+dependence, to buy nothing — 2048 points across a canvas is about three samples
+per pixel and no user has ever wanted the fourth.
+
+The frame's 2048 samples are the **canonical representation**. Both pens read
+them and both pens write them; nothing else is stored, and the harmonic view is
+derived.
+
+### The waveform pen
+
+Draws a single cycle freehand.
+
+- **Domain.** x maps to sample index `i = clamp(round(x_norm · 2047), 0, 2047)`;
+  y maps to a value **clamped to ±1**. The pen cannot draw past full scale.
+- **The canvas shows ±2, not ±1.** ±1 is drawn as a gridline pair and there is a
+  visible headroom band beyond it, because DC removal can push a curve past ±1
+  and a curve that vanished off the top of its own canvas would be a curve the
+  user cannot see or fix. **The editor never clips a sample for display.**
+- **Sparse strokes interpolate LINEARLY, in index order, across the span the
+  stroke crossed.** Between two consecutively delivered points `(i0, v0)` and
+  `(i1, v1)`, every index strictly between them is written with the linear
+  interpolant; `i1 == i0` overwrites with `v1`; a stroke that reverses direction
+  writes twice and the later write wins.
+- **Untouched samples keep their previous value, and a stroke does NOT wrap.** A
+  stroke from i=400 to i=900 changes 501 samples and nothing else. The cycle is a
+  ring to the oscillator and a line to the pen: a discontinuity at the wrap is a
+  legitimate waveform (it is what a sawtooth IS), so there is no wrap-continuity
+  rule and no attempt to close the curve.
+- **Linear and not a spline**, and it is a decision rather than laziness: a spline
+  overshoots, an overshoot is a sample the user did not draw, and the pen must be
+  able to draw a hard vertical step — a pulse edge — which no interpolating spline
+  can express.
+- **A line tool (shift-drag) is the same rule with two points** and needs no
+  further specification.
+
+**DC removal is applied at STROKE END, per frame, and the user watches it
+happen.** The curve slides vertically the moment the pointer lifts. Applied
+during the stroke, the curve would crawl under the cursor; applied at commit, the
+last thing the user saw would not be the thing that got saved — which is the exact
+failure the brief names, and it is worth one visible jump per stroke to avoid it.
+The removal is: accumulate the frame's mean in **f64, ascending index order**,
+then subtract it in f32 from every sample in ascending index order. Fixed
+accumulation type and fixed order, so the same drawing gives the same frame.
+
+**Normalisation is NOT per-frame and NOT per-stroke. It is one set-wide factor at
+commit**, exactly as import applies it, and its visibility argument is different
+in kind: a single scalar over all 32 frames **changes no shape and no inter-frame
+relationship**. Nothing the user drew moves; the whole table gets louder or
+quieter together. The editor carries a live peak readout so the factor is legible
+before the commit, and that readout is the honest version of "you can see it
+happen" — there is nothing else to see, because there is nothing else that moves.
+
+### The harmonic pen
+
+Draws a magnitude spectrum; the waveform is the inverse transform.
+
+- **Editable harmonics: 1..256.** Harmonic 0 (DC) is not editable and is forced to
+  zero. Harmonics **257..1023 exist, are not editable, and are PRESERVED** — see
+  the interoperation rules. 1023 is what a 2048-point cycle carries and what
+  `kSpMaxHarm` already is; 256 is the most bars a human can address, and a bar per
+  harmonic past 256 is under a pixel on any canvas anyone will build. A control
+  the user cannot hit is not a control.
+- **The scale is dB.** Bar top is **0 dB = magnitude 1.0**, which is a full-scale
+  sine at that harmonic under the analysis scaling `2/N` the mip builder already
+  uses. Bar floor is **−80 dB**. Linear was considered and refused: a fifth
+  harmonic at −40 dB is one four-hundredth of the canvas height and therefore
+  invisible and undrawable, and the harmonics that give a wavetable its character
+  live between −20 and −60 dB.
+- **The floor is a HARD ZERO, not −80 dB.** A bar dragged to the bottom sets the
+  magnitude to exactly 0.0f. "Drag it away" must mean the harmonic is gone, not
+  that it is quiet; a −80 dB residue on 256 harmonics is a table with a floor of
+  hiss in it that no gesture can remove.
+- **No harmonic may exceed 0 dB.** The clamp exists so that the set normalisation
+  at commit is a correction and not a rescue.
+- **The dB→magnitude map is `m = (bar == floor) ? 0.0f : 10^(dB/20)`**, and it is
+  the one libm call this feature adds. It sits **upstream of the content hash**,
+  precisely where the import path's `std::sin` sits, and it carries the identical
+  bounded consequence — see the determinism gates.
+
+#### The phase convention: ALL-SINE, and why
+
+Every harmonic is synthesised as a sine, phase −90° relative to cosine:
+
+```
+frame[i] = Σ over h of  m_h · sin(2π · h · i / 2048),    h = 1 .. 1023
+```
+
+Four arguments, in increasing order of how much they matter:
+
+1. **It puts the canonical spectra where the ear expects them.** `m_h = 1/h` over
+   all harmonics is exactly a sawtooth; `m_h = 1/h` over odd harmonics only is
+   exactly a square. Those two gestures are the first two things anybody draws,
+   and under all-cosine they are neither of those waveforms.
+2. **It makes DC exactly zero by construction.** A sum of sines is odd-symmetric
+   about i=0, so its mean is zero to the precision of the sum, and the per-frame
+   DC removal is a **no-op on a harmonic-pen frame**. The pen therefore never
+   moves what the user drew — the property the waveform pen has to buy with a
+   visible jump, the harmonic pen gets for free.
+3. **It puts a zero crossing at the cycle boundary for every drawn spectrum.**
+   `sin(0) = 0` for every harmonic, so `frame[0] = 0` always, and the cycle joins
+   itself continuously. Under all-cosine, `frame[0] = Σ m_h` — the largest value
+   in the frame — so a flat spectrum produces a table whose every frame slams
+   discontinuously at the wrap, and the band-limiting mip builder rings at a
+   discontinuity that the drawing does not contain.
+4. **And this is the one that is specifically about a WAVETABLE rather than an
+   oscillator: frame morphing is a LINEAR CROSSFADE IN THE TIME DOMAIN.** `A
+   Position` interpolates between adjacent frames sample by sample. Two adjacent
+   frames with identical magnitude spectra and different phases **cancel as they
+   cross** — the morph dips, goes hollow in the middle, and comes back, and it
+   sounds like a phaser rather than a morph. A single fixed phase convention
+   across every frame the pen writes is what makes a morph sound like a morph.
+   This is why a phase choice that is inaudible in a one-shot spectrum is loud in
+   a 32-frame table, and it is why the convention is stated in the contract and
+   not left to the implementer.
+
+**Rejected: all-cosine**, whose flat spectrum is an impulse with a crest factor
+near 256 — one drawn frame would drag the whole table's set normalisation down by
+48 dB. **Rejected: Schroeder phase** (`φ_h = −π h(h−1)/H`), which has the best
+crest factor of the three and is perfectly deterministic, and which makes every
+drawn spectrum sound glassy and chirped in a way the user did not ask for and
+cannot see on the bars. **Rejected: random phase**, at once, for putting a draw
+inside an identity.
+
+#### How the two pens interoperate
+
+- **Opening the harmonic view NEVER modifies the frame.** The view is derived: a
+  forward `spFft` at 2048 of the current frame, displaying `|H_h|` for h in
+  1..256. Round-tripping waveform → harmonic view → waveform with no bar touched
+  is the **identity by construction**, not by numerical luck. An f32 FFT/IFFT pair
+  is not bit-exact and this rule is what makes that fact irrelevant.
+- **Touching a bar rewrites that harmonic's magnitude AND its phase, and leaves
+  every untouched harmonic's COMPLEX value alone.** Synthesis is an inverse
+  transform over the full 0..1023 spectrum in which touched harmonics carry
+  `(m, sine phase)`, untouched harmonics carry their analysed `(re, im)`, and DC
+  is zero. So a drawn sawtooth opened in the harmonic view and given one nudge at
+  harmonic 3 keeps its harmonics 257..1023 exactly, and keeps harmonics 1, 2, 4..256
+  exactly, and differs from itself at harmonic 3 and in the last bits of all 2048
+  samples.
+- **It IS lossy, and here is exactly where.** One bar touched re-rounds all 2048
+  samples through an IFFT and rewrites one harmonic's phase to the convention.
+  Nothing else is lost. In particular, harmonic content the bars cannot show is
+  not silently discarded — which is the failure mode a "the pen edits 256
+  harmonics and zeroes the rest" design would have had.
+- **N consecutive harmonic edits perform exactly ONE forward analysis and N
+  inverse syntheses. This is a gate, not an optimisation.** The view holds the
+  analysed spectrum for as long as the frame has not been edited in the waveform
+  domain, and each bar edit re-synthesises from that held spectrum rather than
+  re-analysing the frame it just synthesised. Without this rule, fifty bar edits
+  are fifty FFT round trips of accumulated f32 error, and the drift is audible
+  before it is visible.
+- **A waveform-domain edit invalidates the held spectrum.** The next time the
+  harmonic view is opened it re-analyses. A time-domain stroke touches every
+  harmonic, so there is nothing to preserve and nothing to pretend about:
+  harmonic → waveform pen → harmonic does **not** preserve the harmonics the user
+  drew, and the bars will show what the stroke actually made.
+
+## Frames
+
+**The table always has exactly 32 frames.** `kSpFrames` is the memory layout of
+every table in this instrument, factory and custom, and the audio-rate read is
+built on it. The editor never has 31 frames or 33.
+
+- **The pen edits the SELECTED frame**, an integer cursor 0..31.
+- **The cursor is EDITOR-ONLY.** It is not a parameter, it is not a state record,
+  it is not saved, and a reopened editor starts at frame 0. A cursor is a place to
+  look, not a value.
+- **The cursor is NOT `A Position` (id 1) and never follows it.** The editor draws
+  the live position as a marker on the frame strip and leaves the cursor where the
+  user put it. Position is continuous, automatable and modulatable by four
+  different things; a cursor that followed it would let an automation lane drag
+  the pen around mid-stroke.
+- **Moving.** Click a frame in the strip, or `[` / `]`, or the arrow keys. No wrap
+  at either end.
+- **Opening the editor on a table with fewer than 32 source frames stretches it to
+  32 first**, by the same linear frame-axis interpolation `spBuildCustomMips()`
+  already performs (cited, not re-derived), and the editor says that it did. A
+  one-frame import becomes 32 identical frames, which is what a table with no
+  frame axis is. Committing then yields a **different hash from the original**,
+  which is correct: the content differs, and identity is content.
+
+### Frame operations
+
+| op | effect |
+|----|--------|
+| **Clear** | the cursor frame becomes 2048 zeros |
+| **Copy / Paste** | one frame's 2048 samples, to and from an editor-local clipboard |
+| **Duplicate** | copy the cursor frame into the next slot, pushing the tail down |
+| **Insert** | insert a copy of the cursor frame AT the cursor, pushing the tail down |
+| **Delete** | remove the cursor frame, pulling the tail up, and copy the (new) last frame into slot 31 |
+| **Morph** | fill a range between two endpoints — below |
+| **Re-phase endpoints** | rewrite two named frames to the pen's sine phase, magnitudes untouched — below |
+
+**Insert and Delete are destructive and the contract says so.** The frame count
+is fixed at 32, so Insert **drops what was frame 31** and Delete **duplicates the
+last frame** to keep the count. There is no way to spell "insert" in a fixed-length
+array that does not lose something at one end; the alternative — refusing to insert
+when frame 31 is non-zero — is a tool that stops working the moment the table is
+full, which is always. The editor confirms nothing and undoes everything: these
+are editor-local operations on an uncommitted working copy, and undo is the
+editor's own.
+
+### Morph — the operation that makes 32 frames authorable
+
+Given two frames `a < b` that the user has drawn, **Morph replaces frames
+`a+1 .. b-1`** and does not touch `a` or `b`.
+
+**The domain is HARMONIC: magnitudes are interpolated per harmonic and the result
+is synthesised at the pen's sine phase.**
+
+```
+for k in a+1 .. b-1:
+    t      = (k - a) / (b - a)
+    m_h(k) = (1-t) · |H_h(a)| + t · |H_h(b)|          h = 1 .. 1023
+    frame_k = Σ over h of  m_h(k) · sin(2π h i / 2048)
+```
+
+Ascending in `h`, ascending in `k`, f32 throughout — a fixed order, so the fill is
+reproducible.
+
+**Why not the time domain, and why there is no third option.** A time-domain fill
+is `f_k = (1−t)·f_a + t·f_b`. That is *exactly* what `A Position` already computes
+between adjacent frames — `spRead`'s linear frame blend — so a time-domain fill
+writes 30 frames that produce audio indistinguishable from having drawn only two.
+**It is a no-op you can hear.** And there is no third domain to reach for:
+interpolating the COMPLEX spectrum is, by the linearity of the transform, the
+time-domain crossfade written in a more expensive way. The choice is
+magnitude-only or crossfade, and crossfade already exists.
+
+**What magnitude interpolation buys, and it is the whole character of the
+result:** harmonics fade in and out individually instead of two waveforms
+cancelling through a hollow middle. A saw at `a` and a square at `b` sweeps its
+even harmonics down to nothing across the range; a bright frame and a dark frame
+roll off rather than crossfade. This is what a wavetable morph is supposed to
+sound like and it is the reason the operation exists.
+
+**The honest cost, stated rather than hidden.** The fill is synthesised at sine
+phase; the endpoints keep whatever phase they were drawn with. If an endpoint is
+not already in sine phase, there is a **phase step at the boundary** between `a`
+and `a+1`, or between `b−1` and `b`, and it is audible as a click in the morph at
+exactly that position. Three ways out were available and the choice is stated:
+
+- take `a`'s phases throughout — **rejected**, it is asymmetric in `a` and `b` and
+  moves the discontinuity to the far end rather than removing it;
+- interpolate the phases — **rejected**, it needs unwrapping (which is ill-defined
+  for a spectrum with near-zero magnitudes) and, done linearly on the complex
+  values, it degenerates back into the crossfade;
+- **synthesise the fill at the convention's phase, uniformly, and offer the fix as
+  a separate explicit operation** — **chosen**, because it is the only choice
+  symmetric in `a` and `b`, it needs no unwrapping, and it makes the fill's frames
+  mutually phase-coherent, which is precisely what stops them cancelling as
+  Position sweeps across them.
+
+**Re-phase endpoints** is that fix: a named, user-initiated operation that rewrites
+frames `a` and `b` to sine phase with their magnitudes untouched. It is **never
+applied silently**. When a Morph's endpoints are not in sine phase the editor says
+so in one line — the fill re-phased, the endpoints did not move — and offers it.
+A tool that quietly rewrites the two frames the user actually drew is a tool the
+user stops trusting.
+
+**Bounds.** `b > a + 1` or the operation is a no-op with a line. The fill runs
+over harmonics 1..1023 and not 1..256: the fill is not the pen and has no screen
+to fit in.
+
+## Commit — the canonicalisation, in order
+
+A commit turns the editor's 32 working frames into a table with a name. Every
+step is fixed and ordered, because the last step is the identity.
+
+1. **Every sample must be finite.** One non-finite sample refuses the whole commit
+   with a sentence. This is v3's rule — "a frame containing a non-finite sample is
+   refused at import and never reaches the hash" — applying to the pen unchanged,
+   so NaN payloads cannot become identity by a second door.
+2. **Per-frame DC removal**, ascending frame then ascending index, mean accumulated
+   in f64 and subtracted in f32. Normally a no-op: the waveform pen already did it
+   at stroke end and the harmonic pen's convention makes it one by construction.
+   It runs anyway, because a commit must not depend on which pen last touched a
+   frame.
+3. **Set-wide peak**: `pk = max |sample|` over all 32 × 2048, ascending.
+4. **Refuse a silent table.** If `pk <= 1e-9f` — the same constant the import path
+   already uses — the commit is refused with the sentence "this table is silent".
+   Import maps that case to a gain of 1 and carries on, because an import is
+   recovering someone else's file; a drawing that is all zeros is a mistake, and
+   letting it through would burn an identity on silence forever.
+5. **Multiply every sample by `g = 1 / pk`**, ascending.
+6. **`u64 h = wt::contentHash(frames, 32)`.** The frames are now in exactly the
+   state v3's rule names.
+7. **Write `drawnDir()/<hashHex(h)>.nxwt`** atomically (`writeNxwt` to a temp in
+   the same directory, then `rename()`). A file already there is left alone: same
+   name means same bytes, and `readNxwt` recomputes anyway.
+8. **`wt::adopt(t, /*cache=*/false)`**, then `spBuildCustomMips()`, then publish
+   the base with the existing release store.
+9. **Rewrite the device's state records**: `wtA` (or `wtB`) becomes the new hash,
+   `wtpathA` becomes the drawn file's full path, `wtnameA` becomes the display
+   name if one is set and is dropped if not.
+
+**A commit that changes the frames CLEARS AND REWRITES `wtpath`.** Editing an
+imported table produces a new hash, and the WAV that `wtpath` named is no longer
+the table the hash names. A path that recovers a *different* table than its own
+record's hash is worse than no path at all — it is the one thing rung 5 must never
+do — so the record follows the content or it goes.
+
+## Preview, and the bound that made it necessary
+
+**The editor's working copy is not the playing table, and the playing table
+changes only at commit.** But an editor with no audition is not an editor, and
+the obvious implementation — commit on every stroke — collides with a real cap:
+`spBuildCustomMips()` allocates 1.31 MB per distinct hash into a store that is
+**never freed** (the lifetime invariant: the audio thread holds a raw base
+pointer and there is no event that says no voice is inside a table any more), and
+that store is bounded at `kSpMaxCustom = 32`. Thirty-two strokes and the
+thirty-third is refused. This is not a thing to leave for the implementer to
+discover.
+
+**v5 adds one mechanism: a per-oscillator PREVIEW ARENA that is recycled, and is
+not in the built store and not in identity.**
+
+- **A ring of `kSpPreviewRing = 4` buffers** of `kSpFrames × kSpStride` floats
+  each, allocated on the oscillator's first preview and **never freed** — the
+  lifetime invariant applied to a fixed four rather than to an unbounded store.
+  5.24 MB per oscillator with an open editor, which is one or two at a time.
+- **Publishing a preview** builds the mip chain into the next buffer in the ring
+  and stores the base with the same release store `spResolveCustom()` uses. The
+  audio thread's read is unchanged and does not know a preview from a table.
+- **The recycle proof is a stated bound, not a hope.** The audio thread takes the
+  base at the top of a block and does not retain it past that block. A ring buffer
+  is not rewritten until three further publishes have happened, so the editor's
+  **minimum preview interval** must satisfy `4 × interval > maxBlock /
+  sampleRate`, and the editor computes it from the values `prepare()` was given
+  rather than hard-coding one: `interval = max(50 ms, 2 × maxBlock / sampleRate)`.
+  At 4096 frames and 44.1 kHz that is a 92.9 ms block against 4 × 185.8 ms of
+  protection.
+- **Previews are rate-limited to that interval and are published on STROKE END**,
+  not per pointer motion. A stroke ends when the pointer lifts; a user does not
+  lift sixty times a second.
+- **A preview touches NOTHING that is identity.** No hash, no file, no `wt`
+  record, no store entry. `stateString()` during an open editor names the last
+  **committed** table and nothing else.
+- **`cancelPreview(osc)` republishes the committed base**, and closing an editor
+  without committing does exactly that.
+
+**The user-visible consequence, and it is loud.** Saving a project mid-edit saves
+the last committed table; the uncommitted drawing is not in the set and is lost
+when the editor closes. So: **an editor closing with uncommitted changes must
+ask.** That obligation is in the contract because the alternative is a user losing
+an hour of drawing to a window close, and no amount of implementation care fixes a
+design that permits it.
+
+**The commit cap is unchanged and is correct.** Distinct COMMITTED tables per
+process stay bounded at `kSpMaxCustom = 32`, exactly as imports are, and
+`spBuildCustomMips()` already returns the existing build for a hash it has seen —
+so re-committing an unchanged drawing costs nothing. Thirty-two distinct saved
+tables in one session is a session, not a stroke count.
+
+## Parameters — none, and the cap is not raised
+
+**v5 spends ZERO parameter ids.**
+
+`A Table` (id 0) and `B Table` (id 8) already run 0..8, and value 8 already means
+"this oscillator's custom table, identified by this oscillator's `wt` record". A
+drawn table IS that. There is no drawn slot, no `0..9` widening, and no new
+parameter anywhere in this revision — which follows directly from the design
+decision at the top: if a drawn table were a second kind of table it would need
+one, and it is not.
+
+**The candidates that were considered and refused**, so nobody re-derives them:
+
+- **A "drawn" flag parameter** — refused. Provenance is not a property of content
+  and the DSP has no use for it. See "What v5 is NOT."
+- **An editor-frame-cursor parameter** — refused. A cursor is not a value, it is
+  not automatable in any meaningful sense, and making it a parameter would put an
+  automation lane in a position to move the pen.
+- **A morph-domain parameter** — refused. The domain is a frozen decision, made
+  once, above; a knob for it would be a knob for "should this operation be a
+  no-op".
+
+### v5 id map
+
+| block | ids | functional | note |
+|-------|-----|-----------|------|
+| v1 (frozen) | 0..41 | 42 | |
+| v2 blocks (frozen) | 42..99 | 50 | |
+| v3 blocks (frozen) | 100..110 | 9 | 109, 110 spent by v4 |
+| v4 arpeggiator (frozen) | 109..124 | 14 | reserved tail 123, 124 |
+| **v5** | **—** | **0** | **spends nothing** |
+
+**125 ids total (0..124): 115 functional, 10 reserved. `kSpParamCount` stays 125.
+`kMaxParams` stays 128.**
+
+**The 256 raise is NOT required by v5**, and the paragraph v4 pre-filed stands
+exactly as written, unconsumed and unamended. Three ids remain (125, 126, 127) and
+they still cannot hold a block and a tail, so v4's sentence is still true: the
+next revision that appends a block must raise `kMaxParams` from 128 to 256, it is
+one line in `src/plugin/internal_base.h`, and the justification is already
+written. v5 does not raise it, because v5 does not need it and a cap raised
+speculatively is a cap nobody checks. **This is the first revision in this file's
+history to append a feature and spend no ids at all**, and it is worth naming as
+the thing that made it possible: v3 built the custom-table mechanism as content
+plus state rather than as parameters, and v5 is the interest on that.
+
+## State — one new record per oscillator
+
+Added to the `nxspc1;…` block in the established format. The version tag does not
+move; see the versioning rule below.
+
+| key | value | meaning |
+|-----|-------|---------|
+| `wtnameA` `wtnameB` | escaped text, ≤ **64** DECODED bytes | that oscillator's custom table's DISPLAY NAME. **Never identity, never consulted in resolution, never sent over the wire.** Absent means "no name". |
+
+- **Escaping is `wtpath`'s, verbatim**, and the implementation shares the same
+  helper rather than growing a third escaper: escape any byte with `c <= ' ' ||
+  c >= 0x7F || c == '%' || c == ';' || c == ',' || c == ':' || c == '='` as `%`
+  plus two **uppercase** hex digits; leave every other byte raw. Unescaping is
+  **STRICT** and refuses, in order: a `%` not followed by two hex digits; an escape
+  decoding to NUL; a raw byte the writer would have escaped; anything over 64
+  decoded bytes. A name is UTF-8 and survives because every byte ≥ 0x7F is escaped.
+- **An empty name is not written.** A `wtnameA=` record is a record with an empty
+  value, which is a thing this writer would not produce; clearing a name drops the
+  record. There is exactly one spelling of "no name" and it is absence.
+- **`wtnameA` with no `wtA` is skipped, not refused.** It is a display string for a
+  table that is not there — inert, harmless, and precisely the shape of thing a
+  later or earlier build might leave behind. A duplicate `wtnameA` IS refused,
+  under the existing duplicate-key rule; choosing one of two is guessing.
+- **64 bytes, not 4096.** It is a label, not a path, and a state string is one
+  readable line.
+- **The `wt`-prefix hazard, named and bounded.** `wt::hashesInDeviceState()`
+  qualifies a record whose key begins `wt` and whose value is exactly 16 lowercase
+  hex digits. A table named literally `deadbeefdeadbeef` therefore qualifies. The
+  cost is the one wavetable_io.h already writes down — "one wasted lookup and
+  nothing more", because a hash that qualifies is still only shipped if the store
+  actually holds it — and it is the same hazard `wtpath` has carried since v3 (a
+  relative path of 16 hex characters). Named here so it is a known bound rather
+  than a surprise; not designed around, because designing around it would mean a
+  key outside the `wt` family and the family is worth more than the lookup.
+
+**Record order on write:** `wtA`, `wtpathA`, `wtnameA`, `wtB`, `wtpathB`,
+`wtnameB` — the name follows its table, as the path does. Reading is order-free,
+as the format has always said.
+
+**Defaults stay inert and the empty-state rule stands.** `stateString()` still
+returns the EMPTY string when no grid is drawn, no CC is learned, no arp row is
+drawn and no custom table is named. A missing `wtname` reads as no name, and
+`customName()` falls back exactly as it did before v5.
+
+### `customName()` — a compatible widening, not a new method
+
+`WavetableControl::customName(int osc)` is documented as "basename, display". Its
+resolution order becomes, and this is a strict superset of what it did:
+
+1. the `wtname` record, if present;
+2. `basename(wtpath)`, if a path is present — v3's behaviour;
+3. the bare 16-hex hash — v3's behaviour.
+
+Every table that has no name displays exactly what it displayed before. This is
+why v5 adds no `customTitle()`: a second method that answers the same question
+slightly better is a contract with two answers in it.
+
+### Versioning rule
+
+**The state tag stays `nxspc1` and it does not move for v5.** The tag versions the
+GRAMMAR, not the build: v5 adds a record under the existing grammar, and the
+grammar's own forward-compatibility rule — "a record whose key this build does not
+know is skipped" — was written for exactly this. Bumping to `nxspc2` would make
+every v5 state unreadable by every v4 build in order to communicate nothing a v4
+build could act on.
+
+- **A v4 build reading a v5 state** skips `wtnameA`/`wtnameB`, resolves the table
+  by hash exactly as before, and displays `basename(wtpath)` — the drawn file's
+  name, `<hash>.nxwt`. It is a full degradation with no refusal and no loss of
+  sound. It also cannot resolve rung 3, so a drawn table whose file lives only in
+  `drawnDir()` lands on the refusal contract there: amber, factory table 0, records
+  re-emitted verbatim. **A v4 build never loses the set's intent**, which is the
+  whole reason the refusal contract is shaped the way it is.
+- **A v5 build reading a v1..v4 state** finds no `wtname`, which reads as no name,
+  which is v3/v4 behaviour verbatim.
+- **`loadPreset` resets the new record too.** v3's extension of "a preset is
+  COMPLETE however short it is" covers it without amendment: `loadPreset` resets
+  every id to its default and every state block — `lfo*`, `smooth*`, `cc`, `wt*`,
+  `arpl`, `arps`, and now `wtname*` — to its default, then applies the row's
+  overrides and state macros.
+
+## src/plugin/spectra_presets.inc — the `SPWTNA` / `SPWTNB` macros
+
+The v1/v2/v3/v4 macros are unchanged. v5 adds two, in the established style, and
+adds them as a **pair of A/B macros rather than one macro with an oscillator
+argument**, because v3 already settled that question ("a 0/1 argument beside
+`SPLFO`'s 1-based `n` is a trap") and this file has one answer to it.
+
+```
+SP_PRESET("PD Drawn Glass")
+SP(  0,  8)          // A Table = custom slot 8
+SP(  1,  0.4f)       // A Position
+SPWTA("3f9c1a0b7d24e685")
+SPWTNA("Drawn Glass")
+SP_END()
+```
+
+| macro | signature | rules |
+|-------|-----------|-------|
+| `SPWTNA` / `SPWTNB` | `SPWTNA("<name>")` | The display name for oscillator A's / B's custom table. **1..64 bytes, printable ASCII or UTF-8, no control bytes.** At most one of each per preset. **Requires the matching `SPWTA` / `SPWTB` in the same row** — a name for a table the row does not name is a name for nothing, and the bank's range checker fails it rather than dropping it silently, exactly as it fails an `SPARP` without `SP(109, 1)`. |
+
+**Placement** is `SPLFO`'s and `SPARP`'s: anywhere between `SP_PRESET` and
+`SP_END`, in any order relative to the `SP` rows, convention
+parameters-first-state-after, and it does **not** count against the 64-override
+cap, which is a cap on `SP` rows.
+
+**A state macro never sets a parameter**, v3's rule, unchanged: `SPWTNA` sets no
+id, and `SPWTA` still does not set `A Table` to 8. The row says `SP(0, 8)` itself.
+
+**Why a macro at all.** Without it, a factory preset that ships a drawn table
+displays sixteen hex digits — which is what v3 already does for any preset naming
+a factory table, and which was a wart nobody had to look at because factory
+`.nxwt` files were rare. A revision whose entire premise is that users will author
+a LIBRARY of tables cannot ship the bank that demonstrates it with hashes for
+names.
+
+## Host contract — five additions to `WavetableControl` (host.h)
+
+Append-only, each with a default so that a backend which does not draw is already
+correct without being touched — the discipline `savePreset()` and
+`factoryPresetCount()` established. `customName()`'s widening is above and is not
+a new method.
+
+```cpp
+// GUI thread. Copies this oscillator's resolved table into `out` as
+// kSpFrames * wt::kCycle floats, frame-major, STRETCHED to 32 frames by the
+// same linear frame-axis interpolation spBuildCustomMips() performs when the
+// resolved table has fewer. False, and `out` untouched, when this oscillator
+// has no resolved custom table.
+virtual bool readFrames(int osc, f32* out) const { (void)osc; (void)out; return false; }
+
+// GUI thread. Build and publish a PREVIEW from `frames` (32 * kCycle,
+// frame-major). Touches no hash, no file and no state record: what
+// stateString() names does not move. False if any sample is non-finite, if the
+// oscillator has no handle, or if the caller is inside the minimum preview
+// interval. Rate-limited by the contract, not by the caller.
+virtual bool previewFrames(int osc, const f32* frames) { (void)osc; (void)frames; return false; }
+
+// GUI thread. The nine-step commit above: canonicalise, hash, write the drawn
+// file atomically, adopt, build, publish, and rewrite wt/wtpath/wtname. `name`
+// may be null or empty for no name. False with lastError() set, and NOTHING
+// changed, on any refusal.
+virtual bool commitFrames(int osc, const f32* frames, const char* name) { ... return false; }
+
+// GUI thread. Drop any preview and republish the committed table. Idempotent.
+virtual void cancelPreview(int osc) { (void)osc; }
+
+// GUI thread. Set or clear the display name of this oscillator's custom table.
+// Content is unchanged, so IDENTITY IS UNCHANGED: a rename writes no file and
+// produces no new hash. Null or empty clears. False if the name is over 64
+// bytes or holds a control byte.
+virtual bool setCustomName(int osc, const char* name) { (void)osc; (void)name; return false; }
+```
+
+`customFrames(int osc)` is **unchanged** and keeps meaning "the SOURCE frame count
+of the resolved table, 1..32". After a drawn commit it is always 32, which is a
+fact about drawn tables and not a change to the method.
+
+# Determinism obligations (v5)
+
+Every one of these is a gate, not an aspiration, and they extend rather than
+replace v3's nine and v4's eight. The rule they all serve is still the one v1
+wrote: the same input renders the same audio, in blocks of 1 and of 1024, in the
+daemon and in process.
+
+1. **Frames → mip chain is a pure function of the frames, and v5 adds NOTHING to
+   that path.** A committed drawing goes through `spBuildCustomMips()` — the same
+   factored builder the eight factory tables and every imported table go through,
+   from identical f32 input, in the same order — so v3's obligation 7 covers a
+   drawn table with no amendment and no second proof. **The same drawing produces
+   the same table on every machine that has the frames**, and the frames are what
+   crosses the wire.
+
+2. **Gesture → frames is UPSTREAM of identity, and that is where the libm is.**
+   The pen path calls libm in two places: `10^(dB/20)` for the harmonic pen's bar
+   map, and `std::sin`/`std::cos` inside `spTwiddle()` for the forward analysis
+   and the inverse syntheses. The second adds nothing — the mip builder already
+   makes exactly those calls for every table in the instrument. The first is new
+   and is **deliberate, and it sits precisely where the import path's rules (b)
+   and (c) put theirs.** wavetable_io.cpp names that dependence and bounds it, and
+   the bound here is the same one and is weaker: two machines with different libm
+   versions could in principle turn the same GESTURE into two hashes — and a
+   gesture is never replayed on a second machine, because what travels is the
+   frames. **No machine ever renders two different tables under one hash.** The
+   pen path's answer to "is it pure?" is therefore: downstream of the frames,
+   yes, absolutely, and it is the same code that already was; upstream of them,
+   no, and it does not need to be.
+
+3. **A drawn table crosses the wire by the same `PoolKindWavetable` route as an
+   imported one, and the daemon renders it identically.** `hashesInDeviceState()`
+   finds `wtA`/`wtB` because the key begins `wt` and the value is 16 lowercase hex
+   — a drawn table's record is byte-indistinguishable from an imported one's — the
+   pool ships the frames, and `wt::ingest()` **recomputes the hash and refuses a
+   disagreement**. Gate: a project whose Spectra names a drawn table renders
+   `cmp`-identical in the daemon and in process, at 44.1, 48 and 96 kHz, at block
+   sizes 1, 7, 64 and 1024, which is the same gate v3 wrote for imports and the
+   same test row with a different table in it.
+
+4. **The daemon never draws, and nothing in the editor is reachable from
+   `nxtaktd`.** The pens, the preview arena, the commit and `drawnDir()` sit above
+   the seam exactly where `importFile()` sits, on the one non-realtime thread that
+   owns the device. Nothing here is reachable from the audio thread — the audio
+   thread reads a `const f32*` into a mip chain, which is the only thing it has
+   ever done — and no preview publish allocates on it.
+
+5. **The synthesis and the fill are exact, ordered arithmetic.** Sine phase
+   synthesis sums harmonics **ascending in h**; the morph fills **ascending in k**;
+   DC means accumulate in **f64, ascending in i**; the peak scan is ascending. Two
+   runs of the same drawing in one process, and one run in a fresh process,
+   produce identical frames and therefore the identical hash. **Gate: draw, fill,
+   commit, twice, and `cmp` the two `.nxwt` files.**
+
+6. **No wall clock and no RNG anywhere in the pen path.** A drawn table's identity
+   is a function of its samples and of nothing else — not of when it was drawn,
+   not of how long the stroke took, not of a seed. The preview interval reads a
+   clock and the preview is not identity; nothing that reaches `contentHash()`
+   ever does.
+
+7. **The commit is atomic and self-verifying.** `writeNxwt` to a temporary in the
+   same directory, then `rename()`, so a crash mid-commit cannot leave a partial
+   file under a name that claims a hash — and even if it could, `readNxwt`
+   recomputes the fold and refuses a file whose bytes do not name themselves, so a
+   torn drawn table is a rung that fails and never a table that plays wrongly.
+
+8. **The preview arena's recycle bound is arithmetic, not timing luck.** Four
+   buffers, a minimum publish interval of `max(50 ms, 2 × maxBlock / sampleRate)`,
+   and the audio thread's rule that a base pointer is not retained past the block
+   it was read in. A buffer is not rewritten until three further publishes have
+   happened, so the protection is four intervals against one block period. The
+   editor computes the interval from the values `prepare()` was given.
+
+9. **Bit-identity, and it is the release gate.** **Every existing patch, every one
+   of the 121 rows of the factory bank (Init included), and every factory `.nxwt`
+   render byte-identically to v4.** Not "mathematically equal" — `cmp`-identical
+   WAV, at 44.1, 48 and 96 kHz, at block sizes 1, 7, 64 and 1024, against renders
+   taken from the v4 tip. This holds by construction and not by care, and the
+   construction is thinner than v4's because there is less to it: **v5 adds no
+   parameter, changes no default, changes no enum and changes no arithmetic in any
+   render path.** The only new state record is absent from every state that
+   exists, and its presence changes a display string. **v5 has no exception, and
+   unlike v4 it did not have to argue for one.**
+
+10. **Both factory banks still read.** Every `.nxwt` in `wt::factoryDir()` still
+    reads, still recomputes to its own name, and still builds the identical mip
+    chain; the new rung 3 is appended below rung 2 and cannot shadow it. Gate: the
+    factory wavetable directory's every file round-trips `readNxwt` → `contentHash`
+    → its own filename, and the mip chain each produces is `cmp`-identical to the
+    v4 tip's.
+
+# What v5 does NOT change
+
+Stated so nobody rediscovers it. **No parameter id is added, spent, widened or
+retired**; `kSpParamCount` stays 125 and `kMaxParams` stays 128, and the eight
+reserved ids from v2/v3 (46, 47, 52, 53, 66, 67, 92, 93) and v4's tail (123, 124)
+all stay exactly where they are. The destination enum (0..19) does not widen, for
+the fourth revision running. `A/B Table` stays 0..8. The eight factory tables,
+their generation and their mip policy do not change. The content hash does not
+change — not its construction, not its finaliser, not its `-0.0` fold, not its
+frame-major order. The `.nxwt` format does not change and `kNxwtVersion` stays 1.
+The state string's version tag stays `nxspc1`. The `nxspc1` grammar does not
+change: same charset, same escaping, same refusal rules, same duplicate-key rule.
+The `.nxp` format, the user-preset contract and the path escaping are untouched.
+The 64-override cap on a preset row stays 64. `kSpFrames` stays 32, `wt::kCycle`
+stays 2048, `kSpStride` and the ten-level mip layout stay exactly as they are.
+`kSpMaxCustom` stays 32 and `kMaxTables` stays 256. The arpeggiator, the matrix,
+the LFO grids and their smoothing are not touched by a single line of this
+revision.
+
+# v5 resolutions — where the brief was ambiguous or impossible
+
+Recorded in v3's habit and v4's, because both authors were right that this list is
+the useful part. Each is a place the design was under-determined, self-contradictory
+or simply wrong, and each was **resolved and written down** rather than invented
+silently.
+
+1. **"A drawn table written to the cache resolves forever with no contract change
+   at all" — true for three of the four things it claims, false for the fourth.**
+   Identity, the state record and the wire all carry a drawn table with no
+   amendment; **durability does not**, because the ladder's recovery rung is a
+   re-import and a drawing has nothing to re-import from. **Resolved: the claim is
+   verified rung by rung in its own section, and the one failure is what the
+   revision is about.** Reported rather than quietly patched, because "no contract
+   change" was the premise the brief was working from.
+
+2. **Where a drawn table lives.** The brief offered four options and asked for one.
+   **Resolved: a durable, hash-named, user-owned library at
+   `$XDG_DATA_HOME/nxtakt/drawn/`, a SIBLING of the cache and not a child of it**,
+   inserted into the ladder as rung 3, ahead of the cache. The project-file and
+   preset options are rejected on arithmetic (256 KiB raw is exactly the `.nxp`
+   cap, and 350 KiB base64 is over it before a single `param` line); the
+   cache-and-accept-the-loss option is rejected because the cache's defining
+   property is that deleting it is safe. Full argument and all five rejections in
+   "The durability decision".
+
+3. **The path a `wtpath` record may name.** v3 defined rung 5 as a re-import, and
+   `importFile()` reads WAV. A drawn table's recovery file is a `.nxwt`, which
+   that reader refuses. **Resolved: rung 5 branches on the file extension —
+   `.nxwt` goes to `readNxwt()` (which already recomputes and compares the hash),
+   anything else goes to `importFile()` — and there is no fallback between the two
+   arms.** This is the minimum widening that makes a drawn table portable by file
+   copy, and it costs one `strcmp` on the tail.
+
+4. **Whether a drawn table is a new KIND of table.** The brief does not say, and
+   the shape of the question invites a flag. **Resolved: it is not, and there is no
+   provenance anywhere in the contract.** Identity is content, so "drawn" is not a
+   property a table can have. The consequence is the design's best simplification:
+   **the editor opens on any resolved custom table, imported or drawn**, because a
+   table is 32 × 2048 f32 either way — and editing an imported table simply
+   produces a new table, which is exactly right.
+
+5. **The frame count is fixed at 32, so "insert/delete" as the brief lists them
+   are impossible as stated.** A fixed array cannot grow. **Resolved: Insert pushes
+   the tail down and DROPS frame 31; Delete pulls the tail up and DUPLICATES the
+   new last frame into slot 31.** Both are destructive at one end and the contract
+   says so. The alternative — refusing to insert when frame 31 is non-zero — is a
+   tool that stops working exactly when the table is full, which is always.
+
+6. **"Morph in the waveform domain or the harmonic domain" presupposes two
+   options; there are two, and one of them is a no-op.** A time-domain fill is
+   `(1−t)f_a + t·f_b`, which is **precisely what `A Position` already computes**
+   between adjacent frames — so it writes thirty frames that sound like having
+   drawn two. And there is no third domain: **complex-spectrum interpolation IS
+   the time-domain crossfade, by the linearity of the transform.** **Resolved:
+   magnitude-only interpolation, sine-phase synthesis, over harmonics 1..1023.**
+
+7. **A magnitude-only fill leaves the phase of the fill undetermined at its
+   boundaries.** Two endpoints have two phase sets and the fill has one. **Resolved:
+   the fill is synthesised at the pen's convention throughout — the only choice
+   symmetric in `a` and `b` and the only one that needs no phase unwrapping — the
+   resulting boundary step is stated as an audible cost, and the fix is a NAMED,
+   USER-INITIATED "re-phase endpoints" operation that is never applied silently.**
+   A tool that quietly rewrites the two frames the user actually drew is a tool the
+   user stops trusting.
+
+8. **How many harmonics the pen edits, and what happens to the rest.** A 2048-point
+   cycle carries 1023 and nobody can address 1023 bars. The naive answer — edit 256,
+   zero the rest — destroys the upper spectrum of any waveform-drawn frame the
+   moment the harmonic view is touched. **Resolved: edit 1..256; harmonics 257..1023
+   are PRESERVED with their full complex value; only a TOUCHED bar has its phase
+   rewritten.** That is what makes the round-trip statement precise instead of
+   apologetic.
+
+9. **Round-tripping between the pens: is it lossy?** It is, and the brief asks
+   where. **Resolved, in three parts: opening the harmonic view never modifies the
+   frame (identity by construction, not by numerical luck); touching one bar
+   rewrites that harmonic's phase and re-rounds all 2048 samples; a waveform stroke
+   invalidates the analysis, because a time-domain stroke touches every harmonic and
+   there is nothing to pretend about.** Plus one gate that is genuinely load-bearing
+   and that no brief would have asked for: **N consecutive bar edits perform exactly
+   ONE forward analysis and N inverse syntheses**, because fifty bar edits through
+   fifty FFT round trips accumulate f32 drift that is audible before it is visible.
+
+10. **"Whether the drawn cycle is DC-removed and normalised on commit, and whether
+    the user can see it happen" — the two halves have different answers.**
+    **Resolved: DC removal happens at STROKE END and is visibly a vertical slide;
+    set normalisation happens at COMMIT and is one scalar over all 32 frames.** The
+    first is where it is because doing it during the stroke makes the curve crawl
+    under the cursor and doing it at commit makes the last thing the user saw not be
+    the thing that got saved. The second is defensible precisely because it **changes
+    no shape and no inter-frame relationship** — there is nothing to watch except a
+    level, and the editor carries a peak readout so the level is legible in advance.
+    Net property, and it is the one to state: **nothing the user drew ever moves at
+    commit.**
+
+11. **An all-zero drawn table.** The import path maps a peak of zero to a gain of 1
+    and carries on. A drawing of silence is not a recovered file, it is a mistake,
+    and it would take an identity forever. **Resolved: a commit whose set peak is
+    `<= 1e-9f` — the same constant the import path already uses, so there is one
+    number — is REFUSED with a sentence.** Divergence from import, deliberate,
+    stated in both directions.
+
+12. **A table with fewer than 32 source frames, opened in the editor.** An import
+    may have 1..32. **Resolved: the editor always edits 32; opening stretches by the
+    same linear frame-axis interpolation `spBuildCustomMips()` already performs, and
+    says that it did.** Committing then yields a different hash, which is correct
+    and is not a bug to be hidden — the content differs.
+
+13. **The frame cursor's relationship to `A Position` (id 1).** Both address the
+    frame axis and one of them is automatable. **Resolved: the cursor is editor-only
+    state, is never saved, and NEVER follows Position** — the editor draws Position
+    as a marker and leaves the cursor alone. A cursor that followed a modulated,
+    automatable parameter would let an LFO drag the pen mid-stroke.
+
+14. **The feature is unusable after 32 edits, and the brief does not mention it.**
+    `spBuildCustomMips()` allocates 1.31 MB per distinct hash into a store that is
+    never freed and is capped at `kSpMaxCustom = 32`; an editor that committed per
+    stroke would exhaust it in a minute. **Resolved: a per-oscillator PREVIEW ARENA
+    of four recycled buffers, outside the built store and outside identity, with a
+    stated recycle bound (`4 × interval > maxBlock / sampleRate`) rather than a
+    hopeful one — and a commit that stays an explicit act, bounded at 32 distinct
+    tables per process exactly as imports are.** This is the single largest thing
+    the brief's outline did not contain, and leaving it to the implementer would
+    have meant discovering it as a bug report.
+
+15. **The consequence of separating preview from commit, which is a user-visible
+    loss.** If the playing table changes only at commit, then a project saved
+    mid-edit does not contain the drawing. **Resolved: stated in the contract, and
+    turned into an obligation — an editor closing with uncommitted changes MUST
+    ask.** The alternative is a design that permits losing an hour of drawing to a
+    window close, and no amount of implementation care fixes that.
+
+16. **Editing an imported table leaves `wtpath` pointing at the wrong file.** The
+    new content has a new hash; the WAV the path names has the old one. **Resolved:
+    any commit that changes the frames CLEARS AND REWRITES `wtpath` to the drawn
+    file.** A path that recovers a different table than its own record's hash names
+    is worse than no path at all — it is the one thing rung 5 must never do.
+
+17. **The brief says "prefer ZERO new parameter ids" and does not say whether a
+    display name is worth a state record.** Zero ids was achievable and is what
+    happened. The name was the only judgement call. **Resolved: one record per
+    oscillator, `wtnameA`/`wtnameB`, plus two preset macros.** The argument is that
+    this revision's entire premise is a user building a LIBRARY of drawn tables, and
+    a library whose every entry is sixteen hex digits is not a library. It is the one
+    place v5 adds surface the brief did not ask for, and it is flagged here rather
+    than buried so that a reviewer can strike it in one edit if they disagree: the
+    record is inert when absent, `customName()`'s fallback is v3's behaviour verbatim,
+    and nothing else in the revision depends on it.
+
+18. **`wtnameA` begins with `wt`, and `hashesInDeviceState()` qualifies on that
+    prefix.** A table named exactly `deadbeefdeadbeef` would qualify as a hash.
+    **Resolved: named and bounded rather than designed around** — the cost is the one
+    wavetable_io.h already writes down ("one wasted lookup and nothing more", since a
+    qualifying hash is only shipped if the store holds it), and it is the same hazard
+    `wtpath` has carried since v3. Moving the key outside the `wt` family would buy a
+    lookup and cost the family.
+
+19. **Whether the state tag moves to `nxspc2`.** A new record could be read as a new
+    format. **Resolved: it does not move, and the rule is written down for good — the
+    tag versions the GRAMMAR, not the build.** Bumping it would make every v5 state
+    unreadable by every v4 build in order to communicate nothing a v4 build could act
+    on, and it would throw away the skip-unknown-keys rule that was written for
+    exactly this case.
+
+20. **What the editor needs from `host.h`, which the brief does not mention at
+    all.** `WavetableControl`'s six methods can import, name, count and clear; none
+    of them can read frames, preview, or commit. **Resolved: five append-only
+    additions with defaults (`readFrames`, `previewFrames`, `commitFrames`,
+    `cancelPreview`, `setCustomName`) and ONE compatible widening
+    (`customName()`'s resolution order gains the `wtname` record ahead of its two
+    existing fallbacks).** No `customTitle()`: a second method that answers the same
+    question slightly better is a contract with two answers in it.
+
+---
+
+# v5 implementation notes (NOT contract — the contract above stays frozen)
+
+Decisions the editor and the seam may take where the v5 contract leaves latitude,
+recorded in v2's, v3's and v4's habit so the DSP author and the editor author read
+the same behaviour. Where any of these later needs to change, it changes here and
+in the code together; the sections above do not move.
+
+- **Grid and snap are editor latitude.** An optional x-grid of 2/4/8/16/32
+  divisions with snap, and an optional y-quantise, are useful and are not
+  contract: they change which samples the pen writes, and the pen's rule ("linear
+  across the span the stroke crossed") already covers whatever points the UI
+  delivers. Nothing downstream can tell.
+- **Undo is editor-local and unbounded by the contract.** The working copy is
+  32 × 2048 floats, so a full-table undo step is 256 KiB; a stack of 64 is 16 MB
+  and is fine. Per-frame steps are the obvious optimisation and nothing here
+  depends on which is chosen.
+- **The harmonic view's held spectrum is 1024 complex f32 per frame — 8 KiB —
+  and is held for the CURSOR frame only.** Moving the cursor drops it; the gate is
+  "N consecutive edits, one analysis", and consecutive means without leaving the
+  frame.
+- **Preview at stroke end, and only when something changed.** A stroke that
+  writes the identical samples publishes nothing. The rate limit is a floor, not a
+  schedule: there is no timer, and a slow drawer publishes once per stroke.
+- **The drawn file's mtime is the only "when".** The contract carries no
+  timestamp — a timestamp in a content-addressed name would be a second identity —
+  so a "recently drawn" list in the editor reads `stat()` and is a view, not state.
+- **`drawnDir()` is created lazily, on the first commit, at 0755** (learn.cpp's
+  `ensureParentDir`). A user who never draws never has the directory, which is the
+  same discipline the user preset directory follows.
+- **A commit that finds the file already present skips the write.** The name is
+  the content, so the bytes are known to match; `readNxwt`'s recompute makes even
+  a wrong-bytes case fail closed. Skipping is an optimisation with no observable
+  behaviour, which is why it is here and not above.
+- **The morph's synthesis is the mip builder's `spIfft` with `spTwiddle`
+  twiddles**, reused rather than re-derived, so the fill and the render share one
+  transform and one set of tables. A second FFT in this device would be a second
+  thing to keep in agreement.
+- **The pen never sees a mip.** Everything above the seam works in 2048-sample
+  frames; `spBuildCustomMips()` is the only thing that has ever built a mip and it
+  stays that way.
