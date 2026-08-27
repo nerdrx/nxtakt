@@ -624,7 +624,23 @@ const Table* resolve(u64 hash, const char* path) {
         }
     }
 
-    // 3. the user cache
+    // 3. v5: THE USER'S AUTHORED LIBRARY, and it sits ABOVE the cache.
+    //    Rungs 2, 3 and 4 are hash-keyed and therefore interchangeable when
+    //    they hit, so their order can only be about which copy wins on a
+    //    machine that holds two -- and the answer is the one the user
+    //    authored, because it is the copy that is not disposable and the copy
+    //    whose absence is the failure worth noticing early. Appended BELOW
+    //    rung 2, so it cannot shadow a factory table.
+    {
+        const std::string dir = drawnDir();
+        if (!dir.empty()) {
+            Table t;
+            if (readNxwt(dir + "/" + hex + ".nxwt", t) && t.hash == hash)
+                if (const Table* got = adopt(t, false)) return got;
+        }
+    }
+
+    // 4. the user cache
     {
         const std::string dir = userCacheDir();
         if (!dir.empty()) {
@@ -634,11 +650,39 @@ const Table* resolve(u64 hash, const char* path) {
         }
     }
 
-    // 4. a re-import from the recovery hint. On success this writes the user
-    //    cache, so the next resolution stops at step 3 -- and it yields the
+    // 5. a recovery from the `wtpath` hint. On a WAV this writes the user
+    //    cache, so the next resolution stops at rung 4 -- and it yields the
     //    same hash BY CONSTRUCTION or it is not the table that was asked for,
     //    which is what the equality below insists on.
+    //
+    //    v5 WIDENS THIS RUNG BY FILE EXTENSION, and by nothing else. A decoded
+    //    value ending in `.nxwt` (byte-exact, lowercase) is read with
+    //    readNxwt(), which already recomputes and compares the fold; any other
+    //    tail is importFile(), WAV, exactly as in v3. THERE IS NO FALLBACK
+    //    BETWEEN THE TWO ARMS: a file that lies about being a wavetable cache
+    //    is not a file to guess about, and offering it to the WAV reader
+    //    afterwards would be guessing. This costs one strcmp on the tail and is
+    //    what lets a drawn table travel by file copy -- a user who moves
+    //    `~/.local/share/nxtakt/drawn/` to another machine, or hands one file
+    //    to a collaborator, has a set that resolves.
+    //
+    //    A drawn file recovered here is adopted WITHOUT the cache. It is
+    //    already the one durable copy; a second under a policy that says
+    //    deleting it is safe would be two things to keep in sync, not
+    //    redundancy.
     if (path && *path) {
+        const size_t plen = std::strlen(path);
+        const bool isNxwt = plen >= 5 && std::memcmp(path + plen - 5, ".nxwt", 5) == 0;
+        if (isNxwt) {
+            Table t;
+            if (readNxwt(path, t) && t.hash == hash) {
+                t.path = path;
+                if (const Table* got = adopt(t, false)) return got;
+            } else {
+                LOGW("wavetables: %s is not the %s the set names", path, hex.c_str());
+            }
+            return nullptr;                 // no fallback to the WAV arm
+        }
         Table t;
         std::string err;
         if (importFile(path, t, err)) {
@@ -673,6 +717,20 @@ std::string factoryDir() {
     return d + "/../share/nxtakt/wavetables";
 }
 
+// v5. THE SAME LADDER userCacheDir() WALKS, ending in the same /tmp, and a
+// SIBLING of `wavetables/` rather than a child of it. Written as its own
+// function and not as `userCacheDir() + "/../drawn"` because the point of the
+// path is that no spelling of "clear the wavetable cache" can reach it, and a
+// path that contains the cache directory's name is a path that a careless
+// prefix match can.
+std::string drawnDir() {
+    std::string base;
+    if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x) base = x;
+    else if (const std::string h = homeDir(); !h.empty()) base = h + "/.local/share";
+    else base = "/tmp";
+    return base + "/nxtakt/drawn";
+}
+
 bool writeNxwt(const std::string& file, const Table& t) {
     if (t.frames <= 0 || t.frames > kMaxFrames) return false;
     if (t.data.size() != (size_t)t.frames * (size_t)kCycle) return false;
@@ -697,6 +755,26 @@ bool writeNxwt(const std::string& file, const Table& t) {
     std::fclose(f);
     if (!ok || std::rename(tmp.c_str(), file.c_str()) != 0) {
         std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool writeDrawn(const Table& t, std::string& outPath) {
+    outPath.clear();
+    if (t.hash == 0 || t.frames <= 0 || t.frames > kMaxFrames) return false;
+    const std::string dir = drawnDir();
+    if (dir.empty() || !ensureDir(dir)) {
+        LOGW("wavetables: could not create the drawn-wavetable directory %s",
+             dir.c_str());
+        return false;
+    }
+    const std::string file = dir + "/" + hashHex(t.hash) + ".nxwt";
+    outPath = file;
+    if (fileExists(file)) return true;      // same name means same bytes
+    if (!writeNxwt(file, t)) {
+        LOGW("wavetables: could not write the drawn wavetable %s", file.c_str());
+        outPath.clear();
         return false;
     }
     return true;
@@ -740,6 +818,384 @@ bool readNxwt(const std::string& file, Table& out) {
     out.data      = std::move(data);
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// v5: THE TRANSFORM
+//
+// spFft / spIfft / spTwiddle, MOVED here from spectra_tables.inc without one
+// character of the arithmetic changing, so that the pen and the mip builder
+// share one transform and one set of twiddles. See the header for why, and the
+// release gate for the proof that a move across a translation unit boundary is
+// arithmetically free at these flags.
+//
+// ATTRIBUTION, carried over verbatim: this is fftRadix2 from
+// src/audio/sample.cpp, copied rather than shared, because src/plugin does not
+// include src/audio and should not start doing so for twenty-five lines of
+// butterflies.
+// ---------------------------------------------------------------------------
+
+void fft(f32* re, f32* im, int n, const f32* tw) {
+    for (int i = 1, j = 0; i < n; ++i) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        const int half = len >> 1;
+        const int step = n / len;               // stride into the twiddle table
+        for (int i = 0; i < n; i += len) {
+            for (int k = 0; k < half; ++k) {
+                const f32 wr = tw[(size_t)(k * step) * 2 + 0];
+                const f32 wi = tw[(size_t)(k * step) * 2 + 1];
+                const int a = i + k, b = i + k + half;
+                const f32 vr = re[b] * wr - im[b] * wi;
+                const f32 vi = re[b] * wi + im[b] * wr;
+                re[b] = re[a] - vr; im[b] = im[a] - vi;
+                re[a] = re[a] + vr; im[a] = im[a] + vi;
+            }
+        }
+    }
+}
+
+// IDFT(X) = swap(DFT(swap(X)))/N, so handing the transform its arrays the wrong
+// way round twice is the whole inverse. After this the real part is in `re`.
+void ifft(f32* re, f32* im, int n, const f32* tw) {
+    fft(im, re, n, tw);
+    const f32 s = 1.f / (f32)n;
+    for (int i = 0; i < n; ++i) { re[i] *= s; im[i] *= s; }
+}
+
+void twiddle(std::vector<f32>& t, int n) {
+    t.assign((size_t)(n / 2) * 2, 0.f);
+    for (int i = 0; i < n / 2; ++i) {
+        const f64 a = -6.283185307179586 * (f64)i / (f64)n;
+        t[(size_t)i * 2 + 0] = (f32)std::cos(a);
+        t[(size_t)i * 2 + 1] = (f32)std::sin(a);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v5: THE PEN
+//
+// docs/SPECTRA-PARAMS.md, "The two pens", "Frames", "Morph" and "Commit". The
+// header carries the arguments; this carries the arithmetic, and every loop
+// below has a FIXED ORDER because the frames it produces are the identity.
+// ---------------------------------------------------------------------------
+namespace pen {
+namespace {
+
+// ONE twiddle table for kCycle, built on first use and never rebuilt. A
+// function-local static, so it is a root for the leak checker and a process
+// that never draws never pays for it. Every pen transform is at kCycle -- the
+// pen has no other length, because a pen that drew into 256 points and
+// upsampled would need a defined upsample IN THE IDENTITY PATH, which is a
+// second resampler and a second libm dependence, to buy nothing.
+const std::vector<f32>& cycleTwiddle() {
+    static const std::vector<f32> t = [] {
+        std::vector<f32> v;
+        twiddle(v, kCycle);
+        return v;
+    }();
+    return t;
+}
+
+// Scratch for one transform. Not a static: the pen runs on the one non-realtime
+// thread that owns the device, and 16 KiB on the stack of a GUI call is nothing
+// against a shared buffer that two windows could enter at once.
+struct Scratch {
+    std::vector<f32> re, im;
+    Scratch() : re((size_t)kCycle, 0.f), im((size_t)kCycle, 0.f) {}
+};
+
+inline f32 clamp1(f32 v) { return v < -1.f ? -1.f : (v > 1.f ? 1.f : v); }
+inline int clampIdx(int i) { return i < 0 ? 0 : (i > kCycle - 1 ? kCycle - 1 : i); }
+
+} // namespace
+
+int index(f32 xNorm) {
+    if (!(xNorm == xNorm)) return 0;               // a NaN from a UI is index 0
+    const f32 x = xNorm * (f32)(kCycle - 1);
+    // round-half-away-from-zero, and std::lround rather than a cast, because a
+    // cast truncates and the contract says round.
+    return clampIdx((int)std::lround((double)x));
+}
+
+void stroke(f32* frame, int i0, f32 v0, int i1, f32 v1) {
+    if (!frame) return;
+    i0 = clampIdx(i0);
+    i1 = clampIdx(i1);
+    v0 = clamp1(v0);
+    v1 = clamp1(v1);
+    if (i1 == i0) { frame[i0] = v1; return; }      // the later write wins
+
+    // ASCENDING IN INDEX, whichever way the pointer moved, so that a stroke and
+    // its mirror image write the same samples in the same order.
+    const int lo = i0 < i1 ? i0 : i1;
+    const int hi = i0 < i1 ? i1 : i0;
+    const f32 vlo = i0 < i1 ? v0 : v1;
+    const f32 vhi = i0 < i1 ? v1 : v0;
+    const f32 span = (f32)(hi - lo);
+    for (int i = lo; i <= hi; ++i) {
+        const f32 t = (f32)(i - lo) / span;
+        frame[i] = vlo + (vhi - vlo) * t;
+    }
+    // The endpoints are written exactly rather than through the interpolant, so
+    // that a one-pixel stroke and a thousand-pixel stroke agree about where they
+    // started and stopped.
+    frame[lo] = vlo;
+    frame[hi] = vhi;
+}
+
+void removeDc(f32* frame) {
+    if (!frame) return;
+    f64 sum = 0.0;
+    for (int i = 0; i < kCycle; ++i) sum += (f64)frame[i];     // f64, ascending
+    const f32 mean = (f32)(sum / (f64)kCycle);
+    for (int i = 0; i < kCycle; ++i) frame[i] -= mean;         // f32, ascending
+}
+
+void analyse(const f32* frame, Spectrum& out) {
+    out = Spectrum{};
+    if (!frame) return;
+    Scratch sc;
+    for (int i = 0; i < kCycle; ++i) { sc.re[(size_t)i] = frame[i]; sc.im[(size_t)i] = 0.f; }
+    fft(sc.re.data(), sc.im.data(), kCycle, cycleTwiddle().data());
+    // THE MIP BUILDER'S SCALING, to the character: s = 2/N, hr = cosine
+    // coefficient, hi = MINUS the sine coefficient, h = 0 forced to zero. 2/2048
+    // and its inverse 1024 are both powers of two, so analyse -> synthesise
+    // multiplies by exactly 1.0 and the round trip loses nothing to the scaling.
+    const f32 s = 2.f / (f32)kCycle;
+    for (int h = 0; h <= kMaxHarm; ++h) {
+        out.hr[h] = h == 0 ? 0.f : sc.re[(size_t)h] * s;
+        out.hi[h] = h == 0 ? 0.f : sc.im[(size_t)h] * s;
+    }
+}
+
+f32 magnitude(const Spectrum& s, int h) {
+    if (h < 0 || h > kMaxHarm) return 0.f;
+    return std::sqrt(s.hr[h] * s.hr[h] + s.hi[h] * s.hi[h]);
+}
+
+f32 magFromDb(f32 db) {
+    if (!(db > kFloorDb)) return 0.f;          // THE FLOOR IS A HARD ZERO
+    if (db > 0.f) db = 0.f;                    // no harmonic may exceed 0 dB
+    return (f32)std::pow(10.0, (double)db / 20.0);   // the one new libm call
+}
+
+f32 dbFromMag(f32 m) {
+    if (!(m > 0.f)) return kFloorDb;
+    const f32 db = (f32)(20.0 * std::log10((double)m));
+    return db < kFloorDb ? kFloorDb : (db > 0.f ? 0.f : db);
+}
+
+void setBar(Spectrum& s, int h, f32 mag) {
+    if (h < 1 || h > kEditHarm) return;        // DC is not editable; 257..1023
+                                               // are not editable and PRESERVED
+    if (!(mag > 0.f)) mag = 0.f;
+    if (mag > 1.f) mag = 1.f;
+    // (m, SINE PHASE): frame[i] = m*sin(2*pi*h*i/N) means A_h = 0 and B_h = m,
+    // and the convention stores hi = -B_h.
+    s.hr[h] = 0.f;
+    s.hi[h] = -mag;
+}
+
+void toSinePhase(Spectrum& s) {
+    s.hr[0] = 0.f;
+    s.hi[0] = 0.f;
+    for (int h = 1; h <= kMaxHarm; ++h) {      // ascending in h
+        const f32 m = magnitude(s, h);
+        s.hr[h] = 0.f;
+        s.hi[h] = -m;
+    }
+}
+
+void synthesise(const Spectrum& s, f32* frame) {
+    if (!frame) return;
+    Scratch sc;
+    // Exactly spBuildFrameMips' reconstruction at n = kCycle: X[h] =
+    // (N/2)*(hr + i*hi), its conjugate at N-h, and nothing at all at h = 0 --
+    // DC is FORCED TO ZERO by never being written.
+    const f32 half = 0.5f * (f32)kCycle;
+    for (int h = 1; h <= kMaxHarm; ++h) {      // ascending in h
+        sc.re[(size_t)h] = half * s.hr[h];
+        sc.im[(size_t)h] = half * s.hi[h];
+        sc.re[(size_t)(kCycle - h)] =  sc.re[(size_t)h];
+        sc.im[(size_t)(kCycle - h)] = -sc.im[(size_t)h];
+    }
+    ifft(sc.re.data(), sc.im.data(), kCycle, cycleTwiddle().data());
+    for (int i = 0; i < kCycle; ++i) frame[i] = sc.re[(size_t)i];
+}
+
+bool morph(f32* frames, int a, int b) {
+    if (!frames) return false;
+    if (a < 0 || b >= kMaxFrames || b <= a + 1) return false;   // b > a+1 or no-op
+
+    Spectrum sa, sb;
+    analyse(frames + (size_t)a * (size_t)kCycle, sa);
+    analyse(frames + (size_t)b * (size_t)kCycle, sb);
+
+    // The two magnitude sets, taken once. Ascending in h.
+    std::vector<f32> ma((size_t)kMaxHarm + 1, 0.f), mb((size_t)kMaxHarm + 1, 0.f);
+    for (int h = 1; h <= kMaxHarm; ++h) {
+        ma[(size_t)h] = magnitude(sa, h);
+        mb[(size_t)h] = magnitude(sb, h);
+    }
+
+    Spectrum k;
+    for (int fr = a + 1; fr < b; ++fr) {                        // ascending in k
+        const f32 t = (f32)(fr - a) / (f32)(b - a);
+        k = Spectrum{};
+        for (int h = 1; h <= kMaxHarm; ++h) {                   // ascending in h
+            // MAGNITUDE ONLY, at the pen's SINE PHASE. f32 throughout.
+            const f32 m = (1.f - t) * ma[(size_t)h] + t * mb[(size_t)h];
+            k.hr[h] = 0.f;
+            k.hi[h] = -m;
+        }
+        synthesise(k, frames + (size_t)fr * (size_t)kCycle);
+    }
+    // a and b are NOT TOUCHED. If either is not already in sine phase there is
+    // an audible phase step at the boundary, and rephaseEndpoints() is the named
+    // fix -- it is not called from here, and that is the contract.
+    return true;
+}
+
+bool rephaseEndpoints(f32* frames, int a, int b) {
+    if (!frames) return false;
+    if (a < 0 || a >= kMaxFrames || b < 0 || b >= kMaxFrames || a == b) return false;
+    const int lo = a < b ? a : b, hi = a < b ? b : a;
+    for (int fr : { lo, hi }) {                                 // ascending
+        Spectrum s;
+        f32* f = frames + (size_t)fr * (size_t)kCycle;
+        analyse(f, s);
+        toSinePhase(s);                    // magnitudes untouched
+        synthesise(s, f);
+    }
+    return true;
+}
+
+void clearFrame(f32* frames, int k) {
+    if (!frames || k < 0 || k >= kMaxFrames) return;
+    f32* f = frames + (size_t)k * (size_t)kCycle;
+    for (int i = 0; i < kCycle; ++i) f[i] = 0.f;
+}
+
+// INSERT DROPS FRAME 31. Say it here, where a reader hits it: the frame count is
+// fixed at 32, so the tail has to go somewhere and there is nowhere. The
+// alternative -- refusing to insert when frame 31 is non-zero -- is a tool that
+// stops working exactly when the table is full, which is always.
+void insertFrame(f32* frames, int k) {
+    if (!frames || k < 0 || k >= kMaxFrames) return;
+    const size_t n = (size_t)kCycle * sizeof(f32);
+    for (int i = kMaxFrames - 1; i > k; --i)                    // descending, so
+        std::memcpy(frames + (size_t)i * kCycle,                // the shift does
+                    frames + (size_t)(i - 1) * kCycle, n);      // not eat itself
+    // frames[k] is already the copy: inserting AT the cursor leaves the cursor
+    // frame where it is and puts its duplicate immediately after it. What was
+    // frame 31 is gone.
+}
+
+void duplicateFrame(f32* frames, int k) {
+    if (!frames || k < 0 || k >= kMaxFrames) return;
+    // "copy the cursor frame into the next slot, pushing the tail down" is
+    // insert-at-k+1 of a copy of k -- which produces the identical array Insert
+    // does. The two differ only in where the editor leaves the CURSOR, and a
+    // cursor is editor-only state. Frame 31 is dropped either way.
+    insertFrame(frames, k);
+}
+
+// DELETE DUPLICATES THE NEW LAST FRAME. The same fixed-32 argument from the
+// other end: pulling the tail up leaves slot 31 holding what slot 30 now holds,
+// which IS "copy the (new) last frame into slot 31" -- stated rather than left
+// as a consequence of the memcpy, because a reader will look for the copy.
+void deleteFrame(f32* frames, int k) {
+    if (!frames || k < 0 || k >= kMaxFrames) return;
+    const size_t n = (size_t)kCycle * sizeof(f32);
+    for (int i = k; i < kMaxFrames - 1; ++i)                    // ascending
+        std::memcpy(frames + (size_t)i * kCycle,
+                    frames + (size_t)(i + 1) * kCycle, n);
+    // Slot 31 now equals slot 30 -- the new last frame, duplicated.
+}
+
+void stretchFrames(const f32* src, int srcFrames, f32* dst) {
+    if (!src || !dst || srcFrames <= 0 || srcFrames > kMaxFrames) return;
+    const int n = srcFrames;
+    for (int fr = 0; fr < kMaxFrames; ++fr) {
+        // spBuildCustomMips' frame axis, transcribed rather than re-derived.
+        const f64 x = n <= 1 ? 0.0
+                             : (f64)fr * (f64)(n - 1) / (f64)(kMaxFrames - 1);
+        int s0 = (int)x;
+        if (s0 > n - 1) s0 = n - 1;
+        const int s1 = s0 + 1 < n ? s0 + 1 : s0;
+        const f32 bl = (f32)(x - (f64)s0);
+        const f32* a = src + (size_t)s0 * (size_t)kCycle;
+        const f32* c = src + (size_t)s1 * (size_t)kCycle;
+        f32* d = dst + (size_t)fr * (size_t)kCycle;
+        for (int i = 0; i < kCycle; ++i) d[i] = a[i] + (c[i] - a[i]) * bl;
+    }
+}
+
+bool canonicalise(f32* frames, std::string& err) {
+    err.clear();
+    if (!frames) { err = "there is nothing to commit"; return false; }
+    const size_t n = (size_t)kMaxFrames * (size_t)kCycle;
+
+    // 1. EVERY SAMPLE MUST BE FINITE. v3's rule -- "a frame containing a
+    //    non-finite sample is refused at import and never reaches the hash" --
+    //    applying to the pen unchanged, so a NaN payload cannot become an
+    //    identity by a second door. Checked BEFORE anything is written, so a
+    //    refusal leaves the working copy exactly as it was.
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(frames[i])) {
+            err = "this table has a sample that is not a number; nothing was saved";
+            return false;
+        }
+    }
+
+    // A refusal must change nothing, and step 4 can refuse AFTER step 2 has
+    // written. So step 2 runs on a copy and is committed at the end.
+    std::vector<f32> work(frames, frames + n);
+
+    // 2. PER-FRAME DC REMOVAL, ascending frame then ascending index, mean in
+    //    f64 and subtracted in f32. Normally a no-op -- the waveform pen already
+    //    did it at stroke end and the harmonic pen's sine convention makes it
+    //    one by construction -- and it runs anyway, because a commit must not
+    //    depend on which pen last touched a frame.
+    for (int fr = 0; fr < kMaxFrames; ++fr) removeDc(work.data() + (size_t)fr * (size_t)kCycle);
+
+    // 3. THE SET-WIDE PEAK, ascending.
+    f32 pk = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+        const f32 a = std::fabs(work[i]);
+        if (a > pk) pk = a;
+    }
+
+    // 4. REFUSE A SILENT TABLE. Import maps this case to a gain of 1 and carries
+    //    on because it is recovering someone else's file; a drawing that is all
+    //    zeros is a mistake, and letting it through would burn an identity on
+    //    silence forever. Deliberate divergence, stated in both directions.
+    if (pk <= kSilent) {
+        err = "this table is silent";
+        return false;
+    }
+
+    // 5. ONE SET-WIDE FACTOR, ascending. Not per-frame and not per-stroke: a
+    //    single scalar over all 32 frames changes no shape and no inter-frame
+    //    relationship, so nothing the user drew moves.
+    const f32 g = 1.f / pk;
+    for (size_t i = 0; i < n; ++i) work[i] *= g;
+
+    std::memcpy(frames, work.data(), n * sizeof(f32));
+    return true;
+}
+
+f64 previewInterval(f64 sampleRate, int maxBlock) {
+    if (!(sampleRate > 0.0) || maxBlock <= 0) return 0.05;
+    const f64 twoBlocks = 2.0 * (f64)maxBlock / sampleRate;
+    return twoBlocks > 0.05 ? twoBlocks : 0.05;
+}
+
+} // namespace pen
 
 // ---------------------------------------------------------------------------
 // The wire's discovery half

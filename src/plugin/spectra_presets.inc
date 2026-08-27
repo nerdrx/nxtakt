@@ -1334,6 +1334,7 @@ SP( 72, 1)       // M2 Dst = A Pos
 SP( 73, 0.25f)   // M2 Amt
 SP( 98, 1)       // Voice Mode = Mono
 SPWTA("16b407f0a07b9117")
+SPWTNA("Sweep Table")
 SP_END()
 
 // BA Talk Box — the learned CC (11, expression) is the mouth: the pedal walks
@@ -1621,6 +1622,8 @@ SP( 75, 2)       // M3 Dst = B Pos
 SP( 76, 0.3f)    // M3 Amt
 SPWTA("5c0d37c1e4244576")
 SPWTB("c452993b482418f3")
+SPWTNA("Solar A")
+SPWTNB("Solar B")
 SP_END()
 
 // LD Spark Bloom — a one-shot sine LFO2 is the second envelope: it lifts the

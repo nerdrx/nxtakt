@@ -297,10 +297,15 @@ build/daemon_test: tests/daemon_test.cpp $(IPC_H) src/audio/engine.h build/nxtak
 # and every local run tested yesterday's devices against today's interface. The
 # recipe filters %.cpp out of $^ for the same reason handle_test's does — a .h
 # handed to g++ is compiled as a precompiled header, not ignored.
+# src/plugin/wavetable_io.h joined the list with v5's wavetable editor: the
+# suite calls wt::pen directly (the pen, the morph, the frame ops and the
+# canonicalisation are arithmetic, and arithmetic is worth testing without a
+# device around it), so a change to that header must rebuild this binary. It is
+# the $(IPC_H) lesson with a third filename.
 build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
                             src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
                             src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA) \
-                            src/plugin/host.h src/audio/sample.h
+                            src/plugin/host.h src/audio/sample.h src/plugin/wavetable_io.h
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(shell pkg-config --libs lilv-0) -ldl
 

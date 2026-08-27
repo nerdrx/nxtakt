@@ -26,6 +26,10 @@
 #include "../src/audio/sample.h"
 // Spectra's table accessor -- detail::spectraTables() and friends.
 #include "../src/plugin/internal_base.h"
+// v5's pen, its identity and its directories. wavetable_io.cpp is already in
+// this binary's link line (INTERNAL_SUP); the header is what lets the suite
+// call the pen directly rather than only through a device.
+#include "../src/plugin/wavetable_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -37,7 +41,11 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <vector>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 using namespace lat;
 
@@ -9194,6 +9202,2182 @@ static void smBusyPatch(PluginInstance& s) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v5 — the wavetable editor. docs/SPECTRA-PARAMS.md, "v5 — the wavetable
+// editor (FROZEN)".
+//
+// Everything below tests the ENGINE half: the pen's arithmetic, the
+// analysis/synthesis discipline, the morph, the frame operations, the preview
+// arena, the durable library and the wtname record. The editor's UI is another
+// file and another wave; nothing here draws.
+// ---------------------------------------------------------------------------
+
+static constexpr int kWdCycle  = 2048;
+static constexpr int kWdFrames = 32;
+static constexpr size_t kWdN   = (size_t)kWdFrames * (size_t)kWdCycle;
+
+// A per-suite XDG_DATA_HOME, so that no test ever touches the machine's real
+// wavetable library or its real drawn library. docs/PAPER.md's rule: never test
+// against live user data.
+static std::string wdSandbox() {
+    static std::string dir = [] {
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "/tmp/nxtakt-wd-%d", (int)::getpid());
+        ::mkdir(buf, 0755);
+        ::setenv("XDG_DATA_HOME", buf, 1);
+        return std::string(buf);
+    }();
+    return dir;
+}
+
+// A minimal 32-bit-float WAV, mono, `frames` x 2048 samples -- the Serum
+// convention, which is rule (a) and does no arithmetic on the samples at all.
+// Written by hand because this binary deliberately has no encoder: it is the
+// only way the suite can hand importFile() a file it will actually accept, and
+// rung 5's "no fallback between the arms" cannot be tested without one.
+static bool wdWriteWav(const std::string& path, const f32* data, int frames) {
+    const u32 n = (u32)frames * 2048u;
+    const u32 dataBytes = n * 4u;
+    u8 h[44];
+    std::memcpy(h + 0, "RIFF", 4);
+    const u32 riff = 36u + dataBytes;
+    std::memcpy(h + 4, &riff, 4);
+    std::memcpy(h + 8,  "WAVEfmt ", 8);
+    const u32 fmtSize = 16u;   std::memcpy(h + 16, &fmtSize, 4);
+    const u16 fmt = 3, ch = 1, bits = 32, align = 4;
+    const u32 rate = 44100, bps = 44100u * 4u;
+    std::memcpy(h + 20, &fmt,   2);
+    std::memcpy(h + 22, &ch,    2);
+    std::memcpy(h + 24, &rate,  4);
+    std::memcpy(h + 28, &bps,   4);
+    std::memcpy(h + 32, &align, 2);
+    std::memcpy(h + 34, &bits,  2);
+    std::memcpy(h + 36, "data", 4);
+    std::memcpy(h + 40, &dataBytes, 4);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(h, 1, sizeof h, f) == sizeof h &&
+                    std::fwrite(data, sizeof(f32), n, f) == n;
+    std::fclose(f);
+    return ok;
+}
+
+static bool wdFileExists(const std::string& p) {
+    struct stat st{};
+    return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+// The analytic spectra the phase convention is argued from: m_h = 1/h over all
+// harmonics is exactly a sawtooth, and over odd harmonics only is exactly a
+// square. Those two gestures are the first two things anybody draws.
+static void wdSineSum(f32* frame, bool oddOnly, int maxH) {
+    for (int i = 0; i < kWdCycle; ++i) frame[i] = 0.f;
+    for (int h = 1; h <= maxH; ++h) {
+        if (oddOnly && (h % 2) == 0) continue;
+        const f64 a = 1.0 / (f64)h;
+        for (int i = 0; i < kWdCycle; ++i)
+            frame[i] += (f32)(a * std::sin(6.283185307179586 * (f64)h * (f64)i / (f64)kWdCycle));
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Pen(PluginRegistry& reg) {
+    (void)reg;
+    banner("Spectra v5: the two pens");
+
+    std::vector<f32> f((size_t)kWdCycle, 0.f);
+
+    // --- the waveform pen's domain -----------------------------------------
+    CHECK(wt::pen::index(0.f) == 0 && wt::pen::index(1.f) == 2047,
+          "x maps to clamp(round(x * 2047), 0, 2047): 0 -> %d, 1 -> %d",
+          wt::pen::index(0.f), wt::pen::index(1.f));
+    CHECK(wt::pen::index(-5.f) == 0 && wt::pen::index(5.f) == 2047,
+          "...and clamps outside 0..1 rather than wrapping");
+    CHECK(wt::pen::index(0.5f) == 1024,
+          "0.5 rounds to 1024 (round, not truncate) — got %d", wt::pen::index(0.5f));
+
+    // --- a sparse stroke interpolates linearly across the span it crossed ---
+    {
+        for (f32& v : f) v = 0.f;
+        wt::pen::stroke(f.data(), 400, -1.f, 900, 1.f);
+        int changed = 0;
+        for (int i = 0; i < kWdCycle; ++i) if (f[(size_t)i] != 0.f) ++changed;
+        CHECK(f[400] == -1.f && f[900] == 1.f,
+              "the stroke's endpoints are written exactly (%.3f .. %.3f)",
+              (double)f[400], (double)f[900]);
+        // 501 samples are in the span; the midpoint of a -1..1 ramp is 0, so
+        // exactly one of them is legitimately zero.
+        CHECK(changed == 500,
+              "a stroke from 400 to 900 touches 501 samples and nothing else "
+              "(500 of them non-zero; the ramp crosses zero once) — got %d", changed);
+        bool linear = true;
+        for (int i = 400; i <= 900; ++i) {
+            const f32 want = -1.f + 2.f * (f32)(i - 400) / 500.f;
+            if (std::fabs(f[(size_t)i] - want) > 1e-6f) linear = false;
+        }
+        CHECK(linear, "every index in the span carries the linear interpolant");
+        CHECK(f[399] == 0.f && f[901] == 0.f,
+              "untouched samples keep their previous value");
+        CHECK(f[0] == 0.f && f[2047] == 0.f,
+              "A STROKE DOES NOT WRAP — the cycle is a ring to the oscillator and "
+              "a line to the pen");
+    }
+
+    // --- a hard vertical step, which is what rules out a spline -------------
+    {
+        for (f32& v : f) v = 0.f;
+        wt::pen::stroke(f.data(), 1000, -1.f, 1000, 1.f);
+        CHECK(f[1000] == 1.f, "i1 == i0 overwrites with v1 (the later write wins)");
+        wt::pen::stroke(f.data(), 500, 1.f, 1000, 1.f);
+        wt::pen::stroke(f.data(), 1001, -1.f, 1500, -1.f);
+        bool step = true;
+        for (int i = 500; i <= 1000; ++i) if (f[(size_t)i] != 1.f) step = false;
+        for (int i = 1001; i <= 1500; ++i) if (f[(size_t)i] != -1.f) step = false;
+        CHECK(step, "the pen draws a hard vertical step — a pulse edge, which no "
+                    "interpolating spline can express and no spline may round off");
+    }
+
+    // --- the pen cannot draw past full scale --------------------------------
+    {
+        for (f32& v : f) v = 0.f;
+        wt::pen::stroke(f.data(), 10, -9.f, 20, 9.f);
+        bool inRange = true;
+        for (int i = 0; i < kWdCycle; ++i)
+            if (f[(size_t)i] < -1.f || f[(size_t)i] > 1.f) inRange = false;
+        CHECK(inRange && f[10] == -1.f && f[20] == 1.f,
+              "y is clamped to +/-1: the pen cannot draw past full scale");
+    }
+
+    // --- DC removal at stroke end, and its stated accumulation --------------
+    {
+        for (f32& v : f) v = 0.5f;
+        wt::pen::removeDc(f.data());
+        f64 sum = 0.0;
+        for (int i = 0; i < kWdCycle; ++i) sum += (f64)f[(size_t)i];
+        CHECK(std::fabs(sum) < 1e-3, "DC removal takes the frame's mean to zero "
+              "(residual %.3e over 2048 samples)", sum);
+        // Determinism: the same frame, twice, is the same frame.
+        std::vector<f32> a((size_t)kWdCycle), b((size_t)kWdCycle);
+        for (int i = 0; i < kWdCycle; ++i)
+            a[(size_t)i] = b[(size_t)i] = (f32)std::sin(0.001 * i) + 0.37f;
+        wt::pen::removeDc(a.data());
+        wt::pen::removeDc(b.data());
+        CHECK(std::memcmp(a.data(), b.data(), (size_t)kWdCycle * sizeof(f32)) == 0,
+              "...bit-identical on a repeat");
+
+        // THE ACCUMULATION TYPE AND ORDER ARE LOAD-BEARING, so they are asserted
+        // against an INDEPENDENT reference rather than only against a repeat: a
+        // repeat catches nothing, because the same wrong arithmetic repeats
+        // exactly. Determinism obligation 5 is a claim about two MACHINES, which
+        // one process cannot falsify; this is the half of it a process can hold.
+        std::vector<f32> ref((size_t)kWdCycle), got((size_t)kWdCycle);
+        for (int i = 0; i < kWdCycle; ++i) {
+            // A signal chosen so f32 and f64 accumulation DISAGREE: a large
+            // offset with small detail on top, which is what a hand-drawn curve
+            // sliding off centre actually looks like.
+            const f32 v = 0.9f + (f32)(1e-6 * std::sin(0.37 * i));
+            ref[(size_t)i] = got[(size_t)i] = v;
+        }
+        f64 s64 = 0.0;
+        for (int i = 0; i < kWdCycle; ++i) s64 += (f64)ref[(size_t)i];   // f64, ascending
+        const f32 mean64 = (f32)(s64 / (f64)kWdCycle);
+        for (int i = 0; i < kWdCycle; ++i) ref[(size_t)i] -= mean64;     // f32, ascending
+        wt::pen::removeDc(got.data());
+        CHECK(std::memcmp(ref.data(), got.data(), (size_t)kWdCycle * sizeof(f32)) == 0,
+              "the mean accumulates in f64 in ASCENDING INDEX ORDER and is "
+              "subtracted in f32 in ascending index order — bit-for-bit what an "
+              "independent f64 reference computes");
+
+        f32 s32 = 0.f;
+        for (int i = 0; i < kWdCycle; ++i) s32 += ref[(size_t)i] + mean64;
+        CHECK((f32)(s32 / (f32)kWdCycle) != mean64,
+              "...and an f32 accumulator over the same samples gives a DIFFERENT "
+              "mean (%.9g vs %.9g), so the type is not decoration",
+              (double)(s32 / (f32)kWdCycle), (double)mean64);
+    }
+
+    // --- the dB scale, and the HARD ZERO floor ------------------------------
+    CHECK(wt::pen::magFromDb(0.f) == 1.f,
+          "bar top is 0 dB = magnitude 1.0 (a full-scale sine at that harmonic)");
+    CHECK(wt::pen::magFromDb(-80.f) == 0.f,
+          "THE FLOOR IS A HARD ZERO, not -80 dB: a bar dragged to the bottom sets "
+          "the magnitude to exactly 0.0f");
+    CHECK(wt::pen::magFromDb(-100.f) == 0.f, "...and anything below the floor is 0 too");
+    CHECK(wt::pen::magFromDb(6.f) == 1.f,
+          "no harmonic may exceed 0 dB — the clamp is what makes the commit's set "
+          "normalisation a correction and not a rescue");
+    {
+        const f32 m = wt::pen::magFromDb(-40.f);
+        CHECK(std::fabs(m - 0.01f) < 1e-6f,
+              "-40 dB is magnitude 0.01 (10^(dB/20)) — got %.6f", (double)m);
+        CHECK(std::fabs(wt::pen::dbFromMag(0.01f) + 40.f) < 1e-3f,
+              "...and the display inverse agrees");
+        CHECK(wt::pen::dbFromMag(0.f) == wt::pen::kFloorDb,
+              "a magnitude of zero displays at the floor");
+    }
+
+    // --- ALL-SINE PHASE: the two spectra the convention is argued from ------
+    {
+        wt::pen::Spectrum s;
+        std::vector<f32> saw((size_t)kWdCycle), got((size_t)kWdCycle);
+        wdSineSum(saw.data(), /*oddOnly=*/false, wt::pen::kMaxHarm);
+        // Build the same spectrum through the pen: every bar at 1/h.
+        for (int h = 1; h <= wt::pen::kMaxHarm; ++h) {
+            s.hr[h] = 0.f;
+            s.hi[h] = -(f32)(1.0 / (f64)h);
+        }
+        wt::pen::synthesise(s, got.data());
+        f64 worst = 0.0;
+        for (int i = 0; i < kWdCycle; ++i)
+            worst = std::fmax(worst, std::fabs((f64)got[(size_t)i] - (f64)saw[(size_t)i]));
+        CHECK(worst < 2e-3,
+              "m_h = 1/h over ALL harmonics synthesises EXACTLY a sawtooth under "
+              "all-sine phase (worst sample error %.2e)", worst);
+        CHECK(got[0] == 0.f || std::fabs(got[0]) < 1e-5f,
+              "sin(0) = 0 for every harmonic, so frame[0] is zero and the cycle "
+              "joins itself continuously (%.2e)", (double)got[0]);
+        f64 sum = 0.0;
+        for (int i = 0; i < kWdCycle; ++i) sum += (f64)got[(size_t)i];
+        CHECK(std::fabs(sum) < 1e-2,
+              "a sum of sines is odd-symmetric, so DC IS ZERO BY CONSTRUCTION and "
+              "the per-frame DC removal is a no-op on a harmonic-pen frame (%.2e)", sum);
+    }
+    {
+        wt::pen::Spectrum s;
+        std::vector<f32> sq((size_t)kWdCycle), got((size_t)kWdCycle);
+        wdSineSum(sq.data(), /*oddOnly=*/true, wt::pen::kMaxHarm);
+        for (int h = 1; h <= wt::pen::kMaxHarm; ++h) {
+            s.hr[h] = 0.f;
+            s.hi[h] = (h % 2) ? -(f32)(1.0 / (f64)h) : 0.f;
+        }
+        wt::pen::synthesise(s, got.data());
+        f64 worst = 0.0;
+        for (int i = 0; i < kWdCycle; ++i)
+            worst = std::fmax(worst, std::fabs((f64)got[(size_t)i] - (f64)sq[(size_t)i]));
+        CHECK(worst < 2e-3,
+              "m_h = 1/h over ODD harmonics synthesises EXACTLY a square (worst "
+              "sample error %.2e) — the two gestures anybody draws first", worst);
+    }
+
+    // ...and the same waveform built THROUGH THE BARS, so that setBar()'s phase
+    // convention is load-bearing on a musical gate and not only on one
+    // assertion about two floats. 200 harmonics, because a bar past 256 is not
+    // a control.
+    {
+        wt::pen::Spectrum s;
+        std::vector<f32> saw((size_t)kWdCycle), got((size_t)kWdCycle);
+        wdSineSum(saw.data(), false, 200);
+        for (int h = 1; h <= 200; ++h) wt::pen::setBar(s, h, (f32)(1.0 / (f64)h));
+        wt::pen::synthesise(s, got.data());
+        f64 worst = 0.0;
+        for (int i = 0; i < kWdCycle; ++i)
+            worst = std::fmax(worst, std::fabs((f64)got[(size_t)i] - (f64)saw[(size_t)i]));
+        CHECK(worst < 2e-3,
+              "...and DRAWING 1/h ON THE BARS gives the same sawtooth (worst %.2e): "
+              "setBar and synthesise agree about the convention, which is the thing "
+              "a user's first gesture depends on", worst);
+    }
+
+    // --- DC is not editable and is forced to zero ---------------------------
+    {
+        wt::pen::Spectrum s;
+        wt::pen::setBar(s, 0, 1.f);
+        CHECK(s.hr[0] == 0.f && s.hi[0] == 0.f,
+              "harmonic 0 (DC) is not editable and is forced to zero");
+        wt::pen::setBar(s, 300, 1.f);
+        CHECK(s.hr[300] == 0.f && s.hi[300] == 0.f,
+              "a bar past 256 is not editable either — setBar ignores it");
+        wt::pen::setBar(s, 5, 0.25f);
+        CHECK(s.hr[5] == 0.f && s.hi[5] == -0.25f,
+              "a touched bar carries (m, SINE PHASE): hr = 0, hi = -m");
+    }
+
+    // --- opening the harmonic view never modifies the frame -----------------
+    {
+        std::vector<f32> before((size_t)kWdCycle), after((size_t)kWdCycle);
+        for (int i = 0; i < kWdCycle; ++i)
+            before[(size_t)i] = after[(size_t)i] = (f32)std::sin(0.017 * i) * 0.6f;
+        wt::pen::Spectrum s;
+        wt::pen::analyse(after.data(), s);
+        CHECK(std::memcmp(before.data(), after.data(), (size_t)kWdCycle * sizeof(f32)) == 0,
+              "OPENING THE HARMONIC VIEW NEVER MODIFIES THE FRAME — the round trip "
+              "waveform -> view -> waveform with no bar touched is the identity BY "
+              "CONSTRUCTION, not by numerical luck");
+    }
+
+    // --- 257..1023 are PRESERVED, and only a touched bar moves -------------
+    {
+        std::vector<f32> frame((size_t)kWdCycle), out((size_t)kWdCycle);
+        // A frame with real content above 256, so "preserved" has something to
+        // preserve: a saw carries every harmonic to 1023.
+        wdSineSum(frame.data(), false, wt::pen::kMaxHarm);
+        wt::pen::Spectrum s0, s1;
+        wt::pen::analyse(frame.data(), s0);
+        s1 = s0;
+        wt::pen::setBar(s1, 3, 0.5f);
+        wt::pen::synthesise(s1, out.data());
+        wt::pen::Spectrum s2;
+        wt::pen::analyse(out.data(), s2);
+
+        f64 worstHigh = 0.0;
+        for (int h = 257; h <= wt::pen::kMaxHarm; ++h)
+            worstHigh = std::fmax(worstHigh,
+                std::fabs((f64)wt::pen::magnitude(s2, h) - (f64)wt::pen::magnitude(s0, h)));
+        CHECK(worstHigh < 1e-5,
+              "HARMONICS 257..1023 ARE PRESERVED with their full complex value "
+              "through a bar edit (worst magnitude drift %.2e) — not zeroed, which "
+              "is the failure mode a 'edit 256, zero the rest' design would have had",
+              worstHigh);
+
+        f64 worstLow = 0.0;
+        for (int h = 1; h <= 256; ++h) {
+            if (h == 3) continue;
+            worstLow = std::fmax(worstLow,
+                std::fabs((f64)wt::pen::magnitude(s2, h) - (f64)wt::pen::magnitude(s0, h)));
+        }
+        CHECK(worstLow < 1e-5,
+              "...and harmonics 1, 2, 4..256 are untouched too (worst %.2e)", worstLow);
+        CHECK(std::fabs((f64)wt::pen::magnitude(s2, 3) - 0.5) < 1e-4,
+              "...and the table differs from itself at harmonic 3, which is where "
+              "the user touched it (%.4f)", (double)wt::pen::magnitude(s2, 3));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The gate the contract calls a gate: N consecutive bar edits perform exactly
+// ONE forward analysis and N inverse syntheses.
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Discipline(PluginRegistry& reg) {
+    (void)reg;
+    banner("Spectra v5: one analysis, N syntheses");
+
+    std::vector<f32> start((size_t)kWdCycle);
+    wdSineSum(start.data(), false, 64);
+
+    // THE DISCIPLINED PATH: analyse once, then fifty setBar + synthesise from
+    // the HELD spectrum. This is what the editor does and what the contract
+    // requires.
+    std::vector<f32> held(start);
+    wt::pen::Spectrum s;
+    wt::pen::analyse(held.data(), s);
+    for (int k = 0; k < 50; ++k) {
+        wt::pen::setBar(s, 7, 0.3f);
+        wt::pen::synthesise(s, held.data());
+    }
+
+    // THE NAIVE PATH: re-analyse the frame it just synthesised, fifty times.
+    std::vector<f32> naive(start);
+    for (int k = 0; k < 50; ++k) {
+        wt::pen::Spectrum t;
+        wt::pen::analyse(naive.data(), t);
+        wt::pen::setBar(t, 7, 0.3f);
+        wt::pen::synthesise(t, naive.data());
+    }
+
+    // One synthesis from the held spectrum is the reference: fifty edits of the
+    // SAME value must land exactly there, because the held spectrum does not
+    // move between them.
+    std::vector<f32> once(start);
+    wt::pen::Spectrum r;
+    wt::pen::analyse(once.data(), r);
+    wt::pen::setBar(r, 7, 0.3f);
+    wt::pen::synthesise(r, once.data());
+
+    CHECK(std::memcmp(held.data(), once.data(), (size_t)kWdCycle * sizeof(f32)) == 0,
+          "FIFTY consecutive bar edits from ONE held analysis are BIT-IDENTICAL to "
+          "one edit: nothing accumulates, because nothing re-analyses");
+
+    f64 heldDrift = 0.0, naiveDrift = 0.0;
+    for (int i = 0; i < kWdCycle; ++i) {
+        heldDrift  = std::fmax(heldDrift,  std::fabs((f64)held [(size_t)i] - (f64)once[(size_t)i]));
+        naiveDrift = std::fmax(naiveDrift, std::fabs((f64)naive[(size_t)i] - (f64)once[(size_t)i]));
+    }
+    CHECK(heldDrift == 0.0,
+          "the disciplined path's drift after fifty edits is EXACTLY zero");
+    CHECK(naiveDrift > heldDrift,
+          "...and fifty FFT round trips of the naive path do drift (%.2e vs %.2e), "
+          "which is why the rule is a gate and not an optimisation",
+          naiveDrift, heldDrift);
+
+    // A waveform-domain edit invalidates the held spectrum, and the honest
+    // statement of why: a time-domain stroke touches EVERY harmonic, so there is
+    // nothing to preserve and nothing to pretend about.
+    {
+        std::vector<f32> frame(start);
+        wt::pen::Spectrum before, after;
+        wt::pen::analyse(frame.data(), before);
+        wt::pen::stroke(frame.data(), 100, -1.f, 700, 1.f);
+        wt::pen::analyse(frame.data(), after);
+        int moved = 0;
+        for (int h = 1; h <= wt::pen::kMaxHarm; ++h)
+            if (std::fabs(wt::pen::magnitude(after, h) - wt::pen::magnitude(before, h)) > 1e-7f)
+                ++moved;
+        CHECK(moved > wt::pen::kMaxHarm / 2,
+              "a time-domain stroke moves %d of %d harmonics, so a held spectrum "
+              "must be invalidated by one — harmonic -> waveform pen -> harmonic "
+              "does NOT preserve the harmonics the user drew, and the bars will "
+              "show what the stroke actually made", moved, wt::pen::kMaxHarm);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Morph(PluginRegistry& reg) {
+    (void)reg;
+    banner("Spectra v5: the harmonic-domain morph");
+
+    std::vector<f32> t(kWdN, 0.f);
+    // a = a saw (every harmonic), b = a square (odd harmonics only), both in
+    // sine phase already, so the fill has no boundary step to argue about.
+    wdSineSum(t.data() + (size_t)4 * kWdCycle,  false, 64);
+    wdSineSum(t.data() + (size_t)12 * kWdCycle, true,  64);
+    std::vector<f32> before(t);
+
+    CHECK(!wt::pen::morph(t.data(), 4, 5),
+          "b > a + 1 or the operation is a no-op: morph(4, 5) refuses");
+    CHECK(!wt::pen::morph(t.data(), 4, 4), "...and morph(4, 4) refuses");
+    CHECK(std::memcmp(t.data(), before.data(), kWdN * sizeof(f32)) == 0,
+          "...and a refused morph writes nothing at all");
+
+    CHECK(wt::pen::morph(t.data(), 4, 12), "morph(4, 12) fills frames 5..11");
+
+    CHECK(std::memcmp(t.data() + (size_t)4 * kWdCycle,
+                      before.data() + (size_t)4 * kWdCycle,
+                      (size_t)kWdCycle * sizeof(f32)) == 0 &&
+          std::memcmp(t.data() + (size_t)12 * kWdCycle,
+                      before.data() + (size_t)12 * kWdCycle,
+                      (size_t)kWdCycle * sizeof(f32)) == 0,
+          "THE ENDPOINTS ARE NOT TOUCHED — a and b are byte-identical after the fill");
+
+    bool outsideClean = true;
+    for (int k = 0; k < kWdFrames; ++k) {
+        if (k > 4 && k < 12) continue;
+        if (std::memcmp(t.data() + (size_t)k * kWdCycle,
+                        before.data() + (size_t)k * kWdCycle,
+                        (size_t)kWdCycle * sizeof(f32)) != 0) outsideClean = false;
+    }
+    CHECK(outsideClean, "...and nothing outside a+1..b-1 moves either");
+
+    bool interiorFilled = true;
+    for (int k = 5; k < 12; ++k) {
+        bool nonZero = false;
+        const f32* fr = t.data() + (size_t)k * kWdCycle;
+        for (int i = 0; i < kWdCycle; ++i) if (fr[i] != 0.f) nonZero = true;
+        if (!nonZero) interiorFilled = false;
+    }
+    CHECK(interiorFilled, "every interior frame is written");
+
+    // MAGNITUDE-ONLY INTERPOLATION is the whole character of the result: the
+    // even harmonics of the saw fade to nothing across the range, one at a time,
+    // instead of two waveforms cancelling through a hollow middle.
+    {
+        wt::pen::Spectrum sa, sb;
+        wt::pen::analyse(t.data() + (size_t)4  * kWdCycle, sa);
+        wt::pen::analyse(t.data() + (size_t)12 * kWdCycle, sb);
+        bool interp = true;
+        f64 worst = 0.0;
+        for (int k = 5; k < 12; ++k) {
+            wt::pen::Spectrum sk;
+            wt::pen::analyse(t.data() + (size_t)k * kWdCycle, sk);
+            const f32 tt = (f32)(k - 4) / (f32)(12 - 4);
+            for (int h = 1; h <= 64; ++h) {
+                const f32 want = (1.f - tt) * wt::pen::magnitude(sa, h) +
+                                 tt * wt::pen::magnitude(sb, h);
+                const f64 e = std::fabs((f64)wt::pen::magnitude(sk, h) - (f64)want);
+                worst = std::fmax(worst, e);
+                if (e > 1e-4) interp = false;
+            }
+        }
+        CHECK(interp, "m_h(k) = (1-t)|H_h(a)| + t|H_h(b)| at every interior frame "
+                      "and every harmonic (worst %.2e)", worst);
+
+        // The audible consequence, stated as a measurement: harmonic 2 is in the
+        // saw and not in the square, so it ROLLS OFF monotonically across the
+        // fill rather than crossfading.
+        f32 prev = 1e9f;
+        bool monotone = true;
+        for (int k = 4; k <= 12; ++k) {
+            wt::pen::Spectrum sk;
+            wt::pen::analyse(t.data() + (size_t)k * kWdCycle, sk);
+            const f32 m = wt::pen::magnitude(sk, 2);
+            if (m > prev + 1e-5f) monotone = false;
+            prev = m;
+        }
+        CHECK(monotone, "harmonic 2 — in the saw, absent from the square — sweeps "
+                        "DOWN to nothing across the range, one harmonic fading "
+                        "rather than two waveforms cancelling");
+    }
+
+    // The fill is at SINE PHASE, uniformly. That is what makes the fill's frames
+    // mutually phase-coherent, which is what stops them cancelling as Position
+    // sweeps across them.
+    {
+        bool sinePhase = true;
+        for (int k = 5; k < 12; ++k) {
+            wt::pen::Spectrum sk;
+            wt::pen::analyse(t.data() + (size_t)k * kWdCycle, sk);
+            for (int h = 1; h <= 64; ++h)
+                if (std::fabs(sk.hr[h]) > 1e-4f) sinePhase = false;   // cosine part
+        }
+        CHECK(sinePhase, "every filled frame is synthesised at the pen's SINE PHASE "
+                         "(the cosine coefficient of every harmonic is zero)");
+    }
+
+    // THE DEGENERATE CASE, FOUND BY A RED PROOF THAT CAME BACK GREEN, and it
+    // belongs in the record rather than in a fix.
+    //
+    // The first version of the next check asserted that the harmonic fill and
+    // the time-domain crossfade DIFFER, using the saw/square endpoints above.
+    // It failed, and it was right to: when both endpoints are already in SINE
+    // PHASE with non-negative magnitudes, their complex spectra are collinear —
+    // every harmonic of both sits on the same axis — so
+    //
+    //     (1-t)(-m_a) + t(-m_b)  =  -((1-t) m_a + t m_b)
+    //
+    // and magnitude interpolation IS the complex interpolation IS the
+    // time-domain crossfade, to the last bit. The two domains agree EXACTLY on
+    // phase-aligned endpoints.
+    //
+    // That is not a hole in the contract's argument, it is the other half of it:
+    // the reason the fill is synthesised at sine phase is precisely to make the
+    // fill's frames mutually phase-coherent, and a table whose endpoints are
+    // already coherent has nothing to cancel. The contract's "no-op you can
+    // hear" is about the GENERAL case — endpoints the user drew with whatever
+    // phase — and that case is the block after this one.
+    {
+        std::vector<f32> lin(before);
+        for (int k = 5; k < 12; ++k) {
+            const f32 tt = (f32)(k - 4) / (f32)(12 - 4);
+            for (int i = 0; i < kWdCycle; ++i)
+                lin[(size_t)k * kWdCycle + (size_t)i] =
+                    (1.f - tt) * before[(size_t)4 * kWdCycle + (size_t)i] +
+                    tt * before[(size_t)12 * kWdCycle + (size_t)i];
+        }
+        f64 worst = 0.0;
+        for (int k = 5; k < 12; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                worst = std::fmax(worst,
+                    std::fabs((f64)lin[(size_t)k * kWdCycle + (size_t)i] -
+                              (f64)t  [(size_t)k * kWdCycle + (size_t)i]));
+        CHECK(worst < 1e-3,
+              "on endpoints that are ALREADY IN SINE PHASE the harmonic fill and "
+              "the time-domain crossfade agree to %.2e — collinear spectra make "
+              "magnitude interpolation and complex interpolation the same thing, "
+              "and that is exactly what synthesising the fill at one fixed phase "
+              "buys", worst);
+    }
+
+    // A TIME-DOMAIN FILL IS A NO-OP YOU CAN HEAR, and this is the measurement
+    // that says so — on endpoints with DIFFERENT PHASES, which is what a user
+    // who drew two frames actually has. Two frames with identical magnitude
+    // spectra and different phases CANCEL as they cross: the crossfade dips,
+    // goes hollow in the middle, and comes back, and it sounds like a phaser
+    // rather than a morph.
+    {
+        std::vector<f32> u(kWdN, 0.f);
+        // Identical MAGNITUDES, opposite PHASES: the pure form of the failure.
+        for (int i = 0; i < kWdCycle; ++i) {
+            const f64 p = 6.283185307179586 * (f64)i / (f64)kWdCycle;
+            f32 a = 0.f, b = 0.f;
+            for (int h = 1; h <= 16; ++h) {
+                const f64 m = 1.0 / (f64)h;
+                a += (f32)(m * std::sin((f64)h * p));
+                b += (f32)(m * std::sin((f64)h * p + 3.141592653589793));  // -a
+            }
+            u[(size_t)4  * kWdCycle + (size_t)i] = a;
+            u[(size_t)12 * kWdCycle + (size_t)i] = b;
+        }
+        std::vector<f32> lin(u);
+        for (int k = 5; k < 12; ++k) {
+            const f32 tt = (f32)(k - 4) / (f32)(12 - 4);
+            for (int i = 0; i < kWdCycle; ++i)
+                lin[(size_t)k * kWdCycle + (size_t)i] =
+                    (1.f - tt) * u[(size_t)4  * kWdCycle + (size_t)i] +
+                    tt        * u[(size_t)12 * kWdCycle + (size_t)i];
+        }
+        // The crossfade's middle frame is where the two cancel.
+        f32 linMid = 0.f;
+        for (int i = 0; i < kWdCycle; ++i)
+            linMid = std::fmax(linMid, std::fabs(lin[(size_t)8 * kWdCycle + (size_t)i]));
+        CHECK(linMid < 1e-4f,
+              "A TIME-DOMAIN CROSSFADE GOES HOLLOW: the middle frame of a fade "
+              "between two frames of equal magnitude and opposite phase peaks at "
+              "%.2e — it is SILENT, which is the phaser the contract refuses",
+              (double)linMid);
+
+        CHECK(wt::pen::morph(u.data(), 4, 12), "the harmonic fill over the same two");
+        f32 morphMid = 0.f;
+        for (int i = 0; i < kWdCycle; ++i)
+            morphMid = std::fmax(morphMid, std::fabs(u[(size_t)8 * kWdCycle + (size_t)i]));
+        CHECK(morphMid > 0.5f,
+              "...and the HARMONIC fill's middle frame peaks at %.3f — it does not "
+              "cancel, because magnitudes interpolate and phase does not. This is "
+              "what a wavetable morph is supposed to sound like and it is the "
+              "reason the operation exists.", (double)morphMid);
+    }
+
+    // --- RE-PHASE ENDPOINTS: named, explicit, magnitudes untouched, and never
+    //     silent.
+    {
+        std::vector<f32> u(kWdN, 0.f);
+        // Two frames drawn in COSINE phase, which is exactly the case that
+        // leaves a phase step at the morph's boundary.
+        for (int i = 0; i < kWdCycle; ++i) {
+            const f64 p = 6.283185307179586 * (f64)i / (f64)kWdCycle;
+            u[(size_t)2 * kWdCycle + (size_t)i]  = (f32)(0.7 * std::cos(p) + 0.2 * std::cos(3.0 * p));
+            u[(size_t)10 * kWdCycle + (size_t)i] = (f32)(0.4 * std::cos(2.0 * p) + 0.3 * std::cos(5.0 * p));
+        }
+        wt::pen::Spectrum a0, b0;
+        wt::pen::analyse(u.data() + (size_t)2  * kWdCycle, a0);
+        wt::pen::analyse(u.data() + (size_t)10 * kWdCycle, b0);
+
+        std::vector<f32> keep(u);
+        CHECK(wt::pen::morph(u.data(), 2, 10), "morph over cosine-phase endpoints runs");
+        CHECK(std::memcmp(u.data() + (size_t)2 * kWdCycle,
+                          keep.data() + (size_t)2 * kWdCycle,
+                          (size_t)kWdCycle * sizeof(f32)) == 0,
+              "MORPH NEVER RE-PHASES SILENTLY: the endpoints the user drew are "
+              "byte-identical afterwards");
+
+        CHECK(wt::pen::rephaseEndpoints(u.data(), 2, 10),
+              "Re-phase endpoints is a NAMED, user-initiated operation");
+        wt::pen::Spectrum a1, b1;
+        wt::pen::analyse(u.data() + (size_t)2  * kWdCycle, a1);
+        wt::pen::analyse(u.data() + (size_t)10 * kWdCycle, b1);
+        f64 magDrift = 0.0;
+        for (int h = 1; h <= 16; ++h) {
+            magDrift = std::fmax(magDrift, std::fabs((f64)wt::pen::magnitude(a1, h) -
+                                                     (f64)wt::pen::magnitude(a0, h)));
+            magDrift = std::fmax(magDrift, std::fabs((f64)wt::pen::magnitude(b1, h) -
+                                                     (f64)wt::pen::magnitude(b0, h)));
+        }
+        CHECK(magDrift < 1e-5, "...that rewrites both frames to sine phase with their "
+                               "MAGNITUDES UNTOUCHED (worst drift %.2e)", magDrift);
+        bool nowSine = true;
+        for (int h = 1; h <= 16; ++h)
+            if (std::fabs(a1.hr[h]) > 1e-5f || std::fabs(b1.hr[h]) > 1e-5f) nowSine = false;
+        CHECK(nowSine, "...and both endpoints are now in sine phase");
+
+        // NEVER SILENT. A re-phase of a frame that carries energy must produce a
+        // frame that carries energy: the operation moves phase, not level.
+        f32 pkA = 0.f, pkB = 0.f;
+        for (int i = 0; i < kWdCycle; ++i) {
+            pkA = std::fmax(pkA, std::fabs(u[(size_t)2  * kWdCycle + (size_t)i]));
+            pkB = std::fmax(pkB, std::fabs(u[(size_t)10 * kWdCycle + (size_t)i]));
+        }
+        CHECK(pkA > 0.1f && pkB > 0.1f,
+              "RE-PHASE IS NEVER SILENT: both endpoints still carry their energy "
+              "(peaks %.3f and %.3f)", (double)pkA, (double)pkB);
+
+        CHECK(!wt::pen::rephaseEndpoints(u.data(), 3, 3),
+              "re-phasing one frame onto itself is refused (two NAMED frames)");
+        CHECK(!wt::pen::rephaseEndpoints(u.data(), -1, 4) &&
+              !wt::pen::rephaseEndpoints(u.data(), 0, 32),
+              "...and out-of-range indices are refused");
+    }
+
+    // The fill runs over 1..1023 and not 1..256: the fill is not the pen and has
+    // no screen to fit in.
+    {
+        std::vector<f32> w(kWdN, 0.f);
+        // Endpoint a: a single high harmonic that no bar can address.
+        for (int i = 0; i < kWdCycle; ++i)
+            w[(size_t)0 * kWdCycle + (size_t)i] =
+                (f32)std::sin(6.283185307179586 * 900.0 * (f64)i / (f64)kWdCycle);
+        CHECK(wt::pen::morph(w.data(), 0, 8), "a morph whose endpoint lives at harmonic 900");
+        wt::pen::Spectrum s4;
+        wt::pen::analyse(w.data() + (size_t)4 * kWdCycle, s4);
+        CHECK(wt::pen::magnitude(s4, 900) > 0.2f,
+              "the fill carries harmonic 900 (magnitude %.3f) — it runs over "
+              "1..1023 and not 1..256", (double)wt::pen::magnitude(s4, 900));
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Frames(PluginRegistry& reg) {
+    (void)reg;
+    banner("Spectra v5: frame operations in a fixed 32");
+
+    std::vector<f32> t(kWdN, 0.f);
+    // Frame k is filled with the constant k, so a shift is legible at a glance.
+    auto tag = [&](std::vector<f32>& v) {
+        for (int k = 0; k < kWdFrames; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                v[(size_t)k * kWdCycle + (size_t)i] = (f32)k;
+    };
+    auto at = [&](const std::vector<f32>& v, int k) { return v[(size_t)k * kWdCycle]; };
+
+    tag(t);
+    wt::pen::clearFrame(t.data(), 7);
+    bool cleared = true;
+    for (int i = 0; i < kWdCycle; ++i) if (t[(size_t)7 * kWdCycle + (size_t)i] != 0.f) cleared = false;
+    CHECK(cleared && at(t, 6) == 6.f && at(t, 8) == 8.f,
+          "Clear makes the cursor frame 2048 zeros and touches nothing else");
+
+    tag(t);
+    wt::pen::insertFrame(t.data(), 10);
+    CHECK(at(t, 9) == 9.f && at(t, 10) == 10.f && at(t, 11) == 10.f && at(t, 12) == 11.f,
+          "Insert puts a copy of the cursor frame AT the cursor and pushes the "
+          "tail down (9,10,10,11 at slots 9..12)");
+    CHECK(at(t, 31) == 30.f,
+          "INSERT DROPS WHAT WAS FRAME 31 — the frame count is fixed at 32, so "
+          "the tail has to go somewhere and there is nowhere. Slot 31 now holds "
+          "%.0f, which was frame 30.", (double)at(t, 31));
+
+    tag(t);
+    std::vector<f32> dup(t);
+    wt::pen::duplicateFrame(dup.data(), 10);
+    CHECK(std::memcmp(dup.data(), t.data(), kWdN * sizeof(f32)) != 0, "Duplicate writes");
+    {
+        std::vector<f32> ins(t);
+        wt::pen::insertFrame(ins.data(), 10);
+        CHECK(std::memcmp(dup.data(), ins.data(), kWdN * sizeof(f32)) == 0,
+              "Duplicate and Insert produce the IDENTICAL array — they differ only "
+              "in where the editor leaves the cursor, and a cursor is editor-only "
+              "state that is never saved");
+    }
+
+    tag(t);
+    wt::pen::deleteFrame(t.data(), 10);
+    CHECK(at(t, 9) == 9.f && at(t, 10) == 11.f && at(t, 11) == 12.f,
+          "Delete removes the cursor frame and pulls the tail up (9,11,12)");
+    CHECK(at(t, 30) == 31.f && at(t, 31) == 31.f,
+          "DELETE DUPLICATES THE NEW LAST FRAME into slot 31 (%.0f, %.0f) — the "
+          "same fixed-32 argument from the other end",
+          (double)at(t, 30), (double)at(t, 31));
+
+    tag(t);
+    std::vector<f32> keep(t);
+    wt::pen::insertFrame(t.data(), -1);
+    wt::pen::insertFrame(t.data(), 32);
+    wt::pen::deleteFrame(t.data(), -1);
+    wt::pen::deleteFrame(t.data(), 32);
+    wt::pen::clearFrame(t.data(), 99);
+    CHECK(std::memcmp(t.data(), keep.data(), kWdN * sizeof(f32)) == 0,
+          "an out-of-range cursor writes nothing at all");
+
+    // Insert at the last slot is the degenerate case and must not read past the
+    // array: it is a no-op that drops the frame it would have pushed.
+    tag(t);
+    wt::pen::insertFrame(t.data(), 31);
+    CHECK(at(t, 30) == 30.f && at(t, 31) == 31.f,
+          "Insert at slot 31 pushes nothing (there is nowhere to push to)");
+
+    // --- the frame-axis stretch --------------------------------------------
+    {
+        std::vector<f32> one((size_t)kWdCycle), out(kWdN, 0.f);
+        for (int i = 0; i < kWdCycle; ++i) one[(size_t)i] = (f32)std::sin(0.01 * i);
+        wt::pen::stretchFrames(one.data(), 1, out.data());
+        bool same = true;
+        for (int k = 0; k < kWdFrames; ++k)
+            if (std::memcmp(out.data() + (size_t)k * kWdCycle, one.data(),
+                            (size_t)kWdCycle * sizeof(f32)) != 0) same = false;
+        CHECK(same, "A ONE-FRAME IMPORT BECOMES 32 IDENTICAL FRAMES, which is what a "
+                    "table with no frame axis is");
+
+        std::vector<f32> two((size_t)2 * kWdCycle, 0.f);
+        for (int i = 0; i < kWdCycle; ++i) {
+            two[(size_t)i] = -1.f;
+            two[(size_t)kWdCycle + (size_t)i] = 1.f;
+        }
+        wt::pen::stretchFrames(two.data(), 2, out.data());
+        CHECK(out[0] == -1.f && out[(size_t)31 * kWdCycle] == 1.f,
+              "a two-frame source keeps its endpoints at slots 0 and 31");
+        bool monotone = true;
+        for (int k = 1; k < kWdFrames; ++k)
+            if (out[(size_t)k * kWdCycle] <= out[(size_t)(k - 1) * kWdCycle]) monotone = false;
+        CHECK(monotone, "...and the interior is the same LINEAR frame-axis "
+                        "interpolation the mip builder performs — no step, which "
+                        "nearest-frame would have put into a morph the read is "
+                        "built to make continuous");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Commit(PluginRegistry& reg) {
+    (void)reg;
+    banner("Spectra v5: the commit's canonicalisation");
+
+    std::vector<f32> t(kWdN, 0.f);
+    std::string err;
+
+    // 4. a silent table is REFUSED, and that is a deliberate divergence from
+    //    import, which maps a peak of zero to a gain of 1 and carries on.
+    CHECK(!wt::pen::canonicalise(t.data(), err) && err == "this table is silent",
+          "a drawing of silence is REFUSED with a sentence (\"%s\") — letting it "
+          "through would burn an identity on silence forever", err.c_str());
+
+    // 1. one non-finite sample refuses the whole commit, and NOTHING is written.
+    for (int i = 0; i < kWdCycle; ++i) t[(size_t)i] = 0.5f;
+    std::vector<f32> keep(t);
+    t[(size_t)5 * kWdCycle + 17] = std::nanf("");
+    keep[(size_t)5 * kWdCycle + 17] = t[(size_t)5 * kWdCycle + 17];
+    CHECK(!wt::pen::canonicalise(t.data(), err) && !err.empty(),
+          "one non-finite sample refuses the whole commit with a sentence (\"%s\") "
+          "— v3's rule applying to the pen unchanged, so a NaN payload cannot "
+          "become an identity by a second door", err.c_str());
+    CHECK(std::memcmp(t.data(), keep.data(), kWdN * sizeof(f32)) == 0,
+          "...and a refusal changes NOTHING");
+
+    // 2, 3, 5: DC per frame, one set-wide peak, one set-wide gain.
+    for (size_t i = 0; i < kWdN; ++i) t[i] = 0.f;
+    for (int i = 0; i < kWdCycle; ++i) {
+        const f64 p = 6.283185307179586 * (f64)i / (f64)kWdCycle;
+        t[(size_t)0 * kWdCycle + (size_t)i]  = (f32)(0.1 * std::sin(p) + 0.4);  // quiet + DC
+        t[(size_t)1 * kWdCycle + (size_t)i]  = (f32)(0.5 * std::sin(p) - 0.3);  // loud  + DC
+    }
+    CHECK(wt::pen::canonicalise(t.data(), err), "a table with energy commits");
+    {
+        f64 dc0 = 0.0, dc1 = 0.0;
+        f32 pk = 0.f, pk0 = 0.f, pk1 = 0.f;
+        for (int i = 0; i < kWdCycle; ++i) {
+            dc0 += (f64)t[(size_t)i];
+            dc1 += (f64)t[(size_t)kWdCycle + (size_t)i];
+            pk0 = std::fmax(pk0, std::fabs(t[(size_t)i]));
+            pk1 = std::fmax(pk1, std::fabs(t[(size_t)kWdCycle + (size_t)i]));
+        }
+        for (size_t i = 0; i < kWdN; ++i) pk = std::fmax(pk, std::fabs(t[i]));
+        CHECK(std::fabs(dc0) < 1e-2 && std::fabs(dc1) < 1e-2,
+              "PER-FRAME DC removal ran on every frame (%.2e, %.2e)", dc0, dc1);
+        CHECK(std::fabs(pk - 1.f) < 1e-5f,
+              "the SET peaks at exactly 1.0 (%.6f)", (double)pk);
+        CHECK(pk0 < 0.5f && std::fabs(pk1 - 1.f) < 1e-5f,
+              "NORMALISATION IS ONE SET-WIDE FACTOR, not per-frame: the quiet frame "
+              "stays quiet (%.4f) and only the loudest reaches 1 (%.4f). Nothing the "
+              "user drew moves, and no inter-frame relationship changes.",
+              (double)pk0, (double)pk1);
+    }
+
+    // The canonicalised frames are in exactly the state v3's identity rule
+    // names, so contentHash() applies with no amendment.
+    {
+        const u64 h = wt::contentHash(t.data(), kWdFrames);
+        CHECK(h != 0, "the canonicalised frames fold to a content hash (%s)",
+              wt::hashHex(h).c_str());
+        CHECK(wt::hashHex(h).size() == 16, "...which is 16 lowercase hex digits");
+        // A drawn table and an imported table with the same samples ARE THE SAME
+        // TABLE, and that is correct rather than a coincidence.
+        std::vector<f32> copy(t);
+        CHECK(wt::contentHash(copy.data(), kWdFrames) == h,
+              "identity is CONTENT: the same frames from any provenance fold to "
+              "the same hash — there is no 'drawn' flag anywhere in the contract");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Durability(PluginRegistry& reg) {
+    banner("Spectra v5: the durable library, and the ladder's new rung");
+
+    wdSandbox();
+    const std::string drawn = wt::drawnDir();
+    const std::string cache = wt::userCacheDir();
+
+    CHECK(drawn != cache, "drawnDir() is not userCacheDir()");
+    CHECK(drawn.size() >= 6 && drawn.compare(drawn.size() - 6, 6, "/drawn") == 0,
+          "the drawn library is .../nxtakt/drawn (%s)", drawn.c_str());
+    // THE SIBLING RULE, which is the entire point of the path: the gesture that
+    // clears the cache names `.../nxtakt/wavetables`, and a drawn library inside
+    // it would be swept up by every correct spelling of it.
+    CHECK(drawn.compare(0, cache.size(), cache) != 0,
+          "IT IS A SIBLING OF wavetables/, NOT A CHILD: no correct spelling of "
+          "\"clear the wavetable cache\" (%s) can reach %s",
+          cache.c_str(), drawn.c_str());
+    {
+        const size_t ds = drawn.find_last_of('/'), cs = cache.find_last_of('/');
+        CHECK(ds != std::string::npos && cs != std::string::npos &&
+              drawn.substr(0, ds) == cache.substr(0, cs),
+              "...and they share a parent (%s), so both follow the one ladder this "
+              "tree walks for a user file", drawn.substr(0, ds).c_str());
+    }
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+    WavetableControl* w = s->wavetable();
+    CHECK(w != nullptr, "Spectra offers a WavetableControl");
+    if (!w) return;
+
+    // A drawing with content, deterministic and not a formula anybody else uses.
+    std::vector<f32> t(kWdN, 0.f);
+    for (int k = 0; k < kWdFrames; ++k)
+        for (int i = 0; i < kWdCycle; ++i) {
+            const f64 p = 6.283185307179586 * (f64)i / (f64)kWdCycle;
+            t[(size_t)k * kWdCycle + (size_t)i] =
+                (f32)(std::sin(p) + (0.1 + 0.02 * k) * std::sin(3.0 * p));
+        }
+
+    const int cacheBefore = 0;
+    (void)cacheBefore;
+    CHECK(w->commitFrames(0, t.data(), "Drawn Glass"),
+          "commitFrames() accepts a drawing (%s)", w->lastError());
+
+    const std::string st = s->stateString();
+    CHECK(st.find(";wtA=") != std::string::npos, "the commit rewrote wtA (%s)", st.c_str());
+    CHECK(st.find(";wtpathA=") != std::string::npos, "...and wtpathA");
+    CHECK(st.find(";wtnameA=Drawn%20Glass") != std::string::npos,
+          "...and wtnameA, escaped by wtpath's own escaper (%s)", st.c_str());
+
+    // A COMMIT WRITES ONE FILE IN ONE PLACE.
+    const size_t at = st.find(";wtA=");
+    const std::string hex = st.substr(at + 5, 16);
+    const std::string drawnFile = drawn + "/" + hex + ".nxwt";
+    const std::string cacheFile = cache + "/" + hex + ".nxwt";
+    CHECK(wdFileExists(drawnFile), "the drawn table is at %s", drawnFile.c_str());
+    CHECK(!wdFileExists(cacheFile),
+          "A COMMIT WRITES ONE FILE IN ONE PLACE: adopt(t, cache=false) means "
+          "there is NO copy in the cache. Two copies of an irreplaceable file "
+          "under two policies is not redundancy, it is two things to keep in sync.");
+    {
+        struct stat sb{};
+        ::stat(drawnFile.c_str(), &sb);
+        CHECK(sb.st_size == 24 + (long)kWdN * 4,
+              "...and it is a 24-byte header plus 32 x 2048 f32 = %ld bytes",
+              (long)sb.st_size);
+    }
+    // THE ATOMIC WRITE, and it took a red proof to find a check that can see it.
+    //
+    // "No .tmp survives" is not one: a red that wrote IN PLACE (temp path ==
+    // target path) left no .tmp either, and stayed green. The discriminating
+    // observation is what temp-then-rename can do that an in-place write cannot
+    // — REPLACE A READ-ONLY FILE. rename(2) checks the DIRECTORY's permissions,
+    // not the target's; fopen(target, "wb") checks the target's. So a read-only
+    // target in a writable directory succeeds under one and fails under the
+    // other, and that difference is exactly the property that makes a crash
+    // mid-commit unable to leave a half-written table under a name that claims
+    // a hash.
+    CHECK(!wdFileExists(drawnFile + ".tmp"), "no temporary survives the write");
+    {
+        wt::Table probe;
+        probe.frames = 32;
+        probe.rule = wt::Rule::Serum;
+        probe.srcFrames = 32;
+        probe.srcCycle = wt::kCycle;
+        probe.data.assign(kWdN, 0.f);
+        for (int i = 0; i < kWdCycle; ++i) probe.data[(size_t)i] = 0.25f;
+        probe.hash = wt::contentHash(probe.data.data(), 32);
+        const std::string ro = wdSandbox() + "/readonly.nxwt";
+        CHECK(wt::writeNxwt(ro, probe), "a table written once");
+        CHECK(::chmod(ro.c_str(), 0444) == 0, "...and made read-only");
+        CHECK(wt::writeNxwt(ro, probe),
+              "TEMP-THEN-RENAME: the write still succeeds over a READ-ONLY target, "
+              "because rename(2) needs the directory and not the file — which an "
+              "in-place fopen(\"wb\") could not do, and which is the same property "
+              "that makes a crash mid-commit unable to truncate a good table");
+        ::chmod(ro.c_str(), 0644);
+    }
+
+    // ...and the other half of obligation 7: even a torn file is a rung that
+    // FAILS rather than a table that plays wrongly, because readNxwt recomputes
+    // the fold and refuses a file whose bytes do not name themselves.
+    {
+        const std::string torn = wdSandbox() + "/torn.nxwt";
+        {
+            wt::Table full;
+            full.frames = 32;
+            full.rule = wt::Rule::Serum;
+            full.srcFrames = 32;
+            full.srcCycle = wt::kCycle;
+            full.data.assign(kWdN, 0.f);
+            for (int i = 0; i < kWdCycle; ++i) full.data[(size_t)i] = 0.5f;
+            full.hash = wt::contentHash(full.data.data(), 32);
+            CHECK(wt::writeNxwt(torn, full), "a good file");
+            wt::Table back;
+            CHECK(wt::readNxwt(torn, back), "...reads");
+        }
+        CHECK(::truncate(torn.c_str(), 24 + (long)kWdN * 2) == 0, "...then torn in half");
+        wt::Table back;
+        CHECK(!wt::readNxwt(torn, back),
+              "A TORN DRAWN TABLE IS A RUNG THAT FAILED, never a table that plays "
+              "wrongly");
+        // And one that is complete but LIES about its hash.
+        {
+            FILE* f = std::fopen(torn.c_str(), "r+b");
+            if (f) { std::fseek(f, 24, SEEK_SET); const f32 v = 9.f; std::fwrite(&v, 4, 1, f); std::fclose(f); }
+        }
+        CHECK(!wt::readNxwt(torn, back),
+              "...and so is one whose bytes do not fold to its own name");
+    }
+
+    // The file round-trips and recomputes to its own name.
+    {
+        wt::Table back;
+        CHECK(wt::readNxwt(drawnFile, back), "the drawn file reads back");
+        CHECK(wt::hashHex(back.hash) == hex,
+              "...and recomputes to its own name (%s)", wt::hashHex(back.hash).c_str());
+        CHECK(back.frames == 32, "...with 32 frames, which is what a drawn table always has");
+    }
+
+    // RUNG 3 RESOLVES ON ITS OWN, and this is the check that says the file is
+    // what makes a drawing survive a restart rather than the store.
+    //
+    // Built the only way a single process can build it: a table the store has
+    // NEVER SEEN, written into drawnDir() by hand, then resolved by hash with
+    // no path at all. Rung 1 misses (the store does not hold it), rung 2 misses
+    // (it is not a factory table), and rung 5 is not offered anything. Only
+    // rung 3 can answer.
+    {
+        wt::Table fresh;
+        fresh.frames = 32;
+        fresh.rule = wt::Rule::Serum;
+        fresh.srcFrames = 32;
+        fresh.srcCycle = wt::kCycle;
+        fresh.data.assign(kWdN, 0.f);
+        for (int k = 0; k < kWdFrames; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                fresh.data[(size_t)k * kWdCycle + (size_t)i] =
+                    (f32)(0.61803 * std::sin(6.283185307179586 * (5.0 + k) *
+                                             (f64)i / (f64)kWdCycle));
+        fresh.hash = wt::contentHash(fresh.data.data(), 32);
+        CHECK(wt::find(fresh.hash) == nullptr,
+              "a table the store has never seen (%s)", wt::hashHex(fresh.hash).c_str());
+
+        const std::string f3 = drawn + "/" + wt::hashHex(fresh.hash) + ".nxwt";
+        CHECK(wt::writeNxwt(f3, fresh), "written into the drawn library by hand");
+        CHECK(wt::resolve(fresh.hash, nullptr) != nullptr,
+              "RUNG 3 RESOLVES IT: by hash alone, with no path, from a file in "
+              "drawnDir() that only the user's own commit could have put there");
+
+        // ...and rung 3 is where it came from rather than the cache: the cache
+        // has no such file.
+        CHECK(!wdFileExists(cache + "/" + wt::hashHex(fresh.hash) + ".nxwt"),
+              "...and there is no copy in the cache for it to have come from");
+    }
+
+    // RUNG 3 SITS ABOVE RUNG 4 AND BELOW RUNG 2, and the order is only
+    // observable when two rungs hold DIFFERENT bytes under one name — which
+    // readNxwt's own fold makes impossible for an honest file. So the order is
+    // checked the one way it can be: a file in the cache alone still resolves
+    // (rung 4 is reached), and a file in the drawn library alone still resolves
+    // (rung 3 is reached), so appending rung 3 SHADOWS NOTHING.
+    {
+        wt::Table cached;
+        cached.frames = 32;
+        cached.rule = wt::Rule::Serum;
+        cached.srcFrames = 32;
+        cached.srcCycle = wt::kCycle;
+        cached.data.assign(kWdN, 0.f);
+        for (int k = 0; k < kWdFrames; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                cached.data[(size_t)k * kWdCycle + (size_t)i] =
+                    (f32)(0.41421 * std::sin(6.283185307179586 * (9.0 + k) *
+                                             (f64)i / (f64)kWdCycle));
+        cached.hash = wt::contentHash(cached.data.data(), 32);
+        ::mkdir(cache.c_str(), 0755);
+        CHECK(wt::writeNxwt(cache + "/" + wt::hashHex(cached.hash) + ".nxwt", cached),
+              "a table in the CACHE alone");
+        CHECK(wt::resolve(cached.hash, nullptr) != nullptr,
+              "...still resolves: the new rung 3 is APPENDED BELOW RUNG 2 and "
+              "cannot shadow rung 2 or starve rung 4");
+    }
+
+    // RUNG 5 WIDENS BY FILE EXTENSION, and there is NO FALLBACK between the two
+    // arms: an .nxwt that fails to read does not then get offered to the WAV
+    // reader, because a file that lies about being a wavetable cache is not a
+    // file to guess about.
+    {
+        const std::string bogus = wdSandbox() + "/liar.nxwt";
+        FILE* f = std::fopen(bogus.c_str(), "wb");
+        if (f) { std::fwrite("not a wavetable at all, not even close", 1, 38, f); std::fclose(f); }
+        CHECK(wt::resolve(0x1234567890abcdefull, bogus.c_str()) == nullptr,
+              "a .nxwt that is neither a .nxwt nor a WAV fails rung 5");
+
+        // THE DISCRIMINATING CASE, and it took a red proof to find that the one
+        // above is not it: a file that IS a perfectly good WAV wavetable and is
+        // NAMED `.nxwt`. With a fallback between the arms this resolves; without
+        // one it refuses, and refusing is the contract. A file that lies about
+        // being a wavetable cache is not a file to guess about.
+        {
+            std::vector<f32> src(kWdN, 0.f);
+            for (int k = 0; k < kWdFrames; ++k)
+                for (int i = 0; i < kWdCycle; ++i)
+                    src[(size_t)k * kWdCycle + (size_t)i] =
+                        (f32)(0.5 * std::sin(6.283185307179586 * (7.0 + k) *
+                                             (f64)i / (f64)kWdCycle));
+            const std::string asWav  = wdSandbox() + "/liar2.wav";
+            const std::string asNxwt = wdSandbox() + "/liar2.nxwt";
+            CHECK(wdWriteWav(asWav, src.data(), kWdFrames) &&
+                  wdWriteWav(asNxwt, src.data(), kWdFrames),
+                  "the same 32 x 2048 float WAV under two names");
+
+            wt::Table imported;
+            std::string ierr;
+            const bool got = wt::importFile(asWav, imported, ierr);
+            CHECK(got, "the .wav copy imports (%s)", ierr.c_str());
+            if (got) {
+                CHECK(wt::resolve(imported.hash, asWav.c_str()) != nullptr,
+                      "rung 5's WAV arm recovers it under its real name, exactly as "
+                      "in v3");
+                // The store now holds it, so ask about a hash it does NOT hold:
+                // the SAME file, offered under the .nxwt name, for a hash that
+                // only importFile could ever produce.
+                const std::string asNxwt2 = wdSandbox() + "/liar3.nxwt";
+                std::vector<f32> other(src);
+                for (int i = 0; i < kWdCycle; ++i) other[(size_t)i] *= 0.5f;
+                CHECK(wdWriteWav(asNxwt2, other.data(), kWdFrames), "a second WAV, .nxwt-named");
+                wt::Table imported2;
+                std::string ierr2;
+                const std::string asWav2 = wdSandbox() + "/liar3.wav";
+                CHECK(wdWriteWav(asWav2, other.data(), kWdFrames), "...and its .wav twin");
+                if (wt::importFile(asWav2, imported2, ierr2)) {
+                    // Remove it from consideration by asking BEFORE anything
+                    // adopts it: importFile does not adopt.
+                    CHECK(wt::find(imported2.hash) == nullptr,
+                          "a hash the store does not hold (%s)",
+                          wt::hashHex(imported2.hash).c_str());
+                    CHECK(wt::resolve(imported2.hash, asNxwt2.c_str()) == nullptr,
+                          "NO FALLBACK BETWEEN THE ARMS: a file that IS a valid WAV "
+                          "wavetable but is NAMED .nxwt is read as a .nxwt, fails, "
+                          "and is NOT then offered to the WAV reader");
+                    CHECK(wt::resolve(imported2.hash, asWav2.c_str()) != nullptr,
+                          "...while the identical bytes under a .wav name resolve, so "
+                          "the refusal above is the EXTENSION and not the file");
+                }
+            }
+        }
+        // A WAV tail still goes to importFile, exactly as in v3.
+        CHECK(wt::resolve(0x1234567890abcdefull, "/tmp/nx-no-such-table.wav") == nullptr,
+              "...and a non-.nxwt tail still goes to importFile and still refuses "
+              "a file that is not there");
+    }
+
+    // A SECOND COMMIT OF THE SAME DRAWING IS THE SAME FILE. A drawn table is
+    // never overwritten and never has to be.
+    {
+        struct stat a{}, b{};
+        ::stat(drawnFile.c_str(), &a);
+        CHECK(w->commitFrames(0, t.data(), "Drawn Glass"), "the same drawing commits again");
+        ::stat(drawnFile.c_str(), &b);
+        CHECK(s->stateString().substr(s->stateString().find(";wtA=") + 5, 16) == hex,
+              "...to the same hash, because the filename IS the content hash");
+        CHECK(a.st_ino == b.st_ino,
+              "...and the file already there was left alone (same inode)");
+    }
+
+    // EDITING AN IMPORTED TABLE, which is the case resolution #16 is about and
+    // the case where a stale wtpath actually costs something: the WAV the path
+    // named has the OLD hash, so a path left in place would recover a DIFFERENT
+    // table than its own record's hash names.
+    {
+        std::vector<f32> src(kWdN, 0.f);
+        for (int k = 0; k < kWdFrames; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                src[(size_t)k * kWdCycle + (size_t)i] =
+                    (f32)(0.44 * std::sin(6.283185307179586 * (11.0 + k) *
+                                          (f64)i / (f64)kWdCycle));
+        const std::string wav = wdSandbox() + "/import-me.wav";
+        CHECK(wdWriteWav(wav, src.data(), kWdFrames), "a WAV to import");
+
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        WavetableControl* v = q ? q->wavetable() : nullptr;
+        if (v) {
+            CHECK(v->importFile(0, wav.c_str()), "imported (%s)", v->lastError());
+            const std::string sti = q->stateString();
+            CHECK(sti.find(wav) != std::string::npos,
+                  "...and wtpathA names the WAV, as v3 has always done");
+
+            // THE EDITOR OPENS ON AN IMPORTED TABLE. There is no provenance
+            // anywhere in the contract: a table is 32 x 2048 f32 either way.
+            std::vector<f32> got(kWdN, 0.f);
+            CHECK(v->readFrames(0, got.data()),
+                  "the editor reads an IMPORTED table's frames — it opens on any "
+                  "resolved custom table, and editing one simply produces a new "
+                  "table, which is exactly right");
+            wt::pen::stroke(got.data(), 200, 0.95f, 900, -0.95f);
+            wt::pen::removeDc(got.data());
+            CHECK(v->commitFrames(0, got.data(), nullptr),
+                  "the edit commits (%s)", v->lastError());
+
+            const std::string stc = q->stateString();
+            const std::string hexc = stc.substr(stc.find(";wtA=") + 5, 16);
+            CHECK(stc.find(wav) == std::string::npos,
+                  "A COMMIT THAT CHANGES THE FRAMES CLEARS AND REWRITES wtpath: the "
+                  "WAV is GONE from the state (%s)", stc.c_str());
+            const size_t pa = stc.find(";wtpathA=");
+            CHECK(pa != std::string::npos, "...and a wtpath is still there");
+            if (pa != std::string::npos) {
+                const std::string pv = stc.substr(pa + 9,
+                    stc.find(';', pa + 1) == std::string::npos ? std::string::npos
+                                                               : std::string::npos);
+                CHECK(pv.find(hexc) != std::string::npos &&
+                      pv.size() >= 5 && pv.compare(pv.size() - 5, 5, ".nxwt") == 0,
+                      "...naming the DRAWN FILE, whose name IS the new hash (%s)",
+                      pv.c_str());
+            }
+            // The path resolves, and it resolves to the hash the record names.
+            u64 hv = 0;
+            if (wt::hashFromHex(hexc.c_str(), 16, hv)) {
+                const std::string dp = wt::drawnDir() + "/" + hexc + ".nxwt";
+                CHECK(wdFileExists(dp),
+                      "...and the file it names exists (%s)", dp.c_str());
+                wt::Table chk;
+                CHECK(wt::readNxwt(dp, chk) && chk.hash == hv,
+                      "...and recovers EXACTLY the table the record's hash names — "
+                      "a path that recovers a different one is the one thing rung 5 "
+                      "must never do");
+            }
+        }
+    }
+
+    // A COMMIT THAT CHANGES THE FRAMES CLEARS AND REWRITES wtpath.
+    {
+        std::vector<f32> u(t);
+        for (int i = 0; i < kWdCycle; ++i) u[(size_t)i] *= 0.5f;
+        CHECK(w->commitFrames(0, u.data(), nullptr), "a changed drawing commits");
+        const std::string st2 = s->stateString();
+        const std::string hex2 = st2.substr(st2.find(";wtA=") + 5, 16);
+        CHECK(hex2 != hex, "editing the frames produces a NEW HASH (%s -> %s)",
+              hex.c_str(), hex2.c_str());
+        CHECK(st2.find(";wtpathA=") != std::string::npos &&
+              st2.find(hex2) != std::string::npos,
+              "...and wtpath follows the content to the new drawn file — a path "
+              "that recovers a DIFFERENT table than its own record's hash is the "
+              "one thing rung 5 must never do");
+        CHECK(st2.find(";wtnameA=") == std::string::npos,
+              "...and a commit with no name DROPS the record (there is exactly one "
+              "spelling of \"no name\" and it is absence): %s", st2.c_str());
+    }
+
+    // Refusals leave everything alone.
+    {
+        const std::string was = s->stateString();
+        std::vector<f32> zero(kWdN, 0.f);
+        CHECK(!w->commitFrames(0, zero.data(), nullptr) &&
+              std::strcmp(w->lastError(), "this table is silent") == 0,
+              "a silent commit is refused with the contract's sentence (\"%s\")",
+              w->lastError());
+        std::vector<f32> nan(t);
+        nan[1234] = std::nanf("");
+        CHECK(!w->commitFrames(0, nan.data(), nullptr), "a non-finite commit is refused");
+        CHECK(!w->commitFrames(0, t.data(), std::string(65, 'x').c_str()),
+              "a 65-byte name is refused (the cap is 64)");
+        CHECK(!w->commitFrames(0, t.data(), "bad\tname"),
+              "a name with a control byte is refused");
+        CHECK(s->stateString() == was, "...and NOTHING CHANGED on any of them");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Preview(PluginRegistry& reg) {
+    banner("Spectra v5: the preview arena, and its recycle bound");
+
+    wdSandbox();
+
+    // --- THE BOUND, arithmetically, over every rate and block a host can pick.
+    {
+        const f64 rates[]  = { 8000.0, 22050.0, 44100.0, 48000.0, 96000.0, 192000.0, 384000.0 };
+        const int blocks[] = { 1, 7, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 };
+        bool ok = true;
+        f64 worst = 1e30;
+        for (f64 sr : rates) for (int b : blocks) {
+            const f64 iv    = wt::pen::previewInterval(sr, b);
+            const f64 block = (f64)b / sr;
+            // The audio thread does not retain a base past the block it read it
+            // in, and a ring of four is not rewritten until three further
+            // publishes have happened. The contract states the protection with a
+            // fourth interval of slack; both forms are checked.
+            if (!(3.0 * iv > block)) ok = false;
+            if (!((f64)wt::pen::kPreviewRing * iv > block)) ok = false;
+            worst = std::fmin(worst, ((f64)wt::pen::kPreviewRing * iv) / block);
+        }
+        CHECK(ok, "THE RECYCLE BOUND HOLDS AT EVERY (rate, block) THIS ENGINE CAN BE "
+                  "GIVEN: 4 * interval > maxBlock / sampleRate, with interval = "
+                  "max(50 ms, 2 * maxBlock / sampleRate)");
+        CHECK(worst >= 8.0,
+              "...and the WORST margin over 84 combinations is %.1fx the block "
+              "period, which is the factor of eight the 2 x maxBlock term buys "
+              "(the 50 ms floor buys more at every smaller block)", worst);
+        CHECK(wt::pen::previewInterval(44100.0, 4096) > 0.1857 &&
+              wt::pen::previewInterval(44100.0, 4096) < 0.1859,
+              "the contract's worked example: 4096 frames at 44.1 kHz is a 92.9 ms "
+              "block against 4 x %.1f ms of protection",
+              wt::pen::previewInterval(44100.0, 4096) * 1000.0);
+        CHECK(wt::pen::previewInterval(48000.0, 64) == 0.05,
+              "a small block lands on the 50 ms FLOOR (%.4f s)",
+              wt::pen::previewInterval(48000.0, 64));
+        CHECK(wt::pen::kPreviewRing == 4, "the ring is four buffers");
+    }
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+    WavetableControl* w = s->wavetable();
+    if (!w) return;
+
+    std::vector<f32> t(kWdN, 0.f);
+    for (int k = 0; k < kWdFrames; ++k)
+        for (int i = 0; i < kWdCycle; ++i)
+            t[(size_t)k * kWdCycle + (size_t)i] =
+                (f32)(0.8 * std::sin(6.283185307179586 * (1.0 + k) * (f64)i / (f64)kWdCycle));
+
+    // --- a preview TOUCHES NOTHING THAT IS IDENTITY -------------------------
+    const std::string stateBefore = s->stateString();
+    const int storeBefore = wt::storeSize();
+
+    CHECK(w->previewFrames(0, t.data()), "the first preview publishes (%s)", w->lastError());
+    CHECK(s->stateString() == stateBefore,
+          "A PREVIEW TOUCHES NOTHING THAT IS IDENTITY: stateString() during an "
+          "open editor names the last COMMITTED table and nothing else (\"%s\")",
+          s->stateString().c_str());
+    CHECK(wt::storeSize() == storeBefore,
+          "...no store entry (%d before, %d after)", storeBefore, wt::storeSize());
+    CHECK(!w->hasCustom(0), "...no wt record");
+
+    // --- the rate limit is the CONTRACT'S, not the caller's -----------------
+    CHECK(!w->previewFrames(0, t.data()),
+          "a second preview inside the minimum interval is REFUSED — rate-limited "
+          "by the contract, not by the caller");
+    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+    CHECK(w->previewFrames(0, t.data()),
+          "...and accepted once the interval (50 ms at this block size) has passed");
+
+    // --- non-finite frames are refused --------------------------------------
+    {
+        std::vector<f32> bad(t);
+        bad[999] = std::nanf("");
+        std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        CHECK(!w->previewFrames(0, bad.data()), "a non-finite sample refuses the preview");
+    }
+
+    // --- THE POINT OF THE WHOLE MECHANISM: THE STORE DOES NOT GROW ----------
+    //
+    // spBuildCustomMips() allocates 1.31 MB per DISTINCT HASH into a store that
+    // is never freed and is bounded at 32. An editor that committed per stroke
+    // would exhaust it in about a minute. If a preview entered that store, the
+    // 300 below would blow past the cap and the commit after them would be
+    // refused. It is not, and that is the proof.
+    {
+        const int storeAt = wt::storeSize();
+        for (int k = 0; k < 300; ++k) {
+            for (int i = 0; i < kWdCycle; ++i)                    // distinct content
+                t[(size_t)i] = (f32)(0.5 * std::sin(6.283185307179586 *
+                                     (1.0 + 0.01 * k) * (f64)i / (f64)kWdCycle));
+            // The rate limit is real; the test is about the ARENA, not the clock,
+            // so each publish is offered and a refusal is fine.
+            w->previewFrames(0, t.data());
+        }
+        CHECK(wt::storeSize() == storeAt,
+              "300 previews added ZERO entries to the table store (%d, unchanged)",
+              wt::storeSize());
+
+        // THE DECISIVE COUNT, and it costs two seconds of wall clock on purpose.
+        //
+        // The 300 above are offered as fast as the loop runs, so the rate limit
+        // refuses nearly all of them — which proves the limit and NOT the arena.
+        // A red proof found exactly that: routing the publish through the BUILT
+        // STORE instead of the ring failed the storeSize checks and left this
+        // one GREEN, because only two publishes had actually happened.
+        //
+        // So: publish MORE THAN kSpMaxCustom = 32 times for real, spacing each
+        // by the interval the contract computes. If a preview consumed a
+        // built-store slot, the thirty-third would have exhausted the store and
+        // every commit after it would be refused.
+        int real = 0;
+        for (int k = 0; k < 36 && real < 34; ++k) {
+            for (int i = 0; i < kWdCycle; ++i)                    // distinct content
+                t[(size_t)i] = (f32)(0.5 * std::sin(6.283185307179586 *
+                                     (3.0 + 0.017 * k) * (f64)i / (f64)kWdCycle));
+            std::this_thread::sleep_for(std::chrono::milliseconds(55));
+            if (w->previewFrames(0, t.data())) ++real;
+        }
+        CHECK(real > 32,
+              "%d previews were ACTUALLY PUBLISHED, one per interval — more than "
+              "kSpMaxCustom = 32, which is the number that makes the next check "
+              "mean something", real);
+        CHECK(wt::storeSize() == storeAt,
+              "...and the store is STILL unchanged at %d", wt::storeSize());
+
+        // Now commit something distinct. If the previews had consumed built-store
+        // slots this would be the refusal.
+        std::vector<f32> c(kWdN, 0.f);
+        for (int k = 0; k < kWdFrames; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                c[(size_t)k * kWdCycle + (size_t)i] =
+                    (f32)(0.9 * std::sin(6.283185307179586 * (2.0 + k) * (f64)i / (f64)kWdCycle));
+        CHECK(w->commitFrames(0, c.data(), nullptr),
+              "...and a commit AFTER MORE THAN 32 REAL PUBLISHES still succeeds "
+              "(%s) — the arena is OUTSIDE the built store, which is bounded at 32, "
+              "is never freed, and would have been exhausted by publish 33",
+              w->lastError());
+    }
+
+    // --- cancelPreview republishes the committed table, and is idempotent ---
+    {
+        const std::string committed = s->stateString();
+        std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        CHECK(w->previewFrames(0, t.data()), "a preview over a committed table");
+        CHECK(s->stateString() == committed,
+              "...still names the COMMITTED table");
+        w->cancelPreview(0);
+        w->cancelPreview(0);
+        CHECK(s->stateString() == committed,
+              "cancelPreview() republishes the committed base and is IDEMPOTENT");
+        CHECK(w->hasCustom(0), "...and the committed table is still there");
+    }
+
+    // --- WHAT THE AUDIO THREAD ACTUALLY HEARS -------------------------------
+    //
+    // Everything above checks the RECORDS. The published base is what a voice
+    // reads, and a record is not a base: a red proof that made cancelPreview()
+    // publish null left every check above GREEN, because stateString() and
+    // hasCustom() both read the record. So the arena is gated where it is
+    // audible — by rendering, in ONE CONTINUOUS RUN.
+    //
+    // Continuous, and not three prepare()d takes, because of a second thing the
+    // first version of this test found: prepare() calls resolveTables(), which
+    // REPUBLISHES THE COMMITTED BASE and therefore silently drops an outstanding
+    // preview. That is defensible — prepare() means the rate or the block size
+    // moved, the preview interval is being recomputed from them anyway, and an
+    // editor whose engine was just reconfigured should re-preview — but it is
+    // behaviour, so it is stated here and checked at the bottom of this block
+    // rather than discovered by an editor author.
+    //
+    // The measurement is a ZERO-CROSSING COUNT, which distinguishes the two
+    // tables by the only thing that matters (the committed table's frame 0 is
+    // harmonic 2 of the note; the preview's is harmonic 17) and needs no
+    // bit-identity across a run whose phase has advanced.
+    {
+        // THE COMMITTED TABLE IS THE HIGH-HARMONIC ONE, and the direction matters:
+        // a red proof that cancelled to NULL stayed green when it was the other
+        // way round, because null falls back to FACTORY TABLE 0 — a sawtooth,
+        // which crosses zero about as often as the low sine the test was calling
+        // "committed". Committed = harmonic 17, preview = harmonic 2, factory 0 =
+        // a saw: the committed table is now the only one of the three with a high
+        // count, so "back on the committed table" excludes the fallback too.
+        {
+            std::vector<f32> hi17(kWdN, 0.f);
+            for (int k = 0; k < kWdFrames; ++k)
+                for (int i = 0; i < kWdCycle; ++i)
+                    hi17[(size_t)k * kWdCycle + (size_t)i] =
+                        (f32)std::sin(6.283185307179586 * 17.0 * (f64)i / (f64)kWdCycle);
+            CHECK(w->commitFrames(0, hi17.data(), nullptr),
+                  "a committed table of harmonic 17 (%s)", w->lastError());
+        }
+        s->setParam(0, 8.f);          // A Table = the custom slot
+        s->setParam(4, 0.8f);         // A Level
+        s->setParam(12, 0.f);         // B Level off, so only osc A is heard
+        s->setParam(19, 20000.f);     // Cutoff wide open
+        s->prepare(kSR, kBlock);
+
+        std::vector<f32> L((size_t)kBlock), R((size_t)kBlock);
+        f32* o[2] = { L.data(), R.data() };
+        auto crossings = [&](int blocks) {
+            int n = 0;
+            f32 prev = 0.f;
+            bool have = false;
+            for (int b2 = 0; b2 < blocks; ++b2) {
+                std::fill(L.begin(), L.end(), 0.f);
+                std::fill(R.begin(), R.end(), 0.f);
+                s->process(nullptr, o, 2, kBlock);
+                for (int i = 0; i < kBlock; ++i) {
+                    const f32 v = L[(size_t)i];
+                    if (have && ((prev < 0.f) != (v < 0.f))) ++n;
+                    prev = v;
+                    have = true;
+                }
+            }
+            return n;
+        };
+
+        noteOn(*s, 48, 100);
+        crossings(4);                                  // let the envelope open
+        const int zCommitted = crossings(8);
+
+        // What FACTORY TABLE 0 sounds like, measured rather than assumed: it is
+        // what a null base falls back to, so the check below has to exclude it.
+        s->setParam(0, 0.f);
+        const int zFactory0 = crossings(8);
+        s->setParam(0, 8.f);
+        crossings(2);
+
+        std::vector<f32> other(kWdN, 0.f);
+        for (int k = 0; k < kWdFrames; ++k)
+            for (int i = 0; i < kWdCycle; ++i)
+                other[(size_t)k * kWdCycle + (size_t)i] =
+                    (f32)std::sin(6.283185307179586 * 2.0 * (f64)i / (f64)kWdCycle);
+        std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        CHECK(w->previewFrames(0, other.data()), "a preview of a plainly different table");
+        const int zPreview = crossings(8);
+        CHECK(zPreview * 3 < zCommitted,
+              "THE PREVIEW IS AUDIBLE: the voice renders the previewed table — "
+              "%d zero crossings against the committed table's %d, which is "
+              "harmonic 2 against harmonic 17. The audio thread's read is "
+              "unchanged and does not know a preview from a table.",
+              zPreview, zCommitted);
+
+        w->cancelPreview(0);
+        const int zCancelled = crossings(8);
+        CHECK(zCancelled > zPreview * 3 && zCancelled > zFactory0 * 3,
+              "cancelPreview() REPUBLISHES THE COMMITTED BASE: %d crossings — off "
+              "the preview (%d) AND off factory table 0 (%d), which is what a null "
+              "base would have fallen back to. An editor that cancels must get its "
+              "own table back, not the refusal contract's.",
+              zCancelled, zPreview, zFactory0);
+
+        // The stated prepare() behaviour, checked rather than assumed.
+        std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        CHECK(w->previewFrames(0, other.data()), "a fresh preview");
+        s->prepare(kSR, kBlock);
+        noteOn(*s, 48, 100);
+        crossings(4);
+        const int zAfterPrepare = crossings(8);
+        CHECK(zAfterPrepare > zPreview * 3,
+              "prepare() RESOLVES THE TABLES AGAIN AND THEREFORE DROPS AN "
+              "OUTSTANDING PREVIEW (%d crossings, the committed table, not the "
+              "preview's %d) — stated here because an editor whose engine is "
+              "reconfigured mid-stroke has to re-preview, and finding that out "
+              "from the wrong table would be a bug report", zAfterPrepare, zPreview);
+
+        s->setParam(0, 0.f);
+        s->prepare(kSR, kBlock);
+    }
+
+    // --- an oscillator with no handle cannot preview ------------------------
+    CHECK(!w->previewFrames(9, t.data()) && !w->previewFrames(-1, t.data()),
+          "an oscillator index that is not 0 or 1 refuses");
+
+    // --- the default implementations are already correct --------------------
+    {
+        struct Silent : WavetableControl {
+            bool importFile(int, const char*) override { return false; }
+            bool hasCustom(int) const override { return false; }
+            const char* customName(int) const override { return ""; }
+            int  customFrames(int) const override { return 0; }
+            void clearCustom(int) override {}
+            const char* lastError() const override { return ""; }
+        } q;
+        std::vector<f32> junk(kWdN, 0.f);
+        CHECK(!q.readFrames(0, junk.data()) && !q.previewFrames(0, junk.data()) &&
+              !q.commitFrames(0, junk.data(), nullptr) && !q.setCustomName(0, "x"),
+              "the five additions are APPEND-ONLY WITH DEFAULTS: a backend that "
+              "does not draw is already correct without being touched");
+        q.cancelPreview(0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Name(PluginRegistry& reg) {
+    banner("Spectra v5: the wtname record, and customName()'s widening");
+
+    wdSandbox();
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // --- the record round-trips, strictly ----------------------------------
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            const std::string st = "nxspc1;wtA=00000000000000ff;wtnameA=Drawn%20Glass";
+            CHECK(q->setStateString(st), "a state carrying wtnameA parses");
+            CHECK(q->stateString() == st,
+                  "...and re-emits to the identical bytes (%s)", q->stateString().c_str());
+        }
+    }
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        // UTF-8 survives because every byte >= 0x7F is escaped -- the escaping is
+        // wtpath's, verbatim, and the implementation shares the same helper.
+        if (q) {
+            const std::string st = "nxspc1;wtA=00000000000000ff;"
+                                   "wtnameA=Gl%C3%A4sern%20%E2%80%94%20A";
+            CHECK(q->setStateString(st), "a UTF-8 name parses");
+            CHECK(q->stateString() == st, "...and round-trips byte-exactly (%s)",
+                  q->stateString().c_str());
+        }
+    }
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            // 64 decoded bytes is the cap, checked on the DECODED bytes so an
+            // escape expansion cannot smuggle length past it.
+            const std::string ok64(64, 'a');
+            CHECK(q->setStateString("nxspc1;wtA=00000000000000ff;wtnameA=" + ok64),
+                  "a 64-byte name is accepted");
+            CHECK(q->setStateString("nxspc1;wtA=00000000000000ff;wtnameA=" +
+                                    std::string(65, 'a')) == false,
+                  "a 65-byte name is REFUSED");
+            // 32 escapes decode to 32 bytes, not 96: the cap is on the decoded
+            // length.
+            std::string esc;
+            for (int i = 0; i < 40; ++i) esc += "%C3";
+            CHECK(q->setStateString("nxspc1;wtA=00000000000000ff;wtnameA=" + esc),
+                  "40 escapes decode to 40 bytes and are accepted (the cap is on "
+                  "the DECODED length)");
+        }
+    }
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        struct { const char* s; const char* why; } bad[] = {
+            { "nxspc1;wtA=00000000000000ff;wtnameA=", "an empty value" },
+            { "nxspc1;wtA=00000000000000ff;wtnameA=a%2", "a %% not followed by two hex digits" },
+            { "nxspc1;wtA=00000000000000ff;wtnameA=a%00b", "an escape decoding to NUL" },
+            { "nxspc1;wtA=00000000000000ff;wtnameA=a;b", "a raw byte the writer would have escaped" },
+            { "nxspc1;wtA=00000000000000ff;wtnameA=x;wtnameA=y", "a duplicate key" },
+        };
+        for (const auto& b : bad)
+            if (q) CHECK(!q->setStateString(b.s), "REFUSED: %s", b.why);
+    }
+    {
+        // A NAME WITH NO TABLE IS SKIPPED, NOT REFUSED: it is a display string
+        // for a table that is not there -- inert, harmless, and precisely the
+        // shape of thing a later or earlier build might leave behind.
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            CHECK(q->setStateString("nxspc1;wtnameA=Orphan;smooth1=500"),
+                  "wtnameA with no wtA is SKIPPED, not refused");
+            CHECK(q->stateString() == "nxspc1;smooth1=500",
+                  "...and is not re-emitted, because a name is never written "
+                  "without its table (%s)", q->stateString().c_str());
+        }
+    }
+    {
+        // THE EMPTY-STATE GATE STILL HOLDS. v5 adds a record that is absent from
+        // every state that exists.
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            CHECK(q->stateString().empty(),
+                  "a fresh Spectra still writes NO state string at all — the round-"
+                  "trip gate every revision since v3 has carried");
+            q->loadPreset(0);
+            CHECK(q->stateString().empty(),
+                  "loadPreset(Init) resets wtname* too (a preset is COMPLETE however "
+                  "short it is written)");
+        }
+    }
+    {
+        // A v4 BUILD READING A v5 STATE skips the record. Modelled by feeding a
+        // v5 state to the reader and checking the unknown-key rule still governs
+        // an adjacent spelling.
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            CHECK(q->setStateString("nxspc1;wtA=00000000000000ff;wtnameA=Keep;"
+                                    "wtfuture=whatever"),
+                  "a record a build does not know is skipped, which is the rule "
+                  "wtname itself relies on for a v4 build");
+            CHECK(q->stateString() == "nxspc1;wtA=00000000000000ff;wtnameA=Keep",
+                  "...and this build re-emits only what it understands (%s)",
+                  q->stateString().c_str());
+        }
+    }
+
+    // --- customName()'s three rungs -----------------------------------------
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (!q) return;
+        WavetableControl* w = q->wavetable();
+        if (!w) return;
+
+        // customName() returns a `const char*` into the control's own buffer, so
+        // a second call in the same expression can invalidate the first's
+        // pointer. Every check below takes ONE call into a std::string first.
+        // (Found by a red proof, whose failure line printed four bytes of
+        // garbage instead of the name it was reporting.)
+        auto nameOf = [&](int o) { return std::string(w->customName(o)); };
+
+        CHECK(nameOf(0) == "", "no table, no name (\"%s\")", nameOf(0).c_str());
+
+        // Rung 3: the bare 16-hex hash, for a table a preset names by hash alone.
+        q->setStateString("nxspc1;wtA=00000000000000ff");
+        CHECK(nameOf(0) == "00000000000000ff",
+              "rung 3: a table named by hash alone displays THE BARE 16-HEX HASH "
+              "(\"%s\")", nameOf(0).c_str());
+
+        // Rung 2: basename(wtpath).
+        q->setStateString("nxspc1;wtA=00000000000000ff;wtpathA=/tmp/a/Bells.wav");
+        CHECK(nameOf(0) == "Bells.wav",
+              "rung 2: basename(wtpath) (\"%s\")", nameOf(0).c_str());
+
+        // Rung 1: the wtname record wins.
+        q->setStateString("nxspc1;wtA=00000000000000ff;wtpathA=/tmp/a/Bells.wav;"
+                          "wtnameA=Church%20Bells");
+        CHECK(nameOf(0) == "Church Bells",
+              "rung 1: the wtname record wins over both (\"%s\")", nameOf(0).c_str());
+
+        // A RENAME WRITES NO FILE AND PRODUCES NO NEW HASH.
+        const std::string was = q->stateString();
+        const std::string hashWas = was.substr(was.find(";wtA=") + 5, 16);
+        CHECK(w->setCustomName(0, "Bronze"), "setCustomName() renames");
+        const std::string now = q->stateString();
+        CHECK(now.substr(now.find(";wtA=") + 5, 16) == hashWas,
+              "IDENTITY IS UNCHANGED: a rename produces no new hash (%s)",
+              hashWas.c_str());
+        CHECK(now.find(";wtnameA=Bronze") != std::string::npos,
+              "...and the record is the new name (%s)", now.c_str());
+        {
+            const bool ok = w->setCustomName(0, nullptr);
+            const std::string after = q->stateString();
+            CHECK(ok && after.find(";wtnameA=") == std::string::npos,
+                  "null clears, and clearing DROPS THE RECORD (%s)", after.c_str());
+        }
+        {
+            w->setCustomName(0, "Bronze");
+            const bool ok = w->setCustomName(0, "");
+            const std::string after = q->stateString();
+            CHECK(ok && after.find(";wtnameA=") == std::string::npos,
+                  "...and so does an empty string: there is exactly one spelling of "
+                  "\"no name\" and it is absence (%s)", after.c_str());
+        }
+        CHECK(!w->setCustomName(0, std::string(65, 'x').c_str()),
+              "over 64 bytes is refused");
+        CHECK(!w->setCustomName(0, "no\x01name"), "a control byte is refused");
+    }
+
+    // --- A NAME BELONGS TO ITS TABLE ---------------------------------------
+    //
+    // Not the contract's words — the contract is silent on what happens to a
+    // name when the table under it changes — so it is this implementation's
+    // decision and is gated here rather than left to drift. Carrying the old
+    // name onto new content would be a library whose labels lie, which is worse
+    // than a library with no labels. (Found by a red proof: removing the rule
+    // changed nothing anywhere, because every other path cleared the name for
+    // its own reasons.)
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        WavetableControl* w = q ? q->wavetable() : nullptr;
+        if (w) {
+            std::vector<f32> src(kWdN, 0.f);
+            for (int k = 0; k < kWdFrames; ++k)
+                for (int i = 0; i < kWdCycle; ++i)
+                    src[(size_t)k * kWdCycle + (size_t)i] =
+                        (f32)(0.37 * std::sin(6.283185307179586 * (13.0 + k) *
+                                              (f64)i / (f64)kWdCycle));
+            CHECK(w->commitFrames(0, src.data(), "Named Thing"),
+                  "a drawn table with a name (%s)", w->lastError());
+            CHECK(q->stateString().find(";wtnameA=Named%20Thing") != std::string::npos,
+                  "...is named in the state");
+
+            // A DIFFERENT TABLE arrives on the same oscillator.
+            const std::string wav = wdSandbox() + "/rename-me.wav";
+            for (int i = 0; i < kWdCycle; ++i) src[(size_t)i] *= 0.5f;
+            CHECK(wdWriteWav(wav, src.data(), kWdFrames), "a different table, as a WAV");
+            CHECK(w->importFile(0, wav.c_str()), "imported over it (%s)", w->lastError());
+            CHECK(q->stateString().find(";wtnameA=") == std::string::npos,
+                  "THE NAME IS GONE: it belonged to the table that is no longer "
+                  "there (%s)", q->stateString().c_str());
+            CHECK(std::string(w->customName(0)) == "rename-me.wav",
+                  "...and customName() falls back to basename(wtpath), which is "
+                  "v3's behaviour verbatim");
+
+            // A RENAME keeps the hash, so it keeps the name.
+            const std::string before = q->stateString();
+            const std::string hashBefore = before.substr(before.find(";wtA=") + 5, 16);
+            CHECK(w->setCustomName(0, "Kept"), "renamed");
+            const std::string after = q->stateString();
+            CHECK(after.substr(after.find(";wtA=") + 5, 16) == hashBefore &&
+                  after.find(";wtnameA=Kept") != std::string::npos,
+                  "a rename writes no file and produces no new hash, so the name "
+                  "STAYS (%s)", after.c_str());
+
+            w->clearCustom(0);
+            CHECK(q->stateString().find(";wtname") == std::string::npos,
+                  "clearing the table clears its name too — a name for nothing is "
+                  "not a record this writer produces (%s)", q->stateString().c_str());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+// SPWTNA / SPWTNB's PAIRING RULE, checked over the whole bank. A name for a
+// table the row does not name is a name for nothing, and the bank's range
+// checker fails it rather than dropping it silently — exactly as it fails an
+// SPARP without SP(109, 1).
+//
+// Vacuously true while no row carries a name macro, and that is the point of
+// having it now: the day a row does, the rule is already enforced. It is
+// checked through the STATE STRING, which is the only thing the macros are
+// observable as, so it tests the rule and not the preprocessor.
+static void testSpectraV5PresetNames(PluginRegistry& reg) {
+    banner("Spectra v5: SPWTNA / SPWTNB and the bank's pairing rule");
+
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+
+    int named = 0, orphan = 0, rows = 0;
+    for (int i = 0; i < s->factoryPresetCount(); ++i) {
+        s->loadPreset(i);
+        const std::string st = s->stateString();
+        ++rows;
+        for (int o = 0; o < 2; ++o) {
+            const std::string nk = o ? ";wtnameB=" : ";wtnameA=";
+            const std::string hk = o ? ";wtB="     : ";wtA=";
+            if (st.find(nk) == std::string::npos) continue;
+            ++named;
+            if (st.find(hk) == std::string::npos) {
+                ++orphan;
+                CHECK(false, "row %d (\"%s\") carries %s without the matching %s",
+                      i, spPresetName(*s, i), nk.c_str() + 1, hk.c_str() + 1);
+            }
+        }
+    }
+    CHECK(rows == kSpectraPresetN,
+          "the factory bank is still %d rows, Init included — v5 spends no ids, "
+          "adds no row and changes no default (%d)", kSpectraPresetN, rows);
+    CHECK(orphan == 0,
+          "every SPWTNA / SPWTNB in the bank has its matching SPWTA / SPWTB "
+          "(%d named, %d orphaned)", named, orphan);
+
+    // The macro's own validation, exercised through the one thing that can
+    // reach it from here: a state string with the same rules.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            CHECK(q->setStateString("nxspc1;wtA=00000000000000ff;wtnameA=PD%20Drawn%20Glass"),
+                  "the contract's worked example, as a state: SPWTA + SPWTNA");
+            WavetableControl* w = q->wavetable();
+            const std::string got = w ? std::string(w->customName(0)) : std::string();
+            CHECK(w && got == "PD Drawn Glass",
+                  "...and the bank ships a name rather than sixteen hex digits, "
+                  "which is the whole reason the macro exists (\"%s\")", got.c_str());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Determinism(PluginRegistry& reg) {
+    banner("Spectra v5: determinism, and the two files that must be identical");
+
+    wdSandbox();
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // THE DRAWING, and it exercises every arithmetic step the pen has: strokes,
+    // DC removal, a harmonic edit, a morph and a re-phase. A pure function of
+    // this repository and of nothing else -- no clock, no RNG, no seed.
+    auto draw = [](std::vector<f32>& t) {
+        t.assign(kWdN, 0.f);
+        // Frame 0: a freehand stroke, then its DC removed at stroke end.
+        wt::pen::stroke(t.data(), 0, -0.9f, 700, 0.8f);
+        wt::pen::stroke(t.data(), 700, 0.8f, 1400, -0.4f);
+        wt::pen::stroke(t.data(), 1400, -0.4f, 2047, 0.6f);
+        wt::pen::removeDc(t.data());
+        // Frame 20: a harmonic-pen drawing, all bars through the dB map.
+        {
+            wt::pen::Spectrum s;
+            wt::pen::analyse(t.data() + (size_t)20 * kWdCycle, s);
+            for (int h = 1; h <= 64; ++h)
+                wt::pen::setBar(s, h, wt::pen::magFromDb(-6.f * (f32)((h - 1) % 12)));
+            wt::pen::synthesise(s, t.data() + (size_t)20 * kWdCycle);
+        }
+        // Frame 31: a second harmonic drawing, so the morph has two endpoints
+        // and the re-phase has something to do.
+        {
+            wt::pen::Spectrum s;
+            for (int h = 1; h <= 40; h += 2)
+                wt::pen::setBar(s, h, wt::pen::magFromDb(-2.f * (f32)h));
+            wt::pen::synthesise(s, t.data() + (size_t)31 * kWdCycle);
+        }
+        wt::pen::morph(t.data(), 0, 20);
+        wt::pen::morph(t.data(), 20, 31);
+        wt::pen::rephaseEndpoints(t.data(), 0, 31);
+    };
+
+    std::vector<f32> a, b;
+    draw(a);
+    draw(b);
+    CHECK(std::memcmp(a.data(), b.data(), kWdN * sizeof(f32)) == 0,
+          "TWO RUNS OF THE SAME DRAWING IN ONE PROCESS PRODUCE IDENTICAL FRAMES — "
+          "sine synthesis ascending in h, the morph ascending in k, DC means in "
+          "f64 ascending in i, the peak scan ascending");
+
+    std::string err;
+    std::vector<f32> ca(a), cb(b);
+    CHECK(wt::pen::canonicalise(ca.data(), err) && wt::pen::canonicalise(cb.data(), err),
+          "both canonicalise");
+    const u64 ha = wt::contentHash(ca.data(), kWdFrames);
+    const u64 hb = wt::contentHash(cb.data(), kWdFrames);
+    CHECK(ha != 0 && ha == hb,
+          "...and fold to the IDENTICAL HASH (%s)", wt::hashHex(ha).c_str());
+
+    // THE GATE: draw, fill, commit, TWICE, and cmp the two .nxwt files. Two
+    // INDEPENDENTLY WRITTEN files, by two device instances, compared byte for
+    // byte -- not two reads of one file.
+    {
+        auto s1 = reg.instantiate(*d, kSR, kBlock);
+        auto s2 = reg.instantiate(*d, kSR, 64);       // a different block size, too
+        if (s1 && s2) {
+            WavetableControl* w1 = s1->wavetable();
+            WavetableControl* w2 = s2->wavetable();
+            if (w1 && w2) {
+                CHECK(w1->commitFrames(0, a.data(), "Twice A"), "instance 1 commits (%s)", w1->lastError());
+                const std::string p1 = wt::drawnDir() + "/" + wt::hashHex(ha) + ".nxwt";
+                // Move the first file aside so the second commit WRITES rather
+                // than skipping: the point is two independent writes.
+                const std::string aside = wdSandbox() + "/first.nxwt";
+                CHECK(::rename(p1.c_str(), aside.c_str()) == 0,
+                      "the first file is moved aside so the second commit writes "
+                      "rather than skipping");
+                CHECK(w2->commitFrames(1, b.data(), "Twice B"), "instance 2 commits (%s)", w2->lastError());
+                CHECK(wdFileExists(p1), "the second commit wrote a file");
+
+                FILE* f1 = std::fopen(aside.c_str(), "rb");
+                FILE* f2 = std::fopen(p1.c_str(), "rb");
+                bool same = f1 && f2;
+                long n1 = 0, n2 = 0;
+                if (same) {
+                    std::vector<u8> d1, d2;
+                    int c;
+                    while ((c = std::fgetc(f1)) != EOF) { d1.push_back((u8)c); ++n1; }
+                    while ((c = std::fgetc(f2)) != EOF) { d2.push_back((u8)c); ++n2; }
+                    same = d1.size() == d2.size() &&
+                           std::memcmp(d1.data(), d2.data(), d1.size()) == 0;
+                }
+                if (f1) std::fclose(f1);
+                if (f2) std::fclose(f2);
+                CHECK(same, "THE GATE: two INDEPENDENTLY WRITTEN .nxwt files from the "
+                            "same drawing are cmp-IDENTICAL (%ld and %ld bytes)", n1, n2);
+                // ...and the name, which is never identity, does not enter it.
+                const std::string dn1(w1->customName(0)), dn2(w2->customName(1));
+                CHECK(dn1 == "Twice A" && dn2 == "Twice B",
+                      "the two carry DIFFERENT display names (\"%s\", \"%s\") and "
+                      "the SAME hash — a name is never identity",
+                      dn1.c_str(), dn2.c_str());
+            }
+        }
+    }
+
+    // NO WALL CLOCK AND NO RNG ANYWHERE IN THE PEN PATH. Modelled as: the same
+    // drawing, separated by real time, is the same hash.
+    {
+        std::vector<f32> later;
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        draw(later);
+        std::string e2;
+        wt::pen::canonicalise(later.data(), e2);
+        CHECK(wt::contentHash(later.data(), kWdFrames) == ha,
+              "a drawing made 30 ms later folds to the same hash: a drawn table's "
+              "identity is a function of its samples and of NOTHING else — not of "
+              "when it was drawn, not of how long the stroke took, not of a seed");
+    }
+
+    // THE WIRE. A drawn table's record is byte-indistinguishable from an
+    // imported one's, so hashesInDeviceState() finds it by the same three
+    // bounds, and ingest() RECOMPUTES the hash and refuses a disagreement.
+    {
+        const std::string st = "nxspc1;wtA=" + wt::hashHex(ha) + ";wtnameA=Twice%20A";
+        u64 out[8] = {};
+        const int n = wt::hashesInDeviceState(st.c_str(), out, 8);
+        CHECK(n == 1 && out[0] == ha,
+              "hashesInDeviceState() finds a DRAWN table's hash by exactly the "
+              "three bounds it has always used (found %d)", n);
+        CHECK(wt::ingest(ha, kWdFrames, ca.data()) != nullptr,
+              "ingest() takes the frames and agrees about the hash");
+        std::vector<f32> lie(ca);
+        lie[7] += 0.25f;
+        CHECK(wt::ingest(ha, kWdFrames, lie.data()) == nullptr,
+              "...and REFUSES a disagreement, so the daemon cannot be told a drawn "
+              "table is something it is not");
+    }
+
+    // The `wt`-prefix hazard, named and bounded rather than designed around.
+    {
+        const std::string st = "nxspc1;wtA=00000000000000ff;wtnameA=deadbeefdeadbeef";
+        u64 out[8] = {};
+        const int n = wt::hashesInDeviceState(st.c_str(), out, 8);
+        CHECK(n == 2,
+              "a table named literally `deadbeefdeadbeef` DOES qualify as a hash "
+              "(%d found) — the cost is one wasted lookup and nothing more, "
+              "because a qualifying hash is only shipped if the store holds it, "
+              "and it is the same hazard wtpath has carried since v3", n);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+// THE WIRE'S IN-PROCESS HALF, and it is determinism obligation 3's row with a
+// DRAWN table in it.
+//
+// The daemon end — nxtaktd against build/render, cmp-identical — lives in
+// tests/daemon_test.cpp and tests/handle_test.cpp, which are another wave's
+// files. What this side owns is the claim underneath it: a device given ONLY
+// `nxspc1;wtA=<hash>` — which is exactly what the daemon gets, with the frames
+// arriving separately through PoolKindWavetable — resolves and renders the same
+// audio as the device that drew it, at every rate and block size, with no path
+// and no file lookup involved.
+//
+// A drawn table's record is byte-indistinguishable from an imported one's, so
+// there is nothing here that is specific to drawing. That is the point: THE
+// DAEMON CANNOT TELL A DRAWN TABLE FROM AN IMPORTED ONE AND MUST NOT BE ABLE TO.
+static void testSpectraV5Wire(PluginRegistry& reg) {
+    banner("Spectra v5: a drawn table across rates and block sizes");
+
+    wdSandbox();
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+
+    // Draw, canonicalise and commit once, on a throwaway instance, so that the
+    // store holds the table and the hash is all anybody needs after that.
+    std::vector<f32> t(kWdN, 0.f);
+    for (int k = 0; k < kWdFrames; ++k) {
+        wt::pen::Spectrum sp;
+        for (int h = 1; h <= 48; ++h)
+            wt::pen::setBar(sp, h, wt::pen::magFromDb(-1.5f * (f32)h + 0.4f * (f32)k));
+        wt::pen::synthesise(sp, t.data() + (size_t)k * kWdCycle);
+    }
+    u64 hash = 0;
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        WavetableControl* w = q ? q->wavetable() : nullptr;
+        if (!w) return;
+        CHECK(w->commitFrames(0, t.data(), "Wire"), "the drawing commits (%s)", w->lastError());
+        const std::string st = q->stateString();
+        CHECK(wt::hashFromHex(st.substr(st.find(";wtA=") + 5, 16).c_str(), 16, hash),
+              "and names a hash (%s)", wt::hashHex(hash).c_str());
+    }
+    if (!hash) return;
+
+    // THE DAEMON'S STATE: a hash and nothing else. No wtpath, no file.
+    const std::string wire = "nxspc1;wtA=" + wt::hashHex(hash);
+
+    const f64 rates[3]  = { 44100.0, 48000.0, 96000.0 };
+    const int blocks[4] = { 1, 7, 64, 1024 };
+
+    for (int r = 0; r < 3; ++r) {
+        std::vector<f32> ref;
+        for (int b = 0; b < 4; ++b) {
+            auto q = reg.instantiate(*d, rates[r], blocks[b] > 64 ? blocks[b] : 64);
+            if (!q) continue;
+            q->prepare(rates[r], blocks[b]);
+            CHECK(q->setStateString(wire) || b > 0,
+                  "%g Hz: a state naming ONLY the drawn table's hash parses", rates[r]);
+            q->setParam(0, 8.f);      // A Table = custom
+            q->setParam(4, 0.8f);
+            q->setParam(12, 0.f);
+            WavetableControl* w = q->wavetable();
+            if (b == 0)
+                CHECK(w && w->customFrames(0) == 32,
+                      "%g Hz: it RESOLVES from the store by hash alone, 32 frames (%d)",
+                      rates[r], w ? w->customFrames(0) : -1);
+
+            const int total = 4096;
+            std::vector<f32> out((size_t)total, 0.f);
+            std::vector<f32> L((size_t)blocks[b]), R((size_t)blocks[b]);
+            f32* o[2] = { L.data(), R.data() };
+            noteOn(*q, 48, 100);
+            int at = 0;
+            while (at < total) {
+                const int n = blocks[b] < total - at ? blocks[b] : total - at;
+                std::fill(L.begin(), L.end(), 0.f);
+                std::fill(R.begin(), R.end(), 0.f);
+                q->process(nullptr, o, 2, blocks[b]);
+                for (int i = 0; i < n; ++i) out[(size_t)(at + i)] = L[(size_t)i];
+                at += blocks[b];
+            }
+            if (b == 0) {
+                ref = out;
+                f32 pk = 0.f;
+                for (f32 v : ref) pk = std::fmax(pk, std::fabs(v));
+                CHECK(pk > 0.01f, "%g Hz: the drawn table renders (peak %.4f)",
+                      rates[r], (double)pk);
+            } else {
+                CHECK(std::memcmp(ref.data(), out.data(), (size_t)total * sizeof(f32)) == 0,
+                      "%g Hz, block %d: BIT-IDENTICAL to block 1 — a drawn table "
+                      "goes through spBuildCustomMips() from identical f32 input in "
+                      "the same order as every imported and every factory table, so "
+                      "v3's obligation 7 covers it with no amendment and no second "
+                      "proof", rates[r], blocks[b]);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+static void testSpectraV5Roundtrip(PluginRegistry& reg) {
+    banner("Spectra v5: readFrames, and the editor's round trip");
+
+    wdSandbox();
+    const PluginDesc* d = reg.find("nxtakt:spectra");
+    if (!d) return;
+    auto s = reg.instantiate(*d, kSR, kBlock);
+    if (!s) return;
+    WavetableControl* w = s->wavetable();
+    if (!w) return;
+
+    std::vector<f32> out(kWdN, 0.f);
+    CHECK(!w->readFrames(0, out.data()),
+          "readFrames() is false when the oscillator has no resolved custom table");
+
+    std::vector<f32> t(kWdN, 0.f);
+    for (int k = 0; k < kWdFrames; ++k)
+        for (int i = 0; i < kWdCycle; ++i)
+            t[(size_t)k * kWdCycle + (size_t)i] =
+                (f32)(std::sin(6.283185307179586 * (f64)i / (f64)kWdCycle) +
+                      0.3 * std::sin(6.283185307179586 * (3.0 + k) * (f64)i / (f64)kWdCycle));
+    std::vector<f32> canon(t);
+    std::string err;
+    wt::pen::canonicalise(canon.data(), err);
+
+    CHECK(w->commitFrames(0, t.data(), "Round"), "the drawing commits (%s)", w->lastError());
+    CHECK(w->readFrames(0, out.data()), "readFrames() reads it back");
+    CHECK(std::memcmp(out.data(), canon.data(), kWdN * sizeof(f32)) == 0,
+          "COMMIT THEN READ IS THE CANONICALISED DRAWING, byte for byte — the "
+          "editor reopens on exactly what it saved");
+    CHECK(w->customFrames(0) == 32,
+          "customFrames() is 32 after a drawn commit (%d), which is a fact about "
+          "drawn tables and not a change to the method", w->customFrames(0));
+
+    // Committing what was read back is a NO-OP on identity: the frames are
+    // already canonical, so the second commit is the same hash and the same file.
+    {
+        const std::string st1 = s->stateString();
+        CHECK(w->commitFrames(0, out.data(), "Round"), "committing what was read back");
+        CHECK(s->stateString() == st1,
+              "...is the SAME hash and the SAME state: canonicalisation is "
+              "idempotent, so re-committing an unchanged drawing costs nothing");
+    }
+
+    // THE EDITOR OPENS ON ANY RESOLVED CUSTOM TABLE, imported or drawn, because
+    // a table is 32 x 2048 f32 either way -- and editing one simply produces a
+    // new table, which is exactly right. There is no provenance anywhere.
+    {
+        std::vector<f32> edited(out);
+        wt::pen::stroke(edited.data(), 300, 0.9f, 800, -0.9f);
+        wt::pen::removeDc(edited.data());
+        const std::string st1 = s->stateString();
+        CHECK(w->commitFrames(0, edited.data(), "Round Edited"), "an edit commits");
+        CHECK(s->stateString() != st1,
+              "...to a DIFFERENT hash, because the content differs and identity is "
+              "content");
+    }
+
+    // A table with fewer than 32 source frames stretches on the way out.
+    {
+        auto q = reg.instantiate(*d, kSR, kBlock);
+        if (q) {
+            // Reach a factory .nxwt (7 source frames) through the ordinary
+            // resolution path, then read its frames: 32 come back.
+            q->setStateString("nxspc1;wtA=5c0d37c1e4244576");
+            WavetableControl* v = q->wavetable();
+            if (v && v->customFrames(0) > 0) {
+                CHECK(v->customFrames(0) < 32,
+                      "a factory table with %d source frames", v->customFrames(0));
+                std::vector<f32> got(kWdN, 0.f);
+                CHECK(v->readFrames(0, got.data()),
+                      "readFrames() STRETCHES it to 32 by the same linear frame-axis "
+                      "interpolation the mip builder performs");
+                bool distinct = false;
+                for (int i = 0; i < kWdCycle; ++i)
+                    if (got[(size_t)i] != got[(size_t)31 * kWdCycle + (size_t)i]) distinct = true;
+                CHECK(distinct, "...and the stretched frames are not all the same one");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 static void testSamplerContract(PluginRegistry& reg) {
     banner("Sampler: the descriptor and the frozen parameter table");
 
@@ -11804,6 +13988,18 @@ int main() {
     testSpectraV4Source17(reg);
     testSpectraV4BeatLock(reg);
     testSpectraV4Determinism(reg);
+    testSpectraV5Pen(reg);
+    testSpectraV5Discipline(reg);
+    testSpectraV5Morph(reg);
+    testSpectraV5Frames(reg);
+    testSpectraV5Commit(reg);
+    testSpectraV5Durability(reg);
+    testSpectraV5Preview(reg);
+    testSpectraV5Name(reg);
+    testSpectraV5PresetNames(reg);
+    testSpectraV5Determinism(reg);
+    testSpectraV5Wire(reg);
+    testSpectraV5Roundtrip(reg);
     testSamplerContract(reg);
     testSamplerEmpty(reg);
     testSamplerPlayback(reg);

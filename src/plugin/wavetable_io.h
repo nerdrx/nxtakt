@@ -177,9 +177,21 @@ const Table* adopt(const Table& t, bool cache = true);
 const Table* ingest(u64 hash, int frames, const f32* data);
 
 // THE RESOLUTION ORDER, docs/SPECTRA-PARAMS.md "What an unresolvable slot 8
-// does": the store, then the installed factory wavetable directory, then the
-// user cache, then a re-import from `path` if one is given. Null when every
-// one of those fails, which is the refusal the caller renders amber over.
+// does", as v5 leaves it -- FIVE rungs, one appended and one widened:
+//
+//   1  the in-memory store                  find(); never reads a file
+//   2  factoryDir()/<hash>.nxwt             a preset's tables
+//   3  drawnDir()/<hash>.nxwt               v5. the user's authored library
+//   4  userCacheDir()/<hash>.nxwt           imports cached here
+//   5  recovery from `path`                 .nxwt -> readNxwt, else importFile
+//
+// A RUNG THAT FAILS FOR ANY REASON FALLS THROUGH TO THE NEXT, and only the
+// exhaustion of all five is a refusal -- which is the amber the caller renders.
+// A .nxwt whose bytes do not fold to its own name is refused by readNxwt and is
+// therefore a rung that failed, not a table that plays wrongly.
+//
+// Rung 5's one exception to "fall through": the two arms do not fall through to
+// EACH OTHER. A path ending `.nxwt` is read as a .nxwt or not at all.
 //
 // `path` may be null or empty -- a preset names a hash and never a path.
 const Table* resolve(u64 hash, const char* path);
@@ -202,6 +214,24 @@ std::string userCacheDir();
 // lives; read-only as far as this file is concerned.
 std::string factoryDir();
 
+// v5. THE USER'S AUTHORED LIBRARY, and it is not a cache.
+//
+//   $XDG_DATA_HOME/nxtakt/drawn  ->  ~/.local/share/nxtakt/drawn  ->  ...
+//
+// The same ladder userCacheDir() walks, ending in the same /tmp, because this
+// tree has one answer to "where does nxtakt keep a user file" -- and a SIBLING
+// of `wavetables/`, never a child of it. That is the whole point of the path:
+// the gesture that clears the cache names `.../nxtakt/wavetables`, and a drawn
+// library inside it would be swept up by every correct spelling of "clear the
+// wavetable cache". `.../nxtakt/drawn` cannot be reached by any of them.
+//
+// Rung 3 of the resolution ladder, ABOVE the cache, because rungs 2, 3 and 4
+// are hash-keyed and therefore interchangeable when they hit -- so their order
+// can only be about which copy wins on a machine that holds two, and the
+// answer is the one the user authored. Created lazily, on the first commit; a
+// user who never draws never has the directory.
+std::string drawnDir();
+
 // The cache file. Boring on purpose -- it is a cache, not an interchange
 // format: a 24-byte header and the frames, little-endian f32. Mips are not in
 // it and never will be; they are derived and they rebuild at load.
@@ -217,6 +247,307 @@ inline constexpr int kNxwtHeaderBytes = 24;
 
 bool writeNxwt(const std::string& file, const Table& t);
 bool readNxwt(const std::string& file, Table& out);
+
+// v5. THE COMMIT'S ONE WRITE, and the only writer of drawnDir(). Creates the
+// directory lazily on the first commit, at 0755 (learn.cpp's ensureParentDir
+// discipline) -- a user who never draws never has it -- then writes
+// `drawnDir()/<hashHex(t.hash)>.nxwt` through writeNxwt, which is a temporary
+// in the SAME DIRECTORY followed by rename(). A crash mid-commit therefore
+// cannot leave a half-written table under a name that claims a hash, and even
+// if it could, readNxwt recomputes the fold and refuses a file whose bytes do
+// not name themselves.
+//
+// A FILE ALREADY THERE IS LEFT ALONE and true is returned: the filename IS the
+// content hash, so the same drawing writes the same bytes to the same name. A
+// drawn table is never overwritten and never has to be -- which is the property
+// content-addressing was always going to buy.
+//
+// There is no `.bak` generation for the same reason. `outPath` receives the
+// full path either way, because the editor has to be able to tell the user
+// where the one irreplaceable copy of their work landed.
+bool writeDrawn(const Table& t, std::string& outPath);
+
+// ---------------------------------------------------------------------------
+// v5: THE TRANSFORM, and why it moved here
+//
+// These three were spFft / spIfft / spTwiddle in spectra_tables.inc, where the
+// mip builder is. They are HERE now, unchanged in text and in arithmetic, and
+// the seam calls them through this header -- because v5's pen needs the same
+// transform the mip builder uses and the alternative was a THIRD radix-2 FFT in
+// this tree (src/audio/sample.cpp has one, the mip builder had one). The v5
+// implementation notes ask for exactly this: "the fill and the render share one
+// transform and one set of tables. A second FFT in this device would be a
+// second thing to keep in agreement."
+//
+// The move is arithmetically NEUTRAL and the release gate is what says so: 1500
+// reference renders across three rates and four block sizes, cmp-identical.
+// It is a move and not a copy; nothing calls a second one.
+//
+// `tw` holds cos/sin at -2*pi*i/n for i in [0, n/2), so the inner loop does no
+// trigonometry. `n` must be a power of two and `tw` must have been filled by
+// twiddle() for that same n.
+// ---------------------------------------------------------------------------
+
+void fft (f32* re, f32* im, int n, const f32* tw);
+void ifft(f32* re, f32* im, int n, const f32* tw);
+void twiddle(std::vector<f32>& t, int n);
+
+// ---------------------------------------------------------------------------
+// v5: THE PEN -- gesture to frames
+//
+// docs/SPECTRA-PARAMS.md, "v5 -- the wavetable editor (FROZEN)", "The two
+// pens", "Frames" and "Commit". Everything here works on a WORKING COPY that
+// the editor owns: `kMaxFrames * kCycle` floats, frame-major, the identical
+// layout Table::data has. Nothing here touches the store, a file, a hash or a
+// mip -- the pen never sees a mip -- and nothing here is reachable from the
+// audio thread or from the daemon.
+//
+// WHERE THE LIBM IS, stated once because it is the determinism obligation.
+// Two calls: `10^(dB/20)` in magFromDb() and the std::sin/std::cos inside
+// twiddle(). The second adds nothing -- the mip builder already makes exactly
+// those calls for every table in the instrument. The first is new, is
+// deliberate, and sits precisely where the import path's rules (b) and (c) put
+// theirs: UPSTREAM of the content hash. The bound is the same one and is
+// weaker, because a GESTURE is never replayed on a second machine -- what
+// travels is the frames. No machine ever renders two different tables under
+// one hash.
+//
+// NO WALL CLOCK AND NO RNG. A drawn table's identity is a function of its
+// samples and of nothing else. The preview interval reads a clock; a preview is
+// not identity.
+// ---------------------------------------------------------------------------
+namespace pen {
+
+// A 2048-point cycle carries harmonics 1..1023 and a Nyquist bin. 1023 is
+// kSpMaxHarm, which is what the mip builder keeps, so the pen's spectrum and
+// the render's spectrum have exactly the same extent.
+inline constexpr int kMaxHarm = 1023;
+
+// The bars a human can address. A bar per harmonic past 256 is under a pixel on
+// any canvas anyone will build, and a control the user cannot hit is not a
+// control. 257..1023 EXIST, are not editable, and are PRESERVED.
+inline constexpr int kEditHarm = 256;
+
+// Bar top is 0 dB = magnitude 1.0 -- a full-scale sine at that harmonic under
+// the 2/N analysis scaling the mip builder already uses. Bar floor is -80 dB,
+// and the floor is a HARD ZERO rather than -80 dB: "drag it away" must mean the
+// harmonic is gone, not that it is quiet.
+inline constexpr f32 kFloorDb = -80.f;
+
+// The commit's silence test, and it is the SAME CONSTANT the import path uses,
+// so there is one number. Import maps a peak of zero to a gain of 1 and carries
+// on because it is recovering someone else's file; a drawing of silence is a
+// mistake, and letting it through would burn an identity on silence forever.
+inline constexpr f32 kSilent = 1e-9f;
+
+// ------------------------------------------------------------------ waveform
+
+// x in 0..1 to a sample index: clamp(round(x * 2047), 0, 2047). The pen's whole
+// domain rule in one function so that the UI and the tests cannot disagree.
+int index(f32 xNorm);
+
+// ONE SEGMENT OF A STROKE, between two consecutively delivered points. Every
+// index strictly between i0 and i1 gets the linear interpolant; i1 == i0
+// overwrites with v1; a stroke that reverses direction writes twice and the
+// later write wins. Values are clamped to +/-1 -- the pen cannot draw past full
+// scale -- and indices are clamped to 0..2047.
+//
+// LINEAR AND NOT A SPLINE, and it is a decision rather than laziness: a spline
+// overshoots, an overshoot is a sample the user did not draw, and the pen must
+// be able to draw a hard vertical step (a pulse edge), which no interpolating
+// spline can express.
+//
+// A STROKE DOES NOT WRAP. From i=400 to i=900 changes 501 samples and nothing
+// else. The cycle is a ring to the oscillator and a LINE to the pen: a
+// discontinuity at the wrap is a legitimate waveform -- it is what a sawtooth
+// IS -- so there is no wrap-continuity rule and no attempt to close the curve.
+//
+// A line tool (shift-drag) is this same call with the two endpoints.
+void stroke(f32* frame, int i0, f32 v0, int i1, f32 v1);
+
+// DC removal, applied at STROKE END and not during the stroke and not at
+// commit: during, the curve would crawl under the cursor; at commit, the last
+// thing the user saw would not be the thing that got saved. The user watches
+// the curve slide vertically the moment the pointer lifts.
+//
+// The mean accumulates in f64 in ASCENDING INDEX ORDER and is subtracted in f32
+// in ascending index order. Fixed accumulation type and fixed order, so the
+// same drawing gives the same frame on every machine.
+void removeDc(f32* frame);
+
+// ------------------------------------------------------------------ harmonic
+
+// One frame's spectrum in the MIP BUILDER'S OWN CONVENTION, so that the pen and
+// the render describe a harmonic with the same two numbers: hr[h] is the cosine
+// coefficient of harmonic h and hi[h] is MINUS its sine coefficient, both
+// already scaled by the 2/N the builder applies. h = 0 is DC and is always
+// zero; the Nyquist bin is not represented, exactly as kSpMaxHarm says.
+//
+// 1024 complex f32 -- 8 KiB -- and the editor holds ONE, for the cursor frame.
+struct Spectrum {
+    f32 hr[kMaxHarm + 1] = {};
+    f32 hi[kMaxHarm + 1] = {};
+};
+
+// THE FORWARD ANALYSIS. Reads a frame, writes the spectrum, and MODIFIES
+// NOTHING: opening the harmonic view never touches the frame, so the round trip
+// waveform -> harmonic view -> waveform with no bar touched is the identity BY
+// CONSTRUCTION and not by numerical luck. An f32 FFT/IFFT pair is not bit-exact
+// and this is what makes that fact irrelevant.
+void analyse(const f32* frame, Spectrum& out);
+
+// |H_h| for h in 0..kMaxHarm, and 0 outside. This is what a bar displays.
+f32 magnitude(const Spectrum& s, int h);
+
+// The dB<->magnitude map, and magFromDb is THE ONE LIBM CALL THIS FEATURE ADDS.
+//
+//   m = (db <= kFloorDb) ? 0.0f : 10^(db/20)
+//
+// The floor is a hard zero rather than -80 dB because a -80 dB residue on 256
+// harmonics is a table with a floor of hiss in it that no gesture can remove.
+// No harmonic may exceed 0 dB: the clamp exists so that the set normalisation
+// at commit is a correction and not a rescue.
+f32 magFromDb(f32 db);
+f32 dbFromMag(f32 m);              // kFloorDb for m <= 0; the display inverse.
+
+// TOUCHING A BAR rewrites that harmonic's magnitude AND its phase, and leaves
+// every untouched harmonic's COMPLEX value alone. The touched harmonic carries
+// (m, sine phase): hr = 0, hi = -m.
+//
+// `h` outside 1..kEditHarm is ignored -- DC is not editable and is forced to
+// zero, and 257..1023 are not editable and are preserved.
+void setBar(Spectrum& s, int h, f32 mag);
+
+// Rewrites EVERY harmonic to sine phase with its magnitude untouched, over the
+// full 1..kMaxHarm. This is "Re-phase endpoints"' arithmetic; it is never
+// applied silently and never by morph().
+void toSinePhase(Spectrum& s);
+
+// THE INVERSE SYNTHESIS, over the full 0..1023 spectrum, DC forced to zero.
+// Exactly the reconstruction spBuildFrameMips performs at n = kCycle, so the
+// pen writes what the render would have read.
+//
+// N CONSECUTIVE BAR EDITS PERFORM EXACTLY ONE FORWARD ANALYSIS AND N INVERSE
+// SYNTHESES, and that is a gate rather than an optimisation: the editor holds
+// the analysed Spectrum for as long as the frame has not been edited in the
+// waveform domain, and each bar edit calls setBar() then synthesise() on the
+// HELD spectrum rather than re-analysing the frame it just synthesised. Without
+// that, fifty bar edits are fifty FFT round trips of accumulated f32 error, and
+// the drift is audible before it is visible. A waveform-domain edit invalidates
+// the held spectrum; the next open re-analyses.
+void synthesise(const Spectrum& s, f32* frame);
+
+// ------------------------------------------------------------------ the table
+
+// MORPH, and it is the operation that makes 32 frames authorable. Replaces
+// frames a+1 .. b-1 and does not touch a or b.
+//
+// THE DOMAIN IS HARMONIC: magnitudes are interpolated per harmonic over
+// 1..kMaxHarm -- not 1..256, because the fill is not the pen and has no screen
+// to fit in -- and the result is synthesised at the pen's SINE PHASE. Ascending
+// in h, ascending in k, f32 throughout, so the fill is reproducible.
+//
+// A time-domain fill is exactly what `A Position` already computes between
+// adjacent frames, so it would write thirty frames that sound like having drawn
+// two: a no-op you can hear. And there is no third domain -- interpolating the
+// COMPLEX spectrum is, by the linearity of the transform, the time-domain
+// crossfade written more expensively.
+//
+// THE HONEST COST: the fill is at sine phase and the endpoints keep whatever
+// phase they were drawn with, so an endpoint that is not already in sine phase
+// leaves a PHASE STEP at the a/a+1 or b-1/b boundary, audible as a click in the
+// morph at exactly that position. rephaseEndpoints() is the named fix and it is
+// never applied here.
+//
+// False (and nothing written) unless 0 <= a and a + 1 < b < kMaxFrames.
+bool morph(f32* frames, int a, int b);
+
+// RE-PHASE ENDPOINTS. Rewrites frames a and b to sine phase with their
+// magnitudes untouched. A named, user-initiated operation: a tool that quietly
+// rewrites the two frames the user actually drew is a tool the user stops
+// trusting, so morph() calls this on nothing and the editor offers it in a
+// line. Idempotent -- re-phasing a sine-phase frame is the same frame to the
+// precision of the transform pair.
+//
+// False unless both indices are in range and distinct.
+bool rephaseEndpoints(f32* frames, int a, int b);
+
+// FRAME OPERATIONS, on a fixed array of kMaxFrames. Insert and Delete are
+// DESTRUCTIVE AT ONE END and the contract says so: there is no way to spell
+// "insert" in a fixed-length array that does not lose something, and the
+// alternative -- refusing when frame 31 is non-zero -- is a tool that stops
+// working the moment the table is full, which is always.
+void clearFrame(f32* frames, int k);        // 2048 zeros
+void insertFrame(f32* frames, int k);       // copy AT k, tail down, DROPS 31
+void duplicateFrame(f32* frames, int k);    // copy into k+1, tail down, DROPS 31
+void deleteFrame(f32* frames, int k);       // remove k, tail up, DUPLICATES the
+                                            // new last frame into slot 31
+
+// THE FRAME-AXIS STRETCH. An imported table may have 1..32 source frames and
+// the editor always edits 32, so opening one stretches it first -- by the same
+// LINEAR frame-axis interpolation spBuildCustomMips() already performs, cited
+// and not re-derived. A one-frame import becomes 32 identical frames, which is
+// what a table with no frame axis is. Committing then yields a DIFFERENT HASH
+// from the original, which is correct: the content differs, and identity is
+// content.
+//
+// `src` is srcFrames * kCycle; `dst` is kMaxFrames * kCycle. May not alias.
+void stretchFrames(const f32* src, int srcFrames, f32* dst);
+
+// COMMIT STEPS 1..5, in order, on the editor's working copy, leaving the frames
+// in exactly the state v3's identity rule names -- so that contentHash() may be
+// taken over them with no amendment:
+//
+//   1. every sample must be finite (v3's rule, applying to the pen unchanged,
+//      so a NaN payload cannot become an identity by a second door);
+//   2. per-frame DC removal, ascending frame then ascending index, f64 mean
+//      subtracted in f32 -- normally a no-op, and it runs anyway because a
+//      commit must not depend on which pen last touched a frame;
+//   3. the set-wide peak, ascending;
+//   4. a peak <= kSilent REFUSES with "this table is silent";
+//   5. multiply every sample by 1/pk, ascending.
+//
+// NORMALISATION IS ONE SET-WIDE FACTOR and never per-frame or per-stroke: a
+// single scalar over all 32 frames changes no shape and no inter-frame
+// relationship. Nothing the user drew moves at commit.
+//
+// False with a SENTENCE in `err` and `frames` UNTOUCHED on a refusal.
+bool canonicalise(f32* frames, std::string& err);
+
+// ------------------------------------------------------------------- preview
+
+// The number of buffers in a per-oscillator PREVIEW ARENA. Four, and the
+// arithmetic below is why.
+inline constexpr int kPreviewRing = 4;
+
+// THE MINIMUM PREVIEW INTERVAL, in seconds, and it is ONE NUMBER IN ONE PLACE
+// so that the seam, the editor and the tests cannot disagree about it:
+//
+//     interval = max(50 ms, 2 * maxBlock / sampleRate)
+//
+// computed from the values prepare() was given rather than hard-coded, because
+// the recycle bound has to hold at every rate and block size a host can choose.
+//
+// THE BOUND, which is arithmetic and not timing luck. The audio thread takes a
+// base pointer at the top of a block and does not retain it past that block,
+// and a ring of kPreviewRing is not rewritten until kPreviewRing - 1 further
+// publishes have happened. So the protection is
+//
+//     kPreviewRing * interval  >=  4 * 2 * maxBlock / sampleRate
+//                              =   8 * (maxBlock / sampleRate)
+//                              >   maxBlock / sampleRate
+//
+// -- a factor of eight at the large-block end, where the 50 ms floor is not
+// what binds, and far more at the small-block end where it is. At 4096 frames
+// and 44.1 kHz: a 92.9 ms block against 4 x 185.8 ms of protection.
+//
+// The preview is rate-limited to this and published on STROKE END, not per
+// pointer motion: a user does not lift the pointer sixty times a second. The
+// limit is a FLOOR, not a schedule -- there is no timer, and a slow drawer
+// publishes once per stroke.
+f64 previewInterval(f64 sampleRate, int maxBlock);
+
+} // namespace pen
 
 // ---------------------------------------------------------------------------
 // The wire's discovery half

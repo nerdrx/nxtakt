@@ -5520,6 +5520,260 @@ static void testCleanShutdown(ipc::EngineClient& c, pid_t& daemon) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The offline driver — `--driver file:PATH`
+// ---------------------------------------------------------------------------
+//
+// tests/handle_test.cpp step 4h is where the driver earns its keep: it renders
+// a real set through nxtaktd and compares the WAV byte for byte against one an
+// in-process engine wrote. What is tested HERE is the driver itself, from
+// outside, with no engine linked at all — which is this suite's whole shape:
+//
+//   * the arguments it refuses, and that it refuses them BEFORE claiming a
+//     region, so a bad invocation cannot wedge a session;
+//   * that it is a command-line tool and not an environment one, because
+//     $NXTAKT_AUDIO is inherited by every daemon the GUI spawns;
+//   * that the file it writes is a well-formed 32-bit float WAV of exactly the
+//     frames asked for;
+//   * that TWO SEPARATE DAEMON PROCESSES given the same set write the same
+//     bytes — the determinism claim, made across processes rather than across
+//     two calls in one;
+//   * and that the render is a CLOSED SYSTEM: a client that keeps sending after
+//     the transport starts does not change the file. That last one is a
+//     permanent version of an experiment: with the pump's gate removed, three
+//     runs of the same set produced three different files.
+// ---------------------------------------------------------------------------
+
+// Runs one offline daemon to completion. `after` is called once the transport
+// has been started, i.e. once the render is already armed. Returns the exit
+// status, or -1 if it never finished.
+template <typename Fill, typename After>
+static int renderOffline(const char* tag, const char* wav, const char* frames,
+                         const char* beats, Fill&& fill, After&& after) {
+    char session[80];
+    static int seq = 0;
+    std::snprintf(session, sizeof session, "%s-off%d", gSession, ++seq);
+    std::string drv = std::string("file:") + wav;
+    const char* args[10];
+    int n = 0;
+    args[n++] = "--session"; args[n++] = session;
+    args[n++] = "--driver";  args[n++] = drv.c_str();
+    if (frames) { args[n++] = "--frames"; args[n++] = frames; }
+    if (beats)  { args[n++] = "--beats";  args[n++] = beats;  }
+    args[n] = nullptr;
+
+    std::remove(wav);
+    const pid_t p = ipc::EngineClient::spawnDaemon(gDaemonPath, args);
+    if (p <= 0) { note("%s: could not spawn", tag); return -1; }
+    trackDaemon(p);
+
+    ipc::EngineClient c;
+    if (!c.attach(session, 5000)) {
+        note("%s: could not attach: %s", tag, c.error());
+        ::kill(p, SIGKILL); ::waitpid(p, nullptr, 0);
+        return -1;
+    }
+    fill(c);
+    after(c);
+
+    int st = 0;
+    for (int i = 0; i < 600; ++i) {
+        if (::waitpid(p, &st, WNOHANG) == p) {
+            c.detach();
+            return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        }
+        sleepMs(50);
+    }
+    c.detach();
+    ::kill(p, SIGKILL); ::waitpid(p, nullptr, 0);
+    return -1;
+}
+
+static bool readFileBytes(const char* path, std::vector<u8>& out) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    out.clear();
+    u8 buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.insert(out.end(), buf, buf + n);
+    std::fclose(f);
+    return true;
+}
+
+// Runs `nxtaktd` with the given argv and returns its exit status. Used only for
+// the refusal rows, where the daemon is expected never to come up at all.
+static int runDaemonExpectingFailure(const char* const* args) {
+    const pid_t p = ipc::EngineClient::spawnDaemon(gDaemonPath, args);
+    if (p <= 0) return -1;
+    int st = 0;
+    for (int i = 0; i < 100; ++i) {
+        if (::waitpid(p, &st, WNOHANG) == p) return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        sleepMs(50);
+    }
+    ::kill(p, SIGKILL); ::waitpid(p, nullptr, 0);
+    return -1;
+}
+
+static void testOfflineDriver() {
+    banner("14b. the offline driver: --driver file:PATH");
+
+    char wavA[160], wavB[160], wavC[160], wavD[160];
+    std::snprintf(wavA, sizeof wavA, "/tmp/nxtakt-off-%d-a.wav", (int)::getpid());
+    std::snprintf(wavB, sizeof wavB, "/tmp/nxtakt-off-%d-b.wav", (int)::getpid());
+    std::snprintf(wavC, sizeof wavC, "/tmp/nxtakt-off-%d-c.wav", (int)::getpid());
+    std::snprintf(wavD, sizeof wavD, "/tmp/nxtakt-off-%d-d.wav", (int)::getpid());
+
+    // --- 1. the arguments it will not accept -------------------------------
+    //
+    // Every one of these must fail at PARSE time, which is before the control
+    // region is claimed: a daemon that came up and only then discovered it had
+    // no idea how long to render would take the session name with it.
+    {
+        const char* noCount[] = {"--session", "off-nocount", "--driver", "file:/tmp/x.wav", nullptr};
+        CHECK(runDaemonExpectingFailure(noCount) == 2,
+              "--driver file: with no --frames/--beats is refused (a render that "
+              "stopped on a timer would depend on the machine)");
+        const char* both[] = {"--session", "off-both", "--driver", "file:/tmp/x.wav",
+                              "--frames", "100", "--beats", "4", nullptr};
+        CHECK(runDaemonExpectingFailure(both) == 2, "--frames AND --beats is refused");
+        const char* noPath[] = {"--session", "off-nopath", "--driver", "file:",
+                                "--frames", "100", nullptr};
+        CHECK(runDaemonExpectingFailure(noPath) == 2, "--driver file: with no path is refused");
+        const char* orphan[] = {"--session", "off-orphan", "--driver", "null",
+                                "--frames", "100", nullptr};
+        CHECK(runDaemonExpectingFailure(orphan) == 2,
+              "--frames without --driver file: is refused rather than ignored");
+        const char* huge[] = {"--session", "off-huge", "--driver", "file:/tmp/x.wav",
+                              "--frames", "999999999", nullptr};
+        CHECK(runDaemonExpectingFailure(huge) == 2,
+              "a frame count past what a RIFF size field can describe is refused");
+        CHECK(::access("/tmp/x.wav", F_OK) != 0,
+              "and not one of them created a file on the way out");
+    }
+
+    // --- 2. it is a command-line tool, not an environment one --------------
+    //
+    // $NXTAKT_AUDIO is what EngineHandle passes through to every daemon it
+    // spawns and what a developer exports once and forgets. A `file:` there
+    // would turn the app's engine into a one-shot bounce that renders four bars
+    // and exits — a session that dies for a reason nobody could see.
+    {
+        ::setenv("NXTAKT_AUDIO", "file:/tmp/nxtakt-should-not-exist.wav", 1);
+        const char* env[] = {"--session", "off-env", nullptr};
+        const int rc = runDaemonExpectingFailure(env);
+        ::unsetenv("NXTAKT_AUDIO");
+        CHECK(rc == 1, "NXTAKT_AUDIO=file:... is REFUSED (exit %d), so the GUI's "
+              "spawned engine cannot become a bounce by accident", rc);
+        CHECK(::access("/tmp/nxtakt-should-not-exist.wav", F_OK) != 0,
+              "and nothing was written");
+    }
+
+    // --- 3. one render, and what it produced -------------------------------
+    //
+    // The metronome, because it needs no pool, no clip and no plugin: what is
+    // under test here is the DRIVER, and a set would only add ways for the row
+    // to go red for reasons that are not about it.
+    const int kFrames = 48000;
+    auto fillMetronome = [](ipc::EngineClient& c) {
+        c.pushCommand(Cmd::SetTempo, 0, 0, 120.0);
+        c.pushCommand(Cmd::SetMetronome, 1);
+        c.pushCommand(Cmd::MasterVol, 0, 0, 1.0);
+        sleepMs(50);
+        c.pushCommand(Cmd::SetPlaying, 1);        // LAST: this is what arms it
+    };
+    auto nothingAfter = [](ipc::EngineClient&) {};
+
+    const int rcA = renderOffline("A", wavA, "48000", nullptr, fillMetronome, nothingAfter);
+    CHECK(rcA == 0, "an offline daemon renders and exits 0 (status %d)", rcA);
+
+    std::vector<u8> a;
+    CHECK(readFileBytes(wavA, a), "and left a file behind");
+    // 44 bytes of header, then 2 channels x 4 bytes per frame. The header is
+    // parsed rather than assumed: this suite links no audio library, so if the
+    // daemon's hand-written RIFF ever drifted, this is what would notice.
+    CHECK(a.size() == (size_t)44 + (size_t)kFrames * 8,
+          "exactly %d frames of 32-bit float stereo (%zu bytes)", kFrames, a.size());
+    if (a.size() >= 44) {
+        auto u16at = [&](size_t o) { return (u32)a[o] | ((u32)a[o + 1] << 8); };
+        auto u32at = [&](size_t o) {
+            return (u32)a[o] | ((u32)a[o+1] << 8) | ((u32)a[o+2] << 16) | ((u32)a[o+3] << 24);
+        };
+        CHECK(std::memcmp(&a[0], "RIFF", 4) == 0 && std::memcmp(&a[8], "WAVE", 4) == 0 &&
+              std::memcmp(&a[12], "fmt ", 4) == 0 && std::memcmp(&a[36], "data", 4) == 0,
+              "a well-formed RIFF/WAVE");
+        CHECK(u16at(20) == 3 && u16at(22) == 2 && u32at(24) == 48000 && u16at(34) == 32,
+              "IEEE float, stereo, 48000 Hz, 32 bits (tag %u, ch %u, rate %u, bits %u)",
+              u16at(20), u16at(22), u32at(24), u16at(34));
+        CHECK(u32at(4) == 36u + (u32)kFrames * 8u && u32at(40) == (u32)kFrames * 8u,
+              "and both length fields describe what is actually there");
+        f32 peak = 0.f;
+        for (size_t i = 44; i + 4 <= a.size(); i += 4) {
+            f32 v;
+            std::memcpy(&v, &a[i], 4);
+            peak = std::max(peak, std::fabs(v));
+        }
+        CHECK(peak > 1e-3f, "and it is not silence (peak %.4f)", (double)peak);
+    }
+
+    // --- 4. TWO PROCESSES, THE SAME BYTES ----------------------------------
+    //
+    // The determinism claim, made where it matters: not two calls in one
+    // process but two daemons, spawned separately, each rendering as fast as it
+    // could against whatever else the machine was doing.
+    const int rcB = renderOffline("B", wavB, "48000", nullptr, fillMetronome, nothingAfter);
+    std::vector<u8> b;
+    CHECK(rcB == 0 && readFileBytes(wavB, b), "a second, independent daemon renders the same set");
+    CHECK(a.size() == b.size() && !a.empty() &&
+          std::memcmp(a.data(), b.data(), a.size()) == 0,
+          "AND THE TWO PROCESSES WROTE THE SAME BYTES — same set, same count, "
+          "same file, on a machine that was doing something else in between");
+
+    // --- 5. the render is a CLOSED SYSTEM ----------------------------------
+    //
+    // A client that goes on sending after starting the transport must not be
+    // able to change the file, because WHEN its command landed would be a
+    // property of how fast the box rendered. Here the client tries hard: two
+    // hundred master-volume writes, one per millisecond, every one of which
+    // would be plainly audible if it landed.
+    auto shoutAfter = [](ipc::EngineClient& c) {
+        for (int i = 0; i < 200; ++i) {
+            c.pushCommand(Cmd::MasterVol, 0, 0, 0.05);
+            c.pushCommand(Cmd::SetMetronome, 0);
+            sleepMs(1);
+        }
+    };
+    const int rcC = renderOffline("C", wavC, "48000", nullptr, fillMetronome, shoutAfter);
+    std::vector<u8> cbytes;
+    CHECK(rcC == 0 && readFileBytes(wavC, cbytes), "a third daemon, with a client that keeps sending");
+    CHECK(a.size() == cbytes.size() && !a.empty() &&
+          std::memcmp(a.data(), cbytes.data(), a.size()) == 0,
+          "AND THE FILE IS UNCHANGED: 400 commands sent after the transport "
+          "started are not in the render. A bounce is a frozen set.");
+
+    // --- 6. --beats -------------------------------------------------------
+    //
+    // The other count. Four beats at 120 BPM is two seconds, resolved against
+    // the tempo the CLIENT set and not a default — which is why the fill sets
+    // 150 BPM here: at 120 the right answer and the default answer coincide,
+    // and a row that cannot tell them apart is not a row.
+    auto fill150 = [](ipc::EngineClient& c) {
+        c.pushCommand(Cmd::SetTempo, 0, 0, 150.0);
+        c.pushCommand(Cmd::SetMetronome, 1);
+        c.pushCommand(Cmd::MasterVol, 0, 0, 1.0);
+        sleepMs(80);
+        c.pushCommand(Cmd::SetPlaying, 1);
+    };
+    const int rcD = renderOffline("D", wavD, nullptr, "4", fill150, nothingAfter);
+    std::vector<u8> d;
+    CHECK(rcD == 0 && readFileBytes(wavD, d), "--beats 4 renders and exits 0");
+    // 4 beats at 150 BPM = 1.6 s = 76800 frames.
+    CHECK(d.size() == (size_t)44 + 76800u * 8u,
+          "and it is 76800 frames — four beats at the tempo the CLIENT set "
+          "(150 BPM), not at the default (%zu bytes)", d.size());
+
+    std::remove(wavA); std::remove(wavB); std::remove(wavC); std::remove(wavD);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     if (argc > 1) gDaemonPath = argv[1];
@@ -5583,6 +5837,10 @@ int main(int argc, char** argv) {
         testArrangementSurvival(client, daemon);
         testCrashAndRespawn(client, daemon);
         testCleanShutdown(client, daemon);
+        // AFTER the clean shutdown, deliberately: it spawns daemons of its own
+        // that exit on their own schedule, and running it earlier would leave
+        // the suite's main client sharing a machine with processes that vanish.
+        testOfflineDriver();
     }
 
     banner("15. /dev/shm is clean");

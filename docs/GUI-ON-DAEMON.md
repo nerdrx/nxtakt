@@ -2792,3 +2792,261 @@ rows re-pin the portable halves on the engine-free handle (local() constant
 null, the take ledger's zeros, nothing pending), the reference take gained
 its bare-Engine row, and the matrix gained the two rows above plus the
 daemons-stopped check.
+
+---
+
+## 19. The frames cross: `--driver file:` and a `cmp` gate
+
+Every cross-process audio claim in this project was, until this wave, a
+**level match to four decimals**. §15.7, §13.6 and `handle_test`'s steps
+4e/4f/4g all end the same way — *"AND THE TWO AGREE: daemon 0.4621 vs
+in-process 0.4623"* — and the reason was structural rather than a tolerance
+somebody settled for. Step 4f said it plainly:
+
+> the daemon's frames never cross the boundary at all — it renders into a
+> driver, the null driver runs against the wall clock, and the only audio
+> number the near side can read is a decaying meter. […] Capturing daemon
+> output needs a file/offline driver in `nxtaktd`.
+
+That driver is this section. `nxtaktd --driver file:PATH --frames N` renders
+the engine as fast as the machine will go into a 32-bit float WAV and exits,
+which makes the daemon's output a *file* — and files can be compared with
+`cmp`.
+
+### 19.1 The spelling, and why it is `file:PATH`
+
+```
+nxtaktd [--session NAME] [--driver null|auto|jack|alsa|file:PATH]
+        [--frames N | --beats N] [--rate HZ] [--block FRAMES]
+```
+
+`--driver` already took one word (`null|auto|jack|alsa`), and a driver with a
+*target* is the ordinary Unix shape for exactly this — ALSA's `hw:0`, JACK's
+`alsa:hw:0`, ffmpeg's `file:`. Keeping it inside `--driver` means the daemon
+still has one knob that says where audio goes, and it means `--frames`/
+`--beats` read as arguments to a render rather than as a second mode.
+
+**`file:` is argv-only.** `$NXTAKT_AUDIO` is honoured for every other driver
+and is inherited by every daemon `EngineHandle` spawns; a stray `file:` left
+in an exported variable would turn a user's session into a one-shot bounce
+that renders four bars and exits — a session that dies for a reason nobody
+could see. `NXTAKT_AUDIO=file:…` is therefore **refused, loudly**, before the
+control region is claimed. That refusal is a test row (`daemon_test` 14b),
+and it is the whole of "the GUI must be unaffected": there is no path from
+the app to this driver.
+
+Every argument error is caught at **parse time**, before the region exists: a
+count with no `file:` driver, a `file:` driver with no count, both counts,
+`file:` with no path, and a frame count past what a RIFF 32-bit size field
+can describe (536 870 000 frames of float stereo, about 3.1 h at 48 kHz).
+A daemon that came up, took a whole set and only then discovered it had no
+idea how long to render would take the session name down with it.
+
+### 19.2 It stops on a count, never on a clock
+
+`--frames N` is exact. `--beats N` is resolved **once**, at the moment the
+transport starts, against the tempo the *client* set — so it is still a
+count, and still not a function of how fast the box is. Both refuse zero.
+
+The file is a hand-written RIFF/WAVE: 44 bytes, `WAVE_FORMAT_IEEE_FLOAT`,
+stereo, at the driver's rate. `nxtaktd` links no `sndfile` and this does not
+change that. **Float and not PCM_24** — deliberately, and unlike
+`tools/render.cpp`, which writes 24-bit because a bounce is something a
+person listens to. This file exists to be *compared*: float32 is the engine's
+own output verbatim, so two files differ **iff** two `f32` samples differ. A
+quantiser in between would make a byte difference possibly a rounding
+difference, and `cmp` would stop being a statement about the audio.
+
+### 19.3 What differs from the realtime path, and why none of it reaches the samples
+
+An offline driver is still a driver: this thread calls `Engine::process()`
+with the same signature, the same block size and the same allocation-free,
+lock-free contract the audio thread does. `process()` stays untouched. What
+differs:
+
+| | realtime | offline | why it cannot change a sample |
+|---|---|---|---|
+| cadence | a deadline per block | back to back | the engine's only time base is *frames rendered*; `beat_` advances by `nframes/sr` and reads no clock. `process()` does take a `steady_clock` reading — it feeds the published CPU-load figure and nothing else. |
+| priority | `SCHED_FIFO` best effort | none | a property of a stream that can fall behind, which this one cannot |
+| xruns | reported | none exist | ditto |
+| input | the device's capture | `nullptr` (silence) | a property of the source, not the driver. An audio take records silence here. |
+| the pump | drains the client every 1 ms | **closes** (19.5) | see below |
+| pre-roll | n/a | `process(…, 0)` (19.4) | see below |
+
+### 19.4 The unarmed loop renders *nothing*, and that is load-bearing
+
+The render starts when the transport does — the daemon arms on the command
+the engine itself treats as starting the clock (`Cmd::SetPlaying` with a
+non-zero flag, `LaunchScene`, `LaunchClip`), noticed in `commit()`, i.e. at
+the one point where the command is provably in the engine's ring. Before
+that, the driver has to do *something*: the engine's command ring is 1024
+deep and a client fills it while building a set.
+
+It calls `Engine::process(…, nframes = 0)`. That is the engine's own
+documented early-out — flush parked events, `drainCommands()`, then
+`if (n <= 0) { publish(); return; }` — so it consumes the ring and renders no
+audio, advances no musical time, steps no voice, calls no plugin. The number
+of those calls is a property of how long the client took and of nothing else,
+and it cannot reach a sample. Both alternatives are worse, and both were
+measured:
+
+* **Rendering real blocks while unarmed.** Devices with free-running state
+  advance by a count that depends on the machine. Red-proved: with the
+  unarmed loop changed to render `block_` frames, the two parity runs whose
+  rack holds a `nxtakt:tape` (its wow/flutter oscillators advance every
+  block, signal or no signal) go red and **nothing else does** — *"first
+  difference at byte 3084 (frame 380): daemon 0.0010450324 vs local 0"*.
+* **Not calling `process()` at all.** The ring fills and never drains.
+  Red-proved: a client that pushes 1500 commands before the launch (a 32×32
+  set is about 1155 — `tools/render.cpp` measured it) wedges the daemon
+  outright; with the drain, exit 0.
+
+### 19.5 The render is a closed system, and intake closes *first*
+
+Once the launch is committed, nothing new may enter. Not because it would be
+unsafe — the pushes are as legal as they ever were — but because *when* a
+post-launch command landed would depend on how fast the machine rendered.
+
+The boundary closes in **two steps, at two different moments**, and the
+distinction was a bug before it was a design:
+
+* **Intake** closes the instant the launch is in the engine's ring, *inside*
+  `pumpCommands`, which returns immediately and never drains again. The
+  client's command ring, its MIDI ring and its pool announcements are left
+  alone from that moment.
+* **The render** begins later — at the end of the first tick on which the
+  daemon has nothing left to hand over (no deferred command, no queued
+  device, no queued chain, no scan running). In between, the pumps that
+  finish work the client asked for *before* the launch keep running. Without
+  that wait a chain still sitting in `chainPush_` would land at the top of
+  block 1 instead of block 0.
+
+Closing intake at the *end* of the tick instead — which is what the first
+version did — leaves a one-millisecond window in which a command sent after
+the launch is drained in the same pass as the launch and lands at frame 0.
+That window was not theoretical: `daemon_test` 14b caught it on the first
+run, and it is now a permanent row (a client that pushes 400 commands
+immediately after starting the transport must not change the file).
+
+The **outbound** half keeps running throughout — events, the journal, the
+retirements, the heartbeat. Those are consumer-side and cannot change a
+sample, and draining events is what keeps the engine's parking buffer
+(`engine.cpp`, `PendingEv`) from filling and complaining about a client that
+is in fact right here.
+
+When the file is closed, `finished()` is stored with **release**, *after*
+`fclose()` — the project's counter-order rule, with "a complete WAV on disk"
+as the event. The pump reads it with acquire and sets `gQuit`, so the daemon
+leaves by the ordinary §4.5 shutdown path. A render that did not complete
+exits **1**: what consumes a bounce is a script, and a short file must not
+look like success.
+
+### 19.6 The gate: bit-identity, per payload class
+
+`handle_test` step **4h**. Each run spawns a real `nxtaktd --driver file:`,
+drives it through `EngineHandle` — the object `src/ui` actually holds, so the
+payload really does go through the pool, the wire, the translator and the
+daemon's own plugin instances — waits for the process to exit, and compares
+its WAV against one a bare `lat::Engine` in the test process wrote from the
+same musical intent. 96 000 frames, 768 044 bytes.
+
+| run | payload class | result |
+|---|---|---|
+| 4h.1 | the signature map (v8), metronome in 7/8 | **bit-identical** |
+| 4h.2 | clip envelope + warp markers + transients (v11) | **bit-identical** |
+| 4h.3 | device state: a sampler naming a file, plus its audio (v10) | **bit-identical** |
+| 4h.4 | device state: a Spectra naming a custom wavetable | **bit-identical** |
+| 4h.5 | a rack with contents (v7), one of them stateful | **bit-identical** |
+| 4h.6 | all of it at once, four tracks summed | **bit-identical** |
+
+Nothing was found to be non-bit-identical. The two harnesses are deliberately
+*not* the same — one publishes an `RtChain` of GUI-side model instances and
+lets the handle reconcile a far-side chain out of it, the other builds the
+chain it renders — and that difference is the boundary.
+
+**The gate proves itself.** Every run also renders the set *with the payload
+under test removed* and requires the result to **differ**, so "the two agree"
+is a claim about the wire and not about the harness:
+
+| run | control | 
+|---|---|
+| 4h.1 | in 4/4, no map |
+| 4h.2 | the pre-v11 clip: no envelope, no markers, no transients |
+| 4h.3 | a buffer differing by **one ULP in one sample** |
+| 4h.4 | the factory-table fallback |
+| 4h.5 | an empty rack (the pre-v7 passthrough) |
+| 4h.6 | the rack emptied, three tracks deep, and nothing else changed |
+
+Two more properties are pinned in `daemon_test` 14b, where no engine is
+linked at all: two *separate daemon processes* given the same set write the
+same bytes, and the WAV's header is parsed rather than assumed (a suite that
+links no audio library is the right place to notice a hand-written RIFF
+drifting).
+
+The combined run's tracks sit at 0.3 rather than unity on purpose: at unity
+the mix peaks at exactly 1.0, the master clips, and a clipped sample is 1.0
+whatever fed it — the one thing that could make two different renders compare
+equal.
+
+### 19.7 What the old bounds became
+
+Nothing was weakened. The three cross-boundary legs in step 4f, and the two
+in 4e/4g, are **still bounds**, and their comments now say why — a different
+why from the one they used to give:
+
+> they measure a different daemon. The daemon under test there is the suite's
+> long-lived one, running the **null** driver at the wall clock — the shape a
+> user actually plays into. What crosses from it is the snapshot: a master
+> meter published once per block and decayed by 0.72 each time. A meter is a
+> lossy four-byte summary of 256 frames, so no arrangement of those legs
+> could byte-compare anything.
+
+So the bound is what a *meter* can support, and it is now the weaker of two
+claims rather than the only one available. Both are worth having: 4e/4f/4g
+say the payload survives the realtime path, with an audio thread and a
+scheduler; 4h says it survives the boundary exactly. Neither implies the
+other, and each row now names the other.
+
+### 19.8 Offline bounce falls out for free
+
+It is already there, with no GUI and no further design:
+
+```
+nxtaktd --session S --driver file:out.wav --frames 192000
+```
+
+…then fill session `S` from any client and start the transport last. The set
+renders through the same engine, the same plugins and the same mixer that
+would have played it, at full quality, as fast as the machine allows — 100
+seconds of audio renders in well under a second of wall time. It is a
+strictly better bounce than `tools/render.cpp` in one respect (it is the
+*daemon's* engine, with the daemon's plugin instances, so what you get is
+what daemon mode plays) and a worse one in another (`render` takes a
+`.lattice` file and needs no client; this needs something to fill a session).
+
+What is **not** built, and is a follow-on rather than a gap: a GUI affordance
+("Export audio…") that spawns a second daemon on a scratch session, replays
+the open set into it, and shows a progress bar. Every piece it needs exists —
+`EngineHandle` already knows how to publish a whole set, and the daemon
+already exits with a status when it is done. What it needs designing is the
+UX around a *second* engine holding a copy of the set while the first one
+keeps playing, and that is a wave of its own.
+
+### 19.9 Evidence
+
+* `make -j` clean, zero warnings, both binaries.
+* `make test` from a clean build: **753 / 240 / 870 / 1426 / 1030 / 385**
+  (`daemon_test` +21, `handle_test` +74). `internal_device_test`'s 1192 → 1426
+  is **not** this wave: nothing here touches `src/plugin`. It is a stale
+  binary — the working tree's `build/internal_device_test` predated the
+  Spectra-arpeggiator commit, and `rm -rf build` is what made it recompile.
+  The Makefile's own note above `INTERNAL_INSTR` warns about exactly this
+  class, and it is worth knowing that the number a local run reports can be
+  yesterday's.
+* The four demo renders `cmp`-identical against `BASELINE-07059cb`.
+* ASan+UBSan+LSan and TSan, both suites, against a sanitised `nxtaktd`: zero
+  reports, full counts — **and the six byte-exact parity runs still match**
+  under both, where the daemon runs orders of magnitude slower than the test
+  process. That is the determinism claim proved against speed rather than
+  asserted.
+* Red proofs: §19.4 (two of them) and §19.5.

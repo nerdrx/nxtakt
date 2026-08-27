@@ -105,6 +105,64 @@
 // through the middle of a sixteen-step grid is noise, not structure).
 //
 // ---------------------------------------------------------------------------
+// ...AND WHY v5 MAKES IT FOUR, WHICH IS A DIFFERENT ARGUMENT AGAIN
+//
+// v5 is a wavetable EDITOR: two pens over 2048 samples, 32 frames, a morph and
+// a commit. It spends no parameter ids at all, so nothing about it is a knob
+// looking for a cell. What it needs is the one thing this panel has never had
+// to find: a CANVAS -- a surface whose vertical resolution is the feature,
+// because a pen with sixty pixels of travel draws a staircase and calls it a
+// curve.
+//
+// FOUR SHAPES WERE AVAILABLE AND THREE ARE REFUSED:
+//
+//   * A MODAL OVERLAY over the panel. Refused twice over. §4 licenses a
+//     tier-2 sheet for menus and slide-overs, and this panel already spends
+//     its one on the preset popover -- but a drawing canvas is the FLATTEST
+//     working surface in the program (§5), and putting it on frosted glass
+//     over a card that is already glass is the "glass inside glass reads as
+//     fog" rule broken to buy nothing. And it buys nothing literally: an
+//     overlay over a 200px panel is 200px tall. The scarce axis is height and
+//     a sheet does not make more of it.
+//   * AN EXPANDED DETAIL-PANEL TAKEOVER -- the editor eating the whole detail
+//     strip, full window width. It has the most pixels and it is the one shape
+//     this panel cannot take: it would hide the device strip, the chain, every
+//     other device's card AND all three of this panel's own pages, which is a
+//     hundred reachable controls hidden at once by a surface that four
+//     revisions have refused to hide ONE for. It also lives in app_devices.cpp
+//     and app.cpp, which this wave does not own, and a shape that needs
+//     another agent's file is a shape that is not available.
+//   * A SCROLL INSIDE A PAGE. Refused for the third revision running, for the
+//     reason the two-page note above gives.
+//   * A FOURTH PAGE. Taken. §5's sliding indicator does not care whether there
+//     are three slots or four, and tabPill hit-tests the UN-inset slot
+//     (widgets.cpp 1.7), so the band carries a fourth tab over the 16px floor.
+//     The band widens 108 -> 132 so a slot is 33 logical px rather than 27 --
+//     the twenty-four pixels come out of the amber note, which has 872 and
+//     needs about 300, exactly as v4 took twenty for the third.
+//
+// AND THE PART THAT IS NEW, WHICH IS WHY THIS ARGUMENT IS NOT v4'S AGAIN.
+// Every page above this one is cut to a dock 200 logical pixels tall, and the
+// three notes in this file that call that height "not negotiable from here"
+// were true when they were written and are FALSE NOW: the detail panel grew a
+// SPLITTER last release (app.cpp, UiDetailSplit), and the dock runs 120 to
+// window-height-minus-180. So the DRAW page does the one thing no other page
+// in this panel can do -- it SPENDS height, all of it, and gets better when
+// the user drags the splitter down. The canvas takes the whole body and every
+// pixel the dock gains; the footer prints the number ("canvas 110 px - 27 per
+// unit") so the resolution is a fact rather than a feeling; and a TALLER chip
+// drives the splitter from here, once, reversibly, saying what it did. At the
+// 200px default the page is completely usable and slightly cramped, which is
+// the honest trade and is stated on screen rather than in a release note.
+//
+// WHY THE DRAW PAGE IS CUT DIFFERENTLY, and it is the arp's cut with the
+// proportions swapped. Columns 0 and 1 are the editor's controls -- six rows
+// of sixteen, which is exactly what a 130px body holds -- and columns 2..6 are
+// the frame strip and the canvas, one 802px-wide surface that is the feature.
+// Only the seam at column 2 is drawn: the other five would be hairlines
+// through the middle of a drawing.
+//
+// ---------------------------------------------------------------------------
 // THE GUARD, and why every single lookup has one
 //
 // The panel draws against whatever PluginInstance it is pointed at. Normally
@@ -467,6 +525,87 @@ template <class P> const char* wtError(P* p) {
         const char* e = w ? w->lastError() : nullptr;
         return (e && *e) ? e : "the import was refused and said nothing";
     } else { (void)p; return ""; }
+}
+
+// ---------------------------------------------------------------------------
+// v5's FIVE, AND THE SAME TRICK PLAYED ONE STOREY DEEPER
+//
+// v3 asked "does this build's PluginInstance have wavetable()". v5 asks a
+// harder question: does the WavetableControl that answers have `readFrames`,
+// `previewFrames`, `commitFrames`, `cancelPreview` and `setCustomName` -- five
+// methods a sibling wave is appending to src/plugin/host.h, and five that this
+// file may not add.
+//
+// `HasWavetable` CANNOT STAND IN FOR THEM. A build can have wavetable() and
+// not have the v5 methods, and that build is the one this file compiles in
+// today -- so a shim that tested the accessor and then called readFrames()
+// would be a compile error in exactly the configuration the acceptance test
+// runs. Each of the five therefore gets its own requires-expression written
+// THROUGH wavetable(), which short-circuits for free: a build with no
+// wavetable() at all fails every one of them without a second test.
+//
+// THE FIVE ARE ONE FEATURE AND THEY ARE TESTED AS ONE. `kWtEditor<P>` is the
+// conjunction, every shim below is gated on the conjunction rather than on its
+// own concept, and every control on the editor page passes through it. That is
+// `arpLive`'s rule in a new place: a guard that is right for four of five is a
+// guard nobody can check, and there is no honest editor with four of these --
+// one that can draw and preview but not commit is a toy that eats an hour.
+//
+// THERE ARE THREE STATES ON SCREEN AND NOT TWO, and the page says which:
+//   contract absent                   inert, and the sentence names the five
+//   contract present, wavetable() null  inert, and the sentence names the
+//                                     accessor -- v3's own refusal, verbatim
+//   contract present, device answers  LIVE. A device whose own host.h defaults
+//                                     refuse (all five ship with one) draws
+//                                     live and REPORTS the refusal, because
+//                                     there is no capability query in this
+//                                     contract and a refusal that arrives as a
+//                                     return value is said out loud, not
+//                                     guessed at in advance.
+// ---------------------------------------------------------------------------
+template <class P>
+concept HasWtRead    = requires(P* p, f32* o)        { p->wavetable()->readFrames(0, o); };
+template <class P>
+concept HasWtPreview = requires(P* p, const f32* fr) { p->wavetable()->previewFrames(0, fr); };
+template <class P>
+concept HasWtCommit  = requires(P* p, const f32* fr) { p->wavetable()->commitFrames(0, fr, "n"); };
+template <class P>
+concept HasWtCancel  = requires(P* p)                { p->wavetable()->cancelPreview(0); };
+template <class P>
+concept HasWtSetName = requires(P* p)                { p->wavetable()->setCustomName(0, "n"); };
+template <class P>
+inline constexpr bool kWtEditor = HasWtRead<P> && HasWtPreview<P> && HasWtCommit<P> &&
+                                  HasWtCancel<P> && HasWtSetName<P>;
+
+template <class P> bool wtReadFrames(P* p, int osc, f32* out) {
+    if constexpr (kWtEditor<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w && w->readFrames(osc, out);
+    } else { (void)p; (void)osc; (void)out; return false; }
+}
+template <class P> bool wtPreviewFrames(P* p, int osc, const f32* fr) {
+    if constexpr (kWtEditor<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w && w->previewFrames(osc, fr);
+    } else { (void)p; (void)osc; (void)fr; return false; }
+}
+template <class P> bool wtCommitFrames(P* p, int osc, const f32* fr, const char* name) {
+    if constexpr (kWtEditor<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w && w->commitFrames(osc, fr, name);
+    } else { (void)p; (void)osc; (void)fr; (void)name; return false; }
+}
+template <class P> void wtCancelPreview(P* p, int osc) {
+    if constexpr (kWtEditor<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        if (w) w->cancelPreview(osc);
+    } else { (void)p; (void)osc; }
+}
+template <class P> bool wtSetCustomName(P* p, int osc, const char* name) {
+    if constexpr (kWtEditor<P>) {
+        auto* w = p ? p->wavetable() : nullptr;
+        return w && w->setCustomName(osc, name);
+    } else { (void)p; (void)osc; (void)name; return false; }
 }
 
 // The user-preset half. `psSupported` is a CONTRACT question and not a device
@@ -911,6 +1050,388 @@ struct SpectraSave {
 };
 SpectraSave g_save;
 
+// ===========================================================================
+// v5 -- THE WAVETABLE EDITOR'S OWN STATE AND ARITHMETIC
+//
+// Everything from here to the end of this block is the DRAW page's, and all of
+// it is EDITOR-LOCAL: not a parameter, not a state record, not saved, and
+// nothing here is identity until commitFrames() takes it. The contract says
+// that in as many words about the frame cursor and it is true of the whole
+// working copy: "the editor's working copy is not the playing table, and the
+// playing table changes only at commit".
+//
+// THE TRANSFORM IS THIS FILE'S OWN, AND THAT IS ALLOWED. The contract's
+// implementation notes tell the DSP author to reuse spBuildCustomMips()'s
+// spIfft/spTwiddle for the morph -- and this file has never seen spectra.cpp
+// and must never need to. There is no contradiction, because determinism
+// obligation 2 draws the line in exactly the right place: "downstream of the
+// frames, yes, absolutely; upstream of them, no, and it does not need to be."
+// What crosses the wire and what feeds contentHash() is the FRAMES. So the
+// editor owes a transform that is DETERMINISTIC -- fixed radix, fixed order,
+// a twiddle table built once ascending in k -- and owes nothing else, and this
+// is one. Two runs of the same drawing in one process and one in a fresh
+// process produce the identical frames, which is obligation 5 in full.
+// ===========================================================================
+constexpr int kWeFrames  = 32;        // kSpFrames. The contract freezes it.
+constexpr int kWeCycle   = 2048;      // wt::kCycle
+constexpr int kWeHarm    = 1023;      // what a 2048-point cycle carries
+constexpr int kWeBars    = 256;       // ...and the most a human can address
+constexpr f32 kWeFloorDb = -80.f;     // bar floor; AT the floor the magnitude
+                                      // is a hard 0.0f, never 10^(-80/20)
+constexpr f32 kWeSilentPk = 1e-9f;    // the import path's own constant
+constexpr int kWeUndo    = 48;        // editor-local, bounded, per the notes
+
+inline void weSwap(f32& a, f32& b) { const f32 t = a; a = b; b = t; }
+
+// The twiddles, built ONCE, ascending in k, in f64 and stored in f32. This is
+// the one place the pen path calls libm besides 10^(dB/20), and it is the same
+// call the mip builder already makes for every table in the instrument.
+struct WeTwiddle {
+    f32 cr[kWeCycle / 2], ci[kWeCycle / 2];
+    WeTwiddle() {
+        for (int k = 0; k < kWeCycle / 2; ++k) {
+            const f64 a = -2.0 * 3.14159265358979323846 * (f64)k / (f64)kWeCycle;
+            cr[k] = (f32)std::cos(a);
+            ci[k] = (f32)std::sin(a);
+        }
+    }
+};
+const WeTwiddle& weTw() { static const WeTwiddle t; return t; }
+
+// In-place iterative radix-2 FFT at exactly kWeCycle. Ascending in stage,
+// ascending in block, ascending in k -- a fixed order, so the same frame
+// analyses to the same spectrum every time it is asked.
+void weFft(f32* re, f32* im, bool inverse) {
+    constexpr int N = kWeCycle;
+    for (int i = 1, j = 0; i < N; ++i) {
+        int bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j |= bit;
+        if (i < j) { weSwap(re[i], re[j]); weSwap(im[i], im[j]); }
+    }
+    const WeTwiddle& tw = weTw();
+    for (int len = 2; len <= N; len <<= 1) {
+        const int half = len >> 1, step = N / len;
+        for (int i = 0; i < N; i += len) {
+            for (int k = 0; k < half; ++k) {
+                const int t = k * step;
+                const f32 wr = tw.cr[t];
+                const f32 wi = inverse ? -tw.ci[t] : tw.ci[t];
+                const int a = i + k, b = a + half;
+                const f32 xr = re[b] * wr - im[b] * wi;
+                const f32 xi = re[b] * wi + im[b] * wr;
+                re[b] = re[a] - xr; im[b] = im[a] - xi;
+                re[a] += xr;        im[a] += xi;
+            }
+        }
+    }
+    if (inverse) {
+        const f32 g = 1.f / (f32)N;
+        for (int i = 0; i < N; ++i) { re[i] *= g; im[i] *= g; }
+    }
+}
+
+// THE ANALYSIS SCALING IS 2/N, which is the contract's own: "bar top is 0 dB =
+// magnitude 1.0, which is a full-scale sine at that harmonic under the
+// analysis scaling 2/N the mip builder already uses". Check it against the
+// synthesis below and they agree by construction: a frame that is exactly
+// sin(2*pi*h*i/N) analyses to m_h = 1 and nothing else.
+inline f32 weMagOf(const f32* re, const f32* im, int h) {
+    return 2.f * std::sqrt(re[h] * re[h] + im[h] * im[h]) / (f32)kWeCycle;
+}
+
+// dB <-> magnitude. The ONE libm call this feature adds, sitting exactly where
+// the import path's std::sin sits and carrying the identical bounded
+// consequence (determinism obligation 2). AT the floor it is a hard zero and
+// not 10^(-80/20): "drag it away" has to mean the harmonic is gone.
+inline f32 weDbToMag(f32 db) {
+    return db <= kWeFloorDb ? 0.f : std::pow(10.f, db * 0.05f);
+}
+inline f32 weMagToDb(f32 m) {
+    return m <= 0.f ? kWeFloorDb
+                    : clampv(20.f * std::log10(m), kWeFloorDb, 0.f);
+}
+
+// DC removal, exactly as the contract spells it: mean accumulated in f64 in
+// ASCENDING index order, subtracted in f32 in ASCENDING index order. Fixed
+// accumulation type and fixed order, so the same drawing gives the same frame.
+void weDcRemove(f32* frame) {
+    f64 acc = 0.0;
+    for (int i = 0; i < kWeCycle; ++i) acc += (f64)frame[i];
+    const f32 mean = (f32)(acc / (f64)kWeCycle);
+    for (int i = 0; i < kWeCycle; ++i) frame[i] -= mean;
+}
+
+// SINE-PHASE SYNTHESIS, and the reason it is an inverse transform rather than
+// a sum of sines is speed and nothing else -- the two are the same arithmetic.
+// X[h] = -i * m_h * N/2 and X[N-h] = conj(X[h]) gives, term by term,
+// (1/N)(X_h e^{i0} + X_{N-h} e^{-i0}) = m_h sin(0), which is the contract's
+// formula with h ascending. DC is zero by construction and so is Nyquist: the
+// contract's sum runs h = 1..1023 and bin 1024 is not one of them.
+//
+// `mag` is indexed by harmonic, 1..kWeHarm; mag[0] is ignored.
+// `keepRe` / `keepIm`, when given, are the HELD analysis, and `sine[h]` says
+// which harmonics carry the convention's phase instead. That is the whole of
+// "touched harmonics carry (m, sine phase), untouched harmonics carry their
+// analysed (re, im), and DC is zero".
+void weSynth(const f32* mag, const bool* sine, const f32* keepRe, const f32* keepIm,
+             f32* outFrame, f32* scratchRe, f32* scratchIm) {
+    const f32 half = (f32)kWeCycle * 0.5f;
+    scratchRe[0] = scratchIm[0] = 0.f;                      // DC: forced to zero
+    scratchRe[kWeCycle / 2] = scratchIm[kWeCycle / 2] = 0.f; // Nyquist: not a harmonic
+    for (int h = 1; h <= kWeHarm; ++h) {                    // ASCENDING in h
+        // `sine` is the BAR array and is 1..256 long, so a harmonic above the
+        // pen's reach can never be "touched" -- which is the contract's rule
+        // (257..1023 keep their full complex value) falling out of the bound
+        // rather than being enforced by a second test.
+        const bool conv = !keepRe || !sine || (h <= kWeBars && sine[h]);
+        f32 xr, xi;
+        if (conv) { xr = 0.f;        xi = -mag[h] * half; }
+        else      { xr = keepRe[h];  xi = keepIm[h]; }
+        scratchRe[h] = xr;                 scratchIm[h] = xi;
+        scratchRe[kWeCycle - h] = xr;      scratchIm[kWeCycle - h] = -xi;
+    }
+    weFft(scratchRe, scratchIm, true);
+    for (int i = 0; i < kWeCycle; ++i) outFrame[i] = scratchRe[i];
+}
+
+// Is this frame already in the pen's sine phase? Every harmonic of a sine-phase
+// frame is purely negative-imaginary, so the real part is the deviation, and
+// weighting it by magnitude is what stops a numerical speck at -200 dB from
+// answering for the whole frame. An all-zero frame answers "yes", which is
+// right: silence has no phase step.
+bool weIsSinePhase(const f32* re, const f32* im) {
+    f64 num = 0.0, den = 0.0;
+    for (int h = 1; h <= kWeHarm; ++h) {
+        const f64 a = std::sqrt((f64)re[h] * re[h] + (f64)im[h] * im[h]);
+        num += (f64)std::fabs(re[h]) * a;
+        den += a * a;
+    }
+    return den <= 1e-20 || (num / den) < 1e-3;
+}
+
+// wtpath's escaping, read back for DISPLAY only. The contract's writer escapes
+// any byte <= ' ', >= 0x7F, or one of % ; , : = as `%` plus two uppercase hex.
+// This is the inverse, and it is deliberately not the contract's STRICT
+// unescape: the only consumer is the "Saved to <path>" sentence, and a path
+// that will not decode is shown raw rather than withheld. Nothing here reads
+// back into a record.
+std::string weUnescape(const std::string& v) {
+    std::string out;
+    out.reserve(v.size());
+    const auto hex = [](char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+        if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+        return -1;
+    };
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i] == '%' && i + 2 < v.size()) {
+            const int hi = hex(v[i + 1]), lo = hex(v[i + 2]);
+            if (hi >= 0 && lo >= 0) { out += (char)(hi * 16 + lo); i += 2; continue; }
+        }
+        out += v[i];
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// THE WORKING COPY, and every scrap of state the DRAW page owns.
+//
+// A file static for the reason every other panel-local struct above is one:
+// app.h is another wave's file. Keyed on the open panel's uid and dropped when
+// it changes, exactly like g_page. 32 x 2048 floats is 256 KiB and there are
+// two of them (the working copy and what was READ, which is what draws the
+// "this frame differs" marks); the undo stack is per-frame steps, bounded at
+// 48, so its worst case is 48 x 8 KiB and its whole-table steps -- Insert,
+// Delete, Morph, Re-phase -- are the four that cost 256 KiB apiece.
+//
+// EVERYTHING IS ALLOCATED LAZILY, on the first open, and released when the
+// editor closes. A user who never draws pays nothing, which is the same
+// discipline drawnDir() follows on the other side of the seam.
+// ---------------------------------------------------------------------------
+struct SpectraEdit {
+    bool open = false;
+    u64  uid  = 0;
+    int  osc  = 0;                       // which oscillator was read
+    int  view = 0;                       // 0 the waveform pen, 1 the harmonic pen
+    int  cur  = 0;                       // the frame cursor, 0..31, EDITOR-ONLY
+    int  ma = 0, mb = 31;                // the morph's two endpoints
+    bool fromDevice = false;             // readFrames() answered
+    bool stretched  = false;             // ...and it had fewer than 32 frames
+    int  srcFrames  = 0;
+
+    std::vector<f32> f;                  // 32 * 2048, the working copy
+    std::vector<f32> was;                // ...as it was read or last committed
+    std::vector<f32> clip;               // one frame, the editor-local clipboard
+    bool clipOk = false;
+
+    // THE HELD SPECTRUM, for the CURSOR FRAME ONLY. The gate is "N consecutive
+    // harmonic edits perform exactly ONE forward analysis and N inverse
+    // syntheses", and consecutive means without leaving the frame -- so moving
+    // the cursor drops it and a waveform stroke drops it.
+    std::vector<f32> sre, sim;           // 2048 each: the analysed spectrum
+    std::vector<f32> mag;                // 1024: the bar magnitudes, h = 1..1023
+    std::vector<f32> tre, tim;           // 2048 each: the synthesis scratch
+    bool specOk = false;
+    int  specFrame = -1;
+    bool touched[kWeBars + 1]{};         // 1..256: this bar was edited
+    int  nTouched = 0;
+    int  nAnalyse = 0, nSynth = 0;       // the gate, counted on screen
+
+    // The stroke. One at a time, and its kind decides which pen owns it.
+    int  stroke = 0;                     // 0 none 1 draw 2 erase
+    int  lastI = -1; f32 lastV = 0.f;    // the previous delivered point
+    int  anchI = 0;  f32 anchV = 0.f;    // shift-drag's anchor, which never moves
+    bool strokeChanged = false;
+    // A SHIFT-DRAG IS A RUBBER BAND AND NOT A TRAIL. The line runs from an
+    // anchor that does not move, so every frame of the drag must draw it onto
+    // the state the stroke STARTED from -- otherwise a sweep leaves the
+    // previous frame's longer line behind it and the "line tool" paints a fan.
+    // The waveform pen restores from the undo step it pushed at the press; the
+    // harmonic pen cannot (its undo step is the FRAME and its edit is the
+    // magnitude array), so it keeps its own two.
+    std::vector<f32>  magWas;
+    std::vector<char> touchWas;
+    f64  prevAt = 0.0;                   // when the last preview was published
+
+    struct Step { int frame = -1; std::vector<f32> data; };
+    std::vector<Step> undo;
+
+    std::string name;                    // the display name, for setCustomName
+    bool nameOpen = false, nameJustOpened = false;
+    bool previewing = false;             // a preview is published and standing
+    std::string savedPath;               // what the last commit reported
+    std::string note;                    // the one-line round-trip sentence
+    int  noteInk = 0;                    // 0 quiet 1 cyan (happening) 2 amber 3 violet
+
+    // A MORPH FOUND ITS ENDPOINTS OFF SINE PHASE. The contract: "when a
+    // Morph's endpoints are not in sine phase the editor says so in one line
+    // ... and OFFERS it". The line is the canvas sentence; the offer is this,
+    // which puts an amber ring on RE-PHASE until it is answered -- because the
+    // line is one line and the whole of what it has to say does not fit in one.
+    bool rephaseOffered = false;
+
+    // The ask. The contract makes it an obligation: "an editor closing with
+    // uncommitted changes MUST ask", because the alternative is losing an hour
+    // of drawing to a window close.
+    int  askWhat = 0;                    // 0 none 1 leave the page 2 close the
+                                         // panel 3 read the other oscillator
+    int  askArg  = 0;
+
+    f32* frame(int k)             { return f.data() + (size_t)k * kWeCycle; }
+    const f32* frame(int k) const { return f.data() + (size_t)k * kWeCycle; }
+    const f32* wasFrame(int k) const { return was.data() + (size_t)k * kWeCycle; }
+
+    bool frameDirty(int k) const {
+        if (!open || (int)was.size() != kWeFrames * kWeCycle) return false;
+        const f32* a = frame(k); const f32* b = wasFrame(k);
+        for (int i = 0; i < kWeCycle; ++i) if (a[i] != b[i]) return true;
+        return false;
+    }
+    bool anyDirty() const {
+        if (!open) return false;
+        for (int k = 0; k < kWeFrames; ++k) if (frameDirty(k)) return true;
+        return false;
+    }
+    void alloc() {
+        f.assign((size_t)kWeFrames * kWeCycle, 0.f);
+        was.assign((size_t)kWeFrames * kWeCycle, 0.f);
+        sre.assign(kWeCycle, 0.f); sim.assign(kWeCycle, 0.f);
+        tre.assign(kWeCycle, 0.f); tim.assign(kWeCycle, 0.f);
+        mag.assign(kWeCycle / 2, 0.f);
+        magWas.assign(kWeCycle / 2, 0.f);
+        touchWas.assign(kWeBars + 1, (char)0);
+        clip.assign(kWeCycle, 0.f);
+    }
+    void release() {
+        *this = SpectraEdit{};
+    }
+    // Every mutation goes through here first, so nothing can change the working
+    // copy without leaving a way back. `k < 0` takes the whole table, which is
+    // what the four operations that move frames around each other need.
+    void push(int k) {
+        Step st;
+        st.frame = k;
+        if (k < 0) st.data.assign(f.begin(), f.end());
+        else       st.data.assign(f.begin() + (size_t)k * kWeCycle,
+                                  f.begin() + (size_t)(k + 1) * kWeCycle);
+        undo.push_back(std::move(st));
+        if ((int)undo.size() > kWeUndo) undo.erase(undo.begin());
+    }
+    bool pop() {
+        if (undo.empty()) return false;
+        const Step& st = undo.back();
+        if (st.frame < 0) {
+            if (st.data.size() == f.size()) f = st.data;
+        } else if ((int)st.data.size() == kWeCycle) {
+            for (int i = 0; i < kWeCycle; ++i) frame(st.frame)[i] = st.data[(size_t)i];
+        }
+        undo.pop_back();
+        specOk = false;
+        return true;
+    }
+    // The set-wide peak, ascending, which is the number the commit's gain comes
+    // from and the only thing about normalisation there is to watch.
+    f32 peak() const {
+        f32 pk = 0.f;
+        for (size_t i = 0; i < f.size(); ++i) {
+            const f32 a = std::fabs(f[i]);
+            if (a > pk) pk = a;
+        }
+        return pk;
+    }
+    bool allFinite() const {
+        for (size_t i = 0; i < f.size(); ++i) if (!std::isfinite(f[i])) return false;
+        return true;
+    }
+    void say(const char* s, int ink) { note = s ? s : ""; noteInk = ink; }
+};
+SpectraEdit g_edit;
+
+// THE DOCK HEIGHT THE TALLER CHIP REPLACED, and it lives OUTSIDE the editor
+// on purpose. TALLER changes a setting that belongs to the detail panel, not
+// to a drawing: if it were an editor member, leaving the DRAW page would drop
+// the "put it back" affordance and leave the user with a 380px dock and no
+// memory of what it was. The chip remembers across an editor's whole life, and
+// zero means "the dock is where the user left it".
+f32 g_weGrewFrom = 0.f;
+
+// The two debug hooks' landing pad. They cannot write g_edit directly because
+// the editor does not exist until the page is first drawn and opening it
+// RELEASES the struct; these are consumed by the first open and then gone, so
+// a hook is a starting state and never a thing that keeps re-asserting itself
+// under a driven gesture.
+int g_weSeedView = -1, g_weSeedFrame = -1;
+
+// The analysis, and the ONE place it happens. Everything that wants a spectrum
+// for the cursor frame calls this; it is a no-op when the held spectrum is
+// already this frame's, which is exactly the gate ("N consecutive edits, ONE
+// forward analysis") written as code rather than as a promise.
+void weEnsureSpectrum(SpectraEdit& e) {
+    if (e.specOk && e.specFrame == e.cur) return;
+    const f32* fr = e.frame(e.cur);
+    for (int i = 0; i < kWeCycle; ++i) { e.sre[(size_t)i] = fr[i]; e.sim[(size_t)i] = 0.f; }
+    weFft(e.sre.data(), e.sim.data(), false);
+    for (int h = 1; h <= kWeHarm; ++h)
+        e.mag[(size_t)h] = weMagOf(e.sre.data(), e.sim.data(), h);
+    e.mag[0] = 0.f;
+    for (int b = 0; b <= kWeBars; ++b) e.touched[b] = false;
+    e.nTouched = 0;
+    e.specOk = true;
+    e.specFrame = e.cur;
+    ++e.nAnalyse;
+}
+
+// ...and the synthesis that answers a bar edit, from the HELD spectrum rather
+// than from the frame it just wrote. Without that, fifty bar edits are fifty
+// FFT round trips of accumulated f32 error.
+void weResynth(SpectraEdit& e) {
+    weSynth(e.mag.data(), e.touched, e.sre.data(), e.sim.data(),
+            e.frame(e.cur), e.tre.data(), e.tim.data());
+    ++e.nSynth;
+}
+
 // ---------------------------------------------------------------------------
 // THE DISPLAYED WAVEFORM IS THE REAL ONE -- EXCEPT WHEN IT SAYS OTHERWISE
 //
@@ -1171,6 +1692,25 @@ int App::spectraOpenIdx(const std::vector<DeviceModel>& devices) const {
 //   904          the octave-mode micro-selector
 //   905          the velocity-mode micro-selector
 //   910          the arp level row, 911 the arp step row
+//
+// ...and v5's band, 1000+, which clears the whole of v4's and is the last one
+// that can be added without renumbering anything (the stepper band tops out at
+// 590 and is a function of the widest parameter id, which v5 does not move
+// because v5 spends no ids at all):
+//
+//  1000, 1001    the pen's view tab: WAVE / HARM
+//  1002, 1003    the editor's oscillator target, A / B
+//  1004          the TALLER / SHORTER chip, which drives the detail splitter
+//  1010..1017    the eight frame operations, in the contract's own order:
+//                Clear, Copy, Paste, Duplicate, Insert, Delete, Morph, Re-phase
+//  1020..1023    the morph endpoints: a's two arrows, then b's two
+//  1030          the name field, 1031 the RENAME chip
+//  1040..1043    UNDO, PREVIEW, COMMIT, REVERT
+//  1050          THE CANVAS -- one hot rect for the whole drawing surface,
+//                whichever pen is holding it, exactly as a drawable level row
+//                is one hot rect for sixteen steps
+//  1051          the 32-frame strip, on the same terms
+//  1060..1062    the uncommitted-changes ask: COMMIT & GO, DISCARD, STAY
 // ---------------------------------------------------------------------------
 
 void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
@@ -1232,6 +1772,21 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         g_save.open = false;
         g_wt.err.clear();
         if (ui_.editId == dropId) ui_.editId = 0;
+        // THE ONE PLACE A DRAWING CAN GO WITHOUT BEING ASKED ABOUT, and it is
+        // said out loud rather than hidden. The two USER gestures that end an
+        // editor -- leaving the page and closing the panel -- both ask. This
+        // branch is not a gesture: the panel has been pointed at a DIFFERENT
+        // device (the chain changed under it, or the debug hook moved it), and
+        // there is no editor left to ask on behalf of. So the working copy is
+        // dropped and the status bar says a drawing was dropped, which is the
+        // most this case can honestly offer.
+        if (g_edit.open) {
+            const bool lost = g_edit.anyDirty();
+            g_edit.release();
+            if (lost)
+                status_ = "Spectra: the panel moved to another device - the "
+                          "uncommitted drawing was discarded";
+        }
     }
     // A gesture in flight belongs to the surface it started on. The drag ghost
     // is cleared here rather than at the end of the frame it ended on so that
@@ -1294,9 +1849,26 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
     Rect closeR{title.right() - 18 * s, title.y + 2 * s, 16 * s, 16 * s};
     if (ui_.grab(slop(closeR)).button(uiId(UiSpectraPanel, 0, 0), closeR, "")) {
-        closeDrop();
-        spectraOpenUid_ = 0;
-        spectraForced_ = false;
+        // The same obligation the page tab answers, at the other exit. A close
+        // with uncommitted frames does not close: it turns to the DRAW page and
+        // asks, because the drawing is not in the set and closing loses it.
+        if (g_edit.open && g_edit.uid == dm.uid && g_edit.anyDirty()) {
+            g_page = 3;
+            g_edit.askWhat = 2;
+            status_ = "Spectra: the drawing has uncommitted frames - commit it, "
+                      "discard it, or stay. Closing would lose it.";
+        } else {
+            closeDrop();
+            if (g_edit.open && g_edit.uid == dm.uid) {
+                wtCancelPreview(inst, g_edit.osc);
+                if (probeOn())
+                    LOGI("NXTAKT_DEBUG_PROBE: spectra editor cancelPreview osc "
+                         "%s (panel closed)", g_edit.osc ? "B" : "A");
+                g_edit.release();
+            }
+            spectraOpenUid_ = 0;
+            spectraForced_ = false;
+        }
     }
     {
         const f32 k = 3.f * s;
@@ -1315,7 +1887,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // comment. Switching pages closes the popover: the chip it hangs from is
     // a MAIN-page control.
     {
-        static const char* const kPages[3] = {"MAIN", "MOD", "ARP"};
+        static const char* const kPages[4] = {"MAIN", "MOD", "ARP", "DRAW"};
         // 16 tall, and the slots ARE 16: tabPill's 2px inset is a drawing
         // inset for the sliding indicator and is no longer taken out of the
         // hit test (widgets.cpp). This band paid four pixels to work around
@@ -1329,24 +1901,60 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // pixels out of the amber note beside it -- which has 900 and needs 300
         // -- buys 36 a slot, which is close enough to the 44 two tabs had that
         // the hand does not notice the difference.
-        Rect tabR{title.x + 76 * s, title.y + 1.5f * s, 108 * s, 13 * s};
+        //
+        // 132 AND NOT 108, WHICH IS THE FOURTH PAGE'S FIRST BILL, and it is
+        // v4's bill again at the same rate. Four slots in the 108px band would
+        // be 27 logical pixels apiece -- over the 16px floor, and still a tab
+        // you have to aim at, which is the reason v4 refused 29. Twenty-four
+        // more pixels out of the amber note beside it (which has 872 and needs
+        // about 300) buys 33 a slot.
+        Rect tabR{title.x + 76 * s, title.y + 1.5f * s, 132 * s, 13 * s};
         int page = g_page;
         // grabTo16 because the band is 13 drawn: tabPill re-arms the slop for
-        // every slot, so all THREE tabs come out at the 16px floor rather than
+        // every slot, so all FOUR tabs come out at the 16px floor rather than
         // the first one being padded and the rest left short (widgets.cpp says
         // why that asymmetry is worse than uniformly small).
-        if (ui_.grabTo16(tabR).tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 3, &page) &&
+        if (ui_.grabTo16(tabR).tabPill(uiId(UiSpectraPanel, 2, uidKey), tabR, kPages, 4, &page) &&
             page != g_page) {
-            closeDrop();
-            g_assign = SpectraAssign{};      // a gesture does not survive the turn
-            g_arpDrag = SpectraArpStep{};
-            g_gridDrag = SpectraGrid{};
-            g_page = page;
+            // THE ONE PAGE TURN THAT CAN BE REFUSED. The contract makes it an
+            // obligation rather than a nicety: a preview is not identity and a
+            // project saved mid-edit does not contain the drawing, so "an
+            // editor closing with uncommitted changes MUST ask". Leaving the
+            // DRAW page is that close, and the ask is drawn by the page it is
+            // refusing to leave -- which is why g_page does not move here.
+            if (g_page == 3 && g_edit.open && g_edit.anyDirty()) {
+                g_edit.askWhat = 1;
+                g_edit.askArg  = page;
+                status_ = "Spectra: the drawing has uncommitted frames - commit "
+                          "it, discard it, or stay. A preview is not saved and a "
+                          "project saved now would not contain it.";
+            } else {
+                closeDrop();
+                g_assign = SpectraAssign{};  // a gesture does not survive the turn
+                g_arpDrag = SpectraArpStep{};
+                g_gridDrag = SpectraGrid{};
+                // LEAVING THE PAGE ENDS THE EDITOR, and a standing preview is
+                // the EDITOR's, not the set's. Without this a user who
+                // previewed, undid back to clean and then turned the page would
+                // leave the oscillator playing a table that is in no file, no
+                // hash and no state record, with nothing on screen saying so.
+                // cancelPreview() is idempotent, so it costs nothing when there
+                // was no preview.
+                if (g_page == 3 && g_edit.open) {
+                    wtCancelPreview(inst, g_edit.osc);
+                    if (probeOn())
+                        LOGI("NXTAKT_DEBUG_PROBE: spectra editor cancelPreview "
+                             "osc %s (page turned)", g_edit.osc ? "B" : "A");
+                    g_edit.release();
+                }
+                g_page = page;
+            }
         }
         if (ui_.hovered(tabR))
             ui_.tip = "MAIN is the v1 face; MOD is the parity push - sub & noise, "
                       "warp, LFO 2/3, ENV 3, the matrix, macros, voice mode; ARP "
-                      "is v4's arpeggiator and its sixteen-step pattern";
+                      "is v4's arpeggiator and its sixteen-step pattern; DRAW is "
+                      "v5's wavetable editor - two pens over 32 frames";
     }
 
     // §9: say what happened, in amber, in one line. Three states can be on
@@ -1355,7 +1963,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // -- in which case every missing id draws as an inert socket below and
     // this line is the reason why.
     {
-        const Rect noteR{title.x + 192 * s, title.y, closeR.x - title.x - 198 * s, title.h};
+        // 216 and not 192: the page band grew by 24 for its fourth slot and the
+        // note is where the 24 came from. It had 872 logical pixels for a
+        // sentence that measures about 300.
+        const Rect noteR{title.x + 216 * s, title.y, closeR.x - title.x - 222 * s, title.h};
         char note[128];
         if (!real) {
             snprintf(note, sizeof note, "panel forced onto %s - %d of %d parameters",
@@ -1428,8 +2039,15 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // banks of four would otherwise have to draw. The arp's pattern spans FIVE
     // columns and is one control: four hairlines through the middle of a
     // sixteen-step grid would be structure that is not there.
+    //
+    // THE DRAW PAGE DRAWS ONE OF THE SIX, for the same reason and harder. Its
+    // controls are columns 0 and 1 and its canvas is columns 2..6 -- so the
+    // seam at column 2 is the one real edge on the page, the seam INSIDE the
+    // control block would cut a six-row stack in half, and the four inside the
+    // canvas would be hairlines through the middle of a drawing.
     for (int i = 1; i < kCols; ++i) {
         if (g_page == 2 && i > 2) continue;
+        if (g_page == 3 && i != 2) continue;
         rend_.hairlineV(colX[i] - colGap * 0.5f, body.y + 2 * s, body.bottom() - 2 * s);
     }
 
@@ -4037,7 +4655,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         }
     }
 
-    } else {
+    } else if (g_page == 2) {
     // =======================================================================
     // ARP -- v4's face, and the only page in this panel that is not seven
     // sections in seven columns.
@@ -4636,6 +5254,1575 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         }
     }
 
+    } else {
+    // =======================================================================
+    // DRAW -- v5's face: the wavetable editor, and the first surface in this
+    // panel whose quality is a function of the dock height.
+    //
+    // THE CUT. Columns 0 and 1 are the editor's controls -- six rows of
+    // sixteen logical pixels, which is exactly what a 130px body holds at the
+    // dock's default -- and columns 2..6 are the frame strip and the canvas.
+    // Same colX[] as the other three pages, so the bones stand still when the
+    // page turns; one seam drawn, for the reason the seam loop gives.
+    //
+    // WHAT IS AND IS NOT IDENTITY, restated here because every control below
+    // depends on it. The working copy is 32 x 2048 floats that live in this
+    // file. Drawing writes them. A PREVIEW publishes them into the engine's
+    // recycled arena and touches no hash, no file and no state record -- what
+    // stateString() names does not move. A COMMIT is the nine-step
+    // canonicalisation on the far side of commitFrames(), and it is the only
+    // thing here that makes a table. That split exists because
+    // spBuildCustomMips() allocates 1.31 MB per distinct hash into a store
+    // that is never freed and is capped at 32: an editor that committed per
+    // stroke would be unusable in a minute. The user-visible cost is that a
+    // project saved mid-edit does not contain the drawing -- which is why both
+    // exits from this page ASK.
+    //
+    // THE 2048 SAMPLES ARE THE CANONICAL REPRESENTATION. Both pens read them
+    // and both pens write them; the harmonic view is DERIVED and is discarded
+    // the moment a stroke touches the time domain.
+    // =======================================================================
+    SpectraEdit& e = g_edit;
+
+    // The guard, made once, in three parts -- and the FIRST is a compile-time
+    // question about this build's host.h, which is why it is a constant and not
+    // a call. See the concepts above.
+    constexpr bool weContract = kWtEditor<PluginInstance>;
+    const bool weDevice = wtSupported(inst);
+    const bool weLive   = weContract && weDevice;
+
+    // ---- geometry ---------------------------------------------------------
+    const Rect ctl{colX[0], body.y, kColW[0] * s + colGap + kColW[1] * s, body.h};
+    const Rect can{colX[2], body.y,
+                   colX[kCols - 1] + kColW[kCols - 1] * s - colX[2], body.h};
+    const f32  cy0 = sect(ctl, "WAVETABLE EDITOR", 1.f);
+    const int  kRows = 6;
+    f32 rgap = (ctl.bottom() - cy0 - (f32)kRows * subH) / (f32)(kRows - 1);
+    rgap = clampv(rgap, 2.f * s, 6.f * s);
+    const auto rowY = [&](int i) { return cy0 + (subH + rgap) * (f32)i; };
+    const Rect stripR{can.x, can.y, can.w, subH};
+    // THE CANVAS TAKES EVERYTHING THAT IS LEFT, and everything the splitter
+    // ever hands over. It is the only rect in this panel with no fixed height.
+    const Rect canR{can.x, stripR.bottom() + gap, can.w,
+                    std::max(24 * s, can.bottom() - stripR.bottom() - gap)};
+
+    // ---- opening ----------------------------------------------------------
+    //
+    // The editor reads the oscillator's RESOLVED table, stretched to 32 frames
+    // by the seam, and says what it got. readFrames() answers false for an
+    // oscillator with no custom table -- a factory table is not readable
+    // through this contract and the eight of them are not the editor's to edit
+    // -- and that case is not an error: it is a BLANK 32-frame table, which is
+    // what "draw a wavetable from nothing" has to start from and is the
+    // premise of the whole revision.
+    const auto weOpen = [&](int osc, const char* why) {
+        e.release();
+        e.alloc();
+        e.open = true;
+        e.uid  = dm.uid;
+        e.osc  = clampv(osc, 0, 1);
+        e.fromDevice = weLive && wtReadFrames(inst, e.osc, e.f.data());
+        e.srcFrames  = weLive ? wtFrames(inst, e.osc) : 0;
+        e.stretched  = e.fromDevice && e.srcFrames > 0 && e.srcFrames < kWeFrames;
+        e.was = e.f;
+        if (g_weSeedView  >= 0) { e.view = g_weSeedView;  g_weSeedView  = -1; }
+        if (g_weSeedFrame >= 0) { e.cur  = g_weSeedFrame; g_weSeedFrame = -1; }
+        // THE NAME FIELD OPENS EMPTY, ALWAYS, and that is not laziness. After
+        // v5's widening customName() answers the wtname record, then
+        // basename(wtpath), then the bare hash -- and this side cannot tell
+        // which of the three it got. Seeding the field from it and committing
+        // would turn a FILENAME into a display name the user never typed.
+        // Empty means absence, absence is the one spelling of "no name", and
+        // the placeholder beside the field says what the table is called now.
+        e.name.clear();
+        if (e.stretched) {
+            char t[176];
+            snprintf(t, sizeof t,
+                     "opened %d source frames, stretched to 32 - committing "
+                     "will make a DIFFERENT hash, because the content differs",
+                     e.srcFrames);
+            e.say(t, 2);
+        } else if (e.fromDevice) {
+            e.say("opened this oscillator's custom table - 32 frames", 1);
+        } else if (weLive) {
+            e.say("blank: this oscillator has no custom table to read", 0);
+        }
+        if (why) LOGI("NXTAKT_DEBUG_PROBE: spectra editor opened osc %s (%s), "
+                      "readFrames=%s", e.osc ? "B" : "A", why,
+                      e.fromDevice ? "true" : "false");
+    };
+    if (!e.open || e.uid != dm.uid) weOpen(g_wt.osc, "entered the DRAW page");
+
+    // NOT const: the frame strip is drawn between the operations and the
+    // canvas, and a click on it moves the cursor THIS frame. Without the
+    // refresh below, the pen would spend one frame writing into the frame the
+    // cursor had just left -- a one-frame window, but the kind that turns into
+    // "sometimes my stroke lands on the wrong frame".
+    int        curF = clampv(e.cur, 0, kWeFrames - 1);
+    const bool wave = e.view == 0;
+
+    // ---- the arithmetic the page's verbs are made of ----------------------
+    const auto weMoveCursor = [&](int to, const char* how) {
+        const int n = clampv(to, 0, kWeFrames - 1);      // NO WRAP at either end
+        if (n == e.cur) return;
+        e.cur = n;
+        e.specOk = false;                                // the held spectrum is
+        e.stroke = 0;                                    // this frame's, only
+        if (probeOn())
+            LOGI("NXTAKT_DEBUG_PROBE: spectra editor frame %d (%s)", n, how);
+    };
+
+    // The set-wide peak and what the commit's one scalar would be. This is the
+    // whole of what normalisation has to show: it changes no shape and no
+    // inter-frame relationship, so there is nothing to watch except a level.
+    const f32 wePk = e.open ? e.peak() : 0.f;
+
+    const auto wePreview = [&](const char* why) {
+        if (!weLive) return;
+        // THE INTERVAL IS COMPUTED FROM WHAT prepare() WAS GIVEN, not hard-
+        // coded: max(50 ms, 2 x maxBlock / sampleRate). The recycle proof is
+        // four buffers against one block period, and the driver's own numbers
+        // are what the engine was prepared with.
+        const f64 sr = eng_.driverSampleRate() > 0.0 ? eng_.driverSampleRate() : 48000.0;
+        const f64 bl = eng_.driverBufferSize() > 0 ? (f64)eng_.driverBufferSize() : 256.0;
+        const f64 iv = std::max(0.050, 2.0 * bl / sr);
+        const f64 t  = nowSeconds();
+        if (t - e.prevAt < iv) {
+            char m[144];
+            snprintf(m, sizeof m, "preview held - the minimum interval is %.0f ms",
+                     iv * 1000.0);
+            e.say(m, 2);
+            return;
+        }
+        e.prevAt = t;
+        if (wtPreviewFrames(inst, e.osc, e.f.data())) {
+            // A SUCCESSFUL PREVIEW SAYS NOTHING HERE, deliberately. The one
+            // sentence slot on the canvas belongs to whatever the user just
+            // DID -- and an operation that previews as a side effect would
+            // otherwise erase its own explanation, which is how "the fill
+            // re-phased, the endpoints did not" stopped being on screen the
+            // first time this was driven. Being previewed is a STATE, not an
+            // event, so it is a lamp on the PREVIEW button and a word in the
+            // footer instead.
+            e.previewing = true;
+            if (probeOn())
+                LOGI("NXTAKT_DEBUG_PROBE: spectra editor preview osc %s (%s)",
+                     e.osc ? "B" : "A", why ? why : "edit");
+        } else {
+            e.say("this device refused the preview", 2);
+        }
+    };
+
+    // The path the commit wrote, read back off the record the commit rewrote.
+    // The contract puts the sentence in the editor -- "the editor reports
+    // 'Saved to <path>' with the real path, once, on every commit" -- and the
+    // path is not a return value, so it comes from wtpathA/wtpathB, which
+    // step 9 has just made point at the drawn file.
+    const auto weSavedPath = [&](int osc) {
+        SpecState after;
+        if (!after.parse(inst->stateString())) return std::string();
+        const std::string* p = after.find(osc ? "wtpathB" : "wtpathA");
+        return p ? weUnescape(*p) : std::string();
+    };
+
+    const auto weCommit = [&]() {
+        if (!weLive) {
+            status_ = weContract
+                ? "Spectra: this device answers no wavetable() - there is "
+                  "nothing to commit a drawing to"
+                : "Spectra: this build's plugin contract has no "
+                  "WavetableControl::commitFrames - the editor cannot save";
+            e.say("commit refused: the contract is not here", 2);
+            return false;
+        }
+        // Step 1 of the nine, on this side too, because the sentence is better
+        // here: a non-finite sample is a drawing the user can still fix.
+        if (!e.allFinite()) {
+            status_ = "Spectra: a frame holds a non-finite sample - the whole "
+                      "commit is refused and nothing changed";
+            e.say("commit refused: a sample is not finite", 2);
+            return false;
+        }
+        // ...and step 4, for the same reason. The import path maps a zero peak
+        // to a gain of 1 and carries on; a DRAWING of silence is a mistake and
+        // letting it through would burn an identity on it forever.
+        if (wePk <= kWeSilentPk) {
+            status_ = "Spectra: this table is silent - a drawing of nothing is "
+                      "refused rather than given an identity forever";
+            e.say("commit refused: this table is silent", 2);
+            return false;
+        }
+        undoPoint("commit wavetable");
+        if (!wtCommitFrames(inst, e.osc, e.f.data(),
+                            e.name.empty() ? nullptr : e.name.c_str())) {
+            g_wt.err = wtError(inst);
+            status_ = std::string("Spectra: the commit was refused - ") + g_wt.err;
+            e.say("commit refused - nothing changed", 2);
+            return false;
+        }
+        g_wt.err.clear();
+        // A COMMIT THAT DOES NOT MOVE THE OSCILLATOR ONTO ITS CUSTOM SLOT is a
+        // saved table nobody can hear -- the import drop's own rule, and one
+        // edit to the user, so it rides the commit's undo point rather than
+        // taking a second.
+        const int tid = e.osc ? pBTable : pATable;
+        if (has(tid) && enumMax(tid, 7) >= 8 &&
+            std::lround(get(tid, 0.f)) != 8) {
+            inst->setParam(tid, 8.f);
+            if (ownTrack)
+                autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid, dm.uid,
+                                              inst->paramInfo(tid).id), 8.f, 0);
+        }
+        // The committed table is the NORMALISED one, and the editor now shows
+        // exactly that. Re-reading is how "nothing you drew moved, the level
+        // did" becomes something on screen rather than a claim.
+        if (!wtReadFrames(inst, e.osc, e.f.data())) { /* keep what we sent */ }
+        e.was = e.f;
+        e.specOk = false;
+        e.previewing = false;            // the committed table IS what plays now
+        e.savedPath = weSavedPath(e.osc);
+        char m[400];
+        if (!e.savedPath.empty())
+            snprintf(m, sizeof m, "Spectra: saved to %s", e.savedPath.c_str());
+        else
+            snprintf(m, sizeof m,
+                     "Spectra: committed - the device did not report a path");
+        status_ = m;
+        e.say(e.savedPath.empty() ? "committed"
+                                  : "committed and saved - see the status bar", 3);
+        if (probeOn())
+            LOGI("NXTAKT_DEBUG_PROBE: spectra editor commit osc %s name=\"%s\" "
+                 "path=%s", e.osc ? "B" : "A", e.name.c_str(),
+                 e.savedPath.empty() ? "(none)" : e.savedPath.c_str());
+        return true;
+    };
+
+    // ---- the ask, resolved at the very end of the block --------------------
+    int weAnswer = -1;                   // 0 stay, 1 discard, 2 commit and go
+
+    // =======================================================================
+    // ROW 0 -- who is being edited, which pen, and the dock
+    // =======================================================================
+    {
+        const Rect r0{ctl.x, rowY(0), ctl.w, subH};
+        const f32 tgW = 16 * s;
+        const Rect oscR{r0.x, r0.y, tgW * 2.f, r0.h};
+        const Rect viewR{oscR.right() + 6 * s, r0.y, 92 * s, r0.h};
+        const Rect tallR{r0.right() - 48 * s, r0.y, 48 * s, r0.h};
+        const Rect chipR{viewR.right() + 6 * s, r0.y,
+                         std::max(8 * s, tallR.x - viewR.right() - 12 * s), r0.h};
+
+        // --- A / B, the hero's own pair, on the hero's own terms ------------
+        ui_.segCluster(oscR);
+        for (int k = 0; k < 2; ++k) {
+            const Rect seg{oscR.x + tgW * (f32)k, oscR.y, tgW, oscR.h};
+            if (k) rend_.hairlineV(seg.x, oscR.y + 2 * s, oscR.bottom() - 2 * s);
+            Rect g = seg;
+            if (weLive) {
+                const u64 wid = uiId(UiSpectraPanel, 1002 + k, uidKey);
+                if (ui_.grab(slop(seg)).segButton(wid, seg, k == e.osc, nx::violet) &&
+                    k != e.osc) {
+                    // Switching oscillators throws the working copy away, so it
+                    // is one of the three exits the contract makes ask.
+                    if (e.anyDirty()) { e.askWhat = 3; e.askArg = k; }
+                    else              { weOpen(k, "target switched"); g_wt.osc = k; }
+                }
+                g = ui_.lastRect;
+            }
+            ui_.microIn(fSmall_, g, k ? "B" : "A",
+                        k == e.osc && weLive ? nx::text
+                                             : nx::muted.alpha(weLive ? 0.85f : 0.40f),
+                        Align::Center);
+        }
+        if (ui_.hovered(oscR))
+            ui_.tip = "Which oscillator's table the pens are editing. Switching "
+                      "reads the other one and throws this drawing away, so it "
+                      "asks first.";
+
+        // --- WAVE / HARM ---------------------------------------------------
+        //
+        // A SEGMENTED PAIR AND NOT A TAB PILL: a tab pill is §5's page idiom
+        // and this is not a page, it is two views of ONE frame. The
+        // distinction matters because opening the harmonic view NEVER modifies
+        // the frame -- switching is free, and a control that looks like a page
+        // turn would suggest it costs something.
+        ui_.segCluster(viewR);
+        {
+            static const char* const kViews[2] = {"WAVE", "HARM"};
+            const f32 vw = viewR.w * 0.5f;
+            for (int k = 0; k < 2; ++k) {
+                const Rect seg{viewR.x + vw * (f32)k, viewR.y, vw, viewR.h};
+                if (k) rend_.hairlineV(seg.x, viewR.y + 2 * s, viewR.bottom() - 2 * s);
+                Rect g = seg;
+                if (weLive) {
+                    const u64 wid = uiId(UiSpectraPanel, 1000 + k, uidKey);
+                    if (ui_.grab(slop(seg)).segButton(wid, seg, k == e.view, nx::violet) &&
+                        k != e.view) {
+                        e.view = k;
+                        e.stroke = 0;
+                        if (k == 1) {
+                            // The analysis, and the sentence that says it cost
+                            // the frame nothing. This is the round trip's first
+                            // rule made visible at the moment it applies.
+                            const int before = e.nAnalyse;
+                            weEnsureSpectrum(e);
+                            e.say(e.nAnalyse > before
+                                      ? "analysed - the frame itself is unchanged"
+                                      : "the held spectrum is still this frame's", 1);
+                        } else {
+                            e.say("waveform view - the analysis is still held", 1);
+                        }
+                    }
+                    g = ui_.lastRect;
+                }
+                ui_.microIn(fSmall_, g, kViews[k],
+                            k == e.view && weLive ? nx::text
+                                                  : nx::muted.alpha(weLive ? 0.85f : 0.40f),
+                            Align::Center);
+            }
+        }
+        if (ui_.hovered(viewR))
+            ui_.tip = "WAVE draws the 2048 samples freehand; HARM draws 256 "
+                      "harmonic magnitudes in dB. Opening HARM never modifies "
+                      "the frame - the view is a forward transform and nothing "
+                      "else. Touching a bar rewrites that harmonic's phase to "
+                      "sine; a WAVE stroke drops the analysis, because a "
+                      "time-domain stroke touches every harmonic.";
+
+        // --- THE ROUND-TRIP CHIP, which is this page's honesty in 100px -----
+        //
+        // Three states and each one names itself, because the contract's whole
+        // lossiness statement is three sentences and a user has to be able to
+        // see which of them has happened.
+        {
+            char t[64];
+            Col ink = nx::muted.alpha(0.55f);
+            // Short enough to fit a 100px chip at DPI 1.0 -- chip() has no
+            // ellipsis logic, so a long string here is a string cut in half by
+            // the panel's own clip. The sentence lives in the tooltip.
+            if (!weLive)                       snprintf(t, sizeof t, "INERT");
+            else if (!e.specOk)                snprintf(t, sizeof t, "NO ANALYSIS");
+            else if (e.specFrame != e.cur)     snprintf(t, sizeof t, "STALE");
+            else if (e.nTouched > 0) {
+                snprintf(t, sizeof t, "PHASE %d/256", e.nTouched);
+                ink = nx::violet;
+            } else { snprintf(t, sizeof t, "UNMODIFIED"); ink = nx::cyan.alpha(0.85f); }
+            ui_.chip(chipR, t, ink);
+            if (ui_.hovered(chipR)) {
+                char tip[420];
+                snprintf(tip, sizeof tip,
+                         "The round trip, on screen. %d forward analysis%s and %d "
+                         "inverse synthes%s so far on this frame - the contract "
+                         "makes that a GATE: N consecutive bar edits perform "
+                         "exactly ONE analysis, because fifty FFT round trips "
+                         "accumulate f32 drift that is audible before it is "
+                         "visible. %d of 256 bars carry the pen's sine phase; the "
+                         "rest, and every harmonic from 257 to 1023, keep their "
+                         "analysed complex value.",
+                         e.nAnalyse, e.nAnalyse == 1 ? "" : "es", e.nSynth,
+                         e.nSynth == 1 ? "is" : "es", e.nTouched);
+                ui_.tip = tip;
+            }
+        }
+
+        // --- TALLER / SHORTER ----------------------------------------------
+        //
+        // THE ONE CONTROL IN THIS PANEL THAT REACHES OUTSIDE IT, and it is here
+        // because the thing it reaches for was added for exactly this. Three
+        // comments in this file call the 200px dock "not negotiable"; the
+        // detail panel grew a splitter last release and they are now false. A
+        // canvas is the only surface here that is BETTER with more pixels, so
+        // it gets the one chip that says so -- once, reversibly, out loud, and
+        // restoring precisely the height it replaced.
+        {
+            f32& dH = detailHFor(view_);
+            const f32 maxH = std::max(160.f, (f32)win_.height() / s - 180.f);
+            const bool grown = g_weGrewFrom > 0.f;
+            const u64 wid = uiId(UiSpectraPanel, 1004, uidKey);
+            // Inert with the rest of the page. The splitter is not the
+            // editor's, but a chip that grows a dock so a canvas can say "no
+            // wavetable editor in this build" in a larger font is a control
+            // that works and does nothing -- which is the one thing this panel
+            // has never shipped.
+            if (weLive && ui_.grab(slop(tallR)).button(wid, tallR, "")) {
+                if (!grown) {
+                    g_weGrewFrom = dH;
+                    dH = clampv(std::max(dH, 380.f), 120.f, maxH);
+                    char m[220];
+                    snprintf(m, sizeof m,
+                             "Spectra: the dock is %.0f logical px - the canvas "
+                             "took all of it. The splitter above the panel does "
+                             "the same by hand; this chip puts it back.",
+                             (double)dH);
+                    status_ = m;
+                } else {
+                    dH = clampv(g_weGrewFrom, 120.f, maxH);
+                    g_weGrewFrom = 0.f;
+                    status_ = "Spectra: the dock is back where it was";
+                }
+            }
+            ui_.microIn(fSmall_, weLive ? ui_.lastRect : tallR,
+                        grown ? "SHORTER" : "TALLER",
+                        !weLive ? nx::muted.alpha(0.40f)
+                                : (grown ? nx::violet : nx::muted), Align::Center);
+            if (ui_.hovered(tallR) && !weLive) {
+                ui_.tip = "The dock's height is the canvas's resolution, and "
+                          "this chip is the detail panel's splitter from in "
+                          "here - but there is no editor in this build to give "
+                          "the pixels to.";
+            } else if (ui_.hovered(tallR)) {
+                char t[400];
+                snprintf(t, sizeof t,
+                         "The canvas is %.0f logical pixels tall, which is %.0f "
+                         "pixels per unit of amplitude. A pen wants more of them "
+                         "than a knob row does, and the detail panel has a "
+                         "splitter now - this is that splitter, from in here. "
+                         "%s",
+                         (double)(canR.h / s), (double)(canR.h / s * 0.25f),
+                         grown ? "Click to put the dock back where it was."
+                               : "Click to take the dock to 380.");
+                ui_.tip = t;
+            }
+        }
+    }
+
+    // =======================================================================
+    // ROWS 1 AND 2 -- the eight frame operations, in the contract's order
+    //
+    // DESTRUCTIVE FIRST IN EVERY ROW, which is widgets.h's rule for a place
+    // where slop is unavoidable -- and here it is not even needed (every
+    // segment is 72 x 16, over the floor on both axes, so slop() hands out
+    // zero), so the ordering costs nothing and stands as the habit anyway:
+    // Clear leads row 1 and Insert / Delete lead row 2.
+    //
+    // INSERT AND DELETE SAY WHAT THEY DROPPED, EVERY TIME. The frame count is
+    // fixed at 32, so there is no way to spell "insert" that does not lose
+    // something at one end: Insert drops what was frame 31, Delete duplicates
+    // the new last frame. The contract calls them destructive and says the
+    // editor must not let a frame vanish silently, so both write a sentence
+    // naming the exact slot, into the status bar AND onto the canvas.
+    // =======================================================================
+    //
+    // A DISABLED OPERATION SAYS WHY IT IS DISABLED, which is a different
+    // sentence from what it would do -- the panel's rule for every inert socket
+    // in it. `whyOff` is that sentence; the contract-absent case has one of its
+    // own, because "the clipboard is empty" would be a lie about a build that
+    // has no editor at all.
+    const auto weOp = [&](const Rect& r0, int sub, const char* label,
+                          bool enabled, const char* tip, const char* whyOff,
+                          const auto& fn) {
+        const bool live = weLive && enabled;
+        Rect g = r0;
+        if (live) {
+            const u64 wid = uiId(UiSpectraPanel, sub, uidKey);
+            if (ui_.grab(slop(r0)).segButton(wid, r0, false, nx::violet)) fn();
+            g = ui_.lastRect;
+        }
+        microFit(ui_, fSmall_, g, label,
+                 live ? nx::text.alpha(0.92f) : nx::muted.alpha(0.40f), Align::Center);
+        if (ui_.hovered(r0))
+            ui_.tip = live ? std::string(tip)
+                           : (weLive ? std::string(label) + ": " +
+                                       (whyOff && *whyOff ? whyOff : tip)
+                                     : std::string(label) + " needs the five v5 "
+                                       "WavetableControl methods, which this "
+                                       "build's plugin contract does not have");
+    };
+    {
+        const f32 ow = ctl.w * 0.25f;
+        const Rect r1{ctl.x, rowY(1), ctl.w, subH};
+        const Rect r2{ctl.x, rowY(2), ctl.w, subH};
+        ui_.segCluster(r1);
+        ui_.segCluster(r2);
+        for (int k = 1; k < 4; ++k) {
+            rend_.hairlineV(r1.x + ow * (f32)k, r1.y + 2 * s, r1.bottom() - 2 * s);
+            rend_.hairlineV(r2.x + ow * (f32)k, r2.y + 2 * s, r2.bottom() - 2 * s);
+        }
+        const auto cell = [&](const Rect& r, int k) {
+            return Rect{r.x + ow * (f32)k, r.y, ow, r.h};
+        };
+
+        weOp(cell(r1, 0), 1010, "CLEAR", true,
+             "The cursor frame becomes 2048 zeros. Undo is this editor's own "
+             "button, not Ctrl+Z.", "", [&] {
+            e.push(curF);
+            f32* fr = e.frame(curF);
+            for (int i = 0; i < kWeCycle; ++i) fr[i] = 0.f;
+            e.specOk = false;
+            char m[96];
+            snprintf(m, sizeof m, "frame %d cleared to 2048 zeros", curF);
+            e.say(m, 3);
+            status_ = std::string("Spectra: ") + m;
+            wePreview("clear");
+        });
+        weOp(cell(r1, 1), 1011, "COPY", true,
+             "Copy this frame's 2048 samples to the editor's own clipboard.", "", [&] {
+            const f32* fr = e.frame(curF);
+            for (int i = 0; i < kWeCycle; ++i) e.clip[(size_t)i] = fr[i];
+            e.clipOk = true;
+            char m[96];
+            snprintf(m, sizeof m, "frame %d copied", curF);
+            e.say(m, 1);
+            status_ = std::string("Spectra: ") + m;
+        });
+        weOp(cell(r1, 2), 1012, "PASTE", e.clipOk,
+             "Paste the clipboard over this frame.",
+             "the editor's clipboard is empty - COPY a frame into it first", [&] {
+            e.push(curF);
+            f32* fr = e.frame(curF);
+            for (int i = 0; i < kWeCycle; ++i) fr[i] = e.clip[(size_t)i];
+            e.specOk = false;
+            char m[96];
+            snprintf(m, sizeof m, "pasted over frame %d", curF);
+            e.say(m, 3);
+            status_ = std::string("Spectra: ") + m;
+            wePreview("paste");
+        });
+        weOp(cell(r1, 3), 1013, "DUP", curF < kWeFrames - 1,
+             "Copy this frame into the NEXT slot, pushing the tail down. Frame "
+             "31 is dropped, and it says which.",
+             "frame 31 has no next slot to be duplicated into", [&] {
+            e.push(-1);
+            for (int k = kWeFrames - 1; k >= curF + 2; --k)
+                for (int i = 0; i < kWeCycle; ++i) e.frame(k)[i] = e.frame(k - 1)[i];
+            for (int i = 0; i < kWeCycle; ++i) e.frame(curF + 1)[i] = e.frame(curF)[i];
+            e.specOk = false;
+            char m[176];
+            snprintf(m, sizeof m,
+                     "frame %d duplicated into %d - what was frame 31 is gone, "
+                     "because the table always has exactly 32", curF, curF + 1);
+            e.say(m, 2);
+            status_ = std::string("Spectra: ") + m;
+            wePreview("duplicate");
+        });
+
+        weOp(cell(r2, 0), 1014, "INSERT", true,
+             "Insert a copy of this frame AT the cursor, pushing the tail down. "
+             "DESTRUCTIVE: frame 31 is dropped, and it says so.", "", [&] {
+            e.push(-1);
+            for (int k = kWeFrames - 1; k >= curF + 1; --k)
+                for (int i = 0; i < kWeCycle; ++i) e.frame(k)[i] = e.frame(k - 1)[i];
+            e.specOk = false;
+            char m[176];
+            snprintf(m, sizeof m,
+                     "inserted at frame %d - what was frame 31 was DROPPED. A "
+                     "fixed 32-frame array cannot grow.", curF);
+            e.say(m, 2);
+            status_ = std::string("Spectra: ") + m;
+            wePreview("insert");
+        });
+        weOp(cell(r2, 1), 1015, "DELETE", true,
+             "Remove this frame, pulling the tail up. DESTRUCTIVE: the new last "
+             "frame is duplicated into slot 31 to keep the count, and it says "
+             "so.", "", [&] {
+            e.push(-1);
+            for (int k = curF; k <= kWeFrames - 2; ++k)
+                for (int i = 0; i < kWeCycle; ++i) e.frame(k)[i] = e.frame(k + 1)[i];
+            for (int i = 0; i < kWeCycle; ++i)
+                e.frame(kWeFrames - 1)[i] = e.frame(kWeFrames - 2)[i];
+            e.specOk = false;
+            char m[176];
+            snprintf(m, sizeof m,
+                     "frame %d removed - frame 30 was DUPLICATED into 31 to keep "
+                     "the count at 32", curF);
+            e.say(m, 2);
+            status_ = std::string("Spectra: ") + m;
+            wePreview("delete");
+        });
+
+        // --- MORPH ----------------------------------------------------------
+        //
+        // THE DOMAIN IS HARMONIC AND THE CONTRACT ARGUES IT AT LENGTH: a time-
+        // domain fill is exactly what A Position already computes between
+        // adjacent frames, so it would write thirty frames that sound like
+        // having drawn two -- a no-op you can hear. Magnitudes are interpolated
+        // per harmonic over 1..1023 (the fill is not the pen and has no screen
+        // to fit in) and the result is synthesised at the pen's sine phase,
+        // ascending in k and ascending in h.
+        weOp(cell(r2, 2), 1016, "MORPH", e.mb > e.ma + 1,
+             "Fill frames a+1..b-1 by interpolating harmonic MAGNITUDES and "
+             "re-synthesising at sine phase. a and b are not touched.",
+             "b has to be more than one frame past a - there is nothing between "
+             "them to fill", [&] {
+            const int a = clampv(e.ma, 0, kWeFrames - 1);
+            const int b = clampv(e.mb, 0, kWeFrames - 1);
+            if (b <= a + 1) {
+                status_ = "Spectra: Morph needs b > a + 1 - there is nothing "
+                          "between those two frames";
+                e.say("morph: nothing between a and b", 2);
+                return;
+            }
+            e.push(-1);
+            std::vector<f32> ar(kWeCycle), ai(kWeCycle), br(kWeCycle), bi(kWeCycle);
+            std::vector<f32> mA(kWeCycle / 2, 0.f), mB(kWeCycle / 2, 0.f),
+                             mK(kWeCycle / 2, 0.f);
+            const auto ana = [&](int k, std::vector<f32>& re, std::vector<f32>& im,
+                                 std::vector<f32>& mg) {
+                const f32* fr = e.frame(k);
+                for (int i = 0; i < kWeCycle; ++i) { re[(size_t)i] = fr[i]; im[(size_t)i] = 0.f; }
+                weFft(re.data(), im.data(), false);
+                for (int h = 1; h <= kWeHarm; ++h)
+                    mg[(size_t)h] = weMagOf(re.data(), im.data(), h);
+            };
+            ana(a, ar, ai, mA);
+            ana(b, br, bi, mB);
+            for (int k = a + 1; k < b; ++k) {                       // ASCENDING in k
+                const f32 t = (f32)(k - a) / (f32)(b - a);
+                for (int h = 1; h <= kWeHarm; ++h)                  // ASCENDING in h
+                    mK[(size_t)h] = (1.f - t) * mA[(size_t)h] + t * mB[(size_t)h];
+                weSynth(mK.data(), nullptr, nullptr, nullptr, e.frame(k),
+                        e.tre.data(), e.tim.data());
+                ++e.nSynth;
+            }
+            e.specOk = false;
+            // THE HONEST COST, SAID RATHER THAN FIXED BEHIND THE USER'S BACK.
+            // The fill is at sine phase; the endpoints keep whatever phase they
+            // were drawn with. If they are not already sine there is a phase
+            // step at a->a+1 or b-1->b and it is audible as a click at exactly
+            // that position. Re-phase endpoints is the fix and it is a separate,
+            // named, user-initiated operation -- never applied silently,
+            // because a tool that quietly rewrites the two frames the user
+            // actually drew is a tool the user stops trusting.
+            const bool aSine = weIsSinePhase(ar.data(), ai.data());
+            const bool bSine = weIsSinePhase(br.data(), bi.data());
+            e.rephaseOffered = !(aSine && bSine);
+            char m[120], full[400];
+            if (aSine && bSine) {
+                snprintf(m, sizeof m,
+                         "morph filled %d..%d - endpoints already in sine phase",
+                         a + 1, b - 1);
+                snprintf(full, sizeof full,
+                         "Spectra: morph filled frames %d..%d by interpolating "
+                         "harmonic magnitudes over 1..1023 and re-synthesising at "
+                         "sine phase. Frames %d and %d were not touched and were "
+                         "already in the convention, so the fill joins them with "
+                         "no step.", a + 1, b - 1, a, b);
+            } else {
+                snprintf(m, sizeof m,
+                         "morph filled %d..%d - endpoint%s off sine phase: RE-PHASE",
+                         a + 1, b - 1, (!aSine && !bSine) ? "s" : "");
+                snprintf(full, sizeof full,
+                         "Spectra: morph filled frames %d..%d at sine phase. "
+                         "Frame%s %s did NOT move and %s not in sine phase, so "
+                         "there is an audible step at that boundary. Re-phase "
+                         "endpoints rewrites them to the convention with their "
+                         "magnitudes untouched - it is offered and never applied "
+                         "on your behalf.",
+                         a + 1, b - 1, (!aSine && !bSine) ? "s" : "",
+                         !aSine && !bSine ? "a and b" : (!aSine ? "a" : "b"),
+                         !aSine && !bSine ? "are" : "is");
+            }
+            e.say(m, (aSine && bSine) ? 3 : 2);
+            status_ = full;
+            wePreview("morph");
+        });
+
+        weOp(cell(r2, 3), 1017, "RE-PHASE", true,
+             "Rewrite frames a and b to the pen's sine phase, magnitudes "
+             "untouched. This is the fix for a Morph's boundary step and it is "
+             "never applied on your behalf.", "", [&] {
+            const int a = clampv(e.ma, 0, kWeFrames - 1);
+            const int b = clampv(e.mb, 0, kWeFrames - 1);
+            e.push(-1);
+            std::vector<f32> re(kWeCycle), im(kWeCycle), mg(kWeCycle / 2, 0.f);
+            int moved = 0;
+            const int ends[2] = {a, b};
+            for (int q = 0; q < 2; ++q) {
+                const int k = ends[q];
+                if (q == 1 && b == a) break;
+                const f32* fr = e.frame(k);
+                for (int i = 0; i < kWeCycle; ++i) { re[(size_t)i] = fr[i]; im[(size_t)i] = 0.f; }
+                weFft(re.data(), im.data(), false);
+                if (weIsSinePhase(re.data(), im.data())) continue;
+                for (int h = 1; h <= kWeHarm; ++h)
+                    mg[(size_t)h] = weMagOf(re.data(), im.data(), h);
+                weSynth(mg.data(), nullptr, nullptr, nullptr, e.frame(k),
+                        e.tre.data(), e.tim.data());
+                ++e.nSynth;
+                ++moved;
+            }
+            e.specOk = false;
+            e.rephaseOffered = false;
+            char m[220];
+            if (!moved)
+                snprintf(m, sizeof m,
+                         "frames %d and %d were already in sine phase - nothing "
+                         "was rewritten", a, b);
+            else
+                snprintf(m, sizeof m,
+                         "%d endpoint%s rewritten to sine phase; every "
+                         "magnitude is exactly what it was", moved,
+                         moved == 1 ? "" : "s");
+            e.say(m, moved ? 3 : 1);
+            status_ = std::string("Spectra: ") + m;
+            if (moved) wePreview("re-phase");
+        });
+        // THE OFFER, on the control. Amber is this program's "refused / needs
+        // an answer", and an un-answered phase step at a morph boundary is
+        // exactly that: the fill is done, it is audible, and there is one
+        // gesture that fixes it.
+        if (weLive && e.rephaseOffered)
+            rend_.roundRectOutline(cell(r2, 3), nx::radiusXs * s,
+                                   std::max(1.f, nx::snapPx(s)), nx::amber.alpha(0.85f));
+    }
+
+    // =======================================================================
+    // ROW 3 -- the morph's two endpoints, and the peak the commit will scale by
+    // =======================================================================
+    {
+        const Rect r3{ctl.x, rowY(3), ctl.w, subH};
+        const f32 sw = 88 * s;
+        const auto endpoint = [&](const Rect& r0, int sub, const char* label,
+                                  int* v, int lo, int hi) {
+            ui_.segCluster(r0);
+            const f32 bw = 16 * s;
+            const Rect lb{r0.x, r0.y, bw, r0.h}, rb{r0.right() - bw, r0.y, bw, r0.h};
+            rend_.hairlineV(lb.right(), r0.y + 2 * s, r0.bottom() - 2 * s);
+            rend_.hairlineV(rb.x, r0.y + 2 * s, r0.bottom() - 2 * s);
+            const auto chev = [&](const Rect& b, bool leftward) {
+                const f32 k = 2.6f * s, d = leftward ? -1.f : 1.f;
+                const Col c = weLive ? nx::muted : nx::muted.alpha(0.4f);
+                rend_.line(b.cx() - k * d * 0.6f, b.cy() - k, b.cx() + k * d * 0.6f, b.cy(),
+                           1.1f * s, c);
+                rend_.line(b.cx() - k * d * 0.6f, b.cy() + k, b.cx() + k * d * 0.6f, b.cy(),
+                           1.1f * s, c);
+            };
+            if (weLive) {
+                if (ui_.grab(slop(lb)).segButton(uiId(UiSpectraPanel, sub, uidKey),
+                                                 lb, false, nx::violet))
+                    *v = clampv(*v - 1, lo, hi);
+                chev(ui_.lastRect, true);
+                if (ui_.grab(slop(rb)).segButton(uiId(UiSpectraPanel, sub + 1, uidKey),
+                                                 rb, false, nx::violet))
+                    *v = clampv(*v + 1, lo, hi);
+                chev(ui_.lastRect, false);
+                if (ui_.hovered(r0) && in.wheel != 0.f) {
+                    *v = clampv(*v + (in.wheel > 0.f ? 1 : -1), lo, hi);
+                    in.wheel = 0.f;          // the strip must not also scroll
+                }
+            } else { chev(lb, true); chev(rb, false); }
+            char t[24];
+            snprintf(t, sizeof t, "%s %d", label, *v);
+            microFit(ui_, fSmall_, {lb.right(), r0.y, rb.x - lb.right(), r0.h}, t,
+                     (weLive ? nx::text : nx::muted.alpha(0.45f)), Align::Center);
+        };
+        endpoint({r3.x, r3.y, sw, r3.h}, 1020, "a", &e.ma, 0, kWeFrames - 1);
+        endpoint({r3.x + sw + 4 * s, r3.y, sw, r3.h}, 1022, "b", &e.mb, 0, kWeFrames - 1);
+        if (ui_.hovered({r3.x, r3.y, sw * 2.f + 4 * s, r3.h}))
+            ui_.tip = "The morph's two endpoints. Right-click a cell in the "
+                      "frame strip to set whichever of the two is nearer to it. "
+                      "Morph replaces a+1..b-1 and never touches a or b.";
+
+        // THE PEAK READOUT. Set normalisation is one scalar over all 32 frames
+        // at commit; it changes no shape and no inter-frame relationship, so
+        // there is nothing to watch happen -- and this number is the honest
+        // version of "you can see it happen", because it is the whole of what
+        // the step does, legible before it runs.
+        const Rect pkR{r3.x + sw * 2.f + 12 * s, r3.y,
+                       std::max(8 * s, r3.right() - (r3.x + sw * 2.f + 12 * s)), r3.h};
+        rend_.well(pkR, nx::radiusXs * s, true);
+        char pkT[48];
+        if (!weLive)                     snprintf(pkT, sizeof pkT, "peak -");
+        else if (wePk <= kWeSilentPk)    snprintf(pkT, sizeof pkT, "silent");
+        else snprintf(pkT, sizeof pkT, "pk %.2f  x%.2f", (double)wePk,
+                      (double)(1.f / wePk));
+        microFit(ui_, fSmall_, pkR, pkT,
+                 (!weLive ? nx::muted.alpha(0.40f)
+                          : (wePk <= kWeSilentPk ? nx::amber.alpha(0.95f)
+                                                 : nx::muted.alpha(0.85f))),
+                 Align::Center);
+        if (ui_.hovered(pkR))
+            ui_.tip = wePk <= kWeSilentPk
+                ? "The set peak is zero, so a commit would be refused: a drawing "
+                  "of silence is a mistake, and letting it through would burn an "
+                  "identity on it forever."
+                : "The set-wide peak over all 32 x 2048 samples, and the single "
+                  "gain a commit will multiply every sample by. It is ONE scalar "
+                  "for the whole table: nothing you drew moves, the level does.";
+    }
+
+    // =======================================================================
+    // ROW 4 -- the name
+    // =======================================================================
+    {
+        const Rect r4{ctl.x, rowY(4), ctl.w, subH};
+        const Rect nmR{r4.x, r4.y, r4.w - 64 * s, r4.h};
+        const Rect rnR{r4.right() - 60 * s, r4.y, 60 * s, r4.h};
+        const u64 nid = uiId(UiSpectraPanel, 1030, uidKey);
+        rend_.well(nmR, nx::radiusXs * s, true);
+        if (weLive) {
+            // activateOnDouble = FALSE. A double-click is right for an inline
+            // RENAME over a label that is normally something else (the marker
+            // idiom, and g_save's preset chip); this is a dedicated, always-
+            // visible field in a row of its own, and a field you have to
+            // double-click is a field people report as broken.
+            if (ui_.textField(nid, nmR, &e.name, nx::panel2.alpha(0.f), nx::text,
+                              Align::Left, /*activateOnDouble=*/false)) {
+                if (e.name.size() > 64) {
+                    e.name.resize(64);
+                    ui_.refusal = "a wavetable name is at most 64 bytes";
+                }
+            }
+        }
+        if (e.name.empty() && ui_.editId != nid) {
+            // The placeholder is the table's CURRENT display name, which is
+            // customName()'s three-deep fallback and may be a hash. Saying it
+            // here is what makes "empty means no name" readable rather than
+            // mysterious.
+            const char* cn = weLive ? wtName(inst, e.osc) : "";
+            char ph[96];
+            snprintf(ph, sizeof ph, "%s", (cn && *cn) ? cn : "no name");
+            microFit(ui_, fSmall_, nmR.inset(4 * s), ph, nx::muted.alpha(0.40f),
+                     Align::Left, 0);
+        }
+        if (ui_.hovered(nmR))
+            ui_.tip = "The table's display name, at most 64 bytes. It is NEVER "
+                      "identity, never consulted when a table is resolved and "
+                      "never sent over the wire. Empty means no name at all - "
+                      "which is the only spelling of it - and the grey text is "
+                      "what this table is called now.";
+        {
+            const bool live = weLive && wtHasCustom(inst, e.osc);
+            Rect g = rnR;
+            if (live) {
+                const u64 wid = uiId(UiSpectraPanel, 1031, uidKey);
+                if (ui_.grab(slop(rnR)).segButton(wid, rnR, false, nx::violet)) {
+                    if (wtSetCustomName(inst, e.osc,
+                                        e.name.empty() ? nullptr : e.name.c_str())) {
+                        status_ = e.name.empty()
+                            ? "Spectra: the name was cleared - the content did "
+                              "not change, so the hash did not either"
+                            : std::string("Spectra: renamed to \"") + e.name +
+                              "\" - a rename writes no file and makes no new hash";
+                        e.say("renamed - identity unchanged", 3);
+                    } else {
+                        status_ = "Spectra: the rename was refused - a name is at "
+                                  "most 64 bytes and holds no control byte";
+                        e.say("rename refused", 2);
+                    }
+                }
+                g = ui_.lastRect;
+            }
+            ui_.microIn(fSmall_, g, "RENAME",
+                        live ? nx::text.alpha(0.92f) : nx::muted.alpha(0.40f),
+                        Align::Center);
+            if (ui_.hovered(rnR))
+                ui_.tip = live
+                    ? "Set or clear the display name of the table this "
+                      "oscillator already has. Content is unchanged, so IDENTITY "
+                      "is unchanged: no file is written and no new hash is made."
+                    : "There is no committed table on this oscillator to rename "
+                      "yet - COMMIT takes the name in the field with it.";
+        }
+    }
+
+    // =======================================================================
+    // ROW 5 -- undo, preview, commit, revert
+    // =======================================================================
+    {
+        const f32 ow = ctl.w * 0.25f;
+        const Rect r5{ctl.x, rowY(5), ctl.w, subH};
+        ui_.segCluster(r5);
+        for (int k = 1; k < 4; ++k)
+            rend_.hairlineV(r5.x + ow * (f32)k, r5.y + 2 * s, r5.bottom() - 2 * s);
+        const auto cell = [&](int k) { return Rect{r5.x + ow * (f32)k, r5.y, ow, r5.h}; };
+
+        // UNDO IS A BUTTON AND NOT Ctrl+Z, and that is a decision worth stating.
+        // The set's undo runs in App::handleShortcuts() at the TOP of the frame,
+        // before any view draws, and the editor's working copy is not in the
+        // set at all -- so a Ctrl+Z here would undo some unrelated edit and
+        // leave the drawing exactly where it was. A key that does the wrong
+        // thing is worse than a key that does nothing, and worse again than a
+        // button that does the right one.
+        weOp(cell(0), 1040, "UNDO", !e.undo.empty(),
+             "Step back through this editor's own history. Ctrl+Z is the SET's "
+             "undo and runs before this panel draws; the working copy is not in "
+             "the set, so it has its own.",
+             "nothing has been done to this table yet", [&] {
+            if (e.pop()) {
+                char m[64];
+                snprintf(m, sizeof m, "undone - %d step%s left",
+                         (int)e.undo.size(), e.undo.size() == 1 ? "" : "s");
+                e.say(m, 1);
+                wePreview("undo");
+            }
+        });
+        weOp(cell(1), 1041, "PREVIEW", true,
+             "Publish the working copy into the oscillator's preview arena so "
+             "you can hear it. It touches no hash, no file and no state record: "
+             "what a save would name does not move.", "", [&] {
+            wePreview("button");
+        });
+        weOp(cell(2), 1042, "COMMIT", true,
+             "Canonicalise, hash, write the drawn file, adopt it and point this "
+             "oscillator at it. THIS is the step that makes a table, and it is "
+             "the only one that survives closing the editor.", "", [&] {
+            weCommit();
+        });
+        weOp(cell(3), 1043, "REVERT", true,
+             "Drop the preview, republish the committed table and re-read it "
+             "into the editor. Everything drawn since the last commit is gone.", "", [&] {
+            wtCancelPreview(inst, e.osc);
+            if (probeOn())
+                LOGI("NXTAKT_DEBUG_PROBE: spectra editor cancelPreview osc %s "
+                     "(revert)", e.osc ? "B" : "A");
+            weOpen(e.osc, "revert");     // release() clears `previewing` with it
+            status_ = "Spectra: the committed table is playing again and the "
+                      "editor was re-read from it";
+        });
+        // ...and the standing preview is a LAMP rather than a sentence: it is a
+        // state that persists until a commit or a revert ends it, and §1 puts
+        // cyan on the thing that is happening.
+        if (weLive && e.previewing) {
+            const Rect pl = cell(1);
+            rend_.rect({pl.x + 3 * s, pl.cy() - 1.5f * s, 3 * s, 3 * s},
+                       nx::cyan.alpha(0.9f));
+        }
+        // COMMIT wears the one violet in the row when there is something to
+        // save: §1's rule that violet is a thing you set, and the only control
+        // on this page that sets anything outside the editor.
+        if (weLive && e.anyDirty())
+            rend_.roundRectOutline(cell(2), nx::radiusXs * s,
+                                   std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.8f));
+    }
+
+    // =======================================================================
+    // THE FRAME STRIP -- 32 cells, the cursor, the dirty marks, Position
+    //
+    // ONE HOT RECT for the whole strip, exactly as a drawable level row is one
+    // for sixteen steps: a click selects, a drag scrubs, the wheel steps and is
+    // CONSUMED (a notch that fell through an 800px surface would slide the
+    // device strip out from under a hand that never moved -- the coexistence
+    // rule's exact failure at the largest target on the page), and a
+    // right-click sets whichever morph endpoint is nearer.
+    //
+    // THE CURSOR IS NOT A Position. Position (id 1) is continuous, automatable
+    // and modulatable by four different things; the cursor is a place to look.
+    // The strip draws Position as a marker and leaves the cursor where the user
+    // put it, because a cursor that followed Position would let an automation
+    // lane drag the pen around mid-stroke.
+    // =======================================================================
+    {
+        rend_.well(stripR, nx::radiusXs * s, true);
+        const Rect sp = stripR.insetXY(2 * s, 2 * s);
+        const f32 cw = sp.w / (f32)kWeFrames;
+        const u64 sid = uiId(UiSpectraPanel, 1051, uidKey);
+        const auto cellAt = [&](f32 x) {
+            return clampv((int)std::floor((x - sp.x) / std::max(1e-3f, cw)), 0,
+                          kWeFrames - 1);
+        };
+        bool stripHot = false;
+        if (weLive && ui_.setHot(sid, stripR) && ui_.isHot(sid)) {
+            stripHot = true;
+            ui_.cursor = Cursor::Hand;
+            if (in.pressed[0] || (in.down[0] && ui_.active == sid)) {
+                ui_.active = sid;
+                weMoveCursor(cellAt(in.mx), "strip");
+            }
+            if (in.pressed[2]) {
+                const int k = cellAt(in.mx);
+                // Whichever endpoint is nearer, so one gesture reaches both and
+                // neither needs a modifier.
+                const bool nearA = std::abs(k - e.ma) <= std::abs(k - e.mb);
+                if (nearA) e.ma = k; else e.mb = k;
+                char m[120];
+                snprintf(m, sizeof m, "morph endpoint %s = frame %d",
+                         nearA ? "a" : "b", k);
+                e.say(m, 3);
+                status_ = std::string("Spectra: ") + m;
+            }
+            if (in.wheel != 0.f) {
+                weMoveCursor(e.cur + (in.wheel > 0.f ? 1 : -1), "wheel");
+                in.wheel = 0.f;
+            }
+        }
+        // the morph's span, faint, so a and b are not two numbers in a row
+        if (e.mb > e.ma + 1)
+            rend_.rect({sp.x + cw * (f32)(e.ma + 1), sp.y,
+                        cw * (f32)(e.mb - e.ma - 1), sp.h},
+                       nx::violet.alpha(weLive ? 0.14f : 0.06f));
+        for (int k = 0; k < kWeFrames; ++k) {
+            const Rect c0{sp.x + cw * (f32)k, sp.y, cw, sp.h};
+            if (k % 4 == 0 && k)
+                rend_.hairlineV(std::round(c0.x), stripR.y + 2 * s, stripR.bottom() - 2 * s);
+            const bool isCur = k == e.cur;
+            const bool dirty = weLive && e.frameDirty(k);
+            if (isCur) {
+                rend_.rect(c0.inset(1.f * s), nx::violet.alpha(weLive ? 0.45f : 0.18f));
+                rend_.gradStroke(c0.inset(0.5f * s), nx::radiusXs * s, s, nx::edgeLit, 1.f);
+            }
+            if (dirty)
+                rend_.rect({c0.cx() - 1.5f * s, c0.bottom() - 3.f * s, 3.f * s, 2.f * s},
+                           nx::cyan.alpha(0.9f));
+            if (k == e.ma || k == e.mb)
+                rend_.rect({c0.x + 1.f * s, c0.y, std::max(1.f, nx::snapPx(s)), c0.h},
+                           nx::violet.alpha(0.9f));
+            if (k % 4 == 0 || isCur) {
+                char n[8];
+                snprintf(n, sizeof n, "%d", k);
+                microFit(ui_, fSmall_, c0, n,
+                         (isCur ? nx::text : nx::muted).alpha(weLive ? 0.8f : 0.35f),
+                         Align::Center);
+            }
+        }
+        // Position, drawn and never followed.
+        if (has(e.osc ? pBPos : pAPos)) {
+            const f32 pv = clampv(get(e.osc ? pBPos : pAPos, 0.f), 0.f, 1.f);
+            const f32 px = sp.x + cw * (pv * (f32)(kWeFrames - 1) + 0.5f);
+            rend_.rect({px - 1.f * s, stripR.y + 1.f * s, std::max(1.f, nx::snapPx(2 * s)),
+                        stripR.h - 2.f * s}, nx::cyan.alpha(0.75f));
+        }
+        if (stripHot) {
+            char t[400];
+            snprintf(t, sizeof t,
+                     "Frame %d of 32. Click or drag to move the cursor, wheel "
+                     "steps it, [ and ] step it from the keyboard, right-click "
+                     "sets the nearer morph endpoint. The cyan bar is A "
+                     "Position, which the cursor deliberately does NOT follow: "
+                     "Position is automatable and a cursor that followed it "
+                     "would let an automation lane drag the pen mid-stroke. A "
+                     "cyan dot marks a frame that differs from what was read.",
+                     e.cur);
+            ui_.tip = t;
+        } else if (!weLive && ui_.hovered(stripR)) {
+            ui_.tip = weContract
+                ? "This device answers no wavetable(), so there are no frames "
+                  "to point a cursor at"
+                : "The 32-frame cursor needs WavetableControl's v5 methods, "
+                  "which this build's plugin contract does not have";
+        }
+    }
+
+    // =======================================================================
+    // THE CANVAS -- one surface, two pens, and the page's whole point
+    // =======================================================================
+    curF = clampv(e.cur, 0, kWeFrames - 1);      // the strip may have just moved it
+    {
+        rend_.well(canR, nx::radiusSm * s, true);
+        const Rect p = canR.insetXY(4 * s, 4 * s);
+        const u64 cid = uiId(UiSpectraPanel, 1050, uidKey);
+        const f32 th1 = std::max(1.f, nx::snapPx(s));
+        const bool editable = weLive && e.open;
+
+        if (!editable) {
+            // INERT AND EXPLAINED, which is the acceptance test. The canvas is
+            // a well with a sentence and it claims no hot rect at all, so the
+            // pointer passes straight through it and the cursor never becomes a
+            // pen over a surface that cannot be drawn on.
+            // The LABEL carries the word and the TOOLTIP carries the sentence,
+            // which is this file's rule for every string cut to a cell.
+            const char* line1 = !weContract ? "no wavetable editor in this build"
+                                            : "this device has no wavetable control";
+            const char* line2 = !weContract
+                ? "host.h has none of the five v5 WavetableControl methods:"
+                : "wavetable() answered null, so there are no frames to read";
+            const char* line3 = !weContract
+                // 65 bytes, and the count matters: microFit's own buffer is 72,
+                // so a longer line is silently truncated with no ellipsis to
+                // say it happened. The five names are the whole point of the
+                // line, so the separators pay for them.
+                ? "readFrames/previewFrames/commitFrames/cancelPreview/"
+                  "setCustomName"
+                : "";
+            const char* why = !weContract
+                ? "This build's plugin contract has no WavetableControl::"
+                  "readFrames, previewFrames, commitFrames, cancelPreview or "
+                  "setCustomName - the five v5 methods the editor is written "
+                  "against. They are append-only additions with defaults, so "
+                  "this page comes alive the moment the header lands, with no "
+                  "edit here."
+                : "This device answers no wavetable(), so there is no table to "
+                  "edit and nothing to commit one to.";
+            rend_.textIn(fSmall_, {p.x, p.cy() - 20 * s, p.w, 11 * s}, line1,
+                         nx::amber.alpha(0.9f), Align::Center);
+            microFit(ui_, fSmall_, {p.x + p.w * 0.04f, p.cy() - 4 * s, p.w * 0.92f, 11 * s},
+                     line2, nx::muted.alpha(0.55f), Align::Center);
+            if (*line3)
+                microFit(ui_, fSmall_,
+                         {p.x + p.w * 0.04f, p.cy() + 9 * s, p.w * 0.92f, 11 * s},
+                         line3, nx::muted.alpha(0.40f), Align::Center);
+            if (ui_.hovered(canR)) ui_.tip = why;
+        } else if (wave) {
+            // ===============================================================
+            // THE WAVEFORM PEN
+            //
+            // x is the sample index, y is the value CLAMPED TO +-1 -- the pen
+            // cannot draw past full scale. The canvas shows +-2, because DC
+            // removal at stroke end can push a curve past +-1 and a curve that
+            // vanished off the top of its own canvas would be a curve the user
+            // cannot see or fix. It NEVER clips a sample for display: the range
+            // opens further when a frame needs it (the harmonic pen can build
+            // one that does) and the footer says so.
+            //
+            // Sparse strokes interpolate LINEARLY in index order across the
+            // span the stroke crossed. Linear and not a spline, and that is a
+            // decision: a spline overshoots, an overshoot is a sample the user
+            // did not draw, and the pen has to be able to draw a hard vertical
+            // step, which no interpolating spline can express. A stroke does
+            // NOT wrap -- the cycle is a ring to the oscillator and a line to
+            // the pen, and a discontinuity at the wrap is what a sawtooth IS.
+            // ===============================================================
+            f32 fpk = 0.f;
+            {
+                const f32* fr = e.frame(curF);
+                for (int i = 0; i < kWeCycle; ++i) {
+                    const f32 a = std::fabs(fr[i]);
+                    if (a > fpk) fpk = a;
+                }
+            }
+            const f32 rng = std::max(2.f, std::ceil(fpk));
+            const auto vToY = [&](f32 v) { return p.cy() - v / rng * p.h * 0.5f; };
+            const auto yToV = [&](f32 y) {
+                return clampv((p.cy() - y) / (p.h * 0.5f) * rng, -1.f, 1.f);
+            };
+            const auto xToI = [&](f32 x) {
+                return clampv((int)std::lround((x - p.x) / std::max(1e-3f, p.w) *
+                                               (f32)(kWeCycle - 1)), 0, kWeCycle - 1);
+            };
+
+            // the grid: zero, the +-1 pair, and the headroom band beyond it
+            rend_.rect({p.x, vToY(rng), p.w, vToY(1.f) - vToY(rng)},
+                       nx::line.alpha(0.20f));
+            rend_.rect({p.x, vToY(-1.f), p.w, vToY(-rng) - vToY(-1.f)},
+                       nx::line.alpha(0.20f));
+            rend_.hairlineH(p.x, p.right(), std::round(vToY(1.f)));
+            rend_.hairlineH(p.x, p.right(), std::round(vToY(-1.f)));
+            rend_.rect({p.x, std::round(p.cy()), p.w, th1}, nx::line.alpha(0.85f));
+            // ...and the three of them named, because "which line is full scale"
+            // is the one question this canvas cannot answer by looking.
+            for (int q = 0; q < 3; ++q) {
+                const f32 v = q == 0 ? 1.f : (q == 1 ? 0.f : -1.f);
+                ui_.microIn(fSmall_, {p.x + 1 * s, vToY(v) - 5 * s, 22 * s, 10 * s},
+                            q == 0 ? "+1" : (q == 1 ? "0" : "-1"),
+                            nx::muted.alpha(0.30f), Align::Left, 0);
+            }
+
+            // The GESTURE, before the trace, so what is drawn is this frame's
+            // result and not the last one's.
+            bool hot = false;
+            if (ui_.setHot(cid, canR) && ui_.isHot(cid)) {
+                hot = true;
+                ui_.cursor = Cursor::Hand;
+                ui_.badge = (in.down[2] || in.pressed[2]) ? Badge::Delete : Badge::Draw;
+                if (in.pressed[2] || in.pressed[0]) {
+                    e.push(curF);
+                    e.stroke = in.pressed[2] ? 2 : 1;
+                    e.anchI = e.lastI = xToI(in.mx);
+                    e.anchV = e.lastV = in.pressed[2] ? 0.f : yToV(in.my);
+                    e.strokeChanged = false;
+                    if (in.pressed[0]) ui_.active = cid;
+                    e.frame(curF)[e.lastI] = e.lastV;
+                    e.strokeChanged = true;
+                    if (probeOn())
+                        LOGI("NXTAKT_DEBUG_PROBE: spectra pen down frame %d "
+                             "index %d value %.3f", curF, e.lastI, (double)e.lastV);
+                }
+                if (in.wheel != 0.f) {
+                    weMoveCursor(e.cur + (in.wheel > 0.f ? 1 : -1), "canvas wheel");
+                    in.wheel = 0.f;
+                }
+            }
+            if (e.stroke) {
+                const bool held = e.stroke == 1 ? in.down[0] : in.down[2];
+                if (held) {
+                    const int i1 = xToI(in.mx);
+                    const f32 v1 = e.stroke == 2 ? 0.f : yToV(in.my);
+                    f32* fr = e.frame(curF);
+                    int i0 = e.lastI; f32 v0 = e.lastV;
+                    if (in.shift() && e.stroke == 1) {
+                        // The line tool: two points and the same rule. It is a
+                        // rubber band, so the frame goes back to what it was at
+                        // the press before the line is laid down.
+                        if (!e.undo.empty() && e.undo.back().frame == curF &&
+                            (int)e.undo.back().data.size() == kWeCycle)
+                            for (int i = 0; i < kWeCycle; ++i)
+                                fr[i] = e.undo.back().data[(size_t)i];
+                        i0 = e.anchI; v0 = e.anchV;
+                    }
+                    if (i1 == i0) {
+                        if (fr[i0] != v1) { fr[i0] = v1; e.strokeChanged = true; }
+                    } else {
+                        const int lo = i0 < i1 ? i0 : i1, hi = i0 < i1 ? i1 : i0;
+                        for (int i = lo; i <= hi; ++i) {       // ASCENDING in index
+                            const f32 u = (f32)(i - i0) / (f32)(i1 - i0);
+                            const f32 v = v0 + (v1 - v0) * u;
+                            if (fr[i] != v) { fr[i] = v; e.strokeChanged = true; }
+                        }
+                    }
+                    if (!(in.shift() && e.stroke == 1)) { e.lastI = i1; e.lastV = v1; }
+                } else {
+                    // STROKE END, and the user watches DC removal happen: the
+                    // curve slides vertically the moment the pointer lifts.
+                    // Applied during the stroke the curve would crawl under the
+                    // cursor; applied at commit, the last thing the user saw
+                    // would not be the thing that got saved.
+                    const int was = e.stroke;
+                    e.stroke = 0;
+                    if (e.strokeChanged) {
+                        // THE PROBE'S HALF OF THE PROOF. A screenshot shows a
+                        // curve; this says which samples the stroke actually
+                        // wrote, which is the only way to assert "a stroke from
+                        // 400 to 900 changes 501 samples and nothing else".
+                        if (probeOn()) {
+                            const f32* fr = e.frame(curF);
+                            const f32* wf = e.wasFrame(curF);
+                            int lo = -1, hi = -1, n = 0;
+                            for (int i = 0; i < kWeCycle; ++i)
+                                if (fr[i] != wf[i]) { if (lo < 0) lo = i; hi = i; ++n; }
+                            LOGI("NXTAKT_DEBUG_PROBE: spectra pen up frame %d "
+                                 "wrote %d samples, span %d..%d", curF, n, lo, hi);
+                        }
+                        weDcRemove(e.frame(curF));
+                        // A TIME-DOMAIN STROKE INVALIDATES THE ANALYSIS. It
+                        // touches every harmonic, so there is nothing to
+                        // preserve and nothing to pretend about; the bars will
+                        // show what the stroke actually made.
+                        e.specOk = false;
+                        e.say(was == 2 ? "erased to zero - DC removed, analysis dropped"
+                                       : "stroke ended - DC removed, analysis dropped", 3);
+                        wePreview("stroke");
+                    }
+                }
+            }
+
+            // ---- the trace -------------------------------------------------
+            //
+            // MIN/MAX PER COLUMN rather than a polyline, because 2048 samples
+            // across 800 pixels is two and a half samples a column and the
+            // honest picture of that is the span they cover. It also draws a
+            // hard vertical step as a hard vertical step, which is the one
+            // shape this pen exists to be able to make.
+            const int cols = clampv((int)(p.w / std::max(1.f, s)), 32, 2048);
+            rend_.pushClip(canR);
+            const auto plot = [&](const f32* fr, const Col& c0, f32 minTh) {
+                for (int cx = 0; cx < cols; ++cx) {
+                    const int i0 = (int)((f32)cx * (f32)kWeCycle / (f32)cols);
+                    int i1 = (int)((f32)(cx + 1) * (f32)kWeCycle / (f32)cols);
+                    if (i1 <= i0) i1 = i0 + 1;
+                    if (i1 > kWeCycle) i1 = kWeCycle;
+                    f32 lo = fr[i0], hi = fr[i0];
+                    for (int i = i0 + 1; i < i1; ++i) {
+                        if (fr[i] < lo) lo = fr[i];
+                        if (fr[i] > hi) hi = fr[i];
+                    }
+                    const f32 yA = vToY(hi), yB = vToY(lo);
+                    rend_.rect({p.x + p.w * (f32)cx / (f32)cols, yA,
+                                std::max(minTh, p.w / (f32)cols),
+                                std::max(minTh, yB - yA)}, c0);
+                }
+            };
+            // What was READ, behind, when this frame has moved -- so "what
+            // changed" is on the same axes as what it changed from.
+            if (e.frameDirty(curF)) plot(e.wasFrame(curF), nx::muted.alpha(0.22f), th1);
+            plot(e.frame(curF), nx::cyan.alpha(0.95f), th1);
+            rend_.popClip();
+
+            if (hot) {
+                const int hi = xToI(in.mx);
+                char t[440];
+                snprintf(t, sizeof t,
+                         "Waveform pen, frame %d, sample %d of 2048 (%.3f). Drag "
+                         "to draw, shift-drag for a straight line, right-DRAG to "
+                         "flatten to zero, wheel steps the frame. A stroke fills "
+                         "every index it crossed by linear interpolation and "
+                         "leaves the rest alone - it does not wrap, because a "
+                         "discontinuity at the cycle boundary is what a sawtooth "
+                         "IS. DC is removed when the pointer lifts, and you watch "
+                         "it happen.",
+                         curF, hi, (double)e.frame(curF)[hi]);
+                ui_.tip = t;
+            }
+            // The label, where this display keeps its honesty -- the hero's own
+            // idiom, and here it carries the number the shape argument turns on.
+            char lb[128];
+            snprintf(lb, sizeof lb, "%.0f px canvas - %.0f px per unit%s%s",
+                     (double)(canR.h / s), (double)(canR.h / s * 0.5f / rng),
+                     rng > 2.f ? " - range opened" : "",
+                     e.previewing ? " - PREVIEWING" : "");
+            microFit(ui_, fSmall_,
+                     {canR.x + 6 * s, canR.bottom() - 11 * s, canR.w * 0.40f, 10 * s},
+                     lb, nx::muted.alpha(0.35f), Align::Left, 0);
+        } else {
+            // ===============================================================
+            // THE HARMONIC PEN
+            //
+            // 256 bars, 0 dB at the top (magnitude 1.0 under the 2/N analysis
+            // scaling) and a HARD ZERO at the -80 dB floor: a bar dragged to
+            // the bottom sets the magnitude to exactly 0.0f, because "drag it
+            // away" has to mean the harmonic is gone and a -80 dB residue on
+            // 256 harmonics is a floor of hiss no gesture can remove. The scale
+            // is dB and not linear because a fifth harmonic at -40 dB is one
+            // four-hundredth of a linear canvas, and the harmonics that give a
+            // wavetable its character live between -20 and -60.
+            //
+            // A TOUCHED BAR IS VIOLET AND AN UNTOUCHED ONE IS CYAN, which is
+            // the round trip drawn per harmonic: violet is §1's "a thing you
+            // set", and what a touched bar sets is the magnitude AND the phase.
+            // Everything still cyan kept its analysed complex value, and so did
+            // every harmonic from 257 to 1023, which no bar can show and which
+            // the footer counts.
+            // ===============================================================
+            weEnsureSpectrum(e);
+            const f32 floorPx = std::max(3.f * s, p.h * 0.05f);
+            const auto dbToY = [&](f32 db) {
+                return p.bottom() - p.h * (db - kWeFloorDb) / (-kWeFloorDb);
+            };
+            const auto yToDb = [&](f32 y) {
+                if (y >= p.bottom() - floorPx) return kWeFloorDb;   // the snap band
+                const f32 u = clampv(1.f - (y - p.y) / std::max(1e-3f, p.h), 0.f, 1.f);
+                return clampv(kWeFloorDb * (1.f - u), kWeFloorDb, 0.f);
+            };
+            const auto xToBar = [&](f32 x) {
+                return clampv((int)std::floor((x - p.x) / std::max(1e-3f, p.w) *
+                                              (f32)kWeBars) + 1, 1, kWeBars);
+            };
+
+            for (int d = -20; d > -80; d -= 20)
+                rend_.hairlineH(p.x, p.right(), std::round(dbToY((f32)d)));
+            rend_.rect({p.x, p.bottom() - floorPx, p.w, floorPx},
+                       nx::line.alpha(0.28f));
+            rend_.rect({p.x, std::round(p.bottom() - floorPx), p.w, th1},
+                       nx::amber.alpha(0.45f));
+
+            bool hot = false;
+            const auto barSet = [&](int h, f32 db) {
+                const f32 m = weDbToMag(db);
+                if (e.mag[(size_t)h] == m) return;
+                e.mag[(size_t)h] = m;
+                if (!e.touched[h]) { e.touched[h] = true; ++e.nTouched; }
+                e.strokeChanged = true;
+            };
+            if (ui_.setHot(cid, canR) && ui_.isHot(cid)) {
+                hot = true;
+                ui_.cursor = Cursor::Hand;
+                ui_.badge = (in.down[2] || in.pressed[2]) ? Badge::Delete : Badge::Draw;
+                if (in.pressed[2] || in.pressed[0]) {
+                    e.push(curF);
+                    for (size_t i = 0; i < e.mag.size(); ++i) e.magWas[i] = e.mag[i];
+                    for (int b = 0; b <= kWeBars; ++b) e.touchWas[(size_t)b] = (char)e.touched[b];
+                    e.stroke = in.pressed[2] ? 2 : 1;
+                    e.anchI = e.lastI = xToBar(in.mx);
+                    e.anchV = e.lastV = in.pressed[2] ? kWeFloorDb : yToDb(in.my);
+                    e.strokeChanged = false;
+                    if (in.pressed[0]) ui_.active = cid;
+                    barSet(e.lastI, e.lastV);
+                    if (e.strokeChanged) weResynth(e);
+                }
+                if (in.wheel != 0.f) {
+                    weMoveCursor(e.cur + (in.wheel > 0.f ? 1 : -1), "canvas wheel");
+                    in.wheel = 0.f;
+                }
+            }
+            if (e.stroke) {
+                const bool held = e.stroke == 1 ? in.down[0] : in.down[2];
+                if (held) {
+                    const int b1 = xToBar(in.mx);
+                    const f32 d1 = e.stroke == 2 ? kWeFloorDb : yToDb(in.my);
+                    int b0 = e.lastI; f32 d0 = e.lastV;
+                    const bool line = in.shift() && e.stroke == 1;
+                    if (line) {
+                        for (size_t i = 0; i < e.mag.size(); ++i) e.mag[i] = e.magWas[i];
+                        e.nTouched = 0;
+                        for (int b = 0; b <= kWeBars; ++b) {
+                            e.touched[b] = e.touchWas[(size_t)b] != 0;
+                            if (b >= 1 && e.touched[b]) ++e.nTouched;
+                        }
+                        b0 = e.anchI; d0 = e.anchV;
+                    }
+                    const bool was = e.strokeChanged;
+                    e.strokeChanged = false;
+                    if (b1 == b0) {
+                        barSet(b0, d1);
+                    } else {
+                        const int lo = b0 < b1 ? b0 : b1, hi = b0 < b1 ? b1 : b0;
+                        for (int b = lo; b <= hi; ++b) {       // ASCENDING in h
+                            const f32 u = (f32)(b - b0) / (f32)(b1 - b0);
+                            barSet(b, d0 + (d1 - d0) * u);
+                        }
+                    }
+                    if (e.strokeChanged || line) weResynth(e);
+                    e.strokeChanged = e.strokeChanged || was;
+                    if (!line) { e.lastI = b1; e.lastV = d1; }
+                } else {
+                    e.stroke = 0;
+                    if (e.strokeChanged) {
+                        // NO DC REMOVAL HERE, AND IT IS NOT AN OMISSION. A sum
+                        // of sines is odd-symmetric about i=0, so its mean is
+                        // zero by construction and the removal is a no-op --
+                        // which is the whole reason the phase convention is
+                        // all-sine. The harmonic pen never moves what the user
+                        // drew; the waveform pen has to buy that with a jump.
+                        char m[128];
+                        snprintf(m, sizeof m,
+                                 "%d of 256 bars now carry the sine phase; the "
+                                 "rest kept theirs", e.nTouched);
+                        e.say(m, 3);
+                        wePreview("bars");
+                    }
+                }
+            }
+
+            // ---- the bars --------------------------------------------------
+            const f32 bw = p.w / (f32)kWeBars;
+            rend_.pushClip(canR);
+            for (int h = 1; h <= kWeBars; ++h) {
+                const f32 m = e.mag[(size_t)h];
+                const f32 bx = p.x + bw * (f32)(h - 1);
+                const f32 w0 = std::max(th1, bw - 0.4f * s);
+                if (m <= 0.f) {                       // GONE, and it looks gone
+                    rend_.rect({bx, p.bottom() - th1, w0, th1},
+                               nx::line.alpha(0.55f));
+                    continue;
+                }
+                const f32 y = dbToY(weMagToDb(m));
+                const Col c0 = e.touched[h] ? nx::violet.alpha(0.85f)
+                                            : nx::cyan.alpha(0.55f);
+                rend_.rect({bx, y, w0, std::max(th1, p.bottom() - y)}, c0);
+                rend_.rect({bx, y, w0, th1},
+                           (e.touched[h] ? nx::violetSoft : nx::cyan).alpha(0.95f));
+            }
+            rend_.popClip();
+
+            // What the bars cannot show, counted rather than quietly dropped.
+            f32 tailPk = 0.f;
+            for (int h = kWeBars + 1; h <= kWeHarm; ++h)
+                if (e.mag[(size_t)h] > tailPk) tailPk = e.mag[(size_t)h];
+            char tailT[16] = "silent";
+            if (tailPk > 0.f)
+                snprintf(tailT, sizeof tailT, "%.0f dB", (double)weMagToDb(tailPk));
+            char lb[160];
+            snprintf(lb, sizeof lb,
+                     "h 257..1023 preserved, peak %s%s   -   %.0f px canvas",
+                     tailT, e.previewing ? " - PREVIEWING" : "",
+                     (double)(canR.h / s));
+            microFit(ui_, fSmall_,
+                     {canR.x + 6 * s, canR.bottom() - 11 * s, canR.w * 0.40f, 10 * s},
+                     lb, nx::muted.alpha(0.35f), Align::Left, 0);
+
+            if (hot) {
+                const int hb = xToBar(in.mx);
+                char db[16];
+                if (e.mag[(size_t)hb] <= 0.f) snprintf(db, sizeof db, "gone");
+                else snprintf(db, sizeof db, "%.1f dB", (double)weMagToDb(e.mag[(size_t)hb]));
+                char t[460];
+                snprintf(t, sizeof t,
+                         "Harmonic pen, frame %d, harmonic %d of 256: %s%s. Drag "
+                         "to draw, shift-drag for a slope, right-DRAG to remove, "
+                         "wheel steps the frame. The bottom band is a HARD ZERO "
+                         "and not -80 dB - dragging a bar there means the "
+                         "harmonic is gone. Touching a bar rewrites that "
+                         "harmonic's phase to sine and leaves every other "
+                         "harmonic's complex value exactly alone.",
+                         curF, hb, db, e.touched[hb] ? " (re-phased)" : "");
+                ui_.tip = t;
+            }
+        }
+
+        // ---- the sentence, on the surface it is about ----------------------
+        if (!e.note.empty()) {
+            const Col ink = e.noteInk == 1 ? nx::cyan.alpha(0.75f)
+                          : e.noteInk == 2 ? nx::amber.alpha(0.90f)
+                          : e.noteInk == 3 ? nx::violetSoft.alpha(0.80f)
+                                           : nx::muted.alpha(0.55f);
+            microFit(ui_, fSmall_,
+                     {canR.x + canR.w * 0.44f, canR.bottom() - 11 * s,
+                      canR.w * 0.56f - 6 * s, 10 * s},
+                     e.note.c_str(), ink, Align::Right, 0);
+        }
+    }
+
+    // =======================================================================
+    // THE ASK -- the contract's own obligation, drawn over the controls
+    //
+    // "An editor closing with uncommitted changes MUST ask." It is in the
+    // contract because the alternative is a user losing an hour of drawing to
+    // a window close, and no amount of implementation care fixes a design that
+    // permits it. It is drawn over the CONTROL column and not over the canvas
+    // deliberately: what is at stake is what is on the canvas, so the canvas
+    // stays visible while the question is answered.
+    // =======================================================================
+    if (e.askWhat) {
+        const Rect ask{ctl.x, rowY(1), ctl.w, ctl.bottom() - rowY(1)};
+        rend_.rect(ask, nx::panel2.alpha(0.94f));
+        rend_.roundRectOutline(ask, nx::radiusSm * s, std::max(1.f, nx::snapPx(s)),
+                               nx::amber.alpha(0.75f));
+        const char* what = e.askWhat == 1 ? "leaving this page"
+                         : e.askWhat == 2 ? "closing the panel"
+                                          : "reading the other oscillator";
+        char m[220];
+        snprintf(m, sizeof m, "%s discards the drawing", what);
+        ui_.microIn(fSmall_, {ask.x + 6 * s, ask.y + 4 * s, ask.w - 12 * s, 11 * s},
+                    "UNCOMMITTED FRAMES", nx::amber, Align::Left, 0);
+        microFit(ui_, fSmall_, {ask.x + 6 * s, ask.y + 17 * s, ask.w - 12 * s, 11 * s},
+                 m, nx::text.alpha(0.9f), Align::Left, 0);
+        microFit(ui_, fSmall_, {ask.x + 6 * s, ask.y + 29 * s, ask.w - 12 * s, 11 * s},
+                 "a preview is not saved with the project",
+                 nx::muted.alpha(0.7f), Align::Left, 0);
+        const Rect br{ask.x + 4 * s, ask.bottom() - subH - 4 * s, ask.w - 8 * s, subH};
+        const f32 bwid = br.w / 3.f;
+        ui_.segCluster(br);
+        static const char* const kAsk[3] = {"COMMIT & GO", "DISCARD", "STAY"};
+        for (int k = 0; k < 3; ++k) {
+            const Rect seg{br.x + bwid * (f32)k, br.y, bwid, br.h};
+            if (k) rend_.hairlineV(seg.x, br.y + 2 * s, br.bottom() - 2 * s);
+            const u64 wid = uiId(UiSpectraPanel, 1060 + k, uidKey);
+            // DESTRUCTIVE FIRST is inverted here on purpose and it is the same
+            // rule: the harmful button is DISCARD, so it is the one in the
+            // MIDDLE, where a slip from either neighbour lands on a commit or
+            // on doing nothing rather than on losing the drawing.
+            if (ui_.grab(slop(seg)).segButton(wid, seg, false,
+                                              k == 1 ? nx::amber : nx::violet))
+                weAnswer = k == 0 ? 2 : (k == 1 ? 1 : 0);
+            microFit(ui_, fSmall_, ui_.lastRect, kAsk[k],
+                     (k == 1 ? nx::amber : nx::text).alpha(0.95f), Align::Center);
+            if (ui_.hovered(seg))
+                ui_.tip = k == 0 ? "Save the drawing as a table, then go."
+                        : k == 1 ? "Throw the drawing away and go. It is not in "
+                                   "the set and nothing can bring it back."
+                                 : "Stay here.";
+        }
+    }
+
+    // ---- the keyboard, and the two keys that are actually free -------------
+    //
+    // The contract offers three ways to move the cursor: the strip, [ / ], and
+    // the arrow keys. TWO of them are here and the third is REFUSED, with the
+    // reason on the strip's own tooltip: App::handleShortcuts() runs at the TOP
+    // of the frame, before any view draws, and it already spends Left and Right
+    // on the track selection and the playhead. A key that did two things at
+    // once would be worse than a key that did one, so the arrows keep the job
+    // they had and the brackets -- which nothing in this program binds -- take
+    // this one.
+    if (weLive && !ui_.keysOwned()) {
+        if (in.keyPressed['[']) { weMoveCursor(e.cur - 1, "key ["); in.keyPressed['['] = false; }
+        if (in.keyPressed[']']) { weMoveCursor(e.cur + 1, "key ]"); in.keyPressed[']'] = false; }
+    }
+
+    // ---- the ask, answered ------------------------------------------------
+    // Last in the block, because two of the three answers RELEASE the working
+    // copy and nothing above may still be holding a pointer into it.
+    if (weAnswer >= 0) {
+        const int what = e.askWhat, arg = e.askArg;
+        bool go = true;
+        if (weAnswer == 2) go = weCommit();          // a refusal keeps the ask up
+        else if (weAnswer == 0) go = false;
+        if (weAnswer == 0 || (weAnswer == 2 && !go)) {
+            if (weAnswer == 0) e.askWhat = 0;
+        } else {
+            e.askWhat = 0;
+            if (weAnswer == 1) {
+                wtCancelPreview(inst, e.osc);
+                if (probeOn())
+                    LOGI("NXTAKT_DEBUG_PROBE: spectra editor cancelPreview osc %s "
+                         "(discarded)", e.osc ? "B" : "A");
+            }
+            if (what == 1)      { g_page = arg; e.release(); }
+            else if (what == 2) { closeDrop(); e.release();
+                                  spectraOpenUid_ = 0; spectraForced_ = false; }
+            else if (what == 3) { g_wt.osc = arg; weOpen(arg, "target switched"); }
+        }
+    }
+
     } // page branch
 
     // =======================================================================
@@ -5024,8 +7211,21 @@ void App::debugSeedSpectra() {
     // what the hook just chose.
     if (const char* p = env("DEBUG_SPECTRAPAGE")) {
         g_pageUid = d.uid;
-        g_page = clampv(atoi(p), 0, 2);          // 0 MAIN, 1 MOD, 2 ARP
+        g_page = clampv(atoi(p), 0, 3);          // 0 MAIN, 1 MOD, 2 ARP, 3 DRAW
         LOGI("NXTAKT_DEBUG_SPECTRAPAGE: page %d", g_page);
+    }
+    // v5's two, on the same terms as every hook above: each one presses a
+    // control the mouse has, and neither is a back door beside one. There is
+    // deliberately no hook that WRITES frames -- the pens are the pens, and a
+    // seeded drawing would prove that this file can fill an array.
+    if (const char* p = env("DEBUG_SPECTRAWTVIEW")) {
+        g_weSeedView = clampv(atoi(p), 0, 1);
+        LOGI("NXTAKT_DEBUG_SPECTRAWTVIEW: the editor opens on the %s pen",
+             g_weSeedView ? "harmonic" : "waveform");
+    }
+    if (const char* p = env("DEBUG_SPECTRAWTFRAME")) {
+        g_weSeedFrame = clampv(atoi(p), 0, kWeFrames - 1);
+        LOGI("NXTAKT_DEBUG_SPECTRAWTFRAME: the frame cursor starts at %d", g_weSeedFrame);
     }
     if (const char* p = env("DEBUG_SPECTRADROP")) {
         if (*p && *p != '0') {

@@ -3241,3 +3241,64 @@ in the code together; the sections above do not move.
 - **The pen never sees a mip.** Everything above the seam works in 2048-sample
   frames; `spBuildCustomMips()` is the only thing that has ever built a mip and it
   stays that way.
+
+## v5 engine notes, added by the implementation (NOT contract)
+
+Appended by the DSP/seam half of the v5 wave. Facts the editor author needs and
+findings the contract could not have predicted. Nothing above this heading moves.
+
+- **The transform MOVED, and the note above got its wish literally.** "The fill
+  and the render share one transform and one set of tables" is now true by
+  construction: `spFft` / `spIfft` / `spTwiddle` were lifted out of
+  `spectra_tables.inc` into `wavetable_io.cpp` as `wt::fft` / `wt::ifft` /
+  `wt::twiddle`, and the old names remain as one-line forwarders so every call
+  site reads as it did. It is a MOVE, not a copy — the tree still has exactly two
+  radix-2 FFTs (this one and `src/audio/sample.cpp`'s), not three. Arithmetically
+  neutral, and the release gate says so rather than the author: 1500 reference
+  renders, cmp-identical.
+
+- **`wt::pen` is where the gesture arithmetic lives**, in `wavetable_io.h` — the
+  file that owns a wavetable's frames — so the editor and the suite call it
+  directly and the seam calls the same functions. `wt::pen::previewInterval()` is
+  the contract's `max(50 ms, 2 × maxBlock / sampleRate)` in one place; the editor
+  should read it rather than re-derive it.
+
+- **`prepare()` DROPS AN OUTSTANDING PREVIEW.** It calls `resolveTables()`, which
+  republishes the committed base — so a rate or block-size change silently
+  reverts an open editor's audition to the last commit. This is defensible (the
+  interval is being recomputed from those very numbers) and it is BEHAVIOUR: an
+  editor whose engine is reconfigured mid-stroke must re-preview. Found by a
+  render-level test, gated in `testSpectraV5Preview`.
+
+- **Magnitude interpolation and the time-domain crossfade AGREE EXACTLY when both
+  endpoints are already in sine phase.** Their spectra are collinear, so
+  `(1−t)(−m_a) + t(−m_b) = −((1−t)m_a + t m_b)` to the last bit. The contract's
+  "a no-op you can hear" is about the general case — endpoints the user drew with
+  whatever phase — and the degenerate case is not a hole in the argument but the
+  other half of it: making the fill mutually phase-coherent is exactly what
+  removes the cancellation. Two frames of equal magnitude and opposite phase
+  crossfade to DIGITAL SILENCE at the midpoint (measured: 4.2e-16) and morph to a
+  peak of 1.76.
+
+- **Insert and Duplicate produce the IDENTICAL 32-frame array.** Insert-at-k and
+  copy-k-into-k+1-pushing-the-tail are the same shift; the two differ only in
+  where the editor leaves the cursor, which is editor-only state that is never
+  saved. Both drop what was frame 31.
+
+- **The state record order is APPENDED, not interleaved.** The contract lists
+  `wtA, wtpathA, wtnameA, wtB, wtpathB, wtnameB`; the writer has emitted the two
+  hashes and then the two paths since v3, and reordering it would change the
+  bytes a v3 or v4 state round-trips to — which is a gate this file has carried
+  since those records were added. The names are appended after the paths.
+  Reading is order-free, as the format has always said, so the grouping is not
+  observable to any reader; the round trip is.
+
+- **`customName()`'s rung 3 is new CODE, not new contract.** The v3 code returned
+  `""` for a table named by hash with no path; the v5 contract enumerates the
+  bare 16-hex hash as that case's answer and calls it v3's behaviour. The code
+  now follows the contract. Nothing consults the string for anything but display.
+
+- **A name belongs to its table.** The contract is silent on what happens to
+  `wtname` when the table under it changes, so: any change of hash DROPS the
+  name, and a rename (which keeps the hash) keeps it. Carrying a label onto new
+  content would be a library whose labels lie.

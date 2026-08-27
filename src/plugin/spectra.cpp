@@ -619,6 +619,19 @@ struct SpState {
     u64 wt[2] = { 0, 0 };            // custom table content hash per osc
     std::string wtPath[2];           // recovery hint only, never identity
 
+    // v5. The custom table's DISPLAY NAME per oscillator, <= 64 DECODED bytes.
+    // NEVER IDENTITY, never consulted in resolution, never sent over the wire.
+    // Empty means "no name", and there is exactly one spelling of that: a
+    // `wtnameA=` record is a record with an empty value, which this writer would
+    // not produce, so clearing a name DROPS the record.
+    //
+    // It lives in the state and not in the seam, unlike the hash and the path,
+    // and the split is the file's own: this file owns what the state SAYS and
+    // spectra_tables.inc owns what the table IS. A name is not a property of a
+    // table -- two devices naming the same drawn table may call it two things,
+    // and the hash is the same table either way.
+    std::string wtName[2];
+
     // --- v4: the arp's two rows. THEIR DEFAULTS ARE NOT ZERO, and that is a
     // genuine divergence from the LFO grids this feature otherwise copies
     // exactly. v3's rule is "a missing block reads as its default, and every
@@ -690,6 +703,8 @@ struct SpPreset {
 #define SPLFO(n, g, s)
 #define SPWTA(h)
 #define SPWTB(h)
+#define SPWTNA(n)
+#define SPWTNB(n)
 #define SPCC(n)
 #define SPARP(l, s)
 const SpPreset kSpPresets[] = {
@@ -701,6 +716,8 @@ const SpPreset kSpPresets[] = {
 #undef SPLFO
 #undef SPWTA
 #undef SPWTB
+#undef SPWTNA
+#undef SPWTNB
 #undef SPCC
 #undef SPARP
 
@@ -734,6 +751,26 @@ inline void spPresetGrid(SpState& st, int n, const char* g, f32 smooth) {
 inline void spPresetHash(SpState& st, int osc, const char* h) {
     u64 v = 0;
     if (h && spParseHex64(std::string(h), v)) st.wt[osc] = v;
+}
+
+// v5's SPWTNA / SPWTNB. A PAIR of A/B macros rather than one macro with an
+// oscillator argument, because v3 already settled that question -- "a 0/1
+// argument beside SPLFO's 1-based n is a trap" -- and this file has one answer
+// to it.
+//
+// 1..64 bytes, no control bytes. A malformed argument is a BUILD-time fact
+// about the bank file and not a run-time one, so it is left at the default here
+// exactly as SPLFO's and SPARP's are, and the bank's own range checker is what
+// says so. The PAIRING rule -- an SPWTNA requires the matching SPWTA in the same
+// row, because a name for a table the row does not name is a name for nothing --
+// is likewise the checker's, in the suite, not this function's: dropping it
+// silently is what the checker exists to prevent.
+inline void spPresetName(SpState& st, int osc, const char* n) {
+    if (!n || !*n) return;
+    const std::string v(n);
+    if (v.size() > 64) return;
+    for (char c : v) if ((unsigned char)c < 0x20 || (unsigned char)c == 0x7F) return;
+    st.wtName[osc] = v;
 }
 
 // v4's one new macro: the level row then the step row, in that order — the
@@ -773,6 +810,8 @@ const std::vector<SpState>& spPresetStates() {
 #define SPLFO(n, g, s)  spPresetGrid(cur, (n), (g), (f32)(s));
 #define SPWTA(h)        spPresetHash(cur, 0, (h));
 #define SPWTB(h)        spPresetHash(cur, 1, (h));
+#define SPWTNA(n)       spPresetName(cur, 0, (n));
+#define SPWTNB(n)       spPresetName(cur, 1, (n));
 #define SPCC(n)         cur.cc = (i16)(n);
 #define SPARP(l, s)     spPresetArp(cur, (l), (s));
 #include "spectra_presets.inc"
@@ -782,6 +821,8 @@ const std::vector<SpState>& spPresetStates() {
 #undef SPLFO
 #undef SPWTA
 #undef SPWTB
+#undef SPWTNA
+#undef SPWTNB
 #undef SPCC
 #undef SPARP
         return o;
@@ -995,6 +1036,14 @@ public:
         tbl_ = &spTables();
         spPublish();
 
+        // v5. The preview arena's rate limit is computed FROM THE VALUES
+        // prepare() WAS GIVEN and not hard-coded, so the recycle bound
+        // (4 * interval > maxBlock / sampleRate) holds at every rate and block
+        // size a host can choose. This allocates the arena's bookkeeping and
+        // not its buffers; those wait for the first preview.
+        for (int o = 0; o < 2; ++o)
+            if (oscH_[o] >= 0) spPreviewClock(oscH_[o], sr_, maxBlock_);
+
         for (Voice& v : voices_) v = Voice{};
         nPend_    = 0;
         ovfOff_[0] = ovfOff_[1] = ovfOff_[2] = ovfOff_[3] = 0u;
@@ -1142,6 +1191,28 @@ public:
             o += buf;
             smEsc(o, pth);
         }
+        // v5's one new record, and it is APPENDED rather than interleaved.
+        //
+        // The contract lists the write order as wtA, wtpathA, wtnameA, wtB,
+        // wtpathB, wtnameB -- the name following its table, as the path does.
+        // This writer has emitted the two hashes and then the two paths since
+        // v3, and reordering it would change the bytes a v3 or v4 state
+        // round-trips to, which is a gate this file has carried since the
+        // revision that added the records ("a v2 project round trips through a
+        // v3 build BYTE-identically"). Reading is order-free, as the format has
+        // always said, so the grouping is not observable to any reader; the
+        // round trip is. Grouping wins.
+        //
+        // A NAME IS NEVER WRITTEN WITHOUT ITS TABLE. `wtnameA` with no `wtA` is
+        // a display string for a table that is not there -- read as inert and
+        // skipped, so producing one would be producing a record this reader
+        // discards.
+        for (int osc = 0; osc < 2; ++osc) {
+            if (!wtHashOf(osc) || st_.wtName[osc].empty()) continue;
+            std::snprintf(buf, sizeof buf, ";wtname%c=", osc ? 'B' : 'A');
+            o += buf;
+            smEsc(o, st_.wtName[osc]);
+        }
         // v4's two rows, level then step — the order the contract lists them
         // in and the order SPARP takes them in. A row still at its default is
         // NOT emitted, which is what keeps the empty-state round-trip gate:
@@ -1250,10 +1321,32 @@ public:
     // wt records outside setStateString().
     void adoptCustom(int osc, u64 hash, const char* path) {
         if (osc < 0 || osc > 1) return;
-        if (st_.wt[osc] != hash) warnedTable_[osc] = false;
+        // v5. A NAME BELONGS TO ITS TABLE, so a change of table drops it. The
+        // alternative -- carrying the old name onto the new content -- is a
+        // library whose labels lie, which is worse than a library with no
+        // labels. commitFrames() sets the new name immediately after, and
+        // setCustomName() keeps the hash and therefore keeps the name: a rename
+        // writes no file and produces no new hash.
+        if (st_.wt[osc] != hash) { warnedTable_[osc] = false; st_.wtName[osc].clear(); }
         st_.wt[osc] = hash;
         st_.wtPath[osc] = path ? path : "";
         resolveTables();
+    }
+
+    // v5. The display name, and the ONLY writer of it outside setStateString()
+    // and loadPreset(). Content is unchanged, so identity is unchanged.
+    bool setCustomNameRec(int osc, const char* name) {
+        if (osc < 0 || osc > 1) return false;
+        if (!name || !*name) { st_.wtName[osc].clear(); return true; }
+        const std::string v(name);
+        if (v.size() > 64) return false;
+        for (char c : v) if ((unsigned char)c < 0x20 || (unsigned char)c == 0x7F) return false;
+        st_.wtName[osc] = v;
+        return true;
+    }
+    const std::string& customNameRec(int osc) const {
+        static const std::string kNone;
+        return (osc == 0 || osc == 1) ? st_.wtName[osc] : kNone;
     }
 
     // The oscillator handles, for the table wave's WavetableControl to bind.
@@ -1294,13 +1387,33 @@ public:
             const int h = d_.oscHandle(osc);
             return h >= 0 && spCustomHash(h) != 0;
         }
+        // v5's compatible widening, and it is a strict superset: the `wtname`
+        // record first, then v3's two fallbacks unchanged. Every table that has
+        // no name displays exactly what it displayed before.
+        //
+        // Rung 3 -- the bare 16-hex hash -- is what the contract's own
+        // enumeration names as v3's behaviour, and it is what the seam has
+        // always kept in SpOscRec::name for a table that arrived by hash alone.
+        // The v3 CODE returned "" there; the v3 CONTRACT said hash. v5 states
+        // the three rungs explicitly, so the code follows the contract and the
+        // hash is what a preset-named table now shows. Nothing consults this
+        // string for anything but display.
         const char* customName(int osc) const override {
             const int h = d_.oscHandle(osc);
             if (h < 0) return "";
-            const char* p = spCustomPath(h);
-            if (!p || !*p) return "";                 // a preset names a hash and no path
-            const char* slash = std::strrchr(p, '/');
-            return slash ? slash + 1 : p;
+            if (const std::string& n = d_.customNameRec(osc); !n.empty()) {
+                disp_ = n;
+                return disp_.c_str();
+            }
+            if (const char* p = spCustomPath(h); p && *p) {
+                const char* slash = std::strrchr(p, '/');
+                disp_ = slash ? slash + 1 : p;
+                return disp_.c_str();
+            }
+            const u64 hash = spCustomHash(h);
+            if (!hash) return "";
+            disp_ = spFmtHex64(hash);
+            return disp_.c_str();
         }
         int customFrames(int osc) const override {
             const int h = d_.oscHandle(osc);
@@ -1312,9 +1425,88 @@ public:
         }
         const char* lastError() const override { return err_.c_str(); }
 
+        // ------------------------------------------------------------------
+        // v5 -- THE EDITOR'S FIVE. GUI thread, every one of them, and none of
+        // them reachable from nxtaktd: the daemon renders and never draws.
+        // ------------------------------------------------------------------
+
+        bool readFrames(int osc, f32* out) const override {
+            const int h = d_.oscHandle(osc);
+            return h >= 0 && spReadFrames(h, out);
+        }
+
+        // The rate limit is the SEAM'S, not this class's and not the caller's --
+        // the contract says "rate-limited by the contract, not by the caller",
+        // and a bound the editor can forget is not a bound. A refusal here is
+        // ordinary: it means "too soon", and the editor tries again on the next
+        // stroke end.
+        bool previewFrames(int osc, const f32* frames) override {
+            const int h = d_.oscHandle(osc);
+            if (h < 0) { err_ = "this instance has no oscillator slot for a custom table"; return false; }
+            if (!spPreviewFrames(h, frames)) {
+                err_ = "the preview was not published";
+                return false;
+            }
+            err_.clear();
+            return true;
+        }
+
+        void cancelPreview(int osc) override {
+            const int h = d_.oscHandle(osc);
+            if (h >= 0) spCancelPreview(h);
+        }
+
+        // The nine-step commit. Steps 1..8 are the seam's; step 9 -- the state
+        // records -- is this side's, because this file owns what the state SAYS.
+        //
+        // A COMMIT THAT CHANGES THE FRAMES CLEARS AND REWRITES wtpath, and that
+        // is what adoptCustom() with the DRAWN file's path does: editing an
+        // imported table produces a new hash, and the WAV the old path named is
+        // no longer the table the hash names. A path that recovers a DIFFERENT
+        // table than its own record's hash is the one thing rung 5 must never
+        // do, so the record follows the content or it goes.
+        bool commitFrames(int osc, const f32* frames, const char* name) override {
+            const int h = d_.oscHandle(osc);
+            if (h < 0) { err_ = "this instance has no oscillator slot for a custom table"; return false; }
+            // The name is validated BEFORE anything is written, so a commit
+            // cannot half-succeed with a file on disk and a refused label.
+            if (name && *name) {
+                const std::string v(name);
+                if (v.size() > 64) { err_ = "that name is longer than 64 bytes"; return false; }
+                for (char c : v)
+                    if ((unsigned char)c < 0x20 || (unsigned char)c == 0x7F) {
+                        err_ = "that name contains a control character";
+                        return false;
+                    }
+            }
+            std::string path, e;
+            const u64 hash = spCommitFrames(h, frames, path, e);
+            if (!hash) { err_ = e.empty() ? std::string("the commit was refused") : e; return false; }
+            d_.adoptCustom(osc, hash, path.c_str());     // drops any old name
+            d_.setCustomNameRec(osc, name);              // sets the new one, or none
+            err_.clear();
+            return true;
+        }
+
+        // A rename writes no file and produces no new hash: identity is content
+        // and a name is not content.
+        bool setCustomName(int osc, const char* name) override {
+            if (d_.oscHandle(osc) < 0) { err_ = "this instance has no oscillator slot for a custom table"; return false; }
+            if (!d_.setCustomNameRec(osc, name)) {
+                err_ = "that name is longer than 64 bytes or contains a control character";
+                return false;
+            }
+            err_.clear();
+            return true;
+        }
+
     private:
         Spectra&            d_;
         mutable std::string err_;
+        // customName() returns a `const char*` into something that must outlive
+        // the call. It always did (the seam's std::string); the widening needs a
+        // buffer of its own for the hash arm, and one mutable member is that.
+        mutable std::string disp_;
     };
 
     WavetableControl* wavetable() override { return &wtctl_; }
@@ -3820,6 +4012,19 @@ private:
             std::string pth;
             if (!smUnesc(val, pth) || pth.empty()) return false;
             st.wtPath[key[6] == 'B' ? 1 : 0] = pth;
+            return true;
+        }
+        // v5. THE ESCAPING IS wtpath'S, VERBATIM -- the same smUnesc, not a
+        // third escaper -- so a name is UTF-8 and survives because every byte
+        // >= 0x7F is escaped. STRICT, and it refuses in the order the contract
+        // lists: a `%` not followed by two hex digits, an escape decoding to
+        // NUL, and a raw byte the writer would have escaped are all smUnesc's;
+        // over 64 DECODED bytes is this line's. An empty value is refused
+        // because it is not a record this writer could produce.
+        if (key == "wtnameA" || key == "wtnameB") {
+            std::string nm;
+            if (!smUnesc(val, nm) || nm.empty() || nm.size() > 64) return false;
+            st.wtName[key[6] == 'B' ? 1 : 0] = nm;
             return true;
         }
         return true;                    // unknown key: forward compatibility

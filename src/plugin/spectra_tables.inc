@@ -37,6 +37,7 @@
 } // namespace detail
 } // namespace lat
 #include "wavetable_io.h"
+#include <chrono>
 #include <memory>
 namespace lat {
 namespace detail {
@@ -78,57 +79,34 @@ struct SpectraTables {
 };
 
 // ---------------------------------------------------------------------------
-// FFT
+// FFT -- MOVED, v5. The bodies now live in src/plugin/wavetable_io.cpp as
+// wt::fft / wt::ifft / wt::twiddle, and these three names are what is left of
+// them: thin forwarders, kept so that every call site below reads exactly as it
+// did and the diff that moved them is one file.
 //
-// In-place iterative radix-2 complex FFT. `tw` holds cos/sin at -2*pi*i/n for
-// i in [0, n/2) so the inner loop does no trigonometry.
+// WHY IT MOVED. v5's harmonic pen and its frame morph need a forward analysis
+// and an inverse synthesis at wt::kCycle, above the seam, on a working copy
+// that has no mip and no hash yet. Those live in wavetable_io.cpp -- the file
+// that owns a wavetable's frames -- and the alternative to moving the transform
+// was a THIRD radix-2 FFT in this tree (src/audio/sample.cpp has one; this had
+// one). The v5 implementation notes name the choice: "the fill and the render
+// share one transform and one set of tables. A second FFT in this device would
+// be a second thing to keep in agreement."
 //
-// ATTRIBUTION: this is fftRadix2 from src/audio/sample.cpp, copied rather than
-// shared. src/plugin does not include src/audio and should not start doing so
-// for twenty-five lines of butterflies; the transient detector's copy stays the
-// one the sample layer uses.
+// THE MOVE IS ARITHMETICALLY NEUTRAL, and the release gate is the proof rather
+// than the claim: 1500 reference renders -- 121 factory rows plus one row per
+// factory .nxwt, at 44.1/48/96 kHz and block 1/7/64/1024 -- cmp-identical to
+// the v4 tip. Nothing is inlined across the boundary that was inlined before,
+// and at these flags (-O2, no -march, no -ffast-math) f32 SSE arithmetic has no
+// contraction to lose.
+//
+// ATTRIBUTION, unchanged: this is fftRadix2 from src/audio/sample.cpp, copied
+// rather than shared, because src/plugin does not include src/audio.
 // ---------------------------------------------------------------------------
 
-void spFft(f32* re, f32* im, int n, const f32* tw) {
-    for (int i = 1, j = 0; i < n; ++i) {
-        int bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
-    }
-    for (int len = 2; len <= n; len <<= 1) {
-        const int half = len >> 1;
-        const int step = n / len;               // stride into the twiddle table
-        for (int i = 0; i < n; i += len) {
-            for (int k = 0; k < half; ++k) {
-                const f32 wr = tw[(size_t)(k * step) * 2 + 0];
-                const f32 wi = tw[(size_t)(k * step) * 2 + 1];
-                const int a = i + k, b = i + k + half;
-                const f32 vr = re[b] * wr - im[b] * wi;
-                const f32 vi = re[b] * wi + im[b] * wr;
-                re[b] = re[a] - vr; im[b] = im[a] - vi;
-                re[a] = re[a] + vr; im[a] = im[a] + vi;
-            }
-        }
-    }
-}
-
-// IDFT(X) = swap(DFT(swap(X)))/N, so handing the transform its arrays the wrong
-// way round twice is the whole inverse. After this the real part is in `re`.
-void spIfft(f32* re, f32* im, int n, const f32* tw) {
-    spFft(im, re, n, tw);
-    const f32 s = 1.f / (f32)n;
-    for (int i = 0; i < n; ++i) { re[i] *= s; im[i] *= s; }
-}
-
-void spTwiddle(std::vector<f32>& t, int n) {
-    t.assign((size_t)(n / 2) * 2, 0.f);
-    for (int i = 0; i < n / 2; ++i) {
-        const f64 a = -6.283185307179586 * (f64)i / (f64)n;
-        t[(size_t)i * 2 + 0] = (f32)std::cos(a);
-        t[(size_t)i * 2 + 1] = (f32)std::sin(a);
-    }
-}
+inline void spFft(f32* re, f32* im, int n, const f32* tw) { wt::fft(re, im, n, tw); }
+inline void spIfft(f32* re, f32* im, int n, const f32* tw) { wt::ifft(re, im, n, tw); }
+inline void spTwiddle(std::vector<f32>& t, int n) { wt::twiddle(t, n); }
 
 // ---------------------------------------------------------------------------
 // The eight tables
@@ -509,6 +487,13 @@ struct SpOscRec {
     std::string path;            // "" when the state named none (a preset)
     std::string name;            // basename(path), or the bare hash
     bool        used   = false;  // handle allocation
+
+    // --- v5. THE COMMITTED BASE, remembered so that a preview can be undone.
+    // gSpCustomBase[osc] is what the AUDIO thread reads and a preview publish
+    // overwrites it, so cancelPreview() needs somewhere to read the committed
+    // pointer back from. Null when this oscillator has no resolved table, which
+    // is also exactly what a cancel should then publish.
+    const f32*  base   = nullptr;
 };
 SpOscRec gSpOsc[kSpMaxOsc];
 
@@ -517,22 +502,12 @@ std::string spBaseName(const std::string& p) {
     return slash == std::string::npos ? p : p.substr(slash + 1);
 }
 
-// The mip chain for one imported table, built once per HASH and shared by every
-// oscillator that names it. Null when the store is full.
-const f32* spBuildCustomMips(const wt::Table& t) {
-    for (const std::unique_ptr<SpBuiltTable>& b : spBuiltStore())
-        if (b->hash == t.hash) return b->d.data();
-    if ((int)spBuiltStore().size() >= kSpMaxCustom) {
-        LOGW("spectra: this process has already built %d custom wavetables; "
-             "further imports are refused rather than evicted, because a voice "
-             "may be reading one", kSpMaxCustom);
-        return nullptr;
-    }
-
-    auto b = std::make_unique<SpBuiltTable>();
-    b->hash = t.hash;
-    b->d.assign((size_t)kSpFrames * (size_t)kSpStride, 0.f);
-
+// THE MIP BUILD ITSELF, factored out of spBuildCustomMips() by v5 so that the
+// PREVIEW ARENA can call it with a destination that is not in the built store.
+// Not one character of the arithmetic moved: same order, same scratch, same
+// analysis length, same per-set normalisation. `src` is `nSrc * wt::kCycle`
+// floats, frame-major, 1..kSpFrames of them; `dst` is kSpFrames * kSpStride.
+void spBuildMipsInto(const f32* src, int nSrc, f32* dst) {
     std::vector<f32> twSrc, tw[kSpMips];
     spTwiddle(twSrc, wt::kCycle);
     for (int m = 0; m < kSpMips; ++m) spTwiddle(tw[m], kSpLen[m]);
@@ -541,7 +516,7 @@ const f32* spBuildCustomMips(const wt::Table& t) {
     std::vector<f32> sre(2048), sim(2048);
     SpSpec spec;
 
-    const int n = t.frames;
+    const int n = nSrc;
     for (int fr = 0; fr < kSpFrames; ++fr) {
         // THE FRAME AXIS. An import has 1..32 frames and the layout has exactly
         // 32, so the source axis is stretched onto the destination one by the
@@ -556,8 +531,8 @@ const f32* spBuildCustomMips(const wt::Table& t) {
         if (s0 > n - 1) s0 = n - 1;
         const int s1 = s0 + 1 < n ? s0 + 1 : s0;
         const f32 bl = (f32)(x - (f64)s0);
-        const f32* a = t.frame(s0);
-        const f32* c = t.frame(s1);
+        const f32* a = src + (size_t)s0 * (size_t)wt::kCycle;
+        const f32* c = src + (size_t)s1 * (size_t)wt::kCycle;
         for (int i = 0; i < wt::kCycle; ++i) {
             re[(size_t)i] = a[i] + (c[i] - a[i]) * bl;
             im[(size_t)i] = 0.f;
@@ -577,7 +552,7 @@ const f32* spBuildCustomMips(const wt::Table& t) {
         }
         // norm = 1: DO NOT normalise per frame. The frames arrived normalised
         // as a SET and inter-frame level is musical.
-        spBuildFrameMips(spec, b->d.data() + (size_t)fr * (size_t)kSpStride,
+        spBuildFrameMips(spec, dst + (size_t)fr * (size_t)kSpStride,
                          tw, sre, sim, 1.f);
     }
 
@@ -587,11 +562,30 @@ const f32* spBuildCustomMips(const wt::Table& t) {
     // without ever putting a FRAME on 1.
     f32 pk = 0.f;
     for (int fr = 0; fr < kSpFrames; ++fr) {
-        const f32* m0 = b->d.data() + (size_t)fr * (size_t)kSpStride + kSpOff[0];
+        const f32* m0 = dst + (size_t)fr * (size_t)kSpStride + kSpOff[0];
         for (int i = 0; i < kSpLen[0]; ++i) pk = std::fmax(pk, std::fabs(m0[i]));
     }
     const f32 g = pk > 1e-9f ? 1.f / pk : 1.f;
-    for (f32& v : b->d) v *= g;
+    const size_t total = (size_t)kSpFrames * (size_t)kSpStride;
+    for (size_t i = 0; i < total; ++i) dst[i] *= g;
+}
+
+// The mip chain for one imported table, built once per HASH and shared by every
+// oscillator that names it. Null when the store is full.
+const f32* spBuildCustomMips(const wt::Table& t) {
+    for (const std::unique_ptr<SpBuiltTable>& b : spBuiltStore())
+        if (b->hash == t.hash) return b->d.data();
+    if ((int)spBuiltStore().size() >= kSpMaxCustom) {
+        LOGW("spectra: this process has already built %d custom wavetables; "
+             "further imports are refused rather than evicted, because a voice "
+             "may be reading one", kSpMaxCustom);
+        return nullptr;
+    }
+
+    auto b = std::make_unique<SpBuiltTable>();
+    b->hash = t.hash;
+    b->d.assign((size_t)kSpFrames * (size_t)kSpStride, 0.f);
+    spBuildMipsInto(t.data.data(), t.frames, b->d.data());
 
     spBuiltStore().push_back(std::move(b));
     LOGI("spectra: built a custom wavetable, %s, %d source frame(s) -> %d",
@@ -646,6 +640,7 @@ const f32* spBuildCustomMips(const wt::Table& t) {
     r.frames = 0;
     r.name   = r.path.empty() ? (hash ? wt::hashHex(hash) : std::string())
                               : spBaseName(r.path);
+    r.base   = nullptr;
     gSpCustomBase[osc].store(nullptr, std::memory_order_release);
     if (hash == 0) return false;
 
@@ -654,6 +649,7 @@ const f32* spBuildCustomMips(const wt::Table& t) {
     const f32* base = spBuildCustomMips(*t);
     if (!base) return false;
     r.frames = t->frames;
+    r.base   = base;
     gSpCustomBase[osc].store(base, std::memory_order_release);
     return true;
 }
@@ -684,6 +680,7 @@ const f32* spBuildCustomMips(const wt::Table& t) {
     r.path   = path;
     r.name   = spBaseName(r.path);
     r.frames = stored->frames;
+    r.base   = base;
     gSpCustomBase[osc].store(base, std::memory_order_release);
     LOGI("spectra: imported %s as %s (%s, %d source frame(s) of %d samples)",
          path, wt::hashHex(stored->hash).c_str(), wt::ruleName(stored->rule),
@@ -716,7 +713,266 @@ const f32* spBuildCustomMips(const wt::Table& t) {
     r.frames = 0;
     r.path.clear();
     r.name.clear();
-    // The BUILT table is not touched: see the lifetime invariant above.
+    r.base = nullptr;
+    // The BUILT table is not touched: see the lifetime invariant above. Neither
+    // is the PREVIEW ARENA: it is four buffers that are also never freed, and
+    // the store above has just published null, which is what a cancel publishes
+    // for an oscillator with nothing committed.
+}
+
+// ---------------------------------------------------------------------------
+// v5 — THE PREVIEW ARENA, and the bound that made it necessary
+//
+// docs/SPECTRA-PARAMS.md, "Preview, and the bound that made it necessary", and
+// v5 resolution #14. This is the single largest thing the feature's outline did
+// not contain, and it is the reason the feature is buildable at all.
+//
+// THE ARITHMETIC THAT FORCES IT. spBuildCustomMips() allocates
+// kSpFrames * kSpStride * 4 = 32 * 10240 * 4 = 1,310,720 bytes -- 1.31 MB --
+// per DISTINCT HASH into spBuiltStore(), which is NEVER FREED (the lifetime
+// invariant: the audio thread holds a raw base pointer and there is no event in
+// this engine that says no voice is inside a table any more) and is bounded at
+// kSpMaxCustom = 32. An editor that committed on every stroke would therefore
+// take the thirty-third stroke and be REFUSED, roughly a minute into a drawing.
+//
+// THE MECHANISM. A per-oscillator ring of kSpPreviewRing = 4 buffers of the
+// same kSpFrames * kSpStride floats, allocated on that oscillator's first
+// preview and never freed -- the lifetime invariant applied to a fixed four
+// rather than to an unbounded store. 5.24 MB per oscillator with an open
+// editor, which is one or two at a time. The ring is OUTSIDE spBuiltStore()
+// and OUTSIDE identity: a preview touches no hash, no file, no `wt` record and
+// no store entry, and stateString() during an open editor names the last
+// COMMITTED table and nothing else.
+//
+// THE RECYCLE PROOF, and it is arithmetic rather than timing luck.
+//
+//   * The audio thread takes the base at the top of a block and does not retain
+//     it past that block. So a buffer is safe to rewrite once one block period
+//     has elapsed since the last read that could have taken it.
+//   * A ring of four is not rewritten until THREE FURTHER PUBLISHES have
+//     happened after the one that wrote it.
+//   * Publishes are rate-limited to `interval` and are on STROKE END, so the
+//     minimum time between a write and its overwrite is 3 * interval, and the
+//     contract's bound is stated with the slack of a fourth: the protection is
+//     4 * interval against one block period of exposure.
+//   * interval = max(50 ms, 2 * maxBlock / sampleRate), computed from the
+//     values prepare() was given rather than hard-coded, so the bound holds at
+//     every rate and block size the host can choose:
+//
+//         4 * interval  >=  4 * 2 * maxBlock / sampleRate
+//                       =   8 * (maxBlock / sampleRate)
+//                       >   maxBlock / sampleRate                 [the block]
+//
+//     -- a factor of EIGHT at the large-block end, where the 50 ms floor is not
+//     what binds, and far more than that at the small-block end where it is. At
+//     4096 frames and 44.1 kHz that is a 92.9 ms block against 4 x 185.8 ms of
+//     protection.
+//
+// THE CLOCK IS NOT IDENTITY. The interval reads steady_clock; nothing that
+// reaches contentHash() ever does. Obligation 6.
+// ---------------------------------------------------------------------------
+
+// The ring size and the interval formula are wt::pen's, not this file's: the
+// editor computes the same interval to decide when to offer a preview, so the
+// number lives in the header both sides read. Aliased here so the arena's own
+// code reads as it always would.
+constexpr int kSpPreviewRing = wt::pen::kPreviewRing;
+
+struct SpPreviewArena {
+    std::vector<f32> ring[kSpPreviewRing];
+    int              next     = 0;         // the buffer the NEXT publish writes
+    f64              interval = 0.05;      // seconds; wt::pen::previewInterval
+    f64              lastAt   = -1e18;     // steady_clock seconds of the last
+                                           // publish; -1e18 = never
+    u64              publishes = 0;        // diagnostics and the tests' bound
+};
+
+// A function-local static, so the arenas are a root for the leak checker, and
+// null until an oscillator actually previews: a process that never draws pays
+// nothing, exactly as spBuiltStore() does.
+std::unique_ptr<SpPreviewArena>* spPreviewArenas() {
+    static std::unique_ptr<SpPreviewArena> a[kSpMaxOsc];
+    return a;
+}
+
+f64 spNowSeconds() {
+    using namespace std::chrono;
+    return duration_cast<duration<f64>>(steady_clock::now().time_since_epoch()).count();
+}
+
+// GUI thread. Tell an oscillator what prepare() was given, so that the rate
+// limit is computed from the real block period rather than from a guess. Safe
+// to call on every prepare(); it only writes the interval.
+[[maybe_unused]] void spPreviewClock(int osc, f64 sampleRate, int maxBlock) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) return;
+    std::unique_ptr<SpPreviewArena>& a = spPreviewArenas()[osc];
+    const f64 iv = wt::pen::previewInterval(sampleRate, maxBlock);
+    if (!a) { a = std::make_unique<SpPreviewArena>(); a->interval = iv; return; }
+    a->interval = iv;
+}
+
+// GUI thread. Build and publish a PREVIEW from 32 * wt::kCycle frames.
+//
+// False, and NOTHING published, when: the handle is out of range, the frames
+// are null, any sample is non-finite, or the caller is inside the minimum
+// preview interval. The rate limit is enforced HERE and not by the caller,
+// because the contract says "rate-limited by the contract, not by the caller"
+// and a bound a caller can forget is not a bound.
+[[maybe_unused]] bool spPreviewFrames(int osc, const f32* frames) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc || !frames) return false;
+    const size_t n = (size_t)kSpFrames * (size_t)wt::kCycle;
+    for (size_t i = 0; i < n; ++i)
+        if (!std::isfinite(frames[i])) return false;
+
+    std::unique_ptr<SpPreviewArena>& a = spPreviewArenas()[osc];
+    if (!a) a = std::make_unique<SpPreviewArena>();
+
+    const f64 now = spNowSeconds();
+    if (now - a->lastAt < a->interval) return false;      // inside the interval
+
+    std::vector<f32>& buf = a->ring[a->next];
+    if (buf.empty()) buf.assign((size_t)kSpFrames * (size_t)kSpStride, 0.f);
+    spBuildMipsInto(frames, kSpFrames, buf.data());
+
+    // The SAME release store spResolveCustom() uses, for the same reason: this
+    // publishes 1.31 MB of table written before it, not a value. The audio
+    // thread's read is unchanged and does not know a preview from a table.
+    gSpCustomBase[osc].store(buf.data(), std::memory_order_release);
+    a->next = (a->next + 1) % kSpPreviewRing;
+    a->lastAt = now;
+    ++a->publishes;
+    return true;
+}
+
+// GUI thread. Drop any preview and republish the COMMITTED table -- which is
+// gSpOsc[osc].base, or null when this oscillator has nothing committed, and
+// null is the right answer there because the refusal contract renders factory
+// table 0 over it. Idempotent: calling it twice publishes the same pointer
+// twice, and calling it with no preview outstanding is the same store.
+[[maybe_unused]] void spCancelPreview(int osc) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) return;
+    gSpCustomBase[osc].store(gSpOsc[osc].base, std::memory_order_release);
+    // The arena is NOT freed and the ring position is NOT reset. Freeing it
+    // would break the lifetime invariant (a block in flight may hold one of
+    // these pointers); resetting `next` would let the next preview rewrite the
+    // buffer the audio thread is most likely to still be reading.
+}
+
+// Diagnostics for the tests: how many buffers this oscillator's arena has
+// actually allocated, and how many previews it has published. Zero when the
+// oscillator has never previewed.
+[[maybe_unused]] int spPreviewBuffers(int osc) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) return 0;
+    const std::unique_ptr<SpPreviewArena>& a = spPreviewArenas()[osc];
+    if (!a) return 0;
+    int n = 0;
+    for (int i = 0; i < kSpPreviewRing; ++i) if (!a->ring[i].empty()) ++n;
+    return n;
+}
+[[maybe_unused]] u64 spPreviewCount(int osc) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) return 0;
+    const std::unique_ptr<SpPreviewArena>& a = spPreviewArenas()[osc];
+    return a ? a->publishes : 0;
+}
+
+// ---------------------------------------------------------------------------
+// v5 — READ, and COMMIT
+// ---------------------------------------------------------------------------
+
+// GUI thread. Copies this oscillator's RESOLVED table into `out` as
+// kSpFrames * wt::kCycle floats, frame-major, STRETCHED to 32 frames by the
+// same linear frame-axis interpolation spBuildMipsInto() performs when the
+// resolved table has fewer. False, and `out` untouched, when this oscillator
+// has no resolved custom table.
+//
+// The editor always edits 32 frames; a one-frame import opens as 32 identical
+// ones, which is what a table with no frame axis is. Committing then yields a
+// DIFFERENT HASH from the original, and that is correct rather than a bug to be
+// hidden: the content differs, and identity is content.
+[[maybe_unused]] bool spReadFrames(int osc, f32* out) {
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc || !out) return false;
+    const SpOscRec& r = gSpOsc[osc];
+    if (r.hash == 0 || r.frames <= 0) return false;
+    const wt::Table* t = wt::find(r.hash);
+    if (!t || t->frames <= 0) return false;
+    wt::pen::stretchFrames(t->data.data(), t->frames, out);
+    return true;
+}
+
+// GUI thread. THE NINE-STEP COMMIT, in order, because the last step is the
+// identity. Returns the new content hash, or 0 with a SENTENCE in `err` and
+// NOTHING CHANGED on any refusal.
+//
+//   1..5  wt::pen::canonicalise(): finite, per-frame DC removal, set peak,
+//         refuse silence, one set-wide gain. See wavetable_io.cpp.
+//   6     wt::contentHash() over frames that are now in exactly the state v3's
+//         rule names -- no slicing, no resampling, authored at 2048, DC-removed
+//         and set-normalised. A drawn table and an imported table with the same
+//         samples are THE SAME TABLE, which is correct and is not a coincidence.
+//   7     wt::writeDrawn(): drawnDir()/<hex>.nxwt, atomically, skipping a file
+//         that is already there.
+//   8     wt::adopt(t, /*cache=*/false) -- ONE COPY IN ONE PLACE. Two copies of
+//         an irreplaceable file under two policies is not redundancy, it is two
+//         things to keep in sync. Then spBuildCustomMips(), then the release
+//         store.
+//   9     is the DEVICE's, not this file's: spectra.cpp rewrites wt/wtpath/
+//         wtname, because this file owns what a table IS and that file owns what
+//         the state SAYS. `outPath` is what it writes into wtpath.
+//
+// Step 7 before step 8 is deliberate: a table in the store whose file failed to
+// write would be a table that resolves for this session and is gone at the next
+// launch, which is precisely the loss rung 3 exists to prevent.
+[[maybe_unused]] u64 spCommitFrames(int osc, const f32* frames, std::string& outPath,
+                                    std::string& err) {
+    err.clear();
+    outPath.clear();
+    if ((unsigned)osc >= (unsigned)kSpMaxOsc) {
+        err = "this instance has no oscillator slot for a custom table";
+        return 0;
+    }
+    if (!frames) { err = "there is nothing to commit"; return 0; }
+
+    wt::Table t;
+    t.frames    = kSpFrames;
+    t.rule      = wt::Rule::Serum;      // authored at 2048; no rule was applied
+    t.srcFrames = kSpFrames;
+    t.srcCycle  = wt::kCycle;
+    t.data.assign(frames, frames + (size_t)kSpFrames * (size_t)wt::kCycle);
+
+    if (!wt::pen::canonicalise(t.data.data(), err)) return 0;
+
+    t.hash = wt::contentHash(t.data.data(), kSpFrames);
+    if (t.hash == 0) {
+        err = "this table has a sample that is not a number; nothing was saved";
+        return 0;
+    }
+
+    if (!wt::writeDrawn(t, outPath)) {
+        err = "this drawing could not be saved to your wavetable library";
+        return 0;
+    }
+    t.path = outPath;
+
+    const wt::Table* stored = wt::adopt(t, /*cache=*/false);
+    if (!stored) {
+        err = "this process already holds as many wavetables as it will hold";
+        return 0;
+    }
+    const f32* base = spBuildCustomMips(*stored);
+    if (!base) {
+        err = "this process has already built as many custom wavetables as it will build";
+        return 0;
+    }
+
+    SpOscRec& r = gSpOsc[osc];
+    r.hash   = stored->hash;
+    r.path   = outPath;
+    r.name   = spBaseName(outPath);
+    r.frames = stored->frames;
+    r.base   = base;
+    gSpCustomBase[osc].store(base, std::memory_order_release);
+    LOGI("spectra: saved a drawn wavetable to %s", outPath.c_str());
+    return stored->hash;
 }
 
 // ---------------------------------------------------------------------------

@@ -52,7 +52,9 @@
 #include <cstdlib>
 #include <csignal>
 #include <atomic>
+#include <functional>
 #include <thread>
+#include <sys/wait.h>
 
 using namespace lat;
 
@@ -635,6 +637,1043 @@ static int countShm(const char* needle) {
     while (dirent* e = ::readdir(d)) if (std::strstr(e->d_name, needle)) ++n;
     ::closedir(d);
     return n;
+}
+
+// ===========================================================================
+// STEP 4h: THE OFFLINE PARITY GATE — the daemon's own frames, byte for byte
+// ===========================================================================
+//
+// WHAT THIS CLOSES
+// ----------------
+// Every cross-boundary audio claim in this suite up to here is a LEVEL MATCH to
+// four decimals, and step 4f says at length why: the daemon's frames never
+// crossed the boundary. It rendered into a driver, the null driver ran against
+// the wall clock, and the only audio number this side could read was a
+// block-decayed meter. There was no frame k on this side that was frame k on
+// the other, so `|daemon - local| < 0.01` was the honest thing to write.
+//
+// `nxtaktd --driver file:PATH --frames N` (src/daemon/nxtaktd.cpp, FileDriver)
+// is the transport that was missing. The daemon renders the engine as fast as
+// the machine will go into a 32-bit float WAV, starts when the transport does,
+// and stops on a COUNT rather than a clock. Its output is a file. So is an
+// in-process engine's. Files can be compared with `cmp`.
+//
+// WHAT EACH RUN PROVES, AND WHAT IT DOES NOT
+// ------------------------------------------
+// A run is bit-identity between:
+//
+//   the DAEMON        a real nxtaktd process, fed through EngineHandle — the
+//                     object src/ui actually holds — so the payload really does
+//                     go through the pool, the wire, the translator and the
+//                     daemon's own plugin instances; and
+//   the REFERENCE     a bare lat::Engine in THIS process, handed the same
+//                     musical intent directly.
+//
+// What it does not prove is that the two harnesses are the same, because they
+// are deliberately not: one publishes an RtChain of GUI-side model instances
+// and lets the handle reconcile a far-side chain out of it, the other builds the
+// chain it renders. That difference is the boundary. If the bytes match anyway,
+// the boundary carried everything.
+//
+// THE ONE CONTRACT A CLIENT OF THE FILE DRIVER MUST KEEP
+// ------------------------------------------------------
+// THE TRANSPORT-STARTING COMMAND IS THE LAST ONE SENT. The daemon arms on it
+// and then stops handing anything to the engine (a bounce is a frozen set), so
+// a command sent after it is not in the file. Every fill below therefore ends
+// with exactly one Cmd::LaunchScene and nothing after it.
+// ---------------------------------------------------------------------------
+
+// A 32-bit float stereo WAV. This is a SECOND, INDEPENDENT spelling of the 44
+// bytes nxtaktd's WavWriter emits, and that is deliberate: `cmp` then compares
+// two files two different pieces of code wrote, so a header the daemon got
+// wrong is a red gate rather than a shared assumption.
+static bool writeF32Wav(const char* path, const std::vector<f32>& inter, u32 rate) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    const u32 chans = 2, bpf = chans * 4u;
+    const u32 dataBytes = (u32)(inter.size() * 4);
+    auto w32 = [&](u32 v) {
+        const u8 b[4] = {(u8)(v & 0xff), (u8)((v >> 8) & 0xff),
+                         (u8)((v >> 16) & 0xff), (u8)((v >> 24) & 0xff)};
+        std::fwrite(b, 1, 4, f);
+    };
+    auto w16 = [&](u16 v) {
+        const u8 b[2] = {(u8)(v & 0xff), (u8)((v >> 8) & 0xff)};
+        std::fwrite(b, 1, 2, f);
+    };
+    std::fwrite("RIFF", 1, 4, f); w32(36u + dataBytes); std::fwrite("WAVE", 1, 4, f);
+    std::fwrite("fmt ", 1, 4, f); w32(16); w16(3); w16((u16)chans);
+    w32(rate); w32(rate * bpf); w16((u16)bpf); w16(32);
+    std::fwrite("data", 1, 4, f); w32(dataBytes);
+    std::fwrite(inter.data(), 4, inter.size(), f);
+    const bool ok = std::ferror(f) == 0;
+    std::fclose(f);
+    return ok;
+}
+
+static bool readWholeFile(const char* path, std::vector<u8>& out) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    out.clear();
+    u8 buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.insert(out.end(), buf, buf + n);
+    const bool ok = std::ferror(f) == 0;
+    std::fclose(f);
+    return ok;
+}
+
+// The first byte at which two buffers differ, and what the two f32 samples
+// there were. A gate that only says "they differ" is a gate nobody can act on.
+static void reportFirstDiff(const std::vector<u8>& a, const std::vector<u8>& b) {
+    const size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (size_t i = 0; i < n; ++i) {
+        if (a[i] == b[i]) continue;
+        const size_t frameOff = i >= 44 ? (i - 44) / 8 : 0;
+        const size_t sampOff  = i >= 44 ? ((i - 44) / 4) * 4 + 44 : 0;
+        f32 av = 0.f, bv = 0.f;
+        if (sampOff + 4 <= n) { std::memcpy(&av, &a[sampOff], 4); std::memcpy(&bv, &b[sampOff], 4); }
+        std::printf("        first difference at byte %zu (frame %zu, %s): "
+                    "daemon %.9g vs local %.9g\n",
+                    i, frameOff, i < 44 ? "HEADER" : "audio", (double)av, (double)bv);
+        return;
+    }
+    std::printf("        no differing byte in the common prefix; the lengths "
+                "differ (%zu vs %zu)\n", a.size(), b.size());
+}
+
+// The state one parity run needs. Two fills, one set: the same musical intent
+// expressed to the near side and to a bare engine.
+struct ParityRun {
+    const char* label = "";
+    const char* what  = "";      // the payload class, for the report
+    i64  frames = 48000;
+    // Publishes through EngineHandle and ends with the ONE transport-starting
+    // command. Returns false if the near side could not carry the set at all,
+    // which is a different failure from "the bytes differ".
+    std::function<bool(EngineHandle&, EngineState&)> fillDaemon;
+    // The same, into a bare Engine, ending with the same command.
+    std::function<void(Engine&)> fillRef;
+    // THE NEGATIVE CONTROL, and it is what stops this whole section from being
+    // a tautology. `fillRef` and the daemon agreeing is only a claim about the
+    // boundary if the comparison could have caught a difference — two renders
+    // of digital silence agree too, and so do two renders of a set whose
+    // payload never crossed but was never in the reference either.
+    //
+    // So every run also renders the set WITH THE PAYLOAD UNDER TEST REMOVED,
+    // in this process, and requires it to DIFFER from the daemon's file. What
+    // that says is precise: the daemon's bytes are a function of the payload,
+    // the payload got there, and `memcmp` is sensitive to it.
+    //
+    // `whatControl` names what the control took away.
+    std::function<void(Engine&)> fillRefControl;
+    const char* whatControl = "";
+};
+
+// Pumps the near side for `ms`, draining events. Every wait in the parity
+// section goes through here so a slow machine costs time and not a failure.
+static void parityPump(EngineHandle& eng, EngineState& es, int ms) {
+    Event ev;
+    for (int i = 0; i < ms; ++i) {
+        eng.poll(es);
+        while (eng.popEvent(ev)) {}
+        sleepMs(1);
+    }
+}
+
+// Runs one parity render and reports it. Returns true iff the two files are
+// byte-identical, which is the gate.
+static bool parityRender(const char* baseSession, int idx, const ParityRun& run) {
+    banner(run.label);
+
+    char session[96];
+    std::snprintf(session, sizeof session, "%s-p%d", baseSession, idx);
+    char dwav[192], rwav[192];
+    std::snprintf(dwav, sizeof dwav, "/tmp/nxtakt-parity-%d-%d-daemon.wav", (int)::getpid(), idx);
+    std::snprintf(rwav, sizeof rwav, "/tmp/nxtakt-parity-%d-%d-local.wav",  (int)::getpid(), idx);
+    std::remove(dwav);
+    std::remove(rwav);
+
+    // --- 1. the daemon, with an offline driver -----------------------------
+    //
+    // Spawned by hand rather than by EngineHandle, because the handle passes
+    // --driver and nothing else and the file driver needs a frame count too.
+    // The handle then ATTACHES to it (RemoteEngine::open tries attach before it
+    // spawns), so everything below is the ordinary near side talking to an
+    // ordinary daemon — the only unusual thing about it is where its samples go.
+    char drv[224], frames[32];
+    std::snprintf(drv, sizeof drv, "file:%s", dwav);
+    std::snprintf(frames, sizeof frames, "%lld", (long long)run.frames);
+    const char* dpath = std::getenv("NXTAKT_DAEMON");
+    if (!dpath || !*dpath) dpath = "build/nxtaktd";
+    const char* args[] = {"--session", session, "--driver", drv, "--frames", frames,
+                          "--rate", "48000", "--block", "256", nullptr};
+    const pid_t pid = ipc::EngineClient::spawnDaemon(dpath, args);
+    CHECK(pid > 0, "spawned an offline daemon: %s --driver %s --frames %s",
+          dpath, drv, frames);
+    if (pid <= 0) return false;
+
+    // WAIT FOR IT TO BE READY BEFORE THE HANDLE LOOKS, and this is not
+    // belt and braces. RemoteEngine::open() attaches with a timeout of ZERO and
+    // SPAWNS ONE OF ITS OWN if that fails — with `--driver null`, which is not
+    // the daemon this gate is about. A probe that has seen the region published
+    // makes the handle's attach unconditional.
+    {
+        ipc::EngineClient probe;
+        const bool ready = probe.attach(session, 10000);
+        CHECK(ready, "it published a ready control region");
+        if (ready) probe.detach();
+        if (!ready) { ::kill(pid, SIGKILL); ::waitpid(pid, nullptr, 0); return false; }
+    }
+
+    bool daemonOk = false;
+    ::setenv("NXTAKT_SESSION", session, 1);
+    {
+        EngineHandle eng;
+        EngineState  es;
+        const bool up = eng.open("null");
+        CHECK(up && eng.remoteOpen(), "the near side attached to it");
+        if (up && eng.remoteOpen()) {
+            CHECK(eng.driverName() && std::strstr(eng.driverName(), "file"),
+                  "and it is the FILE driver ('%s'), not a device and not the "
+                  "wall clock", eng.driverName());
+            const bool filled = run.fillDaemon(eng, es);
+            CHECK(filled, "the set crossed the boundary and the transport started");
+
+            // The daemon exits of its own accord when the render is complete
+            // (pumpFileRender sets gQuit), so waiting for the PROCESS is
+            // waiting for the file — and it is a stronger wait than any flag,
+            // because the WAV is closed before the shutdown path even begins.
+            int st = 0;
+            bool exited = false;
+            for (int i = 0; i < 3000 && !exited; ++i) {
+                parityPump(eng, es, 10);
+                exited = ::waitpid(pid, &st, WNOHANG) == pid;
+            }
+            if (!exited) {
+                CHECK(false, "the offline daemon did not finish inside 30 s");
+                ::kill(pid, SIGKILL);
+                ::waitpid(pid, nullptr, 0);
+            } else {
+                daemonOk = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+                CHECK(daemonOk, "it rendered and exited 0 (status %d)",
+                      WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+            }
+        } else {
+            ::kill(pid, SIGKILL);
+            ::waitpid(pid, nullptr, 0);
+        }
+        eng.close();
+    }
+    ::setenv("NXTAKT_SESSION", baseSession, 1);
+    if (!daemonOk) return false;
+
+    // --- 2. the same set, in this process ----------------------------------
+    //
+    // A FRESH Engine, prepared exactly as the daemon prepares its own
+    // (48 kHz / 256, once, before anything is pushed), scoped so that only one
+    // Engine in this process is live at a time — engine.cpp's four side tables
+    // are keyed by address and evict the least recently claimed slot, and the
+    // automation holds are one of them.
+    auto renderRef = [&](const std::function<void(Engine&)>& fill, std::vector<f32>& out) {
+        out.assign((size_t)run.frames * 2, 0.f);
+        auto ref = std::make_unique<Engine>();
+        ref->prepare(48000.0, 256);
+        fill(*ref);
+        std::vector<f32> l(256, 0.f), r(256, 0.f);
+        for (i64 d = 0; d < run.frames; d += 256) {
+            const int n = (int)((run.frames - d < 256) ? (run.frames - d) : 256);
+            ref->process(nullptr, nullptr, l.data(), r.data(), n);
+            for (int i = 0; i < n; ++i) {
+                out[(size_t)(d + i) * 2]     = l[(size_t)i];
+                out[(size_t)(d + i) * 2 + 1] = r[(size_t)i];
+            }
+        }
+        Event ev;
+        while (ref->popEvent(ev)) {}
+    };
+
+    std::vector<f32> inter;
+    renderRef(run.fillRef, inter);
+    CHECK(writeF32Wav(rwav, inter, 48000), "wrote the in-process render to %s", rwav);
+
+    // --- 3. cmp ------------------------------------------------------------
+    std::vector<u8> a, b;
+    const bool reada = readWholeFile(dwav, a);
+    const bool readb = readWholeFile(rwav, b);
+    CHECK(reada && readb, "both renders are on disk (%zu vs %zu bytes)", a.size(), b.size());
+    if (!reada || !readb) return false;
+
+    // Not silent, and this is not decoration: two identical files of digital
+    // zero would pass a byte comparison and prove nothing at all. Every run
+    // below has to make a sound before its bytes mean anything.
+    f32 peak = 0.f;
+    for (const f32 v : inter) peak = std::fmax(peak, std::fabs(v));
+    CHECK(peak > 1e-4f, "and the render is not silence (peak %.6f)", (double)peak);
+
+    const bool same = a.size() == b.size() &&
+                      std::memcmp(a.data(), b.data(), a.size()) == 0;
+    CHECK(same, "BIT-IDENTICAL ACROSS THE PROCESS BOUNDARY (%s): %lld frames, "
+          "%zu bytes, cmp-clean", run.what, (long long)run.frames, a.size());
+    if (!same) {
+        std::printf("        daemon: %s\n        local : %s\n", dwav, rwav);
+        reportFirstDiff(a, b);
+        return false;          // leave both files for `cmp -l`
+    }
+
+    // --- 4. the negative control -------------------------------------------
+    //
+    // The same set with the payload under test taken out, rendered here, and
+    // required to DIFFER from the daemon's file. Without this the section
+    // proves only that two things agree, not that either of them depends on
+    // what crossed the wire.
+    bool sensitive = true;
+    if (run.fillRefControl) {
+        std::vector<f32> ctl;
+        renderRef(run.fillRefControl, ctl);
+        std::vector<u8> c((size_t)ctl.size() * 4);
+        std::memcpy(c.data(), ctl.data(), c.size());
+        sensitive = a.size() != c.size() + 44 ||
+                    std::memcmp(a.data() + 44, c.data(), c.size()) != 0;
+        CHECK(sensitive,
+              "and the comparison is SENSITIVE: the same set %s renders "
+              "differently, so the bytes above are a function of the payload "
+              "and not of the harness", run.whatControl);
+    }
+
+    std::remove(dwav);
+    std::remove(rwav);
+    return peak > 1e-4f && sensitive;
+}
+
+// A command the near side may answer `false` to only in the "try again" sense
+// (§11.2). Retried the way App::flushPending() retries, because a set that was
+// half-published would make the gate a test of the ring's depth.
+static bool parityPush(EngineHandle& eng, EngineState& es, const Command& c) {
+    for (int i = 0; i < 400; ++i) {
+        if (eng.pushCommand(c)) return true;
+        parityPump(eng, es, 5);
+    }
+    return false;
+}
+static bool paritySend(EngineHandle& eng, EngineState& es, Cmd t,
+                       i32 a = 0, i32 b = 0, f64 x = 0.0) {
+    Command c;
+    c.type = t; c.a = a; c.b = b; c.x = x;
+    return parityPush(eng, es, c);
+}
+
+// The scalars every run sets, written ONCE and used by both sides. A difference
+// here would be a difference in the SET, and the gate must not be able to
+// measure one of those: what it is for is differences in the BOUNDARY.
+template <class Send>
+static void parityScalars(Send&& send, f64 tempo, bool metronome) {
+    send(Cmd::SetTempo,     0, 0, tempo);
+    send(Cmd::SetQuantum,   0, 0, 0.0);      // 0 beats: a launch fires on the spot
+    send(Cmd::MasterVol,    0, 0, 1.0);
+    send(Cmd::SetMetronome, metronome ? 1 : 0, 0, 0.0);
+}
+
+// The whole section: one parity render per payload class the process split
+// actually carries, then one that carries all of them at once.
+static void testOfflineParity(const char* baseSession, PluginRegistry& reg) {
+    banner("step 4h: the daemon's frames, byte for byte (--driver file:)");
+
+    const PluginDesc* smpDesc  = reg.find("nxtakt:sampler");
+    const PluginDesc* spDesc   = reg.find("nxtakt:spectra");
+    const PluginDesc* rackDesc = reg.find("nxtakt:rack");
+    const PluginDesc* satDesc  = reg.find("nxtakt:saturator");
+    // A device with FREE-RUNNING STATE, and it is in the set on purpose. Tape's
+    // wow and flutter are oscillators advanced once per block whether or not
+    // there is a signal (fx_tape.cpp, wowPh_/flutA_/flutB_), so a chain holding
+    // one is a chain whose output depends on HOW MANY BLOCKS HAVE BEEN
+    // RENDERED. Every other device in this section is memoryless enough that a
+    // stray block before the render would not show; this one is what makes the
+    // file driver's unarmed loop (which renders nothing at all — see FileDriver
+    // phase 1) a load-bearing design decision rather than a tidy one. Removing
+    // it turns the two rows below red and nothing else.
+    const PluginDesc* tapeDesc = reg.find("nxtakt:tape");
+    CHECK(smpDesc && spDesc && rackDesc && satDesc && tapeDesc,
+          "the registry has the five internal devices this section renders");
+    if (!smpDesc || !spDesc || !rackDesc || !satDesc || !tapeDesc) return;
+
+    // =======================================================================
+    // The material. GUI-heap and alive for the whole section, exactly as App's
+    // decoded buffers are: the handle copies each into the pool and the daemon
+    // plays the copy.
+    // =======================================================================
+    const i64 kTwoSec = 96000;
+
+    // An audio clip with STRUCTURE, so a payload that fails to cross shows as a
+    // difference and not as a quieter version of the same thing: 0.25 with a
+    // 480-frame 0.5 burst every 4800 frames, and a transient 2400 frames before
+    // each burst (step 4f's material, and its arithmetic).
+    std::vector<f32> burstBuf((size_t)kTwoSec, 0.25f);
+    std::vector<i64> grid;
+    for (i64 k = 1; k * 4800 < kTwoSec; ++k) {
+        const i64 p = k * 4800;
+        for (i64 i = p - 240; i < p + 240; ++i) burstBuf[(size_t)i] = 0.5f;
+        grid.push_back(p - 2400);
+    }
+
+    // A clip envelope that RAMPS rather than holds. A flat envelope differs
+    // from no envelope by a constant, which a single wrong sample could not
+    // distinguish from a gain; a ramp puts a different number on every frame,
+    // so "the envelope crossed" and "the envelope crossed and is evaluated at
+    // the same beat on both sides" become the same claim.
+    RtAutoPoint envPts[3];
+    envPts[0].beat = 0.0; envPts[0].value = 0.15f;
+    envPts[1].beat = 4.0; envPts[1].value = 0.95f;
+    envPts[2].beat = 8.0; envPts[2].value = 0.15f;
+    RtAutoSet env{};
+    env.points     = envPts;
+    env.pointCount = 3;
+    env.laneCount  = 1;
+    env.lanes[0].target  = (i32)AutoTarget::TrackVol;
+    env.lanes[0].xform   = (i32)AutoXform::Direct;
+    env.lanes[0].devSlot = -1;
+    env.lanes[0].index   = 0;
+    env.lanes[0].first   = 0;
+    env.lanes[0].count   = 3;
+    env.lanes[0].lo = 0.f; env.lanes[0].hi = 1.f;
+
+    // A warp map that is NOT the clipBpm ratio: 96000 source frames over 10
+    // beats, against a clip whose lengthBeats is 8. If the markers do not
+    // cross, the engine falls back to clipBpm and reads the source at a
+    // different rate — which moves every burst, on every frame.
+    WarpMarker warpMap[2];
+    warpMap[0].srcFrame = 0;        warpMap[0].beat = 0.0;
+    warpMap[1].srcFrame = kTwoSec;  warpMap[1].beat = 10.0;
+
+    RtClip v11Clip{};
+    v11Clip.data          = burstBuf.data();
+    v11Clip.frames        = kTwoSec;
+    v11Clip.channels      = 1;
+    v11Clip.loopStart     = 0;
+    v11Clip.loopEnd       = kTwoSec;
+    v11Clip.clipBpm       = 120.0;
+    v11Clip.lengthBeats   = 8.0;
+    v11Clip.gain          = 1.0f;
+    v11Clip.warp          = (int)Warp::Beats;
+    v11Clip.loop          = true;
+    v11Clip.quantumIdx    = 0;
+    v11Clip.valid         = true;
+    v11Clip.autos         = &env;
+    v11Clip.markers       = warpMap;
+    v11Clip.markerCount   = 2;
+    v11Clip.transients    = grid.data();
+    v11Clip.transientCount = (int)grid.size();
+
+    // A MIDI clip to drive the instruments. Four notes, so a sustain and a
+    // release both land inside every render.
+    RtNote notes[4];
+    for (int i = 0; i < 4; ++i) {
+        notes[i].beat  = (f64)i * 0.5;
+        notes[i].len   = 0.4;
+        notes[i].pitch = (u8)(52 + i * 4);
+        notes[i].vel   = (u8)(100 + i);
+        notes[i].chance = 100;
+        notes[i].velTo  = 0;
+    }
+    RtClip midiClip{};
+    midiClip.isMidi      = true;
+    midiClip.notes       = notes;
+    midiClip.noteCount   = 4;
+    midiClip.lengthBeats = 4.0;
+    midiClip.gain        = 1.0f;
+    midiClip.loop        = true;
+    midiClip.quantumIdx  = 0;
+    midiClip.valid       = true;
+
+    // A plain audio clip for the rack to chew on: DC 0.5, which is the level
+    // step 4b identifies the saturator by (tanh(0.5) = 0.4621).
+    std::vector<f32> dcBuf((size_t)kTwoSec, 0.5f);
+    RtClip dcClip{};
+    dcClip.data        = dcBuf.data();
+    dcClip.frames      = kTwoSec;
+    dcClip.channels    = 1;
+    dcClip.loopStart   = 0;
+    dcClip.loopEnd     = kTwoSec;
+    dcClip.clipBpm     = 120.0;
+    dcClip.lengthBeats = 4.0;
+    dcClip.gain        = 1.0f;
+    dcClip.warp        = (int)Warp::Off;
+    dcClip.loop        = true;
+    dcClip.quantumIdx  = 0;
+    dcClip.valid       = true;
+
+    // The sampler's audio and the name it carries. The PATH is what
+    // stateString() spells and what a saved set would carry; the AUDIO is the
+    // thing nxtaktd cannot produce for itself, because it links no decoder.
+    const char* kSmpPath = "/tmp/nxtakt-parity-kick.wav";
+    const i64   kSmpFrames = 240000;
+    auto smpBuf = std::make_shared<SampleBuffer>();
+    smpBuf->frames   = kSmpFrames;
+    smpBuf->channels = 2;
+    smpBuf->rate     = 48000.0;
+    smpBuf->data.assign((size_t)kSmpFrames * 2, 0.f);
+    for (i64 i = 0; i < kSmpFrames; ++i) {
+        // Not DC: a decaying tone, so a sampler reading the buffer at the wrong
+        // rate or from the wrong offset is a different waveform and not a
+        // different level.
+        const f32 v = (f32)(std::sin(6.283185307179586 * 220.0 * (double)i / 48000.0) *
+                            std::exp(-(double)i / 60000.0) * 0.6);
+        smpBuf->data[(size_t)i * 2]     = v;
+        smpBuf->data[(size_t)i * 2 + 1] = -v;
+    }
+
+    // A custom wavetable, imported HERE and resolved by content hash THERE.
+    char wtPath[192];
+    std::snprintf(wtPath, sizeof wtPath, "/tmp/nxtakt-parity-%d-table.wav", (int)::getpid());
+    std::string wtState;
+    {
+        // Four 2048-sample cycles: the Serum convention, sliced and never
+        // resampled, which is the one import rule whose identity involves no
+        // arithmetic beyond a mono fold and a normalise — so its hash is the
+        // same on every machine.
+        std::vector<f32> src((size_t)4 * 2048, 0.f);
+        for (int fr = 0; fr < 4; ++fr)
+            for (int i = 0; i < 2048; ++i)
+                src[(size_t)fr * 2048 + i] =
+                    (f32)std::sin(6.283185307179586 * (double)(fr + 1) * (double)i / 2048.0);
+        FILE* f = std::fopen(wtPath, "wb");
+        if (f) {
+            const u32 dataBytes = (u32)(src.size() * 4);
+            auto w32 = [&](u32 v) { std::fwrite(&v, 4, 1, f); };
+            auto w16 = [&](u16 v) { std::fwrite(&v, 2, 1, f); };
+            std::fwrite("RIFF", 1, 4, f); w32(36 + dataBytes); std::fwrite("WAVE", 1, 4, f);
+            std::fwrite("fmt ", 1, 4, f); w32(16);
+            w16(3); w16(1); w32(48000); w32(48000 * 4); w16(4); w16(32);
+            std::fwrite("data", 1, 4, f); w32(dataBytes);
+            std::fwrite(src.data(), 4, src.size(), f);
+            std::fclose(f);
+        }
+        wt::Table t;
+        std::string err;
+        const bool imported = wt::importFile(wtPath, t, err);
+        CHECK(imported, "imported a 4 x 2048 wavetable for the parity set: %s", err.c_str());
+        // cache=false: nothing about this run may leave a .nxwt behind that a
+        // later run — or the daemon, which shares $XDG_DATA_HOME — could resolve
+        // from instead of from the pool.
+        if (imported && wt::adopt(t, /*cache=*/false))
+            wtState = "nxspc1;wtA=" + wt::hashHex(t.hash);
+        CHECK(!wtState.empty(), "and put it in this process's store: '%s'", wtState.c_str());
+    }
+
+    // 7/8 from bar 0. The metronome strikes once per SIGNATURE UNIT and accents
+    // the unit that opens the bar, so a map that did not cross is a click
+    // pattern that differs from this one on thousands of frames.
+    RtSig sevenEight[1];
+    sevenEight[0].bar = 0; sevenEight[0].num = 7; sevenEight[0].den = 8;
+    sevenEight[0].pad = 0; sevenEight[0].beat = 0.0;
+
+    // =======================================================================
+    // The device fills. Two spellings of one intent, and the difference between
+    // them IS the boundary:
+    //
+    //   near side   build a GUI-side PluginInstance, set its state on it, put it
+    //               in an RtChain and publish that. The handle reconciles a
+    //               far-side chain out of the declaration, ships the state
+    //               through the pool, and the DAEMON's instances render.
+    //   reference   build the instance that will actually render, apply the
+    //               same state to it in the same order the daemon applies it
+    //               (nxtaktd.cpp doSetDeviceState: params, then the state, then
+    //               the sample; wavetables ingested BEFORE the state, because a
+    //               wavetable's state names a content hash).
+    // =======================================================================
+    auto refInstantiate = [&](const PluginDesc& d) {
+        // The daemon's own two lines (nxtaktd.cpp): instantiate at the driver's
+        // rate and block, then prepare at the same. A reference that used a
+        // different maxBlock would be a different DSP object.
+        std::unique_ptr<PluginInstance> inst = reg.instantiate(d, 48000.0, 256);
+        if (inst) inst->prepare(48000.0, 256);
+        return inst;
+    };
+
+    // The GUI-side model instances, at function scope so the combined run at the
+    // bottom can put all three in one set. They never render a sample: in
+    // daemon mode a PluginInstance in src/ui is the MODEL — it holds the params,
+    // the bypass flag, the rack contents and the state string, and the daemon's
+    // own instances are what make sound (GUI-ON-DAEMON.md §5 step 4).
+    std::unique_ptr<PluginInstance> guiSmp  = reg.instantiate(*smpDesc, 48000.0, 1024);
+    std::unique_ptr<PluginInstance> guiSp   = reg.instantiate(*spDesc, 48000.0, 1024);
+    std::unique_ptr<PluginInstance> guiRack = reg.instantiate(*rackDesc, 48000.0, 1024);
+    SamplerControl* guiSc = guiSmp  ? guiSmp->sampler() : nullptr;
+    RackControl*    guiRc = guiRack ? guiRack->rack()   : nullptr;
+    CHECK(guiSc && guiSp && guiRc,
+          "GUI-side model instances: a sampler, a Spectra and a rack");
+    if (!guiSc || !guiSp || !guiRc) { std::remove(wtPath); return; }
+
+    guiSc->adopt(smpBuf, kSmpPath);
+    CHECK(guiSc->hasSample() && guiSmp->stateString() ==
+              std::string("nxsmp1;p=") + kSmpPath,
+          "the sampler holds the buffer and names the file ('%s')",
+          guiSmp->stateString().c_str());
+    guiSp->setParam(0, 8.f);                        // A Table = 8, the custom slot
+    CHECK(!wtState.empty() && guiSp->setStateString(wtState),
+          "the Spectra takes the state naming the import");
+    CHECK(guiRc->addDevice(*satDesc) && guiRc->addDevice(*tapeDesc) &&
+              guiRc->deviceCount() == 2,
+          "the rack holds a saturator and a tape (the stateful one)");
+    const std::string rackText = rackStateToString(guiRc->state());
+
+    // Every reference-side instance a run builds, kept alive until the whole
+    // section is over. The engine borrows an RtChain and its instances for as
+    // long as it holds the chain, and a run's fill cannot own them because it
+    // returns before a single block is rendered.
+    std::vector<std::unique_ptr<PluginInstance>> refInsts;
+    std::vector<std::unique_ptr<RtChain>>        refChains;
+    auto refChain = [&]() -> RtChain* {
+        refChains.push_back(std::make_unique<RtChain>());
+        return refChains.back().get();
+    };
+
+    int failures = 0;
+    int idx = 0;
+
+    // -----------------------------------------------------------------------
+    // (1) THE SIGNATURE MAP
+    // -----------------------------------------------------------------------
+    {
+        ParityRun r;
+        r.label  = "4h.1: a signature map, rendered on both sides";
+        r.what   = "signature map";
+        r.frames = 96000;                       // 2 s: several 7/8 bars
+        r.fillDaemon = [&](EngineHandle& e, EngineState& s) -> bool {
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { paritySend(e, s, t, a, b, x); },
+                          120.0, /*metronome=*/true);
+            Command sig;
+            sig.type = Cmd::SetSignatures; sig.a = 1; sig.p = sevenEight;
+            if (!parityPush(e, s, sig)) return false;
+            parityPump(e, s, 200);
+            if (e.signaturesRefused() != 0) return false;
+            // LAST. Everything after a transport start is outside the render.
+            return paritySend(e, s, Cmd::LaunchScene, 0);
+        };
+        r.fillRef = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, true);
+            Command sig;
+            sig.type = Cmd::SetSignatures; sig.a = 1; sig.p = sevenEight;
+            en.pushCommand(sig);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        // The control: no map at all, i.e. plain 4/4. The metronome then strikes
+        // on quarters instead of eighths and accents every fourth instead of
+        // every seventh, which is a different file from the first click on.
+        r.whatControl = "in 4/4 (no map)";
+        r.fillRefControl = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, true);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        if (!parityRender(baseSession, idx++, r)) ++failures;
+    }
+
+    // -----------------------------------------------------------------------
+    // (2) A CLIP WITH AN ENVELOPE, A WARP MAP AND TRANSIENTS  (protocol v11)
+    // -----------------------------------------------------------------------
+    {
+        ParityRun r;
+        r.label  = "4h.2: a v11 clip — envelope, warp markers, transients";
+        r.what   = "clip envelopes / warp markers / transients (v11)";
+        r.frames = 96000;
+        r.fillDaemon = [&](EngineHandle& e, EngineState& s) -> bool {
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { paritySend(e, s, t, a, b, x); },
+                          120.0, false);
+            if (!paritySend(e, s, Cmd::TrackVol, 0, 0, 1.0)) return false;
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = v11Clip;
+            const u64 refused0 = e.remoteRefusals();
+            if (!parityPush(e, s, sc)) return false;
+            parityPump(e, s, 300);
+            // The v11 regression gate, restated where it can be measured
+            // against the audio it protects: a refusal here is a clip that
+            // crossed WITHOUT its three payloads, and the bytes would then say
+            // so anyway — but this says which.
+            if (e.remoteRefusals() != refused0) return false;
+            return paritySend(e, s, Cmd::LaunchScene, 0);
+        };
+        r.fillRef = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = v11Clip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        // The control is the PRE-v11 clip: the same sample, the same length, and
+        // none of the three payloads. That is not a hypothetical shape — it is
+        // exactly what daemon mode played for every audio set before protocol
+        // v11, so this row is the regression gate for that bug expressed in
+        // frames rather than in a counter.
+        r.whatControl = "with its envelope, warp map and transients removed "
+                        "(the pre-v11 shape)";
+        r.fillRefControl = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            RtClip bare = v11Clip;
+            bare.autos = nullptr;
+            bare.markers = nullptr; bare.markerCount = 0;
+            bare.transients = nullptr; bare.transientCount = 0;
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = bare;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        if (!parityRender(baseSession, idx++, r)) ++failures;
+    }
+
+    // -----------------------------------------------------------------------
+    // (3) DEVICE STATE: A SAMPLER NAMING A FILE  (protocol v10)
+    // -----------------------------------------------------------------------
+    //
+    // The two halves of "publish an instrument on a track", written once
+    // because runs (3), (4) and (6) all need them and a set that differed
+    // between runs would make a failure ambiguous.
+    //
+    // NEAR SIDE: declare the GUI's own instance in an RtChain and wait for the
+    // daemon to have BOTH instantiated it and been told what it is — a chain
+    // that is live and stateless is a silent instrument, and the launch would
+    // freeze it that way for the whole render.
+    auto daemonDevice = [&](EngineHandle& e, EngineState& s, int track,
+                            PluginInstance* gui, RtChain& ch,
+                            u64 wantStates, u64 wantRacks, u64 wantTables) -> bool {
+        ch.fx[0] = gui;
+        ch.count = 1;
+        Command chain;
+        chain.type = Cmd::SetChain; chain.a = track; chain.p = &ch;
+        if (!parityPush(e, s, chain)) return false;
+        const RemoteDevice* d = nullptr;
+        for (int i = 0; i < 600 && !(d && d->live); ++i) {
+            parityPump(e, s, 10);
+            d = e.remoteDevice(gui);
+        }
+        if (!d || !d->live) return false;
+        for (int i = 0; i < 600; ++i) {
+            if (e.deviceStatesPublished() >= wantStates &&
+                e.racksPublished() >= wantRacks &&
+                e.wavetablesPublished() >= wantTables) break;
+            parityPump(e, s, 10);
+        }
+        return e.deviceStatesPublished() >= wantStates &&
+               e.racksPublished() >= wantRacks &&
+               e.wavetablesPublished() >= wantTables &&
+               e.deviceStatesRefused() == 0 && e.racksRefused() == 0;
+    };
+
+    // REFERENCE SIDE: build the instance that will actually render and apply
+    // the same state in the order nxtaktd applies it (doSetDeviceState: params
+    // first, then the state string, then — for a sampler — the audio, because
+    // the state is what names the file; a wavetable's frames go in BEFORE the
+    // state, which is what wt::adopt() above already did for this process).
+    auto refDevice = [&](Engine& en, int track, const PluginDesc& desc,
+                         const std::string& state, bool isSampler, bool isRack) {
+        std::unique_ptr<PluginInstance> inst = refInstantiate(desc);
+        if (!inst) return;
+        if (&desc == spDesc) inst->setParam(0, 8.f);
+        if (isRack) {
+            RackState rs;
+            if (rackStateFromString(state, rs))
+                if (RackControl* rrc = inst->rack()) rrc->setState(rs);
+        } else if (!state.empty()) {
+            inst->setStateString(state);
+        }
+        if (isSampler) {
+            if (SamplerControl* rsc = inst->sampler()) {
+                auto copy = std::make_shared<SampleBuffer>(*smpBuf);
+                copy->path = rsc->samplePath();
+                rsc->adopt(copy, rsc->samplePath());
+            }
+        }
+        RtChain* ch = refChain();
+        ch->fx[0] = inst.get();
+        ch->count = 1;
+        Command chain;
+        chain.type = Cmd::SetChain; chain.a = track; chain.p = ch;
+        en.pushCommand(chain);
+        refInsts.push_back(std::move(inst));
+    };
+
+    {
+        ParityRun r;
+        r.label  = "4h.3: a sampler's file and its audio, byte for byte";
+        r.what   = "device state — a sampler naming a file (v10)";
+        r.frames = 96000;
+        r.fillDaemon = [&](EngineHandle& e, EngineState& s) -> bool {
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { paritySend(e, s, t, a, b, x); },
+                          120.0, false);
+            if (!paritySend(e, s, Cmd::TrackVol, 0, 0, 1.0)) return false;
+            RtChain ch;
+            if (!daemonDevice(e, s, 0, guiSmp.get(), ch, 1, 0, 0)) return false;
+            parityPump(e, s, 300);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = midiClip;
+            if (!parityPush(e, s, sc)) return false;
+            parityPump(e, s, 200);
+            return paritySend(e, s, Cmd::LaunchScene, 0);
+        };
+        r.fillRef = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            refDevice(en, 0, *smpDesc, guiSmp->stateString(), /*sampler=*/true, /*rack=*/false);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = midiClip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        // ONE SAMPLE, ONE ULP. The control is the same sampler with the same
+        // path, holding a buffer that differs from the one the daemon was sent
+        // in a single float, by the smallest step that float can take. If the
+        // files still matched, the comparison would be measuring something
+        // other than the audio — and this is a far sharper control than "the
+        // sampler is empty and silent", which any broken wire would also pass.
+        r.whatControl = "playing a buffer that differs by one ULP in one sample";
+        r.fillRefControl = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            std::unique_ptr<PluginInstance> inst = refInstantiate(*smpDesc);
+            if (inst) {
+                inst->setStateString(guiSmp->stateString());
+                if (SamplerControl* rsc = inst->sampler()) {
+                    auto copy = std::make_shared<SampleBuffer>(*smpBuf);
+                    copy->data[1000] = std::nextafterf(copy->data[1000], 2.f);
+                    copy->path = rsc->samplePath();
+                    rsc->adopt(copy, rsc->samplePath());
+                }
+                RtChain* ch = refChain();
+                ch->fx[0] = inst.get();
+                ch->count = 1;
+                Command chain;
+                chain.type = Cmd::SetChain; chain.a = 0; chain.p = ch;
+                en.pushCommand(chain);
+                refInsts.push_back(std::move(inst));
+            }
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = midiClip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        if (!parityRender(baseSession, idx++, r)) ++failures;
+    }
+
+    // -----------------------------------------------------------------------
+    // (4) DEVICE STATE: A SPECTRA NAMING A CUSTOM WAVETABLE
+    // -----------------------------------------------------------------------
+    {
+        ParityRun r;
+        r.label  = "4h.4: a Spectra and its custom wavetable, byte for byte";
+        r.what   = "device state — a Spectra naming a custom wavetable";
+        r.frames = 96000;
+        r.fillDaemon = [&](EngineHandle& e, EngineState& s) -> bool {
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { paritySend(e, s, t, a, b, x); },
+                          120.0, false);
+            if (!paritySend(e, s, Cmd::TrackVol, 0, 0, 1.0)) return false;
+            RtChain ch;
+            if (!daemonDevice(e, s, 0, guiSp.get(), ch, 1, 0, 1)) return false;
+            parityPump(e, s, 300);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = midiClip;
+            if (!parityPush(e, s, sc)) return false;
+            parityPump(e, s, 200);
+            return paritySend(e, s, Cmd::LaunchScene, 0);
+        };
+        r.fillRef = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            refDevice(en, 0, *spDesc, wtState, /*sampler=*/false, /*rack=*/false);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = midiClip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        // The control is the FACTORY FALLBACK: the same oscillator on slot 8
+        // with no state naming a table, which is what every wave before the
+        // wavetable wire rendered. If those frames had not crossed, this is
+        // what the daemon's file would be.
+        r.whatControl = "falling back to factory table 0 (no custom table)";
+        r.fillRefControl = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            refDevice(en, 0, *spDesc, std::string(), /*sampler=*/false, /*rack=*/false);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = midiClip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        if (!parityRender(baseSession, idx++, r)) ++failures;
+    }
+
+    // -----------------------------------------------------------------------
+    // (5) A RACK WITH CONTENTS  (protocol v7)
+    // -----------------------------------------------------------------------
+    {
+        ParityRun r;
+        r.label  = "4h.5: a rack's contents — including a device with free-running "
+                   "state — byte for byte";
+        r.what   = "a rack with contents (v7), one of them stateful";
+        r.frames = 96000;
+        r.fillDaemon = [&](EngineHandle& e, EngineState& s) -> bool {
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { paritySend(e, s, t, a, b, x); },
+                          120.0, false);
+            if (!paritySend(e, s, Cmd::TrackVol, 0, 0, 1.0)) return false;
+            RtChain ch;
+            if (!daemonDevice(e, s, 0, guiRack.get(), ch, 0, 1, 0)) return false;
+            parityPump(e, s, 300);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = dcClip;
+            if (!parityPush(e, s, sc)) return false;
+            parityPump(e, s, 200);
+            return paritySend(e, s, Cmd::LaunchScene, 0);
+        };
+        r.fillRef = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            refDevice(en, 0, *rackDesc, rackText, /*sampler=*/false, /*rack=*/true);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = dcClip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        // The control is an EMPTY rack — a passthrough, which is exactly what a
+        // rack was in daemon mode before its contents crossed (v7): a flat 0.5
+        // where the filled one is tanh(0.5) = 0.4621 with a tape moving under
+        // it.
+        r.whatControl = "with an EMPTY rack (the pre-v7 passthrough)";
+        r.fillRefControl = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, false);
+            loc.send(Cmd::TrackVol, 0, 0, 1.0);
+            refDevice(en, 0, *rackDesc, std::string(), /*sampler=*/false, /*rack=*/true);
+            Command sc;
+            sc.type = Cmd::SetClip; sc.a = 0; sc.b = 0; sc.clip = dcClip;
+            en.pushCommand(sc);
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        if (!parityRender(baseSession, idx++, r)) ++failures;
+    }
+
+    // -----------------------------------------------------------------------
+    // (6) ALL OF IT AT ONCE — the set the process split actually has to carry
+    // -----------------------------------------------------------------------
+    //
+    // Four tracks, four payload classes and a signature map in one render, with
+    // the metronome on top so the map is in the mix rather than merely in the
+    // engine. This is the headline: not "each thing crosses" but "a SET
+    // crosses", which is a different claim — the mixer sums four tracks whose
+    // devices were built in another process from declarations this one made,
+    // and every one of the 192 000 samples that comes out is the sample this
+    // process would have produced.
+    {
+        ParityRun r;
+        r.label  = "4h.6: the whole set — clip payloads, two instruments, a rack, "
+                   "a signature map";
+        r.what   = "a whole set: v11 clip + sampler + Spectra + rack + 7/8 + metronome";
+        r.frames = 96000;
+        r.fillDaemon = [&](EngineHandle& e, EngineState& s) -> bool {
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { paritySend(e, s, t, a, b, x); },
+                          120.0, /*metronome=*/true);
+            // 0.3, and the number is load-bearing. At unity this mix peaks at
+            // exactly 1.0 — the master clips, and a clipped sample is 1.0
+            // whatever fed it, which is the one thing that could make two
+            // different renders compare equal. Everything below stays inside
+            // the rails so that every one of the 192 000 samples is a
+            // measurement.
+            for (int t = 0; t < 4; ++t)
+                if (!paritySend(e, s, Cmd::TrackVol, t, 0, 0.3)) return false;
+            Command sig;
+            sig.type = Cmd::SetSignatures; sig.a = 1; sig.p = sevenEight;
+            if (!parityPush(e, s, sig)) return false;
+
+            RtChain chS, chP, chR;
+            if (!daemonDevice(e, s, 1, guiSmp.get(),  chS, 1, 0, 0)) return false;
+            if (!daemonDevice(e, s, 2, guiSp.get(),   chP, 2, 0, 1)) return false;
+            if (!daemonDevice(e, s, 3, guiRack.get(), chR, 2, 1, 1)) return false;
+            parityPump(e, s, 300);
+
+            struct { int track; const RtClip* clip; } cells[4] = {
+                {0, &v11Clip}, {1, &midiClip}, {2, &midiClip}, {3, &dcClip}};
+            for (const auto& c : cells) {
+                Command sc;
+                sc.type = Cmd::SetClip; sc.a = c.track; sc.b = 0; sc.clip = *c.clip;
+                if (!parityPush(e, s, sc)) return false;
+            }
+            parityPump(e, s, 400);
+            if (e.signaturesRefused() || e.deviceStatesRefused() || e.racksRefused())
+                return false;
+            return paritySend(e, s, Cmd::LaunchScene, 0);
+        };
+        r.fillRef = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, true);
+            for (int t = 0; t < 4; ++t) loc.send(Cmd::TrackVol, t, 0, 0.3);
+            Command sig;
+            sig.type = Cmd::SetSignatures; sig.a = 1; sig.p = sevenEight;
+            en.pushCommand(sig);
+            refDevice(en, 1, *smpDesc,  guiSmp->stateString(), true,  false);
+            refDevice(en, 2, *spDesc,   wtState,               false, false);
+            refDevice(en, 3, *rackDesc, rackText,              false, true);
+            struct { int track; const RtClip* clip; } cells[4] = {
+                {0, &v11Clip}, {1, &midiClip}, {2, &midiClip}, {3, &dcClip}};
+            for (const auto& c : cells) {
+                Command sc;
+                sc.type = Cmd::SetClip; sc.a = c.track; sc.b = 0; sc.clip = *c.clip;
+                en.pushCommand(sc);
+            }
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        // One payload removed from the whole set — the rack's contents. A
+        // control that took EVERYTHING out would only prove the set is not
+        // silence; taking out one device three tracks deep proves the
+        // comparison still sees a single track's worth of difference inside a
+        // four-track sum.
+        r.whatControl = "with the rack emptied and nothing else changed";
+        r.fillRefControl = [&](Engine& en) {
+            RefEngineHandle loc{en};
+            parityScalars([&](Cmd t, i32 a, i32 b, f64 x) { loc.send(t, a, b, x); },
+                          120.0, true);
+            for (int t = 0; t < 4; ++t) loc.send(Cmd::TrackVol, t, 0, 0.3);
+            Command sig;
+            sig.type = Cmd::SetSignatures; sig.a = 1; sig.p = sevenEight;
+            en.pushCommand(sig);
+            refDevice(en, 1, *smpDesc,  guiSmp->stateString(), true,  false);
+            refDevice(en, 2, *spDesc,   wtState,               false, false);
+            refDevice(en, 3, *rackDesc, std::string(),         false, true);
+            struct { int track; const RtClip* clip; } cells[4] = {
+                {0, &v11Clip}, {1, &midiClip}, {2, &midiClip}, {3, &dcClip}};
+            for (const auto& c : cells) {
+                Command sc;
+                sc.type = Cmd::SetClip; sc.a = c.track; sc.b = 0; sc.clip = *c.clip;
+                en.pushCommand(sc);
+            }
+            loc.send(Cmd::LaunchScene, 0);
+        };
+        if (!parityRender(baseSession, idx++, r)) ++failures;
+    }
+
+    CHECK(failures == 0,
+          "every payload class the process split carries renders BIT-IDENTICALLY "
+          "in nxtaktd and in this process (%d of %d runs differed)", failures, idx);
+
+    std::remove(wtPath);
 }
 
 int main() {
@@ -1376,6 +2415,15 @@ int main() {
             // is the rack wave's proof shape: the same number on both sides, not
             // "it made a sound".
             //
+            // A BOUND, AND STILL A BOUND ON PURPOSE. What `loaded` is, is a
+            // meter — one f32 per 256 frames, decayed 0.72 per block — read off
+            // a daemon whose driver is the wall clock, so there is no
+            // arrangement of this leg that could byte-compare anything. The
+            // byte-exact version of this same payload is STEP 4h.3, which runs
+            // an offline daemon and compares the two WAVs with memcmp; this leg
+            // is the realtime path's version of the claim and neither implies
+            // the other.
+            //
             // The device is rendered directly rather than through an Engine on
             // purpose — an in-process Engine would add a mixer, a meter's
             // ballistics and a scheduling phase to a comparison that is about
@@ -1408,7 +2456,8 @@ int main() {
             }
             CHECK(localPeak > 0.4f, "the in-process patch peaks at %.4f", (double)localPeak);
             CHECK(std::fabs(loaded - localPeak) < 0.01f,
-                  "AND THE TWO AGREE: daemon %.4f vs in-process %.4f",
+                  "AND THE TWO AGREE on the realtime path: daemon %.4f vs "
+                  "in-process %.4f (step 4h.3 is the byte-exact version)",
                   (double)loaded, (double)localPeak);
 
             // --- an INDEPENDENT client, measuring the daemon's own meter -----
@@ -1978,29 +3027,30 @@ int main() {
                 for (size_t i = localRender.size() * 2 / 3; i < localRender.size(); ++i)
                     localPeak = std::fmax(localPeak, std::fabs(localRender[i]));
 
-                // BIT-IDENTITY, WHERE BIT-IDENTITY IS ACHIEVABLE, and this
-                // paragraph is the finding as much as the check is.
+                // BIT-IDENTITY IN THIS PROCESS, and the cross-process half of
+                // the claim has MOVED rather than gone missing.
                 //
-                // The gate asked for was a cmp-identical render of a
-                // custom-table patch from the DAEMON against one from this
-                // process. It is not achievable in this tree and the reason has
-                // nothing to do with wavetables: the daemon's frames never cross
-                // the boundary at all. It renders into a driver, the null driver
-                // runs against the wall clock, and the only audio number this
-                // side can read is a decaying meter — which is why step 4f's
-                // cross-boundary legs are BOUNDS and say so. Capturing the
-                // daemon's output would need a file/offline driver in nxtaktd,
-                // which is a wire feature to design on its own.
+                // What stood here said a cmp-identical render of a custom-table
+                // patch from the DAEMON against one from this process was "not
+                // achievable in this tree", because the daemon's frames never
+                // crossed the boundary and capturing them "would need a
+                // file/offline driver in nxtaktd, which is a wire feature to
+                // design on its own". That was true when it was written and it
+                // is the thing that got built: `--driver file:PATH`
+                // (src/daemon/nxtaktd.cpp) renders on a frame count instead of a
+                // clock, and STEP 4h.4 runs exactly this patch — this table,
+                // this state string — through a real nxtaktd and compares the
+                // 768 044 bytes it wrote against this process's, with a control
+                // that renders the factory fallback and must differ. The
+                // "remaining gap" that paragraph named is closed.
                 //
-                // What IS achievable, and is what the gate was really about, is
-                // that the mip chain is a deterministic function of the frames
-                // and the frames that cross the wire are the ones that were
-                // hashed. Both are checked: the render is bit-identical run to
-                // run below, ipc_test §13 proves the pool round trip is
-                // byte-exact and hashes to the same identity on the other side,
-                // and the daemon's wt::ingest() recomputes the hash before it
-                // will play a single sample. The remaining gap is a transport,
-                // not an arithmetic.
+                // What is still checked HERE is the arithmetic underneath it,
+                // which is a separate claim and the cheaper one to localise: the
+                // mip chain is a deterministic function of the frames, so two
+                // instances resolving one hash render identically. Beside it,
+                // ipc_test §13 proves the pool round trip is byte-exact and the
+                // daemon's wt::ingest() recomputes the hash before it will play
+                // a single sample.
                 std::vector<f32> again;
                 std::unique_ptr<PluginInstance> ref3 = reg.instantiate(*spDesc, eng.sampleRate(), 1024);
                 if (ref3) {
@@ -2018,8 +3068,9 @@ int main() {
             }
             CHECK(localPeak > 1e-4f, "the in-process patch peaks at %.4f", (double)localPeak);
             CHECK(std::fabs(daemonPeak - localPeak) < 0.01f,
-                  "AND THE TWO AGREE: daemon %.4f vs in-process %.4f — the same "
-                  "table, one of them through the pool",
+                  "AND THE TWO AGREE on the realtime path: daemon %.4f vs "
+                  "in-process %.4f — the same table, one of them through the "
+                  "pool (step 4h.4 is the byte-exact version)",
                   (double)daemonPeak, (double)localPeak);
 
             // Clearing: the state goes back to naming nothing, the oscillator
@@ -2450,25 +3501,37 @@ int main() {
     //
     // The rest is the audio, three legs, each measured against the SAME RtClip
     // rendered by an in-process engine. Every leg is a BOUND (|daemon - local|
-    // < 0.01) and not a comparison of frames, and the reason is structural
-    // rather than a tolerance somebody settled for:
+    // < 0.01) and not a comparison of frames.
     //
-    //   * THE DAEMON'S FRAMES NEVER CROSS THE BOUNDARY. What comes back over
-    //     the wire is the snapshot — block-decayed meters and counters — so
-    //     there is no frame stream on this side of it to diff. (The recording
-    //     section is the exception and it is an exception on purpose: a take is
-    //     the one payload the engine hands back sample for sample.)
-    //   * AND THE TWO STREAMS ARE NOT ALIGNABLE ANYWAY. nxtaktd's null driver
-    //     renders against the WALL CLOCK: it computes how many blocks are due
-    //     from CLOCK_MONOTONIC and renders that many, so the number of blocks
-    //     between the launch and any given instant is a property of the machine
-    //     and of nothing else. There is no frame k on one side that is frame k
-    //     on the other.
+    // THAT USED TO BE A STRUCTURAL LIMIT AND IT IS NOT ONE ANY MORE. What stood
+    // here said that the daemon's frames never cross the boundary, that its
+    // driver runs against the wall clock, and that "capturing daemon output
+    // would need a file/offline driver in nxtaktd, which is a wire feature to
+    // design on its own". That driver now exists — `--driver file:PATH`,
+    // src/daemon/nxtaktd.cpp — and STEP 4h renders exactly these three payloads
+    // through a real nxtaktd and compares the WAV it wrote against one this
+    // process wrote, byte for byte, with a negative control proving the
+    // comparison would have caught the difference. The claim this section could
+    // not make is made there, in frames, and it is green.
     //
-    // A PEAK survives both, because every clip here is DC by construction: its
-    // level is a property of the material and of the payload under test, not of
-    // where the render happened to start. Bit-identity IS claimed, once, where
-    // it is achievable — leg (a) rendered twice in-process and memcmp'd.
+    // WHAT KEEPS THESE THREE LEGS AS BOUNDS, THEN, IS A DIFFERENT THING: THEY
+    // MEASURE A DIFFERENT DAEMON. The daemon under test here is the suite's
+    // long-lived one, running the NULL driver at the wall clock — the shape a
+    // user actually plays into. What crosses from it is the snapshot: a master
+    // meter published once per block and decayed by 0.72 each time. A meter is
+    // a lossy four-byte summary of 256 frames, so no arrangement of this
+    // section could ever byte-compare it against anything; the bound is what a
+    // meter can support, and it is now the WEAKER of two claims rather than the
+    // only one available.
+    //
+    // Both are worth having. This one says the payload survives the realtime
+    // path, with an audio thread, a client polling, and blocks arriving when
+    // the scheduler feels like it. 4h says the payload survives the boundary
+    // exactly. Neither implies the other.
+    //
+    // A PEAK survives the meter, because every clip here is DC by construction:
+    // its level is a property of the material and of the payload under test,
+    // not of where the render happened to start.
     banner("step 4f: clip envelopes, warp markers and transients cross (v11)");
     {
         // Track 2, slot 2: track 0 carries the session clip step 6 relaunches
@@ -2721,8 +3784,9 @@ int main() {
               "the daemon plays the clip envelope: master peak %.4f, and 0.5 DC "
               "through a lane held at 0.25 is 0.125", (double)envDaemon);
         CHECK(std::fabs(envDaemon - envLocal) < 0.01f,
-              "AND THE TWO AGREE: daemon %.4f vs in-process %.4f — the same "
-              "RtAutoSet, one of them through the pool",
+              "AND THE TWO AGREE on the realtime path: daemon %.4f vs "
+              "in-process %.4f — the same RtAutoSet, one of them through the "
+              "pool (step 4h.2 is the byte-exact version)",
               (double)envDaemon, (double)envLocal);
 
         RtClip envOff = envClip;
@@ -2798,7 +3862,8 @@ int main() {
               "them, off the same buffer and the same loop window",
               (double)warpDaemon, (double)warpNone);
         CHECK(std::fabs(warpDaemon - warpLocal) < 0.01f,
-              "AND THE TWO AGREE: daemon %.4f vs in-process %.4f",
+              "AND THE TWO AGREE on the realtime path: daemon %.4f vs "
+              "in-process %.4f (step 4h.2 is the byte-exact version)",
               (double)warpDaemon, (double)warpLocal);
 
         // --- 3c. THE TRANSIENT GRID: where the grains start -----------------
@@ -2859,8 +3924,9 @@ int main() {
               "transients, %.4f without them, off the same %lld frames",
               (double)trDaemon, (int)grid.size(), (double)trNone, (long long)kTwoSec);
         CHECK(std::fabs(trDaemon - trLocal) < 0.01f,
-              "AND THE TWO AGREE: daemon %.4f vs in-process %.4f — grain "
-              "scheduling in another process, off a grid this one wrote",
+              "AND THE TWO AGREE on the realtime path: daemon %.4f vs "
+              "in-process %.4f — grain scheduling in another process, off a "
+              "grid this one wrote (step 4h.2 is the byte-exact version)",
               (double)trDaemon, (double)trLocal);
 
         // --- 5. nothing was refused over the whole of it -------------------
@@ -3318,6 +4384,13 @@ int main() {
         ::setenv("NXTAKT_ENGINE", "daemon", 1);
         ::setenv("NXTAKT_SESSION", session, 1);
     }
+
+    // LAST, and deliberately: it spawns its own daemons with an offline driver,
+    // renders through them, and compares the result to this process's engine
+    // byte for byte. `reg` is the registry step 4b scanned — the parity runs
+    // build model instances from it and the reference instances they are
+    // compared against, and re-scanning would cost a second for nothing.
+    testOfflineParity(session, reg);
 
     std::printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;

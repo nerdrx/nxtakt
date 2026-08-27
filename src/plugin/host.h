@@ -579,10 +579,70 @@ public:
     virtual ~WavetableControl() = default;
     virtual bool importFile(int osc, const char* path) = 0;   // GUI thread
     virtual bool hasCustom(int osc) const = 0;
+
+    // Display only, and NEVER identity. v5 WIDENS its resolution order, and the
+    // widening is a strict superset of what it did:
+    //
+    //   1. the `wtname` state record, if one is set;
+    //   2. basename(wtpath), if a path is present   -- v3's behaviour;
+    //   3. the bare 16-hex content hash             -- v3's behaviour.
+    //
+    // Every table that has no name displays exactly what it displayed before.
+    // There is deliberately no second method that answers the same question
+    // slightly better: a contract with two answers in it is a contract with an
+    // argument in it.
     virtual const char* customName(int osc) const = 0;        // basename, display
     virtual int  customFrames(int osc) const = 0;
     virtual void clearCustom(int osc) = 0;
     virtual const char* lastError() const = 0;
+
+    // -----------------------------------------------------------------------
+    // v5 -- THE WAVETABLE EDITOR'S FIVE.
+    //
+    // docs/SPECTRA-PARAMS.md, "Host contract -- five additions to
+    // WavetableControl". APPEND-ONLY, and every one of them carries a default,
+    // so a backend that does not draw is already correct without being touched
+    // -- the discipline savePreset() and factoryPresetCount() established.
+    //
+    // GUI THREAD, all five. Reading frames, building ten mip levels per frame
+    // and folding a hash allocate and take tens of milliseconds; none of this
+    // is reachable from the audio thread, and none of it is reachable from
+    // nxtaktd, because THE DAEMON NEVER DRAWS.
+    // -----------------------------------------------------------------------
+
+    // Copies this oscillator's resolved table into `out` as 32 * 2048 floats,
+    // frame-major, STRETCHED to 32 frames by the same linear frame-axis
+    // interpolation the mip builder performs when the resolved table has fewer.
+    // False, and `out` untouched, when this oscillator has no resolved custom
+    // table.
+    virtual bool readFrames(int osc, f32* out) const { (void)osc; (void)out; return false; }
+
+    // Build and publish a PREVIEW from `frames` (32 * 2048, frame-major).
+    // Touches no hash, no file and no state record: what stateString() names
+    // does not move. False if any sample is non-finite, if the oscillator has
+    // no handle, or if the caller is inside the minimum preview interval --
+    // which is `max(50 ms, 2 * maxBlock / sampleRate)` and is RATE-LIMITED BY
+    // THE CONTRACT, NOT BY THE CALLER.
+    virtual bool previewFrames(int osc, const f32* frames) { (void)osc; (void)frames; return false; }
+
+    // The nine-step commit: canonicalise (finite, per-frame DC removal, set
+    // peak, refuse silence, one set-wide gain), hash, write the drawn file
+    // atomically into the user's wavetable library, adopt, build, publish, and
+    // rewrite wt/wtpath/wtname. `name` may be null or empty for no name.
+    // False with lastError() set, and NOTHING CHANGED, on any refusal.
+    virtual bool commitFrames(int osc, const f32* frames, const char* name) {
+        (void)osc; (void)frames; (void)name;
+        return false;
+    }
+
+    // Drop any preview and republish the committed table. Idempotent.
+    virtual void cancelPreview(int osc) { (void)osc; }
+
+    // Set or clear the display name of this oscillator's custom table. Content
+    // is unchanged, so IDENTITY IS UNCHANGED: a rename writes no file and
+    // produces no new hash. Null or empty clears. False if the name is over 64
+    // bytes or holds a control byte.
+    virtual bool setCustomName(int osc, const char* name) { (void)osc; (void)name; return false; }
 };
 
 // Backend entry points. One pair per format; host.cpp dispatches to them.

@@ -7,8 +7,14 @@
 // yet, so this binary is currently exercised by tests/daemon_test.cpp and by
 // hand.
 //
-//   nxtaktd [--session NAME] [--driver null|auto|jack|alsa]
-//            [--rate HZ] [--block FRAMES] [--verbose]
+//   nxtaktd [--session NAME] [--driver null|auto|jack|alsa|file:PATH]
+//            [--frames N | --beats N] [--rate HZ] [--block FRAMES] [--verbose]
+//
+// `--driver file:PATH` is the OFFLINE driver (see FileDriver below): it renders
+// as fast as the machine will go into a 32-bit float WAV, starts when the
+// transport does, stops on a COUNT rather than a clock, and exits. It is what
+// makes the daemon's audio comparable byte for byte against an in-process
+// render, and it doubles as an honest offline bounce.
 //
 // THE ONE PLACE A NUMBER BECOMES A POINTER
 // ----------------------------------------
@@ -25,8 +31,9 @@
 //
 // Three threads:
 //
-//   audio     Engine::process(). A real backend's callback thread, or the null
-//             driver's cadence thread. Never touches the region.
+//   audio     Engine::process(). A real backend's callback thread, the null
+//             driver's cadence thread, or the file driver's render thread.
+//             Never touches the region.
 //   pump      main(). Drains the command ring into the engine, the engine's
 //             events into the event ring, and the MIDI ring into the engine.
 //             This is the thread that plays the GUI's role in the in-process
@@ -76,8 +83,10 @@
 #include "../plugin/wavetable_io.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -252,15 +261,354 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// A RIFF/WAVE writer, 32-bit float, interleaved
+// ---------------------------------------------------------------------------
+//
+// nxtaktd links no sndfile and this does not change that (the Makefile's
+// DAEMON_SRC says so and means it). It does not need one either: the format is
+// the narrowest useful case and the header is 44 bytes of little-endian
+// integers written by hand.
+//
+// FLOAT, NOT PCM. tools/render.cpp writes PCM_24 because a bounce is something
+// a person listens to; this file exists to be COMPARED, and float32 is the
+// engine's own output verbatim. A quantiser between the samples and the bytes
+// would mean a byte difference could be a rounding difference, and then `cmp`
+// would no longer be a statement about the audio. It is one here: two files
+// differ iff two f32 samples differ.
+//
+// Every integer is written byte by byte rather than by memcpy'ing a u32, so the
+// file is little-endian because this code says so and not because the machine
+// happens to be.
+class WavWriter {
+public:
+    bool open(const char* path, u32 rate, u32 channels) {
+        rate_ = rate;
+        chans_ = channels;
+        f_ = std::fopen(path, "wb");
+        if (!f_) return false;
+        // A header for zero frames, rewritten by close() with the true count.
+        // Written now rather than seeked past so that a render killed halfway
+        // leaves a file that says "empty" instead of one that says nothing.
+        return writeHeader(0);
+    }
+
+    bool write(const f32* interleaved, u64 frames) {
+        if (!f_) return false;
+        const size_t n = (size_t)frames * chans_;
+        // The engine's f32 is IEEE-754 binary32 and so is the file's, so the
+        // samples go out as raw bytes. The one thing that would make this
+        // machine-dependent is byte order, and that is asserted rather than
+        // assumed: there is no big-endian build of this daemon, and if there
+        // ever is, this is the line that has to grow a swap.
+        static_assert(sizeof(f32) == 4, "a float sample must be 4 bytes");
+        if (std::fwrite(interleaved, sizeof(f32), n, f_) != n) return false;
+        frames_ += frames;
+        return true;
+    }
+
+    // Rewrites the two length fields and closes. Returns false if anything
+    // along the way failed, which the caller turns into a non-zero exit rather
+    // than a silently short file.
+    bool close() {
+        if (!f_) return false;
+        bool ok = std::fseek(f_, 0, SEEK_SET) == 0 && writeHeader(frames_);
+        if (std::fclose(f_) != 0) ok = false;
+        f_ = nullptr;
+        return ok;
+    }
+
+    ~WavWriter() { if (f_) std::fclose(f_); }
+
+    u64 frames() const { return frames_; }
+
+private:
+    void u32le(u32 v) {
+        const u8 b[4] = {(u8)(v & 0xff), (u8)((v >> 8) & 0xff),
+                         (u8)((v >> 16) & 0xff), (u8)((v >> 24) & 0xff)};
+        std::fwrite(b, 1, 4, f_);
+    }
+    void u16le(u16 v) {
+        const u8 b[2] = {(u8)(v & 0xff), (u8)((v >> 8) & 0xff)};
+        std::fwrite(b, 1, 2, f_);
+    }
+
+    bool writeHeader(u64 frames) {
+        const u32 bytesPerFrame = chans_ * 4u;
+        // Clamped rather than wrapped: a RIFF size field is 32 bits, so a
+        // render longer than 4 GiB cannot be described by this container at
+        // all. Saying so is the caller's job (renderFrames is checked at parse
+        // time); what must not happen here is a truncated field that makes a
+        // 5 GiB file claim to be a small one.
+        const u64 dataBytes64 = frames * bytesPerFrame;
+        const u32 dataBytes = dataBytes64 > 0xFFFFFFF0ull ? 0xFFFFFFF0u : (u32)dataBytes64;
+        std::fwrite("RIFF", 1, 4, f_);
+        u32le(36u + dataBytes);
+        std::fwrite("WAVE", 1, 4, f_);
+        std::fwrite("fmt ", 1, 4, f_);
+        u32le(16);                        // PCM-shaped fmt chunk
+        u16le(3);                         // WAVE_FORMAT_IEEE_FLOAT
+        u16le((u16)chans_);
+        u32le(rate_);
+        u32le(rate_ * bytesPerFrame);     // byte rate
+        u16le((u16)bytesPerFrame);        // block align
+        u16le(32);                        // bits per sample
+        std::fwrite("data", 1, 4, f_);
+        u32le(dataBytes);
+        return std::ferror(f_) == 0;
+    }
+
+    FILE* f_ = nullptr;
+    u32   rate_ = 48000, chans_ = 2;
+    u64   frames_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// The file driver  --  `--driver file:PATH`
+// ---------------------------------------------------------------------------
+//
+// WHY IT EXISTS
+// -------------
+// Every cross-process audio claim this project makes is a level match to four
+// decimals, and it is a level match for one structural reason: the daemon's
+// FRAMES NEVER CROSS THE BOUNDARY. It renders into a driver, the null driver
+// renders against the wall clock, and the only audio number a client can read
+// is a block-decayed meter. There is no frame k on this side that is frame k on
+// the other, so `cmp` was not available and a bound was the honest thing to
+// write (tests/handle_test.cpp step 4f says so at length).
+//
+// This driver is the missing transport. It renders the engine as fast as the
+// machine will go, writes the master bus to a WAV, and stops on a COUNT — never
+// on a clock. That makes the daemon's output a file, and a file can be compared
+// byte for byte against one an in-process engine wrote from the same set.
+//
+// It is also, and for free, an honest offline bounce: `nxtaktd --driver
+// file:out.wav --frames N` on a session a GUI has filled in renders that set
+// through the same engine, the same plugins and the same mixer that would have
+// played it.
+//
+// WHAT DIFFERS FROM THE REALTIME PATH, AND WHY NONE OF IT REACHES THE SAMPLES
+// --------------------------------------------------------------------------
+//   1. NO CLOCK. Blocks run back to back instead of on a deadline. The engine's
+//      only time base is frames rendered — beat_ advances by nframes/sr, never
+//      by anything it reads from a clock — so the wall time a block happens at
+//      is not an input to a single sample. (Engine::process does take a
+//      steady_clock reading; it feeds the published CPU-load figure and nothing
+//      else.)
+//   2. NO DEVICE, so no xrun to report and no SCHED_FIFO to ask for. Both are
+//      properties of a stream that can fall behind, and this one cannot.
+//   3. INPUT IS SILENCE — a null inL/inR, exactly as the null driver passes
+//      without NXTAKT_DEBUG_INPUT. An audio TAKE therefore records silence
+//      here. That is a property of the source, not of the driver.
+//   4. BEFORE THE RENDER IS ARMED the driver calls Engine::process() with
+//      nframes = 0. See armTransport() below for why that is provably a no-op
+//      on everything the render is a function of.
+//   5. WHILE THE RENDER IS IN FLIGHT THE PUMP DOES NOT PUSH TO THE ENGINE. The
+//      render is a closed system; see Daemon::pumpLoop().
+//
+// What is emphatically NOT different is the engine path: this thread calls
+// Engine::process() with the same signature, the same block size and the same
+// allocation-free, lock-free contract the audio thread does. If it did not, it
+// would prove nothing about what users hear.
+//
+// DETERMINISM IS THE WHOLE POINT
+// ------------------------------
+// Same set + same rate + same block + same frame count = same bytes, on any
+// machine, at any speed. Everything above is written to keep that true, and the
+// gate in tests/handle_test.cpp is what holds it to it.
+class FileDriver {
+public:
+    // How long the unarmed loop sleeps between drain calls. Short enough that a
+    // client filling the command ring never waits perceptibly, long enough that
+    // an idle daemon is not a spin. Neither number can reach the samples: the
+    // calls it paces render nothing.
+    static constexpr long kIdleNs = 200000;      // 0.2 ms
+
+    bool start(Engine& e, f64 sampleRate, int block, const char* path,
+               i64 frames, f64 beats) {
+        engine_ = &e;
+        sr_     = sampleRate;
+        block_  = block;
+        path_   = path;
+        wantFrames_ = frames;
+        wantBeats_  = beats;
+        l_.assign((size_t)block_, 0.f);
+        r_.assign((size_t)block_, 0.f);
+        inter_.assign((size_t)block_ * 2, 0.f);
+
+        // Proven writable before the region is published, so a client never
+        // builds a whole set against a daemon that was always going to fail at
+        // the last step. The header this leaves behind is rewritten at the end.
+        if (!wav_.open(path_.c_str(), (u32)sr_, 2)) {
+            LOGE("file driver: cannot write '%s': %s", path_.c_str(), std::strerror(errno));
+            return false;
+        }
+
+        engine_->prepare(sr_, block_);
+        run_.store(true, std::memory_order_release);
+        thread_ = std::thread(&FileDriver::loop, this);
+        if (wantFrames_ >= 0)
+            LOGI("file driver up: %.0f Hz, %d frames/block, %lld frames -> '%s' "
+                 "(waiting for the transport to start)",
+                 sr_, block_, (long long)wantFrames_, path_.c_str());
+        else
+            LOGI("file driver up: %.0f Hz, %d frames/block, %.4f beats -> '%s' "
+                 "(waiting for the transport to start)",
+                 sr_, block_, wantBeats_, path_.c_str());
+        return true;
+    }
+
+    // Pump thread. Called once, at the end of the tick in which the transport
+    // was started, and only when the daemon has nothing left to hand the engine
+    // — see Daemon::pumpLoop(), which owns that judgement.
+    void arm() { arm_.store(true, std::memory_order_release); }
+
+    // The closed-system gate. True from the instant arm() lands, which is why
+    // it is the flag the pump reads and not `rendering_`: what must not happen
+    // is a command being pushed BETWEEN the arm and the first block.
+    bool armed() const { return arm_.load(std::memory_order_acquire); }
+
+    // The file on disk is complete. Acquire against the release in loop(),
+    // which is stored AFTER fclose() — a reader that saw this before the close
+    // would be reading a file with an unwritten tail. Same rule as every other
+    // counter in this daemon that arrives "with an event".
+    bool finished() const { return done_.load(std::memory_order_acquire); }
+    bool ok() const { return ok_.load(std::memory_order_relaxed); }
+    u64  framesWritten() const { return frames_.load(std::memory_order_relaxed); }
+    const char* path() const { return path_.c_str(); }
+
+    void stop() {
+        if (!run_.exchange(false)) return;
+        if (thread_.joinable()) thread_.join();
+    }
+
+    ~FileDriver() { stop(); }
+
+private:
+    void loop() {
+        // -- PHASE 1: unarmed ------------------------------------------------
+        //
+        // Engine::process() with nframes = 0 is the engine's own documented
+        // early-out: it flushes parked events, DRAINS THE COMMAND RING, then
+        // `if (n <= 0) { publish(); return; }`. No audio is written, no musical
+        // time passes, no voice is stepped, no plugin is called and no meter
+        // decays. So the number of these calls — which is a property of how
+        // long the client took to build its set, and of nothing else — cannot
+        // reach a single rendered sample. That is the argument that makes the
+        // whole file deterministic, and it is worth spelling out because the
+        // obvious alternative is not:
+        //
+        //   * Rendering real blocks while unarmed would advance every stateful
+        //     device (an LFO's phase, a delay line's cursor) by a count that
+        //     depends on the machine. The render would then be a function of
+        //     how fast the client was.
+        //   * Not calling process() at all would leave the engine's 1024-deep
+        //     command ring to fill and never drain, and the pump would wedge on
+        //     any set larger than that — tools/render.cpp measures a 32x32 set
+        //     at about 1155 commands, so this is not a corner case.
+        //
+        // The zero-frame call is the one option that drains without rendering.
+        while (run_.load(std::memory_order_relaxed) &&
+               !arm_.load(std::memory_order_acquire)) {
+            engine_->process(nullptr, nullptr, l_.data(), r_.data(), 0);
+            timespec ts{0, kIdleNs};
+            ::nanosleep(&ts, nullptr);
+        }
+        if (!run_.load(std::memory_order_relaxed)) { finish(false); return; }
+
+        // -- how long ---------------------------------------------------------
+        //
+        // A COUNT, resolved once, here. --frames is already one; --beats is
+        // turned into one against the tempo the engine is holding at the moment
+        // the transport starts, which is a value the client set and not one the
+        // machine did. A render whose length depended on how fast the box was
+        // would not be a gate.
+        u64 total = 0;
+        if (wantFrames_ >= 0) {
+            total = (u64)wantFrames_;
+        } else {
+            const f64 tempo = engine_->tempo.load(std::memory_order_relaxed);
+            const f64 t = (tempo >= 20.0 && tempo <= 999.0) ? tempo : 120.0;
+            total = (u64)std::llround(wantBeats_ * 60.0 / t * sr_);
+            LOGI("file driver: %.4f beats at %.3f BPM is %llu frames",
+                 wantBeats_, t, (unsigned long long)total);
+        }
+
+        // -- PHASE 2: the counted render ---------------------------------------
+        u64 done = 0;
+        bool wrote = true;
+        while (run_.load(std::memory_order_relaxed) && done < total) {
+            const u64 left = total - done;
+            const int n = left < (u64)block_ ? (int)left : block_;
+            engine_->process(nullptr, nullptr, l_.data(), r_.data(), n);
+            for (int i = 0; i < n; ++i) {
+                inter_[(size_t)i * 2]     = l_[(size_t)i];
+                inter_[(size_t)i * 2 + 1] = r_[(size_t)i];
+            }
+            if (!wav_.write(inter_.data(), (u64)n)) {
+                LOGE("file driver: write failed after %llu frames: %s",
+                     (unsigned long long)done, std::strerror(errno));
+                wrote = false;
+                break;
+            }
+            done += (u64)n;
+            frames_.store(done, std::memory_order_relaxed);
+        }
+        finish(wrote && done == total);
+    }
+
+    // Closes the file, THEN publishes. The order is the rule this project
+    // learned the hard way (a failed release gate): a flag documented as
+    // arriving with an event is stored after the event, release-ordered, so a
+    // reader that sees the flag sees everything it vouches for. Here the
+    // "event" is a complete WAV on disk.
+    void finish(bool rendered) {
+        const bool closed = wav_.close();
+        ok_.store(rendered && closed, std::memory_order_relaxed);
+        done_.store(true, std::memory_order_release);
+        if (rendered && closed)
+            LOGI("file driver: %llu frames written to '%s'",
+                 (unsigned long long)frames_.load(std::memory_order_relaxed), path_.c_str());
+        else if (!closed)
+            LOGE("file driver: '%s' did not close cleanly; the render is incomplete",
+                 path_.c_str());
+    }
+
+    Engine*          engine_ = nullptr;
+    f64              sr_     = 48000.0;
+    int              block_  = 256;
+    std::string      path_;
+    i64              wantFrames_ = -1;
+    f64              wantBeats_  = -1.0;
+    std::vector<f32> l_, r_, inter_;
+    WavWriter        wav_;
+    std::thread      thread_;
+    std::atomic<bool> run_{false};
+    std::atomic<bool> arm_{false};
+    std::atomic<bool> done_{false};
+    std::atomic<bool> ok_{false};
+    std::atomic<u64>  frames_{0};
+};
+
+// ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
 
 struct Options {
     const char* session = "default";
-    const char* driver  = nullptr;   // null / auto / jack / alsa
-    f64  rate    = 48000.0;          // null driver only; a device dictates its own
+    const char* driver  = nullptr;   // null / auto / jack / alsa / file:PATH
+    f64  rate    = 48000.0;          // null and file drivers; a device dictates its own
     int  block   = 256;              // ditto
     bool verbose = false;
+    // True when --driver came from argv rather than from the environment. The
+    // file driver is argv-only on purpose: $NXTAKT_AUDIO is inherited by every
+    // daemon the GUI spawns, and a stray `file:` in an exported variable would
+    // turn a user's session into a silent one-shot bounce that exits. A knob
+    // that can only be set deliberately cannot do that.
+    bool driverFromArgv = false;
+    // --frames / --beats. Exactly one is required by the file driver and
+    // neither is legal without it. -1 means "not given".
+    i64  renderFrames = -1;
+    f64  renderBeats  = -1.0;
 };
 
 void usage() {
@@ -269,13 +617,25 @@ void usage() {
         "\n"
         "  --session NAME     session id; the control region is /nxtakt-engine-NAME\n"
         "                     (default: $NXTAKT_SESSION, else \"default\")\n"
-        "  --driver KIND      null | auto | jack | alsa   (default: $NXTAKT_AUDIO, else auto)\n"
+        "  --driver KIND      null | auto | jack | alsa | file:PATH\n"
+        "                     (default: $NXTAKT_AUDIO, else auto)\n"
         "                     ($LATTICE_SESSION / $LATTICE_AUDIO are still read too)\n"
         "                     null renders at block cadence with no audio device\n"
-        "  --rate HZ          null driver sample rate (default 48000)\n"
-        "  --block FRAMES     null driver block size   (default 256)\n"
+        "                     file:PATH renders AS FAST AS IT CAN into a 32-bit\n"
+        "                     float WAV and exits. The render starts when the\n"
+        "                     transport does and stops on a COUNT, never a timer,\n"
+        "                     so the same set gives the same bytes on any machine.\n"
+        "                     Command line only — not honoured from $NXTAKT_AUDIO.\n"
+        "  --frames N         file driver: render exactly N frames\n"
+        "  --beats  N         file driver: render N beats at the tempo in force\n"
+        "                     when the transport starts (exactly one of the two)\n"
+        "  --rate HZ          null/file driver sample rate (default 48000)\n"
+        "  --block FRAMES     null/file driver block size   (default 256)\n"
         "  --verbose          log every rejected command\n"
-        "  --help\n");
+        "  --help\n"
+        "\n"
+        "  offline bounce:  nxtaktd --session S --driver file:out.wav --frames 192000\n"
+        "                   then fill session S from a client and start the transport.\n");
 }
 
 bool parseArgs(int argc, char** argv, Options& o) {
@@ -287,8 +647,23 @@ bool parseArgs(int argc, char** argv, Options& o) {
             return true;
         };
         if (!std::strcmp(a, "--session")) { if (!value(&o.session)) return false; }
-        else if (!std::strcmp(a, "--driver")) { if (!value(&o.driver)) return false; }
-        else if (!std::strcmp(a, "--rate")) {
+        else if (!std::strcmp(a, "--driver")) {
+            if (!value(&o.driver)) return false;
+            o.driverFromArgv = true;
+        }
+        else if (!std::strcmp(a, "--frames")) {
+            const char* v = nullptr;
+            if (!value(&v)) return false;
+            char* end = nullptr;
+            o.renderFrames = (i64)std::strtoll(v, &end, 10);
+            if (end == v || *end) { LOGE("--frames '%s' is not a number", v); return false; }
+        } else if (!std::strcmp(a, "--beats")) {
+            const char* v = nullptr;
+            if (!value(&v)) return false;
+            char* end = nullptr;
+            o.renderBeats = std::strtod(v, &end);
+            if (end == v || *end) { LOGE("--beats '%s' is not a number", v); return false; }
+        } else if (!std::strcmp(a, "--rate")) {
             const char* v = nullptr;
             if (!value(&v)) return false;
             o.rate = std::strtod(v, nullptr);
@@ -302,6 +677,46 @@ bool parseArgs(int argc, char** argv, Options& o) {
     }
     if (o.rate < 8000.0 || o.rate > 384000.0) { LOGE("--rate %.0f out of range", o.rate); return false; }
     if (o.block < 16 || o.block > kMaxBlock)  { LOGE("--block %d out of range", o.block); return false; }
+
+    // -- the file driver's own arguments, checked here and not at the driver --
+    //
+    // Fail at parse time, before a region is claimed and before a client can
+    // attach: a daemon that comes up, takes a whole set and only then discovers
+    // it has no idea how long to render is the worst available shape.
+    const bool wantsFile = o.driver && !std::strncmp(o.driver, "file:", 5);
+    const bool haveCount = o.renderFrames >= 0 || o.renderBeats >= 0.0;
+    if (wantsFile) {
+        if (o.driver[5] == '\0') {
+            LOGE("--driver file: needs a path, e.g. --driver file:/tmp/bounce.wav");
+            return false;
+        }
+        if (o.renderFrames >= 0 && o.renderBeats >= 0.0) {
+            LOGE("--frames and --beats are two answers to one question; give one");
+            return false;
+        }
+        if (!haveCount) {
+            LOGE("--driver file: needs --frames N or --beats N. A render that "
+                 "stopped on a timer would depend on how fast this machine is, "
+                 "which is exactly what an offline driver exists to remove");
+            return false;
+        }
+        if (o.renderFrames == 0 || (o.renderBeats >= 0.0 && o.renderBeats <= 0.0)) {
+            LOGE("a render of nothing is not a render");
+            return false;
+        }
+        // The RIFF container's size fields are 32 bits, so an f32 stereo file
+        // stops describing itself past ~536 million frames (about 3.1 hours at
+        // 48 kHz). Refused rather than silently wrapped.
+        if (o.renderFrames > 536870000ll) {
+            LOGE("--frames %lld is past what a RIFF/WAVE size field can describe "
+                 "(max 536870000 for 32-bit float stereo)", (long long)o.renderFrames);
+            return false;
+        }
+        if (o.renderBeats > 1e7) { LOGE("--beats %.0f is not a render", o.renderBeats); return false; }
+    } else if (haveCount) {
+        LOGE("--frames/--beats only mean something with --driver file:PATH");
+        return false;
+    }
     return true;
 }
 
@@ -371,7 +786,12 @@ public:
 
         map_.state->init(sr_, (u32)block_);
         map_.state->engineState.store(ipc::SharedState::StateRunning, std::memory_order_relaxed);
-        map_.hdr->init((i32)::getpid(), nullDriver_ != nullptr, driverName_, takeDir_);
+        // `driverIsNull` is the header's "there is no audio device" bit, and the
+        // file driver has none either: nothing it renders reaches a speaker. A
+        // client that draws "no audio device" for the null driver is right to
+        // draw it for this one.
+        map_.hdr->init((i32)::getpid(), nullDriver_ != nullptr || fileDriver_ != nullptr,
+                       driverName_, takeDir_);
         region_.publishReady();
         LOGI("nxtaktd ready: session '%s', region %s, %.0f Hz / %d frames, driver %s",
              opt_.session, gRegionName, sr_, block_, driverName_);
@@ -597,7 +1017,33 @@ private:
 
     bool startDriver() {
         const char* want = opt_.driver;
-        if (!want) want = env("AUDIO");   // same knob the GUI honours
+        bool fromArgv = opt_.driverFromArgv;
+        if (!want) { want = env("AUDIO"); fromArgv = false; }   // same knob the GUI honours
+
+        if (want && !std::strncmp(want, "file:", 5)) {
+            // ARGV ONLY, and this is the whole of "the GUI must be unaffected".
+            // $NXTAKT_AUDIO is inherited by every daemon EngineHandle spawns, so
+            // a `file:` left in an exported variable would make the app's engine
+            // render four bars into a file and exit — a session that dies for a
+            // reason nobody could see. The env knob keeps meaning what it meant.
+            if (!fromArgv) {
+                LOGE("NXTAKT_AUDIO='%s': the file driver is a command-line tool "
+                     "(tests and offline bounce), not a mode the environment may "
+                     "select. Pass --driver file:PATH deliberately, or unset it.", want);
+                return false;
+            }
+            fileDriver_ = std::make_unique<FileDriver>();
+            if (!fileDriver_->start(*engine_, opt_.rate, opt_.block, want + 5,
+                                    opt_.renderFrames, opt_.renderBeats)) {
+                LOGE("file driver failed to start");
+                fileDriver_.reset();
+                return false;
+            }
+            sr_    = opt_.rate;
+            block_ = opt_.block;
+            std::snprintf(driverName_, sizeof driverName_, "file");
+            return true;
+        }
 
         if (want && !std::strcmp(want, "null")) {
             nullDriver_ = std::make_unique<NullDriver>();
@@ -634,17 +1080,66 @@ private:
     void pumpLoop() {
         while (!gQuit) {
             observeDrains();
-            pumpPool();
-            pumpCommands();
-            pumpDeviceQueue();
-            pumpChainPushes();
-            pumpParams();
-            pumpMidi();
-            // BEFORE pumpEvents(), so a take whose buffer landed this tick is
-            // armed before the engine's events for this tick are drained, and
-            // AFTER pumpCommands(), so a start and the stop that follows it
-            // cannot be separated by a whole tick for no reason.
-            pumpTakes();
+            // THE CLOSED SYSTEM (file driver only; both flags are false for
+            // every other driver on every tick).
+            //
+            // An offline render must be a function of the SET and of nothing
+            // else. Anything a client hands over after it has started the
+            // transport would land in block 12 or block 30 depending on how
+            // fast the machine rendered, and a render that is a function of the
+            // machine is not a render anything can be compared against. So the
+            // boundary closes, in two steps, and the two are NOT the same
+            // moment:
+            //
+            //   INTAKE closes the instant the transport-starting command is in
+            //   the engine's ring (renderArmSeen_, set by commit()). From then
+            //   on nothing NEW enters: the client's command ring, its MIDI ring
+            //   and its pool announcements are left alone. They keep their
+            //   contents — the client sees ordinary back-pressure — and the
+            //   daemon exits without ever applying them.
+            //
+            //   THE RENDER starts later, at the end of the first tick on which
+            //   the daemon has nothing left to hand over (pumpFileRender). In
+            //   between, the pumps that finish work the client asked for BEFORE
+            //   the launch keep running: a device still being instantiated, a
+            //   chain still queued for the engine's ring, a parameter row not
+            //   yet written. Those are the daemon's own backlog, not new input.
+            //
+            // Closing intake at the END of the tick instead would leave a
+            // one-millisecond window in which a command sent after the launch
+            // is drained in the same pass as the launch and lands at frame 0.
+            // That window was real and measurable: with it open, a client that
+            // pushed master-volume writes immediately after starting the
+            // transport changed the file, sometimes.
+            //
+            // The OUTBOUND half keeps running throughout — events, the journal,
+            // the retirements, the heartbeat — because those are consumer-side
+            // and cannot change a sample. Draining events during the render is
+            // not merely harmless: it is what keeps the engine's parking buffer
+            // (engine.cpp, PendingEv) from filling and complaining about a
+            // client that is in fact right here.
+            const bool rendering = fileDriver_ && fileDriver_->armed();
+
+            if (!rendering) {
+                if (!intakeClosed()) pumpPool();
+                pumpCommands();              // returns at once once intake is closed
+                pumpDeviceQueue();
+                pumpChainPushes();
+                pumpParams();
+                // Tested again rather than reusing the value from above: intake
+                // closes INSIDE pumpCommands, and a MIDI byte pushed after the
+                // launch must not ride the same tick the launch did.
+                if (!intakeClosed()) pumpMidi();
+                // Unguarded, because it reads no client ring: it finishes takes
+                // the daemon already owns buffers for, and one in flight when
+                // intake closed has to be resolved rather than abandoned.
+                //
+                // BEFORE pumpEvents(), so a take whose buffer landed this tick
+                // is armed before the engine's events for this tick are drained,
+                // and AFTER pumpCommands(), so a start and the stop behind it
+                // cannot be separated by a whole tick for no reason.
+                pumpTakes();
+            }
             pumpEvents();
             // AFTER pumpEvents(), and the ordering is load-bearing: a take that
             // really did finish has been taken off the table by finishTake()
@@ -663,9 +1158,85 @@ private:
             pumpSigRetirements();
             pumpClipAutosRetirements();
             map_.hdr->heartbeat.fetch_add(1, std::memory_order_relaxed);
+            pumpFileRender();
             timespec ts{0, 1000000};        // 1 ms
             ::nanosleep(&ts, nullptr);
         }
+    }
+
+    // -- the file driver's two moments --------------------------------------
+    //
+    // LAST in the tick, and both halves depend on that.
+    //
+    // ARMING. `renderArmSeen_` is set by commit() the instant a
+    // transport-starting command is in the engine's ring, but the arm itself
+    // waits until the END of the tick and until the daemon has nothing left to
+    // hand over. Everything the client sent before the launch has then been
+    // translated, every device it asked for is instantiated, every chain is
+    // published and every parameter in the table has been written — all of
+    // which happen EARLIER in this same tick than this line does. Without the
+    // quiescence test a chain still sitting in chainPush_ would land at the top
+    // of block 1 instead of block 0, and the render would differ from an
+    // in-process one by exactly one block of one track.
+    //
+    // A client that goes on sending after starting the transport is not wrong,
+    // it is just not part of this render, and it is told so once.
+    //
+    // FINISHING. `finished()` is an acquire load against the release the driver
+    // stores after fclose(), so by the time this sets gQuit the WAV on disk is
+    // complete — which matters because the client's next move is to open it.
+    void pumpFileRender() {
+        if (!fileDriver_) return;
+
+        if (!fileDriver_->armed()) {
+            if (!renderArmSeen_) return;
+            const bool quiet = !havePending_ && deviceQueue_.empty() &&
+                               chainPush_.empty() && takeCmds_.empty() &&
+                               scanState_ != ipc::ScanRunning;
+            if (!quiet) {
+                // Not a timeout — this waits for as long as it takes, because a
+                // plugin scan on a machine with a thousand bundles legitimately
+                // takes seconds. But a wait that never ends and never says
+                // anything is the worst shape a tool can have, so after five
+                // seconds it names what it is waiting for, once.
+                if (++armWaitTicks_ == 5000)
+                    LOGW("the offline render has been waiting %s for %s to finish; "
+                         "it will start when they do (SIGTERM to give up)",
+                         fileDriver_->path(),
+                         !deviceQueue_.empty()      ? "device instantiation"
+                         : scanState_ == ipc::ScanRunning ? "the plugin scan"
+                         : !chainPush_.empty()      ? "a chain publication"
+                         : !takeCmds_.empty()       ? "a take"
+                                                    : "a deferred command");
+                return;
+            }
+            LOGI("file driver: the transport started and the daemon is quiescent — "
+                 "rendering %s. Nothing further reaches the engine.",
+                 fileDriver_->path());
+            fileDriver_->arm();
+            return;
+        }
+
+        // Armed. Anything left in the client's ring is not in the file, and by
+        // now nothing has been taken out of it since the launch.
+        if (!lateCmdLogged_ && !map_.cmds->empty()) {
+            lateCmdLogged_ = true;
+            LOGW("commands arrived after the offline render was armed; they are "
+                 "NOT part of '%s'. A bounce is a frozen set by construction.",
+                 fileDriver_->path());
+        }
+
+        if (!fileDriver_->finished()) return;
+        if (!renderDoneLogged_) {
+            renderDoneLogged_ = true;
+            if (fileDriver_->ok())
+                LOGI("offline render complete: %llu frames in '%s'; stopping",
+                     (unsigned long long)fileDriver_->framesWritten(), fileDriver_->path());
+            else
+                LOGE("offline render did NOT complete: %llu frames in '%s'",
+                     (unsigned long long)fileDriver_->framesWritten(), fileDriver_->path());
+        }
+        gQuit = 1;                     // the ordinary shutdown path, §4.5's order
     }
 
     // -- the drain counter --------------------------------------------------
@@ -785,12 +1356,28 @@ private:
     // tick, so a burst is delayed rather than dropped. Dropping would lose user
     // intent silently, which docs/PROCESS-SPLIT.md §5 calls out as the thing
     // phase 1 owes.
+    // "Nothing new may enter." True only under the file driver, and only from
+    // the moment the transport-starting command is provably in the engine's
+    // ring. See pumpLoop() for why this is a separate moment from the render
+    // actually beginning.
+    bool intakeClosed() const { return fileDriver_ && renderArmSeen_; }
+
     void pumpCommands() {
+        // THE DEFERRED COMMAND IS PLACED FIRST, BEFORE THE INTAKE TEST, and the
+        // order is not cosmetic. A command that was deferred came off the
+        // client's ring BEFORE the launch did, so it belongs to this render;
+        // and if intake could close while one was still parked, `havePending_`
+        // would never clear, the quiescence test below would never pass, and
+        // the daemon would idle for ever holding a set it had promised to
+        // render. (It cannot happen today — pumpCommands returns the instant it
+        // commits the launch, so nothing can be staged behind it — but a rule
+        // that only holds by luck is one an edit can take away.)
         if (havePending_) {
             if (!engine_->pushCommand(pending_.cmd)) return;
             commit(pending_);
             havePending_ = false;
         }
+        if (intakeClosed()) return;
         ipc::WireCommand w;
         u32 budget = kCmdBudget;                 // F7: bounded work per tick
         while (budget-- && map_.cmds->pop(w)) {
@@ -827,6 +1414,12 @@ private:
                 return;                      // resume from here next tick
             }
             commit(st);
+            // THE OFFLINE RENDER'S HARD STOP. The launch is in the ring; every
+            // command behind it in this ring belongs to a set that is not being
+            // rendered. Returning here — rather than at the end of the tick —
+            // is what makes "the transport start is the last command" a rule the
+            // daemon enforces instead of one a client is trusted to keep.
+            if (intakeClosed()) return;
         }
     }
 
@@ -837,6 +1430,25 @@ private:
     // has it", not "the client sent it".
     void commit(Staged& st) {
         map_.hdr->commandsApplied.fetch_add(1, std::memory_order_relaxed);
+        // THE OFFLINE RENDER'S STARTING GUN, and this is the right place for it
+        // for exactly the reason the comment above gives: "the command is
+        // definitely in the engine's ring". A launch noticed at translate time
+        // could still be refused or deferred; one noticed here cannot.
+        //
+        // The three commands are the three the engine itself treats as starting
+        // the clock (engine.cpp, armTransport): SetPlaying with a non-zero flag,
+        // a scene launch and a clip launch. Nothing else is a transport start,
+        // and deliberately not RecordSlot/RecordMidiSlot — a take under the file
+        // driver records silence (there is no capture device), so arming a
+        // bounce off one would render the wrong thing for the right reason.
+        //
+        // The flag is only READ at the end of the tick. See pumpFileRender().
+        if (fileDriver_ && !renderArmSeen_) {
+            const Cmd t = st.cmd.type;
+            if ((t == Cmd::SetPlaying && st.cmd.a != 0) ||
+                t == Cmd::LaunchScene || t == Cmd::LaunchClip)
+                renderArmSeen_ = true;
+        }
         if (st.arr) { installArrangement(st); return; }
         if (st.sig) { installSignatures(st); return; }
         if (!st.pooled) return;
@@ -4636,6 +5248,11 @@ private:
 
         if (backend_)    backend_->stop();
         if (nullDriver_) nullDriver_->stop();
+        // Joins the render thread. If the daemon is being torn down mid-render
+        // (a SIGTERM), stop() makes the loop break out and finish() still closes
+        // the WAV — a short file that says how short it is, rather than one
+        // whose header claims frames that were never written.
+        if (fileDriver_) fileDriver_->stop();
 
         // Takes, with no audio thread left to be inside a capture buffer. A take
         // still in flight cannot be finished — the engine that would have closed
@@ -4713,6 +5330,11 @@ private:
         map_.clear();
         region_.close();                 // creator: unlinks the name
         LOGI("nxtaktd stopped, region unlinked");
+        // An offline render that did not finish is a FAILED RUN and says so in
+        // the exit status, because the thing that consumes it is a script or a
+        // test, and a bounce that came out short must not look like success.
+        // Every other driver exits 0 here as it always did.
+        if (fileDriver_ && !fileDriver_->ok()) return 1;
         return 0;
     }
 
@@ -4764,6 +5386,15 @@ private:
     std::unique_ptr<Engine>        engine_;     // ~2 MB of scratch: never on the stack
     std::unique_ptr<AudioBackend>  backend_;
     std::unique_ptr<NullDriver>    nullDriver_;
+    // --driver file:PATH. Null for every other driver, which is what makes the
+    // whole offline path a single `if (fileDriver_)` away from not existing.
+    std::unique_ptr<FileDriver>    fileDriver_;
+    // Set by commit() when a transport-starting command is provably in the
+    // engine's ring; consumed by pumpFileRender() at the end of that tick.
+    bool                           renderArmSeen_    = false;
+    bool                           lateCmdLogged_    = false;
+    bool                           renderDoneLogged_ = false;
+    u32                            armWaitTicks_     = 0;
     ipc::ShmRegion                 region_;
     ipc::ControlMap                map_;
     ipc::PoolReader                pool_;       // read-only: the GUI owns it
