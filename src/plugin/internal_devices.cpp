@@ -1,3 +1,4 @@
+#include "drum_machine.h"
 // NxTakt's own stock devices.
 //
 // These are ordinary PluginInstance implementations, so they ride the browser,
@@ -2567,6 +2568,7 @@ void scanInternal(std::vector<PluginDesc>& out) {
     const size_t before = out.size();
     out.push_back(saturatorDesc());
     out.push_back(pulseDesc());
+    out.push_back(drumMachineDesc());
     out.push_back(spectraDesc());
     out.push_back(samplerDesc());
     out.push_back(eq3Desc());
@@ -2597,6 +2599,8 @@ std::unique_ptr<PluginInstance> instantiateInternal(const PluginDesc& d,
         inst = std::make_unique<Saturator>(saturatorDesc());
     else if (d.uri == kPulseUri || d.uri == kPulseUriLegacy)
         inst = std::make_unique<Pulse>(pulseDesc());
+    else if (d.uri == "nxtakt:drums")
+        inst = makeDrumMachine(drumMachineDesc());
     else if (d.uri == kSpectraUri)
         inst = std::make_unique<Spectra>(spectraDesc());
     else if (d.uri == kSamplerUri)

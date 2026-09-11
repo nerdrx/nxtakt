@@ -35,6 +35,7 @@ namespace lat {
 // first. App therefore holds it behind a unique_ptr and defines its destructor
 // out of line, in the one .cpp that has both definitions.
 class PianoRoll;
+class DrumSequencer;
 // Same reason, and the roll's other argument: the plain view of what a clip's
 // envelopes may name (pianoroll.h). Only ever passed by reference from here.
 struct AutoTargets;
@@ -139,7 +140,9 @@ private:
     // so a device whose plugin is missing today still declares the track's
     // intent and the set does not silently turn into an audio track.
     bool  trackHasNoteDevice(int track) const;
-    void  createMidiClip(int track, int slot);    // empty pattern in an empty slot
+    PluginInstance* drumDeviceFor(int track) const;
+    void addDrumTrack();
+    void  createMidiClip(int track, int slot, bool recordUndo = true); // empty pattern
     // Every path that moves the selection goes through here: selecting a track
     // also arms it (see autoArmed_).
     void  selectTrack(int track);
@@ -639,6 +642,9 @@ private:
     // The piano roll, shown in the CLIP tab for MIDI clips. Created on first
     // use; see the forward declaration above for why it is not a plain member.
     std::unique_ptr<PianoRoll> roll_;
+    std::unique_ptr<DrumSequencer> drumSeq_;
+    std::unique_ptr<DrumSequencer> arrDrumSeq_;
+    int drumEditor_ = 0;
 
     // --- piano roll note preview -------------------------------------------
     // Editing a note you cannot hear is guesswork, so the roll asks for pitches

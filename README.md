@@ -82,7 +82,22 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
-## Studio workspace — 0.16
+## Drum studio — 0.17
+
+Press **+ Drums** for an instrument and a ready-to-edit pattern. Eight lanes,
+click-to-toggle steps, velocity editing and 16/32/64-step patterns bring a
+familiar drum programming workflow to the clip editor. **Play pattern** starts
+your beat; switch to **Piano** for free timing and detailed MIDI editing.
+
+The built-in Drum Machine includes original **808-, 707- and 909-inspired**
+synthesized kits, with level, tuning and decay for every sound. No sample packs
+or downloads needed. See [the drum sequencer guide](docs/DRUM-SEQUENCER.md).
+
+<p align="center">
+  <img alt="Drum sequencer with eight instrument lanes and a playing step pattern" src="assets/drums.png" width="900">
+</p>
+
+## Studio workspace
 
 A redesigned studio workspace in NX violet and cyan: a two-row transport,
 numbered track headers, separated mixer channels, collapsible returns and

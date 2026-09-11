@@ -218,7 +218,7 @@ INTERNAL_DATA := src/plugin/spectra_presets.inc src/plugin/spectra_tables.inc \
 # it goes into every target that compiles internal_devices.cpp INCLUDING
 # nxtaktd, which is the whole point: the daemon never imports a file, it
 # ingests frames off the wire and resolves them by hash exactly as the GUI does.
-INTERNAL_SUP := src/plugin/wavetable_io.cpp
+INTERNAL_SUP := src/plugin/wavetable_io.cpp src/plugin/drum_machine.cpp
 TOOL_LIBS := $(shell pkg-config --libs sndfile samplerate lilv-0) -ldl -lpthread -lm
 TOOL_CF   := -std=c++20 -O2 -w $(shell pkg-config --cflags sndfile samplerate lilv-0) -Ivendor/clap/include
 
@@ -371,8 +371,13 @@ build/input_test: tests/input_test.cpp src/ui/window.h src/core/common.h
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
 
-test: build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
+build/drum_machine_test: tests/drum_machine_test.cpp src/plugin/drum_machine.cpp src/plugin/drum_machine.h src/plugin/internal_base.h src/plugin/internal_dsp.h src/core/common.cpp
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(filter %.cpp,$^) -o $@ -lpthread -lm
+
+test: build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
       build/timesig_view_test build/handle_test build/render build/gen_demo build/plugin_scan
+	./build/drum_machine_test
 	./build/input_test
 	./build/hit_map_test
 	./build/engine_test

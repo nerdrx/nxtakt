@@ -13946,7 +13946,7 @@ int main() {
         if (reg.plugins()[i].format == PluginFormat::Internal) ++internals;
         else if (firstNonInternal < 0) firstNonInternal = (int)i;
     }
-    CHECK(internals == 16, "scan lists every internal device (%d)", internals);
+    CHECK(internals == 17, "scan lists every internal device (%d)", internals);
     CHECK(firstNonInternal < 0 || firstNonInternal == internals,
           "internal devices sort to the front of the list");
 

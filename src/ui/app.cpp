@@ -1,6 +1,7 @@
 #include "app.h"
 #include "arrange.h"
 #include "pianoroll.h"
+#include "drum_sequencer.h"
 #include "../core/project.h"
 #include "../gfx/gl.h"
 #include <algorithm>
@@ -852,6 +853,7 @@ PianoRoll* App::visibleRoll() {
     if (selTrack_ < 0 || selTrack_ >= (int)ses_.tracks.size()) return nullptr;
     if (selSlot_ < 0 || selSlot_ >= kMaxScenes) return nullptr;
     const ClipModel& m = ses_.tracks[selTrack_].slots[selSlot_];
+    if (m.kind == ClipKind::Midi && drumDeviceFor(selTrack_) && drumEditor_ == 0) return nullptr;
     // Audio clips reach the roll too, since it now hosts their envelope lane:
     // the keyboard verbs (Delete, arrows, Escape) route to whichever selection
     // the roll holds, and refusing here would have left an audio clip's
@@ -868,6 +870,7 @@ PianoRoll* App::visibleArrRoll() {
         detailTab_ != DetailTab::Clip)
         return nullptr;
     const ArrangeClip* it = selectedArrItem();
+    if (it && it->src.kind == ClipKind::Midi && drumDeviceFor(arrSelTrack_) && drumEditor_ == 0) return nullptr;
     return (it && it->src.valid()) ? arrRoll_.get() : nullptr;
 }
 

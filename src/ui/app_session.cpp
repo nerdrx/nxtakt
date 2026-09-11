@@ -221,13 +221,13 @@ bool App::trackHasNoteDevice(int track) const {
 
 // An empty MIDI clip is a real, launchable, editable entity — Live's "create
 // empty clip", and the only way to get a pattern without playing one in.
-void App::createMidiClip(int track, int slot) {
+void App::createMidiClip(int track, int slot, bool recordUndo) {
     if (track < 0 || track >= (int)ses_.tracks.size()) return;
     if (slot < 0 || slot >= (int)ses_.scenes.size()) return;
 
     // Here rather than at the (single) call site: this is the whole edit, and
     // the slot is untouched until the next line.
-    undoPoint("new clip");
+    if (recordUndo) undoPoint("new clip");
 
     ClipModel& m = ses_.tracks[track].slots[slot];
     m = ClipModel{};

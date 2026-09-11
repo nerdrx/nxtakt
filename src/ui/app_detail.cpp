@@ -5,6 +5,7 @@
 #include "app_internal.h"
 #include "arrange.h"
 #include "pianoroll.h"
+#include "drum_sequencer.h"
 #include "../core/project.h"
 #include "../gfx/gl.h"
 #include <algorithm>
@@ -211,6 +212,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
     }
     ClipModel& m = it->src;
     const int track = arrSelTrack_;
+    const bool drumTrack = m.kind == ClipKind::Midi && drumDeviceFor(track);
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
     Rect head{r.x, r.y + 1 * s, r.w, 36 * s};
@@ -219,6 +221,11 @@ void App::drawArrangeClipDetail(const Rect& r) {
                  nx::text, Align::Left, 0);
     rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
+    if (drumTrack) {
+        static const char* views[] = {"Steps", "Piano"};
+        ui_.tabPill(uiId(UiDrumSequencer, 1005),
+                    {r.x + 328 * s, head.y + 3 * s, 170 * s, head.h - 6 * s}, views, 2, &drumEditor_);
+    }
     const f32 panelW = 300 * s;
     Rect ctrl{r.x + 16 * s, head.bottom() + 8 * s, panelW, r.bottom() - head.bottom() - 16 * s};
     rend_.roundRect(ctrl, 10 * s, nx::panel2.mix(nx::panel, 0.55f));
@@ -299,8 +306,13 @@ void App::drawArrangeClipDetail(const Rect& r) {
     const f64 phase = inside ? (it->offset + (beat - it->start)) : 0.0;
 
     const ClipModel before = m;
-    if (arrRoll_->draw(ui_, wave, m, targets, ses_.scale, phase, inside)) {
-        undoPointWith(arrRoll_->lastEdit(), m, before);
+    bool edited = false;
+    if (drumTrack && drumEditor_ == 0) {
+        if (!arrDrumSeq_) arrDrumSeq_ = std::make_unique<DrumSequencer>();
+        edited = arrDrumSeq_->draw(ui_, wave, m, std::fmod(phase, std::max(1.0, m.lengthBeats)), inside);
+    } else edited = arrRoll_->draw(ui_, wave, m, targets, ses_.scale, phase, inside);
+    if (edited) {
+        undoPointWith(drumTrack && drumEditor_ == 0 ? arrDrumSeq_->lastEdit() : arrRoll_->lastEdit(), m, before);
         placed = true;
     }
     if (placed) {
@@ -313,7 +325,8 @@ void App::drawArrangeClipDetail(const Rect& r) {
         }
     }
     u8 pv[PianoRoll::kPreviewMax];
-    const int np = arrRoll_->drainPreview(pv, PianoRoll::kPreviewMax);
+    const int np = drumTrack && drumEditor_ == 0 ? arrDrumSeq_->drainPreview(pv, PianoRoll::kPreviewMax)
+                                                : arrRoll_->drainPreview(pv, PianoRoll::kPreviewMax);
     for (int i = 0; i < np; ++i) startPreview((int)pv[i], m.uid);
 }
 
@@ -474,6 +487,7 @@ void App::drawClipDetail(const Rect& r) {
     // *range* have nothing to act on; everything else on this panel is about
     // launching, which a MIDI clip does exactly like an audio one.
     const bool midi = m.kind == ClipKind::Midi;
+    PluginInstance* drumDevice = midi ? drumDeviceFor(selTrack_) : nullptr;
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
     Rect head{r.x, r.y + 1 * s, r.w, 36 * s};
@@ -496,10 +510,11 @@ void App::drawClipDetail(const Rect& r) {
     rend_.roundRect(ctrl, 10 * s, nx::panel2.mix(nx::panel, 0.55f));
     rend_.roundRectOutline(ctrl, 10 * s, s, nx::line.alpha(0.45f));
     static const char* midiPages[] = {"Notes", "Playback", "Launch"};
+    static const char* drumPages[] = {"Kit", "Playback", "Launch"};
     static const char* audioPages[] = {"Playback", "Launch"};
     int& page = midi ? midiInspectorPage_ : audioInspectorPage_;
     const Rect pages{ctrl.x + 8 * s, ctrl.y + 8 * s, ctrl.w - 16 * s, 32 * s};
-    ui_.tabPill(uiId(8, 50), pages, midi ? midiPages : audioPages, midi ? 3 : 2, &page);
+    ui_.tabPill(uiId(8, 50), pages, midi ? (drumDevice ? drumPages : midiPages) : audioPages, midi ? 3 : 2, &page);
     const bool notesPage = midi && page == 0;
     const bool playbackPage = page == (midi ? 1 : 0);
     const bool launchPage = page == (midi ? 2 : 1);
@@ -522,17 +537,29 @@ void App::drawClipDetail(const Rect& r) {
     const Rect ctrl2 = ctrl;
     f32 y2 = y;
     const f32 editorX = ctrl.right() + 24 * s;
-    rend_.textIn(fSmall_, {editorX, head.y, 160 * s, head.h},
+    if (!drumDevice) rend_.textIn(fSmall_, {editorX, head.y, 160 * s, head.h},
                  midi ? "Piano roll" : "Waveform", nx::muted, Align::Left, 0);
     if (r.w > 900 * s)
         rend_.textIn(fSmall_, {editorX + 160 * s, head.y,
                               r.right() - editorX - 176 * s, head.h},
+                     drumDevice && drumEditor_ == 0 ? "Click steps  /  Ctrl + scroll for velocity" :
                      "Ctrl + scroll to zoom  /  Middle drag to pan", nx::muted.alpha(0.65f),
                      Align::Right, 0);
     auto field = [&](const Rect& b) {
         rend_.roundRect(b, 5 * s, nx::bgTop);
         rend_.roundRectOutline(b, 5 * s, s, nx::line.alpha(0.4f));
     };
+
+    if (drumDevice) {
+        static const char* views[] = {"Steps", "Piano"};
+        ui_.tabPill(uiId(UiDrumSequencer, 1001),
+                    {editorX, head.y + 3 * s, 170 * s, head.h - 6 * s}, views, 2, &drumEditor_);
+        const bool patternPlaying = es_.playing && es_.activeSlot[selTrack_] == selSlot_;
+        if (ui_.button(uiId(UiDrumSequencer, 1005),
+                       {editorX + 180 * s, head.y + 3 * s, 96 * s, head.h - 6 * s},
+                       patternPlaying ? "Stop pattern" : "Play pattern", patternPlaying, nx::violet))
+            send(patternPlaying ? Cmd::StopTrack : Cmd::LaunchClip, selTrack_, selSlot_);
+    }
 
     // Quiet sentence-case labels share the value baseline for a clean inspector.
     auto label = [&](const char* t, const Rect& row) {
@@ -541,6 +568,34 @@ void App::drawClipDetail(const Rect& r) {
     };
 
     rend_.pushClip(inspectorBody);
+    if (notesPage && drumDevice) {
+        static const char* kits[] = {"808", "707", "909"};
+        rend_.textIn(fSmall_, {ctrl.x, y, ctrl.w, 18 * s}, "Drum kit", nx::muted, Align::Left, 0);
+        int kit = clampv((int)std::round(drumDevice->getParam(0)), 0, 2);
+        Rect kitBox{ctrl.x, y + 22 * s, ctrl.w, rowH};
+        if (ui_.selector(uiId(UiDrumSequencer, 1002), kitBox, &kit, kits, 3)) {
+            undoPoint("drum kit");
+            drumDevice->setParam(0, (f32)kit);
+        }
+        y = kitBox.bottom() + 12 * s;
+        rend_.textIn(fSmall_, {ctrl.x, y, ctrl.w, 18 * s}, "Kit output", nx::muted, Align::Left, 0);
+        Rect output{ctrl.x, y + 22 * s, ctrl.w, rowH};
+        field(output);
+        f64 volume = drumDevice->getParam(1);
+        if (ui_.dragNumber(uiId(UiDrumSequencer, 1003), output, &volume, -60, 6, 0.1, "%.1f dB")) {
+            undoPoint("drum output");
+            drumDevice->setParam(1, (f32)volume);
+        }
+        Rect sounds{ctrl.x, output.bottom() + 16 * s, ctrl.w, rowH};
+        if (ui_.button(uiId(UiDrumSequencer, 1004), sounds, "Edit drum sounds")) {
+            selectChainOwner(selTrack_);
+            detailTab_ = DetailTab::Devices;
+            ensurePluginScan();
+        }
+        rend_.textIn(fSmall_, {ctrl.x, sounds.bottom() + 8 * s, ctrl.w, 20 * s},
+                     "Click steps. Ctrl + scroll sets velocity.", nx::muted, Align::Left, 0);
+    }
+
     if (playbackPage) {   // Warp mode (audio only) + loop, which both kinds have
         Rect row{ctrl.x, y, ctrl.w, rowH};
         Rect lp{row.x + lblW, row.y, row.w - lblW, row.h};
@@ -668,7 +723,7 @@ void App::drawClipDetail(const Rect& r) {
         }
         y += rowH + 4 * s;
     }
-    if (notesPage) {   // The set's KEY: root, scale, and whether edits are held to it.
+    if (notesPage && !drumDevice) {   // The set's KEY: root, scale, and whether edits are held to it.
         // On the clip panel rather than on the control bar, which is where Live
         // puts it, for a reason that is about this program and not about taste:
         // the control bar here is already at the width it can carry and the only
@@ -717,7 +772,7 @@ void App::drawClipDetail(const Rect& r) {
                                         "Chromatic");
         y2 = row.y + rowH + (compactInspector ? 6.f : 12.f) * s;
     }
-    if (notesPage && roll_) {
+    if (notesPage && roll_ && !drumDevice) {
         // The note tools (PianoRoll's quantize / legato / duplicate / transpose).
         // Buttons rather than shortcuts: the roll's key map is already full, and
         // these are deliberate one-shot gestures rather than things a hand does
@@ -889,6 +944,18 @@ void App::drawClipDetail(const Rect& r) {
     // which is that a click that adds a note or a breakpoint can be undone. The
     // roll owns ui_.active for the length of a drag, so a note or a breakpoint
     // dragged across the editor leaves one entry and not one per frame.
+    if (drumDevice && drumEditor_ == 0) {
+        if (!drumSeq_) drumSeq_ = std::make_unique<DrumSequencer>();
+        const ClipModel before = m;
+        if (drumSeq_->draw(ui_, wave, m, active ? phase * m.lengthBeats : 0.0, active && es_.playing)) {
+            undoPointWith(drumSeq_->lastEdit(), m, before);
+            pushClip(selTrack_, selSlot_);
+        }
+        u8 previews[16];
+        const int count = drumSeq_->drainPreview(previews, 16);
+        for (int i = 0; i < count; ++i) startPreview(previews[i], m.uid);
+        return;
+    }
     const ClipModel before = m;
     if (roll_->draw(ui_, wave, m, targets, ses_.scale,
                     active ? phase * m.lengthBeats : 0.0, active)) {

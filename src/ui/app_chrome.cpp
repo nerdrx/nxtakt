@@ -723,6 +723,12 @@ void App::drawControlBar(const Rect& r) {
         x += posR.w + sep;
     }
 
+    if (r.w >= 1000 * s) {
+        const Rect drums{r.x + 566 * s, primaryY, 100 * s, 36 * s};
+        if (ui_.button(uiId(UiDrumSequencer, 1000), drums, "+ Drums")) addDrumTrack();
+        if (ui_.hovered(drums)) ui_.tip = "Add a drum track with 808, 707 and 909-inspired kits";
+    }
+
     // The engine link used to be announced HERE, as amber text squeezed into
     // whatever room the readout left -- which at 1100px wide was text drawn
     // under the tab pill, and at any width was a dead engine announced in the
