@@ -228,7 +228,7 @@ public:
     // is again the only external caller: FOLD is a click nothing in gamescope
     // can make, and a fold no screenshot can reach is a fold nothing checks.
     FoldMode foldMode() const { return fold_; }
-    void setFoldMode(FoldMode m) { fold_ = m; }
+    void setFoldMode(FoldMode m) { fold_ = m; fitPitchPending_ = true; }
 
     // --- keyboard API ------------------------------------------------------
     // Driven by App::handleShortcuts, which routes the arrows, Delete, Escape
@@ -398,6 +398,9 @@ private:
     // Logical (DPI-independent) px per beat. 0 means "not chosen yet": the
     // next draw fits the clip to the width, which is how every clip starts.
     f32  zoom_ = 0.f;
+    // Fit pitch once per clip or explicit Fit, then retain it during edits.
+    f32  pitchRowH_ = 18.f;
+    bool fitPitchPending_ = true;
     // Identity of the clip drawn last frame. The caller swaps clips under us
     // freely (selecting another slot), and selection/scroll/zoom are all about
     // one particular clip, so they reset when this changes.

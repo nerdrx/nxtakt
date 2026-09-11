@@ -64,17 +64,17 @@ namespace pal {
 // is 90% darkness with small luminous accents, so the base surfaces move
 // toward the field (#0a0714) and keep only a BREATH of violet; saturated
 // color is for clips, accents and live elements, never for square metres.
-constexpr Col appBg        = rgb(0x1D1E21);   // the "nothing here" fill
-constexpr Col panel        = rgb(0x292A2E);   // chrome panels
-constexpr Col panelAlt     = rgb(0x36373C);   // controls on panels
-constexpr Col gridBg       = rgb(0x1D1E21);   // the clip grid's empty field
-constexpr Col slotEmpty    = rgb(0x303136);
-constexpr Col slotHover    = rgb(0x424348);
+constexpr Col appBg        = rgb(0x17171F);   // the "nothing here" fill
+constexpr Col panel        = rgb(0x22222D);   // chrome panels
+constexpr Col panelAlt     = rgb(0x30303D);   // controls on panels
+constexpr Col gridBg       = rgb(0x17171F);   // the clip grid's empty field
+constexpr Col slotEmpty    = rgb(0x292935);
+constexpr Col slotHover    = rgb(0x3A394B);
 // Not a divider colour any more: `divider` is used both for separators and for
 // recessed troughs, and only the separators are wrong. It is now the --line
 // token, which is a violet-black rather than a grey. Real dividers should move
 // to Renderer::hairlineH/V -- a solid line is a §11 finding.
-constexpr Col divider      = rgb(0x434449);
+constexpr Col divider      = rgb(0x404052);
 constexpr Col ridge        = rgb(0x96989E);           // raised edges, handles
 
 // Text
@@ -87,14 +87,14 @@ constexpr Col textOnClip   = rgb(0x222326);
 // dark hue, so two rules keep it readable: as small TEXT on dark surfaces use
 // accentHi (a lifted tint), and anything drawn ON an accent fill uses light
 // text — widgets.cpp picks per-luminance.
-constexpr Col accent       = rgb(0xE6B980);   // selection / focus / brand
-constexpr Col accentHi     = rgb(0xF2D4AD);   // accent as text on dark
+constexpr Col accent       = rgb(0x7700FF);   // selection / focus / brand
+constexpr Col accentHi     = rgb(0xB995FF);   // accent as text on dark
 // Transport and status. Play moves to cyan: §1 reserves cyan for "light inside
 // materials" -- live values, playheads, running state -- which is exactly what
 // a play indicator is, and a lime green on a violet field was the one colour in
 // the program that belonged to no palette at all. Record stays red because red
 // means record everywhere and a DAW does not get to be clever about that.
-constexpr Col playGreen    = rgb(0x68D5C0);
+constexpr Col playGreen    = rgb(0x00E5FF);
 constexpr Col recRed       = rgb(0xFF5470);
 constexpr Col armRed       = rgb(0xB03048);
 constexpr Col soloBlue     = rgb(0x66C4FF);

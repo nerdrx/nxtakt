@@ -1,4 +1,4 @@
-# NxTakt 0.15: workspace refinement
+# NxTakt 0.16: studio workspace
 
 This release makes the existing DAW easier to read and operate across Session,
 Arrangement, clip editing, automation, browsing, and device panels. Projects and
@@ -6,13 +6,25 @@ the audio engine keep their existing formats and behavior.
 
 This visual direction supersedes the older glass/nebula styling in DESIGN.md.
 
-## 0.15 refinement
+## 0.16 structural redesign
 
-Quieter borders, segmented view switches, sentence-case labels, consistent
-library spacing and flatter fader handles establish a calmer hierarchy. Track,
-return and master gain values remain visible. Piano clips open centered on their
-notes, preserving manual scrolling after opening. Shared timeline surfaces now
-match the neutral workspace. Existing larger click targets remain intact.
+NX violet (#7700FF) and cyan (#00E5FF) anchor the interface over deep neutral
+surfaces. The two-row command bar separates playback from performance settings.
+Numbered track headers and individual mixer cards establish clear channels.
+Returns can be shown with the A-D button in the Scenes header, freeing the
+workspace when hidden. Existing track widths are preserved in projects, with a
+112px display minimum for usable controls.
+
+The larger detail panel has a material header, focused Notes, Playback and Launch
+pages with full labels and aligned fields, plus an explicit Fit view action.
+MIDI clips open centered on their notes with rows fitted to the pitch range,
+subject to a readable minimum size. Shared controls use stronger
+violet selected states; cyan marks live state and MIDI identity.
+
+The [FL Studio usability pass](FL-STUDIO-WORKFLOW.md) documents navigation
+aliases, creation entry points and deliberate workflow differences. Clip bodies
+now edit without launching; triangles launch. Note double-clicks are harmless.
+Hover/press feedback takes 150/90ms and respects reduced-motion settings.
 
 ## Interaction contract
 
@@ -31,18 +43,18 @@ match the neutral workspace. Existing larger click targets remain intact.
 
 ## Layout and appearance
 
-- Warm graphite surfaces, softly rounded matte controls, restrained amber state accents and clearer secondary text. Decorative glow and the animated background are off by default.
+- Deep neutral surfaces, softly rounded matte controls, NX violet and cyan accents and clearer secondary text. Decorative glow and the animated background are off by default.
 - Text sizes: 11px supporting labels, 13px body/header, 18px transport readout; Noto Sans preferred with existing system fallbacks.
-- 46px transport bar; 30px transport controls; explicit Files toggle. Optional
+- 84px two-row transport bar; roomy transport controls; explicit Library toggle. Optional
   diagnostics disappear as width decreases instead of overlapping transport.
-- 28px Session rows and track headers; 24px mute/solo/arm and send controls;
-  28px pan controls; wider faders. Detail defaults to 330px and has a 12px
+- 32px Session rows and 40px track headers; 28px mute/solo/arm and send controls;
+  32px pan controls; wider faders. Detail defaults to 390px and has a 12px
   resize grip, with a viewport-dependent cap preserving the upper workspace.
-- Piano rows are 18px, pitches are labeled, short notes remain visible, and
-  selected/hovered note ends show resize grips. A single compact inspector replaces the two wide columns, giving 280px back to the piano roll.
+- Piano rows fit the material (up to 18 logical px), pitches are labeled, short notes remain visible, and
+  selected/hovered note ends show resize grips. A focused 300px inspector keeps the piano roll as the main working surface.
 - Arrangement track titles offer a full-row automation target. Larger marker,
   automation and lane-resize targets expose the editing affordances.
-- Browser rows are 28px. Plugin rows show name and maker separately; search
+- Library file rows are 32px. Plugin rows show name and maker separately; search
   matches either. Device cards, knobs, editor selectors, tabs, rack controls
   and sampler boundary grabs have more room.
 
@@ -74,7 +86,11 @@ and audio detail, Arrangement, device panels, F1 help, 1024x768 actual window
 size and fractional scale. Gamescope's output size alone can scale the image;
 resize the application window when testing its layout.
 
-The source of record is `nerdrx/nxtakt`. `make dist VERSION=0.15.0` creates an
+`tests/inspector_gestures.sh` also verifies inspector navigation, clip loop and
+note duplication, device bypass, logarithmic parameter editing and undo against
+a disposable saved project. Run it with the same harness and environment.
+
+The source of record is `nerdrx/nxtakt`. `make dist VERSION=0.16.0` creates an
 NX Hub-compatible Linux archive and checksum. Pushing a `v*` tag triggers the
 GitHub release workflow, which builds on Ubuntu, runs the full suite, checks
 the packaged binaries and only then publishes assets. Prefer those portable

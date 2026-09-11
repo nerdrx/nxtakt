@@ -787,7 +787,8 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     if (r.w < 140.f * s || r.h < 70.f * s) return false;     // too small to be useful
 
     // --- layout ------------------------------------------------------------
-    const f32 keyW = kKeyW * s, rowH = kRowH * s;
+    const f32 keyW = kKeyW * s;
+    f32 rowH = pitchRowH_ * s;
     const f32 laneH = std::min(kLaneH * s, r.h * 0.42f);
     const Rect ruler{r.x, r.y, r.w, kRulerH * s};
     const Rect body{r.x, ruler.bottom(), r.w, r.h - ruler.h - laneH - 1.f * s};
@@ -814,16 +815,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         paintPitch_ = -1;
         paintBeat_ = -1.0;
         scrollX_ = scrollY_ = 0.f;
-        // Open on the musical material, including low notes near the edge of
-        // a compact editor. Subsequent edits retain the user's scroll position.
-        if (midiClip && fold_ == FoldMode::All && !clip.notes.empty()) {
-            int low = 127, high = 0;
-            for (const auto& note : clip.notes) {
-                low = std::min(low, (int)note.pitch);
-                high = std::max(high, (int)note.pitch);
-            }
-            scrollY_ = ((f32)kCentrePitch - 0.5f * (f32)(low + high)) * rowH;
-        }
+        fitPitchPending_ = true;
         zoom_ = 0.f;                 // -> fit to width below
         addedLastPress_ = false;
         followSel_ = false;
@@ -886,6 +878,31 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     // --- axes --------------------------------------------------------------
     const int keepPitch = (drag_ == Drag::Move && dragNote_ >= 0) ? dragPitch_ : -1;
     const RowMap rows = buildRows(clip.notes, fold_, key, keepPitch);
+    if (fitPitchPending_) {
+        fitPitchPending_ = false;
+        int first = rows.count, last = -1;
+        if (midiClip) {
+            for (const auto& note : clip.notes) {
+                const int row = rows.rowOf(note.pitch);
+                if (row >= 0) {
+                    first = std::min(first, row);
+                    last = std::max(last, row);
+                }
+            }
+        }
+        pitchRowH_ = kRowH;
+        scrollY_ = 0.f;
+        if (last >= first) {
+            // Include both extreme note rows and a full row of breathing room
+            // above and below. A wide pitch range retains a readable 12 device-pixel floor.
+            pitchRowH_ = clampv(grid.h / ((f32)(last - first + 3) * s), 12.f / s, kRowH);
+            rowH = pitchRowH_ * s;
+            const int centre = (fold_ != FoldMode::All && rows.count < 128)
+                                   ? rows.count / 2 : rows.rowOf(kCentrePitch);
+            scrollY_ = (0.5f * (f32)(first + last) - (f32)std::max(0, centre)) * rowH;
+        }
+        rowH = pitchRowH_ * s;
+    }
 
     const f64 lenBeats = std::max(1.0, clip.lengthBeats);
     // First sight of a clip: fit the loop to the width, so a pattern opens as
@@ -1314,9 +1331,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         }
     } else if (hotGrid && midiClip && (in.pressed[0] || in.pressed[2])) {
         const int hit = noteAt(clip.notes, rows, ta, pa, in.mx, in.my, minNoteW);
-        // Clicking empty space adds, so without this the second click of a
-        // double-click on empty space would delete what the first click made.
-        const bool prevAdded = addedLastPress_;
+        // Left clicks select or draw; only right-click/Delete erase notes.
         addedLastPress_ = false;
 
         if (in.pressed[2]) {
@@ -1329,8 +1344,6 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             dragNote_ = -1;
             sweepX_ = in.mx;
             sweepY_ = in.my;
-        } else if (hit >= 0 && in.dblClick && !prevAdded) {
-            eraseNote(hit);                               // double-click deletes
         } else if (hit >= 0 && (in.shift() || in.ctrl())) {
             // Ambiguous until it moves: a click toggles membership (Shift) or
             // selects (Ctrl); a drag clones. Nothing is decided here -- see the
@@ -1444,8 +1457,15 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     rr.hairlineH(ruler.x, ruler.right(), ruler.bottom() - 1.f * s);
 
     const Rect lenBox{ruler.right() - 70.f * s, ruler.y + 2.f * s, 66.f * s, ruler.h - 4.f * s};
+    const Rect fitBox{lenBox.x - 74.f * s, ruler.y + 2.f * s, 68.f * s, ruler.h - 4.f * s};
+    if (ui.button(uiId(UiRollFold, 1), fitBox, "Fit view")) {
+        zoom_ = 0.f;
+        scrollX_ = 0.f;
+        fitPitchPending_ = true;
+    }
+    if (ui.hovered(fitBox)) ui.tip = "Fit the loop to the editor and center its notes";
     if (ui.fSmall) {
-        rr.pushClip({grid.x, ruler.y, std::max(0.f, std::min(grid.right(), lenBox.x) - grid.x), ruler.h});
+        rr.pushClip({grid.x, ruler.y, std::max(0.f, std::min(grid.right(), fitBox.x) - grid.x), ruler.h});
         // The shared ruler (timeaxis.h). Same loop, same numbers, same colours —
         // now also the arrangement's, which is the point of the extraction.
         drawRulerLabels(rr, *ui.fSmall, ta, grid.x, grid.right(),
@@ -1463,8 +1483,10 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         int fm = (int)fold_;
         // Full-height controls in a dedicated ruler; small slop eases edge hits.
         ui.grab(3.f * s);
-        if (ui.selector(uiId(UiRollFold, 0), foldBox, &fm, kFoldModeNames, kFoldModeCount))
+        if (ui.selector(uiId(UiRollFold, 0), foldBox, &fm, kFoldModeNames, kFoldModeCount)) {
             fold_ = (FoldMode)clampv(fm, 0, kFoldModeCount - 1);
+            fitPitchPending_ = true;
+        }
         if (ui.hovered(foldBox.inset(-3.f * s)))
             ui.tip = fold_ == FoldMode::Key
                          ? (key.active() ? "showing only the rows in " + key.label()
@@ -1555,7 +1577,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
 
     // --- grid: note rows for a pattern, the waveform for a sample -----------
     rr.pushClip(grid);
-    rr.rect(grid, rgb(0x1D1E21));
+    rr.rect(grid, nx::bgTop);
     // An audio clip's canvas is the same well the note grid sits in, with the
     // same faint lift a white-key row gets -- one surface family, so a waveform
     // and a pattern are read against the same material.
@@ -1588,6 +1610,11 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // piece actually begins.
         const bool divide = showKey ? key.isRoot(p) : (p % 12 == 0);
         if (divide) rr.hairlineH(grid.x, grid.right(), y + rowH - 1.f * s);
+    }
+    if (hotGrid && midiClip && drag_ == Drag::None) {
+        const int hoverRow = yToRow(pa, in.my);
+        if (hoverRow >= 0 && hoverRow < rows.count)
+            rr.rect({grid.x, rowToY(pa, hoverRow), grid.w, rowH}, nx::violet.alpha(0.055f));
     }
     drawTimeGrid(rr, ta, grid, s);          // the shared grid (timeaxis.h)
     {   // Past the loop length is not editable, so dim it like Live does.
@@ -1687,7 +1714,8 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     // A well of its own, one step deeper than the grid: the stems are read
     // against a floor, and a floor has to look like one.
     rr.hairlineH(r.x, r.right(), body.bottom());
-    rr.well(lane, 0.f, true);
+    rr.rect(lane, nx::bgTop);
+    rr.hairlineH(lane.x, lane.right(), lane.y, nx::violet.alpha(0.24f));
     rr.pushClip(lane);
     if (env) {
         // The lane, which is now a component and no longer a slice of this

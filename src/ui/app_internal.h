@@ -22,10 +22,10 @@ namespace lat {
 
 // Layout constants, in logical px before the DPI scale is applied.
 namespace lay {
-inline constexpr f32 controlBarH = 46.f;
+inline constexpr f32 controlBarH = 84.f;
 inline constexpr f32 statusH     = 20.f;
-inline constexpr f32 trackHeadH  = 28.f;
-inline constexpr f32 slotH       = 28.f;
+inline constexpr f32 trackHeadH  = 40.f;
+inline constexpr f32 slotH       = 32.f;
 inline constexpr f32 sceneColW   = 96.f;
 inline constexpr f32 masterW     = 92.f;
 // A return bus has no clips and no M/S/arm, so its strip is barely wider than
@@ -34,7 +34,7 @@ inline constexpr f32 returnW     = 54.f;
 // Tall enough for the M/S/arm row, the 2x2 send grid, pan, and a fader with
 // enough travel left to mix with. The clip grid gives up the difference and
 // preserves useful fader travel with comfortably sized controls.
-inline constexpr f32 mixerH      = 210.f;
+inline constexpr f32 mixerH      = 230.f;
 inline constexpr f32 gutter      = 1.f;
 
 // SPECTRA'S PANEL, which is two files' business and therefore neither file's

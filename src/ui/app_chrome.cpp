@@ -346,13 +346,18 @@ void App::drawControlBar(const Rect& r) {
     // group, `sep` separates the groups themselves and carries a hairline down
     // its middle. Widths stay content-sized -- the grid governs the space
     // between things, not the size of a number that has to fit.
-    const f32 pad = nx::sp1 * s, gap = nx::sp1 * s, sep = nx::sp2 * s;
-    const f32 h = 30 * s;
-    const f32 cy = std::round(r.y + (r.h - h) * 0.5f);
-    f32 x = pad;
+    const f32 pad = 16 * s, gap = 8 * s, sep = 16 * s;
+    const f32 primaryY = r.y + 8 * s, settingsY = r.y + 48 * s;
+    f32 h = 36 * s, cy = primaryY;
+    // One command surface, two clear levels: performance above, setup below.
+    rend_.rect({r.x, settingsY - 2 * s, r.w, 38 * s}, pal::panelAlt.alpha(0.45f));
+    rend_.roundRect({r.x + pad, primaryY, 36 * s, 36 * s}, 8 * s, nx::violet);
+    ui_.drawTextIn(fBold_, {r.x + pad, primaryY, 36 * s, 36 * s}, "NX", nx::text, Align::Center, 0);
+    ui_.drawTextIn(fBold_, {r.x + 60 * s, primaryY, 44 * s, 36 * s}, "Takt", nx::text, Align::Left, 0);
+    f32 x = r.x + 112 * s;
 
     // --- tempo ---
-    Rect tapR{x, cy, 34 * s, h};
+    Rect tapR{x, cy, 44 * s, h};
     // EVERY CONTROL IN THIS BAR NOW SAYS WHAT IT IS AND WHAT ITS GESTURES ARE.
     //
     // Before this pass four of the fifteen did (the signature, AUTO, ARR, MAP)
@@ -380,7 +385,7 @@ void App::drawControlBar(const Rect& r) {
     // The tempo is a FIELD, so it recesses (§5). dragNumber draws nothing over
     // a well at rest and takes the well over itself while the drag owns it, so
     // the two agree about what a number being edited looks like.
-    Rect tempoR{x, cy, 62 * s, h};
+    Rect tempoR{x, cy, 82 * s, h};
     chromeDebugMark("tempo", tempoR);
     ctlWell(rend_, tempoR, s);
     f64 bpm = ses_.tempo;
@@ -396,6 +401,8 @@ void App::drawControlBar(const Rect& r) {
         setTempo(bpm);
     }
     x += tempoR.w + gap;
+    const f32 primaryTempoEnd = x;
+    x = r.x + pad; cy = settingsY; h = 28 * s;
 
     // --- time signature ---
     //
@@ -417,7 +424,7 @@ void App::drawControlBar(const Rect& r) {
     // that only exist while the pointer is on it. That is deliberate: "a set
     // that has never been re-barred renders bit-identically" is this wave's
     // gate, and it is a gate a redesigned chip could not pass.
-    Rect sigR{x, cy, 44 * s, h};
+    Rect sigR{x, cy, 64 * s, h};
     {
         // Two invisible halves, split on the slash: numerator left, denominator
         // right. Hand-rolled rather than two Ui::dragNumbers because those draw
@@ -499,20 +506,20 @@ void App::drawControlBar(const Rect& r) {
     }
     x += sigR.w + gap;
 
-    Rect metR{x, cy, 36 * s, h};
+    Rect metR{x, cy, 60 * s, h};
     chromeDebugMark("met", metR);
     if (ui_.isHot(uiId(1, 2))) ui_.tip = "Metronome  (M)";
-    if (ui_.button(uiId(1, 2), metR, "Met", ses_.metronome, pal::accent)) {
+    if (ui_.button(uiId(1, 2), metR, "Click", ses_.metronome, pal::accent)) {
         undoPoint("metronome");
         ses_.metronome = !ses_.metronome;
         send(Cmd::SetMetronome, ses_.metronome ? 1 : 0);
     }
     x += metR.w + sep;
-    ctlSeam(rend_, x - sep * 0.5f, r, s);
+    ctlSeam(rend_, x - sep * 0.5f, {r.x, cy, r.w, h}, s);
 
     // --- global launch quantum ---
-    ui_.microIn(fSmall_, {x, cy, 14 * s, h}, "Q", pal::textFaint, Align::Left);
-    Rect quantR{x + 14 * s + gap, cy, 62 * s, h};
+    ui_.drawTextIn(fSmall_, {x, cy, 42 * s, h}, "Launch", pal::textDim, Align::Left, 0);
+    Rect quantR{x + 42 * s + gap, cy, 76 * s, h};
     // The selector writes into the session and only then reports the change,
     // so the entry needs the index handed back to it.
     const int wasQuantum = ses_.quantumIdx;
@@ -524,7 +531,10 @@ void App::drawControlBar(const Rect& r) {
         send(Cmd::SetQuantum, ses_.quantumIdx);
     }
     x = quantR.right() + sep;
-    ctlSeam(rend_, x - sep * 0.5f, r, s);
+    ctlSeam(rend_, x - sep * 0.5f, {r.x, cy, r.w, h}, s);
+
+    const f32 settingsRoutingX = x;
+    x = primaryTempoEnd + gap; cy = primaryY; h = 36 * s;
 
     // --- transport ---
     //
@@ -539,7 +549,7 @@ void App::drawControlBar(const Rect& r) {
     // single lit edge; segments separate by hairline, show a whisper on hover,
     // and only an active state fills. A physical transport is one machined
     // block with three switches in it, and that is what the eye should group.
-    const f32 segW = 38 * s;
+    const f32 segW = 48 * s;
     Rect trioR{x, cy, segW * 3, h};
     ui_.segCluster(trioR);
 
@@ -549,7 +559,7 @@ void App::drawControlBar(const Rect& r) {
     if (ui_.isHot(uiId(1, 4)))
         ui_.tip = playing ? "Stop  (Space)" : "Play  (Space)";
     if (ui_.segButton(uiId(1, 4), playR, playing, pal::accent)) togglePlay();
-    ui_.playTriangle(ui_.lastRect.insetXY(11 * s, 6 * s),
+    ui_.playTriangle(ui_.lastRect.insetXY(17 * s, 10 * s),
                      playing ? nx::text : pal::textDim.mix(nx::text, 0.5f));
     x += segW;
     rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
@@ -560,7 +570,7 @@ void App::drawControlBar(const Rect& r) {
     if (ui_.isHot(uiId(1, 5)))
         ui_.tip = "Stop - the playhead stays where it is  (Home returns it to the start)";
     if (ui_.segButton(uiId(1, 5), stopR, false, pal::accent)) send(Cmd::SetPlaying, 0);
-    ui_.stopSquare(ui_.lastRect.insetXY(11 * s, 6 * s), pal::textDim.mix(nx::text, 0.5f));
+    ui_.stopSquare(ui_.lastRect.insetXY(17 * s, 10 * s), pal::textDim.mix(nx::text, 0.5f));
     x += segW;
     rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
 
@@ -593,6 +603,8 @@ void App::drawControlBar(const Rect& r) {
     rend_.circle(rr.cx(), rr.cy(), 5 * s,
                  anyRec ? nx::text : (recIntent_ ? pal::recRed : pal::recRed.scale(0.55f)));
     x += segW + gap;
+    const f32 primaryPositionX = x + gap;
+    x = settingsRoutingX; cy = settingsY; h = 28 * s;
 
     // Automation Arm — its own control, immediately right of the record circle
     // (docs/AUTOMATION.md §5.1, decision #10). Not implied by record-arm:
@@ -604,12 +616,12 @@ void App::drawControlBar(const Rect& r) {
     // AUTO and ARR are one cluster: two record-destination modes, one plate.
     // They kept reading as strays while every other control found a group --
     // which is exactly the "buttons that don't belong together" complaint.
-    ui_.segCluster({x, cy, 36 * s + 32 * s, h});
+    ui_.segCluster({x, cy, 192 * s, h});
     {
-        Rect autoR{x, cy, 36 * s, h};
+        Rect autoR{x, cy, 96 * s, h};
         const u64 id = uiId(1, 10);
         if (ui_.segButton(id, autoR, autoArm_, nx::violet)) toggleAutoArm();
-        ui_.drawTextIn(fSmall_, ui_.lastRect, "Auto",
+        ui_.drawTextIn(fSmall_, ui_.lastRect, "Automation",
                     autoArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
                     Align::Center);
         if (ui_.isHot(id))
@@ -630,10 +642,10 @@ void App::drawControlBar(const Rect& r) {
     // depending on which tab is open. That is the modality AUTOMATION.md §5.1
     // refused when it made the automation arm its own control.
     {
-        Rect arrR{x, cy, 32 * s, h};
+        Rect arrR{x, cy, 96 * s, h};
         const u64 id = uiId(1, 12);
         const bool pressed = ui_.segButton(id, arrR, arrArm_, nx::violet);
-        ui_.drawTextIn(fSmall_, ui_.lastRect, "Arr",
+        ui_.drawTextIn(fSmall_, ui_.lastRect, "Timeline rec",
                     arrArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
                     Align::Center);
         if (ui_.isHot(id))
@@ -653,8 +665,11 @@ void App::drawControlBar(const Rect& r) {
             }
         }
         x = arrR.right() + sep;
-        ctlSeam(rend_, x - sep * 0.5f, r, s);
+        ctlSeam(rend_, x - sep * 0.5f, {r.x, cy, r.w, h}, s);
     }
+
+    const f32 settingsEnd = x;
+    x = primaryPositionX; cy = primaryY; h = 36 * s;
 
     // --- position readout ---
     {
@@ -680,7 +695,7 @@ void App::drawControlBar(const Rect& r) {
         // running counter is a live value, which is precisely what cyan is
         // reserved for, and it is legible against a --well-deep recess in a way
         // no glass fill would make it.
-        Rect posR{x, cy, 92 * s, h};
+        Rect posR{x, cy, 136 * s, h};
         ctlWell(rend_, posR, s, true);
         // Tabular figures, synthesised (§7): the system font's digits are
         // proportional, and a centred proportional counter breathes four times
@@ -723,18 +738,18 @@ void App::drawControlBar(const Rect& r) {
         // indicator that slides between the two slots on --ease-spring, never
         // two backgrounds toggling. Two lit buttons side by side is what this
         // was, and it is exactly the pattern the spec names and refuses.
-        Rect vs{rx - 152 * s, cy, 152 * s, h};
+        Rect vs{rx - 192 * s, cy, 192 * s, h};
         // Half the pill, so the cursor lands on the tab that is NOT current.
         chromeDebugMark("tab", {vs.x + vs.w * 0.5f, vs.y, vs.w * 0.5f, vs.h});
         static const char* const kViews[2] = {"Session", "Arrange"};
         int vi = view_ == MainView::Session ? 0 : 1;
         // tabPill hashes a sub-id per slot; either one hot means the pill is.
         if (ui_.hovered(vs))
-            ui_.tip = "Session (clip grid) / Arrangement (timeline)  -  Tab switches";
+            ui_.tip = "Session (F6) / Arrangement (F5)  -  Tab switches";
         if (ui_.tabPill(uiId(1, 7), vs, kViews, 2, &vi))
             view_ = vi == 0 ? MainView::Session : MainView::Arrangement;
         rx = vs.x - sep;
-        ctlSeam(rend_, rx + sep * 0.5f, r, s);
+        ctlSeam(rend_, rx + sep * 0.5f, {r.x, cy, r.w, h}, s);
     }
     // THE "?" -- and it is here because F1 is worth nothing if nobody knows
     // about F1. A key with no visible affordance is documentation about
@@ -744,7 +759,7 @@ void App::drawControlBar(const Rect& r) {
     // rather than about the music.
     {
         const u64 id = uiId(UiControlBar, 53);
-        Rect qr{rx - 30 * s, cy, 30 * s, h};
+        Rect qr{rx - 36 * s, cy, 36 * s, h};
         if (ui_.isHot(id))
             ui_.tip = "Keys and gestures  (F1)";
         if (ctlChip(ui_, id, qr, fSmall_, "?", g_keysOpen)) g_keysOpen = !g_keysOpen;
@@ -755,18 +770,19 @@ void App::drawControlBar(const Rect& r) {
     // controls, so widening targets never creates overlapping hit regions.
     {
         const u64 id = uiId(UiControlBar, 54);
-        Rect browseR{rx - 64 * s, cy, 64 * s, h};
-        if (ctlChip(ui_, id, browseR, fSmall_, "Files", showBrowser_))
+        Rect browseR{rx - 80 * s, cy, 80 * s, h};
+        if (ctlChip(ui_, id, browseR, fSmall_, "Library", showBrowser_))
             showBrowser_ = !showBrowser_;
         if (ui_.isHot(id))
             ui_.tip = "Show or hide samples and sets  (Ctrl+B)";
         rx = browseR.x - gap;
     }
-    if (rx - x >= 244 * s) {
+    cy = settingsY; h = 28 * s; x = settingsEnd; rx = r.right() - pad;
+    if (rx - x >= 314 * s) {
         const f32 cpu = es_.cpu;
         char buf[32];
-        snprintf(buf, sizeof buf, "%.0f%%", cpu);
-        Rect cr{rx - 46 * s, cy, 46 * s, h};
+        snprintf(buf, sizeof buf, "CPU %.0f%%", cpu);
+        Rect cr{rx - 64 * s, cy, 64 * s, h};
         ctlWell(rend_, cr, s);
         // Amber means attention and red means danger -- §1, and a CPU load that
         // is about to glitch the audio is the one number in this bar that earns
@@ -789,11 +805,11 @@ void App::drawControlBar(const Rect& r) {
         // §7: everything sits on the 8px grid -- including the gap this label
         // was quietly eating.
         const f32 bw = std::max(60.f * s, ui_.microWidth(fSmall_, lbl) + nx::sp1 * s);
-        if (rx - x >= bw + sep + 172 * s) {
+        if (rx - x >= bw + sep + 242 * s) {
             Rect br{rx - bw, cy, bw, h};
             ui_.drawTextIn(fSmall_, br, lbl, drv ? pal::textDim : nx::danger, Align::Right, 0);
             rx = br.x - sep;
-            ctlSeam(rend_, rx + sep * 0.5f, r, s);
+            ctlSeam(rend_, rx + sep * 0.5f, {r.x, cy, r.w, h}, s);
         }
     }
     // Computer MIDI keyboard. It belongs with the audio/MIDI readouts because
@@ -802,12 +818,12 @@ void App::drawControlBar(const Rect& r) {
     // carries the octave so PgUp / PgDn have somewhere to show their work, and
     // velocity sits next to it as a number: the FL layout spends C and V on
     // notes, so there are no keys left to nudge it with.
-    if (rx - x >= 66 * s) {
+    if (rx - x >= 98 * s) {
         // Velocity is secondary to the keyboard's on/off state. It returns
         // automatically when there is room for its own full-width field.
-        if (rx - x >= 108 * s) {
+        if (rx - x >= 152 * s) {
             f64 vel = (f64)kbd_.velocity();
-            Rect vr{rx - 34 * s, cy, 34 * s, h};
+            Rect vr{rx - 46 * s, cy, 46 * s, h};
             ctlWell(rend_, vr, s);
             if (ui_.isHot(uiId(16, 0)))
                 ui_.tip = "Computer-keyboard velocity - drag or wheel  -  double-click "
@@ -826,8 +842,8 @@ void App::drawControlBar(const Rect& r) {
         }
 
         char buf[24];
-        snprintf(buf, sizeof buf, "Kbd C%d", kbd_.octave());
-        Rect kr{rx - 58 * s, cy, 58 * s, h};
+        snprintf(buf, sizeof buf, "Keys C%d", kbd_.octave());
+        Rect kr{rx - 90 * s, cy, 90 * s, h};
         if (ui_.isHot(uiId(1, 9)))
             ui_.tip = kbdMidi_
                 ? "Computer MIDI keyboard is ON - the letter keys play the armed "
@@ -842,14 +858,14 @@ void App::drawControlBar(const Rect& r) {
     // reason those do: it says what, other than this window, can currently move
     // something in this set. A chip and not a panel, because the answer is
     // three numbers and there is no fourth thing to say about it.
-    if (rx - x >= 64 * s) {
+    if (rx - x >= 88 * s) {
         const size_t nb = midiMap_.size();
         const bool learning = midiMap_.learning();
         char buf[24];
         if (learning) snprintf(buf, sizeof buf, "Learn");
-        else          snprintf(buf, sizeof buf, "Map %zu", nb);
+        else          snprintf(buf, sizeof buf, "MIDI %zu", nb);
 
-        Rect mr{rx - 56 * s, cy, 56 * s, h};
+        Rect mr{rx - 80 * s, cy, 80 * s, h};
         const u64 id = uiId(1, 11);
 
         // Violet, pulsing, while a control is waiting to be learned — the same
@@ -918,48 +934,46 @@ void App::drawBrowser(const Rect& r) {
     // edge was a solid rule and is now a hairline that fades at both ends.
     rend_.hairlineV(r.right() - 1 * s, r.y, r.bottom(), nx::hairlineInk, 1 * s);
 
-    const f32 rowH = 28 * s;
+    const f32 rowH = 32 * s;
     // The header was a painted shelf -- a flat panelAlt rectangle with a hard
     // edge along the bottom -- while SCENES, MASTER, CHAIN, MACRO and every
     // other column head in the program is a micro-label over a hairline that
     // fades at both ends. §11 rules out the solid rule; the inconsistency was
     // the more visible half of it, since the browser sits beside the scene
     // column that does it the other way.
-    Rect head{r.x, r.y, r.w, 40 * s};
-    rend_.textIn(fBold_, {head.x + 12 * s, head.y, head.w - 24 * s, head.h}, "Library",
+    Rect head{r.x, r.y, r.w, 52 * s};
+    rend_.textIn(fBig_, {head.x + 16 * s, head.y, head.w - 32 * s, head.h}, "Library",
                  nx::text, Align::Left, 0);
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
-    // Places
-    f32 y = head.bottom();
+    // Quick places are a compact two-column shelf, separate from file content.
+    f32 y = head.bottom() + 8 * s;
+    const f32 placeGap = 6 * s, placeH = 50 * s;
+    const f32 placeW = (r.w - 24 * s - placeGap) * 0.5f;
     for (size_t i = 0; i < browserPlaces_.size(); ++i) {
-        Rect row{r.x, y, r.w, rowH};
+        Rect row{r.x + 12 * s + (i % 2) * (placeW + placeGap),
+                 y + (i / 2) * (placeH + placeGap), placeW, placeH};
         const std::string& p = browserPlaces_[i];
         const bool sel = p == browserDir_;
-        const bool hot = ui_.setHot(uiId(2, 100 + (int)i), row) && ui_.isHot(uiId(2, 100 + (int)i));
-        if (sel) {
-            rend_.roundRect(row.insetXY(6 * s, 2 * s), 5 * s, pal::accent.alpha(0.16f));
-            rend_.rect({row.x + 6 * s, row.y + 7 * s, 3 * s, row.h - 14 * s}, pal::accent);
-        } else if (hot) rend_.roundRect(row.insetXY(6 * s, 2 * s), 5 * s, pal::slotHover);
-        if (hot) ui_.cursor = Cursor::Hand;
+        const u64 id = uiId(2, 100 + (int)i);
+        const bool hot = ui_.setHot(id, row) && ui_.isHot(id);
+        rend_.roundRect(row, 8 * s, sel ? nx::violet.alpha(0.20f)
+                                      : hot ? pal::slotHover : pal::panelAlt);
+        if (sel) rend_.roundRectOutline(row, 8 * s, s, nx::violet.alpha(0.7f));
         const size_t slash = p.find_last_of('/');
         const std::string name = p == homeDir() ? "Home"
                                : p == "/usr/share/sounds" ? "Sounds"
                                : slash == std::string::npos ? p : p.substr(slash + 1);
-        // Places share a quiet folder glyph and a consistent text inset.
-        const Col icon = sel ? pal::accent : pal::textDim;
-        rend_.roundRectOutline({row.x + 14 * s, row.cy() - 4 * s, 12 * s, 9 * s},
+        const Col icon = sel ? nx::cyan : nx::muted;
+        rend_.roundRectOutline({row.cx() - 7 * s, row.y + 9 * s, 14 * s, 11 * s},
                                2 * s, s, icon);
-        rend_.line(row.x + 15 * s, row.cy() - 6 * s,
-                   row.x + 20 * s, row.cy() - 6 * s, s, icon);
-        rend_.textIn(fBody_, row, name.c_str(),
-                     sel ? pal::text : pal::textDim, Align::Left, 36 * s);
+        rend_.line(row.cx() - 6 * s, row.y + 7 * s, row.cx(), row.y + 7 * s, s, icon);
+        rend_.textIn(fSmall_, {row.x + 4 * s, row.y + 26 * s, row.w - 8 * s, 18 * s},
+                     name.c_str(), sel ? nx::text : pal::textDim, Align::Center, 0);
+        if (hot) { ui_.cursor = Cursor::Hand; ui_.tip = p; }
         if (hot && in.pressed[0]) browseTo(p);
-        y += rowH;
     }
-
-    rend_.hairlineH(r.x + 6 * s, r.right() - 6 * s, y + 3 * s, nx::hairlineInk, 1 * s);
-    y += nx::sp1 * s;
+    y += ((browserPlaces_.size() + 1) / 2) * (placeH + placeGap) + 8 * s;
 
     // Current directory label, cut from the FRONT rather than the back.
     //
@@ -2228,15 +2242,27 @@ void App::drawStatusBar(const Rect& r) {
     }
 
     char buf[224];
-    snprintf(buf, sizeof buf, "%s%s%s %.0f Hz / %d fr%s%s%s%.0f fps  -  %d draws",
-             win_.backendName(), kSep,
-             eng_.driverName() ? eng_.driverName() : "silent",
-             eng_.driverSampleRate(),
-             eng_.driverBufferSize(),
-             pdcTag,
-             midiTag,
-             kSep,
-             fps_, rend_.drawCalls());
+    const bool showDiagnostics = env("DEBUG_STATUS") != nullptr;
+    if (showDiagnostics) {
+        snprintf(buf, sizeof buf, "%s%s%s %.0f Hz / %d fr%s%s%s%.0f fps  -  %d draws",
+                 win_.backendName(), kSep,
+                 eng_.driverName() ? eng_.driverName() : "silent",
+                 eng_.driverSampleRate(),
+                 eng_.driverBufferSize(),
+                 pdcTag,
+                 midiTag,
+                 kSep,
+                 fps_, rend_.drawCalls());
+    } else if (es_.link == EngineLink::Live && eng_.driverName()) {
+        snprintf(buf, sizeof buf, "Audio connected   %.1f kHz   %d samples",
+                 eng_.driverSampleRate() / 1000.0, eng_.driverBufferSize());
+    } else {
+        const char* state = es_.link == EngineLink::Starting ? "Connecting audio"
+                          : es_.link == EngineLink::Stopping ? "Stopping audio"
+                          : es_.link == EngineLink::Stale ? "Audio not responding"
+                          : "Audio disconnected";
+        snprintf(buf, sizeof buf, "%s", state);
+    }
     rend_.textIn(fSmall_, r, buf, kIdleInk, Align::Right, nx::sp1 * s);
     // The coloured tags are their own draws so each can carry its role's ink
     // instead of vanishing into the faint utility text beside them: refusals in
@@ -2257,37 +2283,45 @@ void App::drawStatusBar(const Rect& r) {
         const u64 idDiag = uiId(UiControlBar, 51);
         const Rect diagR{r.right() - nx::sp1 * s - diagW, r.y, diagW, r.h};
         if (ui_.setHot(idDiag, diagR) && ui_.isHot(idDiag)) {
-            char t[224];
-            int n;
-            if (eng_.remoteOpen())
-                n = snprintf(t, sizeof t, "Engine: nxtaktd, pid %d",
-                             eng_.enginePid());
-#ifdef _WIN32
-            // The port's in-process arm (§18's carve-out): on Linux
-            // localOpen() is a constant false and this branch was deleted
-            // with the engine it described.
-            else if (eng_.localOpen())
-                n = snprintf(t, sizeof t, "Engine: in-process");
-#endif
-            else
-                n = snprintf(t, sizeof t, "Engine: none - the set is editable, "
-                                          "nothing sounds");
-            if (eng_.resyncs() > 0 && n < (int)sizeof t)
-                n += snprintf(t + n, sizeof t - (size_t)n,
-                              " - restarted %llu time%s this run",
-                              (unsigned long long)eng_.resyncs(),
-                              eng_.resyncs() == 1 ? "" : "s");
-            if (eng_.midiRunning() && n < (int)sizeof t)
-                n += snprintf(t + n, sizeof t - (size_t)n,
-                              " - MIDI in: %llu message%s",
-                              (unsigned long long)eng_.midiReceived(),
-                              eng_.midiReceived() == 1 ? "" : "s");
-            if ((eng_.takesReturned() || eng_.takesEmpty()) && n < (int)sizeof t)
-                snprintf(t + n, sizeof t - (size_t)n,
-                         " - takes: %llu kept, %llu empty",
-                         (unsigned long long)eng_.takesReturned(),
-                         (unsigned long long)eng_.takesEmpty());
-            ui_.tip = t;
+            ui_.tip = es_.link == EngineLink::Live
+                ? "Audio is connected. Buffer size sets the balance between latency and stability."
+                : "Audio is unavailable. Use Restart above to reconnect.";
+            if (pdc > 0)
+                ui_.tip += " Plugin delay is compensated automatically.";
+            if (eng_.midiRunning()) ui_.tip += " MIDI input is ready.";
+            if (showDiagnostics) {
+                char t[224];
+                int n;
+                if (eng_.remoteOpen())
+                    n = snprintf(t, sizeof t, "Engine: nxtaktd, pid %d",
+                                 eng_.enginePid());
+    #ifdef _WIN32
+                // The port's in-process arm (§18's carve-out): on Linux
+                // localOpen() is a constant false and this branch was deleted
+                // with the engine it described.
+                else if (eng_.localOpen())
+                    n = snprintf(t, sizeof t, "Engine: in-process");
+    #endif
+                else
+                    n = snprintf(t, sizeof t, "Engine: none - the set is editable, "
+                                              "nothing sounds");
+                if (eng_.resyncs() > 0 && n < (int)sizeof t)
+                    n += snprintf(t + n, sizeof t - (size_t)n,
+                                  " - restarted %llu time%s this run",
+                                  (unsigned long long)eng_.resyncs(),
+                                  eng_.resyncs() == 1 ? "" : "s");
+                if (eng_.midiRunning() && n < (int)sizeof t)
+                    n += snprintf(t + n, sizeof t - (size_t)n,
+                                  " - MIDI in: %llu message%s",
+                                  (unsigned long long)eng_.midiReceived(),
+                                  eng_.midiReceived() == 1 ? "" : "s");
+                if ((eng_.takesReturned() || eng_.takesEmpty()) && n < (int)sizeof t)
+                    snprintf(t + n, sizeof t - (size_t)n,
+                             " - takes: %llu kept, %llu empty",
+                             (unsigned long long)eng_.takesReturned(),
+                             (unsigned long long)eng_.takesEmpty());
+                ui_.tip = t;
+            }
         }
     }
     if (refuseTag[0]) {
@@ -2412,13 +2446,27 @@ void App::drawKeysSheet() {
     }
     const int leftN  = split;
     const int rightN = keys::count - split;
-    const f32 bodyH  = rowH * (f32)(leftN > rightN ? leftN : rightN);
+    const auto columnHeight = [&](int from, int to) {
+        f32 rows = 0.f;
+        for (int i = from; i < to; ++i)
+            rows += !keys::table[i].keys ? (keys::table[i].what ? 1.4f : 0.5f) : 1.f;
+        return rows * rowH;
+    };
+    const f32 bodyH = std::max(columnHeight(0, leftN), columnHeight(split, split + rightN));
 
     Rect box{0, 0, colW * 2.f + padX * 3.f, titleH + bodyH + padY * 2.f};
     box.w = std::min(box.w, W - nx::sp2 * s * 2.f);
     box.h = std::min(box.h, H - nx::sp2 * s * 2.f);
     box.x = std::round((W - box.w) * 0.5f);
     box.y = std::round((H - box.h) * 0.5f);
+
+    const Rect sheetBody{box.x, box.y + padY + titleH, box.w,
+                         std::max(0.f, box.h - titleH - padY * 2.f)};
+    static f32 scroll = 0.f;
+    const f32 maxScroll = std::max(0.f, bodyH - sheetBody.h);
+    if (box.contains(win_.input().mx, win_.input().my))
+        scroll -= win_.input().wheel * 40.f * s;
+    scroll = clampv(scroll, 0.f, maxScroll);
 
     // §4's sheet material, the preset popover's mix -- one menu material in the
     // program. A dimming wash under it, because this one covers the whole set
@@ -2433,16 +2481,16 @@ void App::drawKeysSheet() {
     ui_.microIn(fSmall_, {box.x + padX, box.y + padY * 0.5f, 200 * s, titleH},
                 "KEYS", nx::text, Align::Left, 0);
     rend_.textIn(fSmall_, {box.x, box.y + padY * 0.5f, box.w - padX, titleH},
-                 "F1 or Esc to close", nx::muted.alpha(0.8f), Align::Right, 0);
+                 maxScroll > 0.f ? "Scroll for more  /  F1 or Esc to close" : "F1 or Esc to close", nx::muted.alpha(0.8f), Align::Right, 0);
     rend_.hairlineH(box.x + padX, box.right() - padX,
                     std::round(box.y + padY * 0.5f + titleH), nx::hairlineInk, s);
 
-    rend_.pushClip(box);
+    rend_.pushClip(sheetBody);
     for (int col = 0; col < 2; ++col) {
         const int from = col == 0 ? 0 : split;
         const int to   = col == 0 ? split : keys::count;
         const f32 cx   = box.x + padX + (f32)col * (colW + padX);
-        f32 y = box.y + padY + titleH;
+        f32 y = sheetBody.y - scroll;
         for (int i = from; i < to; ++i) {
             const keys::Row& kr = keys::table[i];
             if (!kr.keys && !kr.what) { y += rowH * 0.5f; continue; }

@@ -89,8 +89,8 @@ inline constexpr Col gridSub  = rgba(0xC5C3C0, 0.030f);
 // --- surfaces ---------------------------------------------------------------
 //
 // Warm graphite chrome and a restrained neutral lift match the main workspace.
-inline constexpr Col panelFill = rgb(0x292A2E);   // --panel
-inline constexpr Col panelAlt  = rgb(0x303135);   // --panel-2
+inline constexpr Col panelFill = nx::panel;   // --panel
+inline constexpr Col panelAlt  = nx::panel2;   // --panel-2
 // The alternating lane stripe, and the row banding in the roll. Barely there on
 // purpose: §1's "if it is visible from across the room, halve it" -- this is
 // what is left after halving it twice.

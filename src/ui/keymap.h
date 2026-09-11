@@ -38,6 +38,8 @@ inline constexpr Row table[] = {
 
     {nullptr, "VIEWS AND PANELS"},
     {"Tab",           "Session / Arrangement"},
+    {"F5 / F6",       "Arrangement / Session (FL-style view shortcuts)"},
+    {"F7 / F9",       "clip editor / mixer"},
     {"Ctrl+B",        "browser"},
     {"Ctrl+D",        "clip detail panel"},
     {"F1",            "this list"},
@@ -86,7 +88,7 @@ inline constexpr Row table[] = {
     {nullptr, nullptr},
 
     {nullptr, "PIANO ROLL  (CLIP tab, MIDI clips)"},
-    {"click",         "add / select a note.  Double-click adds or deletes."},
+    {"click",         "add / select a note. Double-click keeps the note."},
     {"drag",          "move it; the right edge sizes it.  Right-click deletes."},
     {"wheel",         "scroll pitch    Shift+wheel scrolls time"},
     {"Ctrl+wheel",    "zoom time about the cursor"},
@@ -100,7 +102,7 @@ inline constexpr Row table[] = {
     {nullptr, "RECORDING"},
     {"",              "The round button arms the INTENT, like Live's session"},
     {"",              "record. With it lit: click an empty slot on an armed"},
-    {"",              "track to start a take, click again to stop. Click a MIDI"},
+    {"",              "track to start a take, click again to stop. Use the triangle on a MIDI"},
     {"",              "clip to overdub another pass into it."},
     {"",              "ARR sends the take to the timeline instead of the grid;"},
     {"",              "AUTO records control moves into the playing clip."},

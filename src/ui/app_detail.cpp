@@ -170,9 +170,11 @@ void App::drawDetailPanel(const Rect& r) {
     }
 
     Rect content{r.x, head.bottom(), r.w, r.bottom() - head.bottom()};
+    rend_.pushClip(content);
     if (detailTab_ != DetailTab::Clip)          drawDeviceDetail(content);
     else if (view_ == MainView::Arrangement)    drawArrangeClipDetail(content);
     else                                        drawClipDetail(content);
+    rend_.popClip();
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +205,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
         rend_.textIn(fBold_, {r.x, r.cy() - lh - nx::sp1 * s, r.w, lh},
                      "No item selected", nx::text, Align::Center);
         rend_.textIn(fBody_, {r.x, r.cy() + nx::sp1 * s, r.w, lh},
-                     "Click a clip on the timeline, or drag one onto it.",
+                     "Drag a Session clip, press F5 while holding it, then drop it here.",
                      nx::muted, Align::Center);
         return;
     }
@@ -211,16 +213,22 @@ void App::drawArrangeClipDetail(const Rect& r) {
     const int track = arrSelTrack_;
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
-    Rect head{r.x, r.y + 1 * s, r.w, 28 * s};
+    Rect head{r.x, r.y + 1 * s, r.w, 36 * s};
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s}, ccol);
     rend_.textIn(fBold_, {head.x + 10 * s, head.y, 260 * s, head.h}, m.name.c_str(),
                  nx::text, Align::Left, 0);
     rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
-    const f32 panelW = 278 * s;
-    Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
-    f32 y = ctrl.y;
-    const f32 rowH = 28 * s, lblW = 76 * s;
+    const f32 panelW = 300 * s;
+    Rect ctrl{r.x + 16 * s, head.bottom() + 8 * s, panelW, r.bottom() - head.bottom() - 16 * s};
+    rend_.roundRect(ctrl, 10 * s, nx::panel2.mix(nx::panel, 0.55f));
+    rend_.roundRectOutline(ctrl, 10 * s, s, nx::line.alpha(0.45f));
+    rend_.textIn(fBold_, {ctrl.x + 12 * s, ctrl.y + 4 * s, ctrl.w - 24 * s, 30 * s},
+                 "Clip placement", nx::text, Align::Left, 0);
+    f32 y = ctrl.y + 42 * s;
+    ctrl.x += 12 * s;
+    ctrl.w -= 24 * s;
+    const f32 rowH = 30 * s, lblW = 90 * s;
     // Field labels share the value baseline and use quiet sentence case.
     auto label = [&](const char* tx, const Rect& row) {
         rend_.textIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
@@ -234,7 +242,8 @@ void App::drawArrangeClipDetail(const Rect& r) {
         Rect row{ctrl.x, y, ctrl.w, rowH};
         label(lbl, row);
         f64 tmp = *v;
-        Rect dn{row.x + lblW, row.y, 90 * s, row.h};
+        Rect dn{row.x + lblW, row.y, row.w - lblW, row.h};
+        rend_.roundRect(dn, 5 * s, nx::bgTop);
         if (ui_.dragNumber(uiId(UiDetailPlacement, id), dn, &tmp, lo, hi, 0.02, fmt)) {
             undoPoint("clip placement");
             *v = tmp;
@@ -251,7 +260,8 @@ void App::drawArrangeClipDetail(const Rect& r) {
         Rect row{ctrl.x, y, ctrl.w, rowH};
         label("Gain", row);
         f64 db = gainToDb(m.gain);
-        Rect dn{row.x + lblW, row.y, 70 * s, row.h};
+        Rect dn{row.x + lblW, row.y, 112 * s, row.h};
+        rend_.roundRect(dn, 5 * s, nx::bgTop);
         if (ui_.dragNumber(uiId(UiDetailPlacement, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
                            Align::Center, nullptr, 0.0, /*def=*/0.0)) {
             undoPoint("clip gain");
@@ -267,15 +277,15 @@ void App::drawArrangeClipDetail(const Rect& r) {
         y += rowH + 4 * s;
     }
     if (ui_.fSmall) {
-        Rect row{ctrl.x, y, ctrl.w, rowH};
+        Rect row{ctrl.x, r.bottom() - 28 * s, ctrl.w, 20 * s};
         char buf[128];
         snprintf(buf, sizeof buf, "%s  -  %.2f .. %.2f bt", ownerName(track).c_str(),
                  it->start, it->end());
         rend_.textIn(fSmall_, row, buf, nx::muted.alpha(0.8f), Align::Left, 0);
     }
 
-    Rect wave{ctrl.right() + 12 * s, head.bottom() + 6 * s,
-              r.right() - ctrl.right() - 20 * s, r.bottom() - head.bottom() - 12 * s};
+    Rect wave{ctrl.right() + 24 * s, head.bottom() + 6 * s,
+              r.right() - ctrl.right() - 32 * s, r.bottom() - head.bottom() - 12 * s};
 
     if (!arrRoll_) arrRoll_ = std::make_unique<PianoRoll>();
     AutoTargets targets;
@@ -440,11 +450,24 @@ void App::drawClipDetail(const Rect& r) {
         // is exactly the trap the specimen sheet's own labels warn about.
         const f32 lh = fBody_.height();
         rend_.textIn(fBold_, {r.x, r.cy() - lh - nx::sp1 * s, r.w, lh},
-                     "No clip selected", nx::text, Align::Center);
+                     "Select a clip to start editing", nx::text, Align::Center);
         rend_.textIn(fBody_, {r.x, r.cy() + nx::sp1 * s, r.w, lh},
-                     "Drag a file from the browser onto a slot, or double-click "
-                     "an empty slot on an instrument track.",
+                     "Drag a sample into a slot, or double-click an empty MIDI slot.",
                      nx::muted, Align::Center);
+        const bool canCreate = trackHasNoteDevice(selTrack_);
+        const Rect action{r.cx() - 90 * s, r.cy() + 42 * s, 180 * s, 34 * s};
+        if (ui_.button(uiId(8, 51), action, canCreate ? "Create MIDI clip" : "Add instrument", true)) {
+            if (canCreate) createMidiClip(selTrack_, selSlot_);
+            else {
+                selectChainOwner(selTrack_);
+                pluginCategory_ = 1;
+                pluginFilter_.clear();
+                pluginScroll_ = 0.f;
+                detailTab_ = DetailTab::Devices;
+                ensurePluginScan();
+                status_ = "Choose an instrument, then double-click it to add it to this track";
+            }
+        }
         return;
     }
     // A pattern has no sample behind it, so warp, clip tempo and the loop
@@ -453,26 +476,63 @@ void App::drawClipDetail(const Rect& r) {
     const bool midi = m.kind == ClipKind::Midi;
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
-    Rect head{r.x, r.y + 1 * s, r.w, 28 * s};
+    Rect head{r.x, r.y + 1 * s, r.w, 36 * s};
+    rend_.rect(head, nx::panel);
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s}, ccol);
-    const f32 nameW = std::min(260 * s, fBold_.measure(m.name.c_str()) + 4 * s);
+    const f32 nameW = std::min(180 * s, fBold_.measure(m.name.c_str()) + 4 * s);
     rend_.textIn(fBold_, {head.x + 10 * s, head.y, nameW, head.h}, m.name.c_str(),
                  nx::text, Align::Left, 0);
     // What kind of material this is, as a status chip (§5) rather than as one
     // more line of prose. Cyan = a pattern, which is the one the editor to the
     // right behaves differently for.
-    ui_.chip({head.x + 14 * s + nameW, head.cy() - 6 * s, 44 * s, 13 * s},
+    ui_.chip({head.x + 14 * s + nameW, head.cy() - 8 * s, 46 * s, 17 * s},
              midi ? "midi" : "audio", midi ? nx::cyan : nx::muted);
     rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
-    // A single inspector keeps the material as the main working surface.
-    // Clip playback and note tools form two compact groups in the same column.
-    const f32 panelW = 278 * s;
-    Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
-    f32 y = ctrl.y;
-    const f32 rowH = 26 * s, lblW = 76 * s;
+    // One focused page at a time gives each field a complete label and a
+    // dependable target. The editor remains visible while changing pages.
+    const f32 panelW = 300 * s;
+    Rect ctrl{r.x + 16 * s, head.bottom() + 8 * s, panelW, r.bottom() - head.bottom() - 16 * s};
+    rend_.roundRect(ctrl, 10 * s, nx::panel2.mix(nx::panel, 0.55f));
+    rend_.roundRectOutline(ctrl, 10 * s, s, nx::line.alpha(0.45f));
+    static const char* midiPages[] = {"Notes", "Playback", "Launch"};
+    static const char* audioPages[] = {"Playback", "Launch"};
+    int& page = midi ? midiInspectorPage_ : audioInspectorPage_;
+    const Rect pages{ctrl.x + 8 * s, ctrl.y + 8 * s, ctrl.w - 16 * s, 32 * s};
+    ui_.tabPill(uiId(8, 50), pages, midi ? midiPages : audioPages, midi ? 3 : 2, &page);
+    const bool notesPage = midi && page == 0;
+    const bool playbackPage = page == (midi ? 1 : 0);
+    const bool launchPage = page == (midi ? 2 : 1);
+    const bool compactInspector = ctrl.h < 290 * s;
+    const f32 rowH = (compactInspector ? 28.f : 32.f) * s, lblW = 90 * s;
+    const Rect inspectorBody{ctrl.x + 12 * s, pages.bottom() + 12 * s,
+                             ctrl.w - 24 * s, std::max(0.f, ctrl.bottom() - pages.bottom() - 44 * s)};
+    const f32 required = notesPage ? 3.f * (22 * s + rowH) + (compactInspector ? 12.f : 24.f) * s
+                         : launchPage ? 4.f * rowH + 20 * s
+                         : (midi ? 2.f : 3.f) * (rowH + 4 * s);
+    const f32 maxInspectorScroll = std::max(0.f, required - inspectorBody.h);
+    f32& inspectorScroll = inspectorScroll_[midi ? page : page + 3];
+    const Input& inspectorInput = win_.input();
+    if (inspectorBody.contains(inspectorInput.mx, inspectorInput.my) && inspectorInput.wheel != 0.f)
+        inspectorScroll -= inspectorInput.wheel * 32 * s;
+    inspectorScroll = clampv(inspectorScroll, 0.f, maxInspectorScroll);
+    f32 y = inspectorBody.y - inspectorScroll;
+    ctrl.x += 12 * s;
+    ctrl.w -= 24 * s;
     const Rect ctrl2 = ctrl;
-    f32 y2 = ctrl.y;
+    f32 y2 = y;
+    const f32 editorX = ctrl.right() + 24 * s;
+    rend_.textIn(fSmall_, {editorX, head.y, 160 * s, head.h},
+                 midi ? "Piano roll" : "Waveform", nx::muted, Align::Left, 0);
+    if (r.w > 900 * s)
+        rend_.textIn(fSmall_, {editorX + 160 * s, head.y,
+                              r.right() - editorX - 176 * s, head.h},
+                     "Ctrl + scroll to zoom  /  Middle drag to pan", nx::muted.alpha(0.65f),
+                     Align::Right, 0);
+    auto field = [&](const Rect& b) {
+        rend_.roundRect(b, 5 * s, nx::bgTop);
+        rend_.roundRectOutline(b, 5 * s, s, nx::line.alpha(0.4f));
+    };
 
     // Quiet sentence-case labels share the value baseline for a clean inspector.
     auto label = [&](const char* t, const Rect& row) {
@@ -480,14 +540,15 @@ void App::drawClipDetail(const Rect& r) {
                     t, nx::muted, Align::Left, 0);
     };
 
-    {   // Warp mode (audio only) + loop, which both kinds have
+    rend_.pushClip(inspectorBody);
+    if (playbackPage) {   // Warp mode (audio only) + loop, which both kinds have
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        Rect lp{row.x + lblW, row.y, 52 * s, row.h};
+        Rect lp{row.x + lblW, row.y, row.w - lblW, row.h};
         if (!midi) {
             label("Warp", row);
             static const char* warpNames[] = {"Off", "Repitch", "Beats"};
             int wi = (int)m.warp;
-            Rect sel{row.x + lblW, row.y, 84 * s, row.h};
+            Rect sel{row.x + lblW, row.y, 112 * s, row.h};
             if (ui_.selector(uiId(8, 0), sel, &wi, warpNames, 3)) {
                 undoPoint("warp mode");
                 m.warp = (Warp)wi;
@@ -497,18 +558,19 @@ void App::drawClipDetail(const Rect& r) {
         } else {
             label("Playback", row);
         }
-        if (ui_.button(uiId(8, 1), lp, "Loop", m.loop, nx::violet)) {
+        if (ui_.button(uiId(8, 1), lp, midi ? (m.loop ? "Loop enabled" : "One shot") : "Loop", m.loop, nx::violet)) {
             undoPoint("clip loop");
             m.loop = !m.loop;
             send(Cmd::ClipLoop, selTrack_, selSlot_, m.loop ? 1.0 : 0.0);
         }
         y += rowH + 4 * s;
     }
-    if (!midi) {   // Clip tempo
+    if (!midi && playbackPage) {   // Clip tempo
         Rect row{ctrl.x, y, ctrl.w, rowH};
         label("Tempo", row);
         f64 bpm = m.clipBpm;
-        Rect dn{row.x + lblW, row.y, 70 * s, row.h};
+        Rect dn{row.x + lblW, row.y, 100 * s, row.h};
+        field(dn);
         if (ui_.dragNumber(uiId(8, 2), dn, &bpm, 20.0, 400.0, 0.1, "%.2f")) {
             undoPoint("clip tempo");
             m.clipBpm = bpm;
@@ -534,11 +596,12 @@ void App::drawClipDetail(const Rect& r) {
         ui_.microIn(fSmall_, ui_.lastRect, "*2", nx::muted, Align::Center);
         y += rowH + 4 * s;
     }
-    {   // Gain
+    if (playbackPage) {   // Gain
         Rect row{ctrl.x, y, ctrl.w, rowH};
         label("Gain", row);
         f64 db = gainToDb(m.gain);
-        Rect dn{row.x + lblW, row.y, 70 * s, row.h};
+        Rect dn{row.x + lblW, row.y, 100 * s, row.h};
+        field(dn);
         if (ui_.dragNumber(uiId(8, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
                            Align::Center, nullptr, 0.0, /*def=*/0.0)) {
             undoPoint("clip gain");
@@ -547,14 +610,14 @@ void App::drawClipDetail(const Rect& r) {
         }
         y += rowH + 4 * s;
     }
-    {   // Launch quantum override
+    if (launchPage) {   // Launch quantum override
         Rect row{ctrl.x, y, ctrl.w, rowH};
         label("Launch grid", row);
         static const char* qn[kQuantumCount + 1] = {"Global"};
         static bool qnInit = false;
         if (!qnInit) { for (int i = 0; i < kQuantumCount; ++i) qn[i + 1] = kQuantumNames[i]; qnInit = true; }
         int qi = m.quantumIdx + 1;
-        Rect sel{row.x + lblW, row.y, 84 * s, row.h};
+        Rect sel{row.x + lblW, row.y, 112 * s, row.h};
         if (ui_.selector(uiId(8, 6), sel, &qi, qn, kQuantumCount + 1)) {
             undoPoint("clip quantum");
             m.quantumIdx = qi - 1;
@@ -562,15 +625,16 @@ void App::drawClipDetail(const Rect& r) {
         }
         y += rowH + 4 * s;
     }
-    {   // Generative launch: probability, follow action, follow length.
+    if (launchPage) {   // Generative launch: probability, follow action, follow length.
         // The engine rolls `prob` on every launch and fires the follow action
         // after `followBeats` of playback, so all three are pure clip state and
         // ride across in the same RtClip as everything else here.
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        label("Launch", row);
+        label("Chance", row);
 
         f64 pct = m.prob * 100.0;
-        Rect pr{row.x + lblW, row.y, 48 * s, row.h};
+        Rect pr{row.x + lblW, row.y, row.w - lblW, row.h};
+        field(pr);
         if (ui_.dragNumber(uiId(UiDetailLaunch, 0), pr, &pct, 0.0, 100.0, 0.4, "%.0f%%",
                            Align::Center, nullptr, 0.0, /*def=*/100.0)) {
             undoPoint("launch probability");
@@ -579,7 +643,9 @@ void App::drawClipDetail(const Rect& r) {
         }
 
         int fa = (int)m.followAction;
-        Rect fr{pr.right() + 6 * s, row.y, 58 * s, row.h};
+        row.y += rowH + 8 * s;
+        label("Follow action", row);
+        Rect fr{row.x + lblW, row.y, row.w - lblW, row.h};
         if (ui_.selector(uiId(UiDetailLaunch, 1), fr, &fa, kFollowNames, kFollowCount)) {
             undoPoint("follow action");
             m.followAction = (Follow)clampv(fa, 0, kFollowCount - 1);
@@ -590,7 +656,10 @@ void App::drawClipDetail(const Rect& r) {
         // than as a length. Whole beats only: a follow length between beats is
         // a tempo problem, not a musical choice.
         f64 fb = m.followBeats;
-        Rect br{fr.right() + 6 * s, row.y, 52 * s, row.h};
+        row.y += rowH + 8 * s;
+        label("After", row);
+        Rect br{row.x + lblW, row.y, row.w - lblW, row.h};
+        field(br);
         if (ui_.dragNumber(uiId(UiDetailLaunch, 2), br, &fb, 0.0, 128.0, 0.06, "%.0f bt",
                            Align::Center, "Auto", 1.0)) {
             undoPoint("follow length");
@@ -599,11 +668,7 @@ void App::drawClipDetail(const Rect& r) {
         }
         y += rowH + 4 * s;
     }
-    if (midi) {
-        rend_.hairlineH(ctrl.x, ctrl.right() - 8 * s, y + 1 * s);
-        y2 = y + 8 * s;
-    }
-    if (midi) {   // The set's KEY: root, scale, and whether edits are held to it.
+    if (notesPage) {   // The set's KEY: root, scale, and whether edits are held to it.
         // On the clip panel rather than on the control bar, which is where Live
         // puts it, for a reason that is about this program and not about taste:
         // the control bar here is already at the width it can carry and the only
@@ -616,7 +681,8 @@ void App::drawClipDetail(const Rect& r) {
         // not, say, CLIP KEY, and why it goes through undoPoint like any other
         // session edit.
         Rect row{ctrl2.x, y2, ctrl2.w, rowH};
-        label("Scale", row);
+        rend_.textIn(fSmall_, {row.x, row.y, row.w, 18 * s}, "Musical scale", nx::muted, Align::Left, 0);
+        row.y += 22 * s;
         static const char* rootNames[12] = {};
         static bool rootInit = false;
         if (!rootInit) { for (int i = 0; i < 12; ++i) rootNames[i] = kPitchNames[i]; rootInit = true; }
@@ -625,18 +691,18 @@ void App::drawClipDetail(const Rect& r) {
         if (!scaleInit) { for (int i = 0; i < kScaleCount; ++i) scaleNames[i] = kScales[i].name; scaleInit = true; }
 
         int root = clScaleRoot(ses_.scale.root);
-        Rect rr_{row.x + lblW, row.y, 34 * s, row.h};
+        Rect rr_{row.x, row.y, 48 * s, row.h};
         if (ui_.selector(uiId(UiDetailKeyRow, 0), rr_, &root, rootNames, 12)) {
             undoPoint("key");
             ses_.scale.root = clScaleRoot(root);
         }
         int mode = clScaleMode(ses_.scale.mode);
-        Rect sr{rr_.right() + 6 * s, row.y, 90 * s, row.h};
+        Rect sr{rr_.right() + 6 * s, row.y, 152 * s, row.h};
         if (ui_.selector(uiId(UiDetailKeyRow, 1), sr, &mode, scaleNames, kScaleCount)) {
             undoPoint("scale");
             ses_.scale.mode = clScaleMode(mode);
         }
-        Rect nr{sr.right() + 6 * s, row.y, 44 * s, row.h};
+        Rect nr{sr.right() + 6 * s, row.y, 64 * s, row.h};
         if (ui_.button(uiId(UiDetailKeyRow, 2), nr, "Snap", ses_.scale.snap, nx::violet)) {
             undoPoint("scale snap");
             ses_.scale.snap = !ses_.scale.snap;
@@ -649,9 +715,9 @@ void App::drawClipDetail(const Rect& r) {
                                                + ses_.scale.label())
                           : std::string("Pick a scale first - there is nothing to snap to in "
                                         "Chromatic");
-        y2 += rowH + 4 * s;
+        y2 = row.y + rowH + (compactInspector ? 6.f : 12.f) * s;
     }
-    if (midi && roll_) {
+    if (notesPage && roll_) {
         // The note tools (PianoRoll's quantize / legato / duplicate / transpose).
         // Buttons rather than shortcuts: the roll's key map is already full, and
         // these are deliberate one-shot gestures rather than things a hand does
@@ -662,7 +728,8 @@ void App::drawClipDetail(const Rect& r) {
         // for what it does and not for what it does it to.
         {
             Rect row{ctrl2.x, y2, ctrl2.w, rowH};
-            label("Quantize", row);
+            rend_.textIn(fSmall_, {row.x, row.y, row.w, 18 * s}, "Timing / strength", nx::muted, Align::Left, 0);
+            row.y += 22 * s;
             // The grid, as a selector over the divisions a sequencer actually
             // uses. Triplets are in the list because a swung part cannot be
             // quantized by a straight grid at any strength.
@@ -672,20 +739,21 @@ void App::drawClipDetail(const Rect& r) {
             int gi = 4;
             for (int i = 0; i < kGridCount; ++i)
                 if (std::fabs(gridBeats[i] - roll_->quantGrid()) < 1e-9) { gi = i; break; }
-            Rect gr{row.x + lblW, row.y, 52 * s, row.h};
+            Rect gr{row.x, row.y, 76 * s, row.h};
             if (ui_.selector(uiId(UiDetailNotes, 0), gr, &gi, gridNames, kGridCount))
                 roll_->setQuantGrid(gridBeats[clampv(gi, 0, kGridCount - 1)]);
 
             // Strength. Live's "Amount": 100% snaps hard, anything less keeps
             // the part of a performance's timing that makes it one.
             f64 amt = (f64)roll_->quantStrength() * 100.0;
-            Rect ar{gr.right() + 6 * s, row.y, 48 * s, row.h};
+            Rect ar{gr.right() + 6 * s, row.y, 76 * s, row.h};
+            field(ar);
             if (ui_.dragNumber(uiId(UiDetailNotes, 1), ar, &amt, 0.0, 100.0, 0.4, "%.0f%%",
                                Align::Center, nullptr, 0.0, /*def=*/0.0))
                 roll_->setQuantStrength((f32)(amt * 0.01));
 
-            Rect qb{ar.right() + 6 * s, row.y, 48 * s, row.h};
-            if (ui_.button(uiId(UiDetailNotes, 2), qb, "Apply")) {
+            Rect qb{ar.right() + 6 * s, row.y, 112 * s, row.h};
+            if (ui_.button(uiId(UiDetailNotes, 2), qb, "Quantize")) {
                 const ClipModel was = m;
                 if (roll_->quantizeSelected(m)) {
                     undoPointWith("quantize", m, was);
@@ -695,17 +763,18 @@ void App::drawClipDetail(const Rect& r) {
             if (ui_.hovered(qb))
                 ui_.tip = roll_->hasSelection(m) ? "Quantize the selected notes"
                                                  : "Quantize every note in the clip";
-            y2 += rowH + 4 * s;
+            y2 = row.y + rowH + (compactInspector ? 6.f : 12.f) * s;
         }
         {
             Rect row{ctrl2.x, y2, ctrl2.w, rowH};
-            label("Notes", row);
-            Rect lg{row.x + lblW, row.y, 64 * s, row.h};
-            Rect dp{lg.right() + 6 * s, row.y, 48 * s, row.h};
+            rend_.textIn(fSmall_, {row.x, row.y, row.w, 18 * s}, "Transform notes", nx::muted, Align::Left, 0);
+            row.y += 22 * s;
+            Rect lg{row.x, row.y, 76 * s, row.h};
+            Rect dp{lg.right() + 6 * s, row.y, 98 * s, row.h};
             // Down and up are one control with two directions, so they are one
             // cluster with a seam rather than two capsules in a gap.
-            Rect dn{dp.right() + 6 * s, row.y, 28 * s, row.h};
-            Rect up{dn.right(), row.y, 28 * s, row.h};
+            Rect dn{dp.right() + 6 * s, row.y, 42 * s, row.h};
+            Rect up{dn.right(), row.y, 42 * s, row.h};
             ui_.segCluster({dn.x, dn.y, up.right() - dn.x, dn.h});
             rend_.hairlineV(up.x, dn.y + 3 * s, dn.bottom() - 3 * s);
 
@@ -718,16 +787,17 @@ void App::drawClipDetail(const Rect& r) {
             }
             if (ui_.hovered(lg))
                 ui_.tip = "Stretch each note to where the next one begins";
-            if (ui_.button(uiId(UiDetailNotes, 4), dp, "Copy")) {
+            const bool selectedNotes = roll_->hasSelection(m);
+            if (ui_.button(uiId(UiDetailNotes, 4), dp, selectedNotes ? "Duplicate" : "Double loop")) {
                 const ClipModel was = m;
-                if (roll_->duplicateSelected(m)) {
+                if (selectedNotes ? roll_->duplicateSelected(m) : roll_->duplicateLoop(m)) {
                     undoPointWith("duplicate notes", m, was);
                     pushClip(selTrack_, selSlot_);
                 }
             }
             if (ui_.hovered(dp))
-                ui_.tip = "Copy the notes one selection-width later (Ctrl+U doubles "
-                          "the whole loop instead)";
+                ui_.tip = selectedNotes ? "Copy the selected notes later in this loop"
+                                        : "Double the loop length and repeat all its notes";
             // Transpose by a semitone each way. An octave is Shift+Up/Down on the
             // keyboard already, so the buttons cover what the keyboard does not.
             if (ui_.segButton(uiId(UiDetailNotes, 5), dn, false, nx::violet)) {
@@ -750,11 +820,17 @@ void App::drawClipDetail(const Rect& r) {
                 ui_.tip = ses_.scale.snap && ses_.scale.active()
                               ? "Transpose by one step of " + ses_.scale.label()
                               : std::string("Transpose by a semitone");
-            y2 += rowH + 4 * s;
+            y2 = row.y + rowH + (compactInspector ? 6.f : 12.f) * s;
         }
     }
+    rend_.popClip();
+    if (maxInspectorScroll > 0.f && inspectorBody.h > 0.f) {
+        const f32 thumbH = std::max(16 * s, inspectorBody.h * inspectorBody.h / required);
+        const f32 thumbY = inspectorBody.y + (inspectorBody.h - thumbH) * inspectorScroll / maxInspectorScroll;
+        rend_.roundRect({ctrl.right() + 5 * s, thumbY, 3 * s, thumbH}, 1.5f * s, nx::violetSoft.alpha(0.6f));
+    }
     {   // Read-out of what the engine will actually do
-        Rect row{ctrl.x, midi ? y2 : y, ctrl.w, rowH};
+        Rect row{ctrl.x, r.bottom() - 28 * s, ctrl.w, 20 * s};
         char buf[96];
         // ASCII ONLY. The glyph atlas is 32..126 (gfx/font.h), so the U+00B7
         // this line used to separate its fields with rendered as the invalid
@@ -788,8 +864,8 @@ void App::drawClipDetail(const Rect& r) {
     // rather than faked.
     // Both material types share the same compact inspector width.
     const f32 leftEdge = ctrl.right();
-    Rect wave{leftEdge + 12 * s, head.bottom() + 6 * s,
-              r.right() - leftEdge - 20 * s, r.bottom() - head.bottom() - 12 * s};
+    Rect wave{leftEdge + 24 * s, head.bottom() + 6 * s,
+              r.right() - leftEdge - 32 * s, r.bottom() - head.bottom() - 12 * s};
 
     // Where the clip is, in its own beats, so the grid and the lane draw the
     // same playhead from the same number.

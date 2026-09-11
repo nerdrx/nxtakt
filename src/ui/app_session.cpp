@@ -327,7 +327,7 @@ void App::drawSessionView(const Rect& r) {
     // the master. Everything the mix ends up in reads left to right.
     const f32 masterW = lay::masterW * s;
     const f32 sceneW  = lay::sceneColW * s;
-    const f32 retW    = lay::returnW * s * kMaxReturns;
+    const f32 retW    = showReturns_ ? lay::returnW * s * kMaxReturns : 0.f;
     Rect masterCol{r.right() - masterW, r.y, masterW, r.h};
     Rect retCol{masterCol.x - retW, r.y, retW, r.h};
     Rect sceneCol{retCol.x - sceneW, r.y, sceneW, r.h};
@@ -335,7 +335,7 @@ void App::drawSessionView(const Rect& r) {
 
     // Horizontal scroll over the track area.
     f32 totalW = 0.f;
-    for (const auto& t : ses_.tracks) totalW += t.width * s + lay::gutter * s;
+    for (const auto& t : ses_.tracks) totalW += std::max(112.f, t.width) * s;
     const f32 maxScroll = std::max(0.f, totalW - tracksCol.w);
     if (tracksCol.contains(in.mx, in.my) && in.wheel != 0.f && in.shift())
         gridScrollX_ = clampv(gridScrollX_ - in.wheel * 60.f * s, 0.f, maxScroll);
@@ -375,7 +375,7 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
 
     for (size_t i = 0; i < ses_.tracks.size(); ++i) {
         TrackModel& t = ses_.tracks[i];
-        const f32 w = t.width * s;
+        const f32 w = std::max(112.f, t.width) * s;
         Rect cell{x, r.y, w - lay::gutter * s, h};
         x += w;
         if (cell.right() < r.x || cell.x > r.right()) continue;
@@ -383,22 +383,21 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
         const bool sel = (int)i == selTrack_;
         const u64 id = uiId(3, (int)i);
         const bool hot = ui_.setHot(id, cell) && ui_.isHot(id);
-        // Chrome, so it takes the tier language: a well at rest, the glass chip
-        // under the pointer, and the lit edge only on the track being edited --
-        // one surface floating is enough to say which one that is.
-        const f32 rad = kCellRadius * s;
-        if (sel) {
-            rend_.roundRect(cell, rad, pal::slotHover);
-            rend_.roundRectOutline(snapRect(cell), rad, std::max(1.f, s),
-                                   nx::violet.alpha(0.7f));
-        } else {
-            rend_.roundRect(cell, rad, hot ? pal::slotHover : pal::panel);
-        }
-        // Colour chip so the track's identity reads at a glance, as in Live.
-        // Inset by the corner radius so it does not overhang the rounding.
-        rend_.rect({cell.x + rad, cell.y, std::max(0.f, cell.w - rad * 2.f),
-                    std::max(1.f, nx::snapPx(2 * s))},
-                   pal::clipColors[t.colorIdx % pal::clipColorCount]);
+        // A distinct header cap anchors each channel: track number, color,
+        // and name remain legible above even a full grid of clips.
+        const f32 rad = 7.f * s;
+        const Rect cap = cell.insetXY(3.f * s, 3.f * s);
+        rend_.roundRect(cap, rad, sel ? pal::slotHover : pal::panelAlt);
+        if (sel) rend_.roundRectOutline(snapRect(cap), rad, std::max(1.f, s), nx::violet);
+        const Col trackInk = pal::clipColors[t.colorIdx % pal::clipColorCount];
+        rend_.roundRect({cap.x + 5 * s, cap.y + 7 * s, 3 * s, cap.h - 14 * s},
+                        1.5f * s, trackInk);
+        char number[24];
+        std::snprintf(number, sizeof number, "%zu", i + 1);
+        const Rect badge{cap.x + 12 * s, cap.cy() - 10 * s, 20 * s, 20 * s};
+        rend_.roundRect(badge, 5 * s, pal::appBg);
+        rend_.textIn(fSmall_, badge, number, sel ? nx::text : nx::muted, Align::Center, 0);
+        const Rect nameBox{badge.right() + 4 * s, cell.y, cell.right() - badge.right() - 9 * s, cell.h};
 
         // textField writes the new name and only then says it committed, and it
         // can only commit on a frame where it already owns the caret -- so the
@@ -406,8 +405,8 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
         const u64 nameId = uiId(3, 1000 + (int)i);
         std::string wasName;
         if (ui_.editId == nameId) wasName = t.name;
-        if (ui_.textField(nameId, cell, &t.name,
-                          Col(0, 0, 0, 0), sel ? nx::text : nx::muted, Align::Left))
+        if (ui_.textField(nameId, nameBox, &t.name,
+                          Col(0, 0, 0, 0), nx::text, Align::Left))
             undoPointWith("rename track", t.name, wasName);
         // The editable name covers the header: a single click still selects
         // the track, while a double click can enter the name field.
@@ -417,16 +416,19 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
         // the header does not. Suppressed while the field is being edited --
         // the caret is already showing the whole string.
         if (hotHeader && ui_.editId != nameId &&
-            textTruncated(fBody_, t.name.c_str(), cell.w - 8 * s))
+            textTruncated(fBody_, t.name.c_str(), nameBox.w - 6 * s))
             ui_.tip = t.name;
         if (hotHeader && ui_.editId != nameId) ui_.cursor = Cursor::Hand;
         if (hotHeader && in.pressed[0]) selectTrack((int)i);
     }
 
-    // "+" to append a track.
-    Rect add{x, r.y, 28 * s, h};
-    if (add.x < r.right()) {
-        if (ui_.button(uiId(3, 900), add, "+")) { undoPoint("add track"); addTrack(); }
+    // Use the spare header space for an explicit creation action.
+    const f32 addW = std::min(106.f * s, r.right() - x - 6.f * s);
+    Rect add{x + 3 * s, r.y + 4 * s, addW, h - 8 * s};
+    if (addW >= 28.f * s) {
+        if (ui_.button(uiId(3, 900), add, addW >= 80.f * s ? "+ Track" : "+")) {
+            undoPoint("add track"); addTrack();
+        }
     }
 
     // The header band ends in a hairline, not a painted shelf: §11, no solid
@@ -454,7 +456,7 @@ void App::drawClipGrid(const Rect& r, f32 scrollX) {
 
     f32 x = r.x - scrollX;
     for (size_t ti = 0; ti < ses_.tracks.size(); ++ti) {
-        const f32 w = ses_.tracks[ti].width * s;
+        const f32 w = std::max(112.f, ses_.tracks[ti].width) * s;
         // The selected lane gets a neutral lift; separators keep the grid calm.
         const Rect lane{x, clipTop, w - lay::gutter * s, grid.h};
         if (lane.right() >= r.x && lane.x <= r.right()) {
@@ -637,8 +639,12 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
     rend_.roundRect(cell, rad, fill);
     // Launch button zone on the left. Cyan while it plays: §1 reserves cyan for
     // light inside a material -- live values, playheads, running state.
-    const f32 btnW = 24 * s;
+    const f32 btnW = 28 * s;
     Rect btn{cell.x, cell.y, btnW, cell.h};
+    const bool overLaunch = btn.contains(in.mx, in.my);
+    if (hot && overLaunch) rend_.rect(btn, pal::textOnClip.alpha(0.10f));
+    rend_.hairlineV(btn.right(), cell.y + 6 * s, cell.bottom() - 6 * s,
+                    pal::textOnClip.alpha(0.22f));
     if (playing) ui_.playTriangle(btn.insetXY(8.f * s, 8.f * s), nx::live);
     else         ui_.playTriangle(btn.insetXY(8.f * s, 8.f * s), pal::textOnClip.alpha(0.55f));
 
@@ -692,9 +698,14 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
         // RIGHT-CLICK EMPTIES THE SLOT (which it has always done, instantly and
         // without asking) was findable only by doing it.
         if (ui_.tip.empty())
-            ui_.tip = m.name + "  -  click launches it, right-click clears the slot";
+            ui_.tip = m.name + (overLaunch ? "  -  launch clip" : "  -  click to edit; drag to move") +
+                      "; right-click clears the slot";
         if (in.pressed[0]) {
             selectTrack(ti); selSlot_ = si;
+            if (!overLaunch) {
+                detailTab_ = DetailTab::Clip;
+                showDetail_ = true;
+            }
             // With the record button lit, a MIDI clip on an armed track is an
             // overdub target and not just something to launch: the engine
             // relaunches it at the record boundary and captures another pass
@@ -703,9 +714,13 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
             // untouched by this - there is no overdub for a sample.
             const bool overdub = recIntent_ && ses_.tracks[ti].arm &&
                                  m.kind == ClipKind::Midi && trackHasNoteDevice(ti);
-            if (recHere)       stopRecording(ti);
-            else if (overdub)  startRecording(ti, si);
-            else               send(Cmd::LaunchClip, ti, si);
+            // Only the dedicated launch region changes playback. Selecting
+            // or dragging a clip's name must not interrupt the current take.
+            if (overLaunch) {
+                if (recHere)       stopRecording(ti);
+                else if (overdub)  startRecording(ti, si);
+                else               send(Cmd::LaunchClip, ti, si);
+            }
             drag_.kind = DragState::Kind::Clip;
             drag_.srcTrack = ti; drag_.srcSlot = si;
             drag_.startX = in.mx; drag_.startY = in.my;
@@ -736,7 +751,13 @@ void App::drawSceneColumn(const Rect& r) {
     rend_.hairlineV(r.x, r.y, r.bottom());
 
     Rect head{r.x, r.y, r.w, lay::trackHeadH * s};
-    rend_.textIn(fBold_, head, "Scenes", nx::text, Align::Center, 0);
+    rend_.textIn(fSmall_, {head.x + 4 * s, head.y, head.w - 46 * s, head.h},
+                 "Scenes", nx::text, Align::Left, 0);
+    const Rect returnToggle{head.right() - 40 * s, head.cy() - 14 * s, 36 * s, 28 * s};
+    const u64 returnToggleId = uiId(5, 902);
+    if (ui_.button(returnToggleId, returnToggle, "A-D", showReturns_)) showReturns_ = !showReturns_;
+    if (ui_.isHot(returnToggleId))
+        ui_.tip = showReturns_ ? "Hide return channels A-D" : "Show return channels A-D";
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
     const f32 rad = kCellRadius * s;
@@ -817,6 +838,20 @@ void App::drawSceneColumn(const Rect& r) {
         if (ui_.button(uiId(5, 901), add, "+ Scene")) { undoPoint("add scene"); addScene(); }
     }
     rend_.popClip();   // the scene rows' clip, opened before the loop
+
+    // A count makes rows below the viewport discoverable without pretending
+    // this text is a button. The scroll gesture remains over the grid itself.
+    const f32 sceneBottom = r.bottom() - lay::mixerH * s;
+    const int firstVisible = (int)std::floor(gridScrollY_ / slotH);
+    const int lastVisible = std::min(ns, (int)std::floor((gridScrollY_ + sceneBottom - clipTop) / slotH));
+    char count[48];
+    if (firstVisible >= ns) std::snprintf(count, sizeof count, "Scene actions");
+    else std::snprintf(count, sizeof count, "%d-%d / %d scenes", firstVisible + 1,
+                       std::max(firstVisible + 1, lastVisible), ns);
+    rend_.textIn(fSmall_, {r.x + 3 * s, sceneBottom + 10 * s, r.w - 6 * s, 18 * s},
+                 count, nx::text, Align::Center, 0);
+    rend_.textIn(fSmall_, {r.x + 3 * s, sceneBottom + 29 * s, r.w - 6 * s, 18 * s},
+                 "Scroll in grid", nx::muted, Align::Center, 0);
 }
 
 void App::drawMixer(const Rect& r, f32 scrollX) {
@@ -826,31 +861,30 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
     rend_.pushClip(mix);
     // A docked band of controls, so it takes the bar fill and a hairline along
     // its top edge rather than the solid rule it used to have.
-    rend_.rect(mix, pal::panel);
-    rend_.hairlineH(mix.x, mix.right(), mix.y);
+    rend_.rect(mix, pal::appBg);
+    rend_.hairlineH(mix.x, mix.right(), mix.y, nx::hairlineInk.alpha(0.5f));
 
     f32 x = r.x - scrollX;
     for (size_t ti = 0; ti < ses_.tracks.size(); ++ti) {
         TrackModel& t = ses_.tracks[ti];
-        const f32 w = t.width * s;
+        const f32 w = std::max(112.f, t.width) * s;
         Rect col{x, top, w - lay::gutter * s, mix.h};
         x += w;
         if (col.right() < r.x || col.x > r.right()) continue;
-        // Continue the selected lane's neutral lift down through the mixer.
-        if ((int)ti == selTrack_) rend_.rect(col, nx::text.alpha(0.025f));
-        rend_.hairlineV(col.right(), mix.y + nx::sp1 * s, mix.bottom() - nx::sp1 * s,
-                        nx::hairlineInk.alpha(0.10f));
+        // Separated rounded channels make the control groups visible at a
+        // glance. The empty gutters are real spacing, not another border.
+        const bool selected = (int)ti == selTrack_;
+        const Rect card = col.insetXY(4.f * s, 6.f * s);
+        rend_.roundRect(card, 9.f * s, pal::panelAlt);
+        rend_.roundRectOutline(snapRect(card), 9.f * s, std::max(1.f, s),
+                               selected ? nx::violet.alpha(0.8f) : nx::hairlineInk.alpha(0.2f));
+        if (selected)
+            rend_.roundRect({card.x + 12 * s, card.y, card.w - 24 * s, 3 * s},
+                            1.5f * s, nx::violet);
+        f32 y = col.y + 12 * s;
 
-        f32 y = col.y + 6 * s;
-
-        // M / S / arm: ONE cluster, not three capsules floating in gaps. Mute,
-        // solo and arm are the three switches of one channel strip -- on a
-        // desk they are three keys in a single machined block, and that is what
-        // the eye should group. The plate and the lit edge belong to the
-        // cluster; the segments separate by hairline and only fill when they
-        // are on.
-        // Give each switch a full 24px target, with a gap before the sends.
-        const Rect trio{col.x + 6 * s, y, col.w - 12 * s, 24 * s};
+        // Three substantial switches share one group above the send controls.
+        const Rect trio{col.x + 9 * s, y, col.w - 18 * s, 28 * s};
         ui_.segCluster(trio);
         const f32 bw = trio.w / 3.f;
         Rect mr{trio.x, y, bw, trio.h};
@@ -904,18 +938,19 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         }
         rend_.circle(ui_.lastRect.cx(), ui_.lastRect.cy(), 3.5f * s,
                      t.arm ? nx::text : pal::recRed.scale(0.55f));
-        y += 28 * s;
+        y += 34 * s;
 
-        // Sends A-D use a spaced 2x2 grid with 24px drag targets and labels.
+        // Sends A-D form a two-row grid of generous drag targets.
         // The arc keeps the current level visible without hovering.
         {
-            const f32 cellW = (col.w - 12 * s) * 0.5f;
-            const f32 rowH  = 28 * s;
+            const f32 cellW = (col.w - 18 * s) * 0.5f;
+            const f32 rowH  = 32 * s;
             for (int rn = 0; rn < kMaxReturns; ++rn) {
-                Rect cell{col.x + 6 * s + (rn % 2) * cellW, y + (rn / 2) * rowH, cellW, rowH};
+                Rect cell{col.x + 9 * s + (rn % 2) * cellW, y + (rn / 2) * rowH, cellW, rowH};
                 ui_.microIn(fSmall_, {cell.x, cell.y, 9 * s, cell.h}, kReturnLetter[rn],
                             nx::muted.alpha(0.75f), Align::Left, 0);
-                Rect kr{cell.x + 10 * s, cell.y + 2 * s, 24 * s, 24 * s};
+                const f32 knobSize = std::max(24.f * s, std::min(28.f * s, cellW - 11.f * s));
+                Rect kr{cell.x + 10 * s, cell.y + (rowH - knobSize) * 0.5f, knobSize, knobSize};
                 const f32 wasSend = t.sends[rn];
                 if (ui_.knob(uiId(6, (int)ti, 10 + rn), kr, &t.sends[rn], 0.f, 1.f, 0.f)) {
                     undoPointWith(kSendUndo[rn], t.sends[rn], wasSend);
@@ -923,25 +958,35 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
                     autoCapture(addr::trackSend(t.uid, rn), t.sends[rn],
                                 uiId(6, (int)ti, 10 + rn));
                 }
+                if (ui_.isHot(uiId(6, (int)ti, 10 + rn))) {
+                    const ReturnModel& destination = ses_.returns[rn];
+                    const std::string name = destination.name == kReturnPlaceholder
+                        ? std::string("Return ") + kReturnLetter[rn] : destination.name;
+                    char amount[24];
+                    std::snprintf(amount, sizeof amount, " (%.0f%%)", t.sends[rn] * 100.f);
+                    ui_.tip = std::string("Send ") + kReturnLetter[rn] + " -> " + name + amount +
+                              (destination.devices.empty() ? "; no effects loaded" : "") +
+                              "; A-D shows the return channels";
+                }
             }
-            y += 2 * rowH + 3 * s;
+            y += 2 * rowH + 2 * s;
         }
 
         // Pan keeps a visible name alongside its independent drag target.
-        rend_.textIn(fSmall_, {col.x + 6 * s, y, 24 * s, 28 * s}, "Pan", nx::muted, Align::Left, 0);
-        Rect pan{col.cx() - 14 * s, y, 28 * s, 28 * s};
+        rend_.textIn(fSmall_, {col.x + 10 * s, y, 28 * s, 32 * s}, "Pan", nx::muted, Align::Left, 0);
+        Rect pan{col.cx() - 4 * s, y, 32 * s, 32 * s};
         if (ui_.knob(uiId(6, (int)ti, 3), pan, &t.pan, -1.f, 1.f, 0.f)) {
             undoPointWith("pan", t.pan, wasPan);
             send(Cmd::TrackPan, (int)ti, 0, t.pan);
             autoCapture(addr::trackField(t.uid, "pan"), t.pan, uiId(6, (int)ti, 3));
         }
-        y += 32 * s;
+        y += 36 * s;
 
         // Fader + meter, in a recessed lane. §4: a region inside a glass
         // surface recesses rather than frosting again, and the fader travel and
         // the meter are one instrument, so they share one well.
-        const f32 fh = col.bottom() - y - 6 * s;
-        Rect fader{col.x + 10 * s, y, 24 * s, fh};
+        const f32 fh = col.bottom() - y - 12 * s;
+        Rect fader{col.x + 13 * s, y, 28 * s, fh};
         Rect meter{fader.right() + 5 * s, y, 9 * s, fh};
         rend_.well({fader.x - 4 * s, y - 4 * s, meter.right() - fader.x + 8 * s, fh + 8 * s},
                    nx::radiusXs * s);
@@ -957,7 +1002,7 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         peakHoldT_[ti] = std::max(lvl, peakHoldT_[ti] * 0.985f);
         ui_.meterV(meter, lvl, peakHoldT_[ti]);
         drawFaderValue(rend_, fSmall_,
-                       {meter.right() + 3 * s, y + 2 * s, col.right() - meter.right() - 6 * s, 32 * s},
+                       {meter.right() + 3 * s, y + 2 * s, col.right() - meter.right() - 10 * s, 32 * s},
                        t.fader, s, true);
     }
     rend_.popClip();
@@ -1020,11 +1065,15 @@ void App::drawReturnStrips(const Rect& r) {
         rend_.popClip();
 
         Rect mix{col.x, top, col.w, r.bottom() - top};
-        rend_.hairlineH(mix.x, mix.right(), mix.y);
+        rend_.rect(mix, pal::appBg);
+        const Rect busCard = mix.insetXY(3.f * s, 6.f * s);
+        rend_.roundRect(busCard, 8.f * s, pal::panelAlt);
+        rend_.roundRectOutline(snapRect(busCard), 8.f * s, std::max(1.f, s),
+                               sel ? nx::violet : nx::hairlineInk.alpha(0.2f));
         // The same top inset the master strip uses, so the buses and the mix
         // they land in read as one row of faders rather than a staircase.
-        f32 y = mix.y + 26 * s;
-        const f32 fh = mix.bottom() - y - 6 * s;
+        f32 y = mix.y + 34 * s;
+        const f32 fh = mix.bottom() - y - 12 * s;
         // A 24px fader fits beside the meter within the 54px strip.
         Rect fader{mix.x + 6 * s, y, 24 * s, fh};
         Rect meter{fader.right() + 5 * s, y, 9 * s, fh};
@@ -1036,7 +1085,7 @@ void App::drawReturnStrips(const Rect& r) {
             undoPointWith("return volume", rt.fader, wasFader);
             send(Cmd::ReturnVol, i, 0, faderToGain(rt.fader));
         }
-        drawFaderValue(rend_, fSmall_, {mix.x + 3 * s, mix.y + 4 * s, mix.w - 6 * s, 18 * s},
+        drawFaderValue(rend_, fSmall_, {mix.x + 3 * s, mix.y + 10 * s, mix.w - 6 * s, 18 * s},
                        rt.fader, s);
         const f32 lvl = std::max(es_.returnMeterL[i], es_.returnMeterR[i]);
         peakHoldR_[i] = std::max(lvl, peakHoldR_[i] * 0.985f);
@@ -1085,7 +1134,11 @@ void App::drawMasterStrip(const Rect& r) {
 
     const f32 top = r.bottom() - lay::mixerH * s;
     Rect mix{r.x, top, r.w, lay::mixerH * s};
-    rend_.hairlineH(mix.x, mix.right(), mix.y);
+    rend_.rect(mix, pal::appBg);
+    const Rect masterCard = mix.insetXY(4.f * s, 6.f * s);
+    rend_.roundRect(masterCard, 9.f * s, pal::panelAlt);
+    rend_.roundRectOutline(snapRect(masterCard), 9.f * s, std::max(1.f, s),
+                           sel ? nx::violet : nx::live.alpha(0.35f));
 
     // The master chain, where a return lists its own: this is where a bus
     // compressor or a saturator across the whole mix lives.
@@ -1098,9 +1151,9 @@ void App::drawMasterStrip(const Rect& r) {
     }
 
     static f32 masterFader = 0.85f;
-    f32 y = mix.y + 26 * s;
-    const f32 fh = mix.bottom() - y - 6 * s;
-    Rect fader{mix.x + 12 * s, y, 24 * s, fh};
+    f32 y = mix.y + 34 * s;
+    const f32 fh = mix.bottom() - y - 12 * s;
+    Rect fader{mix.x + 12 * s, y, 28 * s, fh};
     Rect meterL{fader.right() + 6 * s, y, 9 * s, fh};
     Rect meterR{meterL.right() + 3 * s, y, 9 * s, fh};
     rend_.well({fader.x - 4 * s, y - 4 * s, meterR.right() - fader.x + 8 * s, fh + 8 * s},
@@ -1109,7 +1162,7 @@ void App::drawMasterStrip(const Rect& r) {
     if (ui_.vFader(uiId(7, 0), fader, &masterFader))
         send(Cmd::MasterVol, 0, 0, faderToGain(masterFader));
 
-    drawFaderValue(rend_, fSmall_, {mix.x + 4 * s, mix.y + 4 * s, mix.w - 8 * s, 18 * s},
+    drawFaderValue(rend_, fSmall_, {mix.x + 4 * s, mix.y + 10 * s, mix.w - 8 * s, 18 * s},
                    masterFader, s);
     const f32 l = es_.masterMeterL, rr = es_.masterMeterR;
     peakHoldM_[0] = std::max(l, peakHoldM_[0] * 0.985f);

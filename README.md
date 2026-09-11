@@ -82,14 +82,17 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
-## Workspace refinement — 0.15
+## Studio workspace — 0.16
 
-A warm graphite workspace with soft amber accents, a compact clip
-inspector, roomier controls, clearer typography and contrast, larger
-piano notes and automation handles, searchable plugin makers, and a toolbar
-that adapts to smaller windows. Fast clicks respond immediately; track and
-scene names work across their full label area. The Files button opens the
-sample browser. See [the interface changes and validation](docs/UI-MAKEOVER.md).
+A redesigned studio workspace in NX violet and cyan: a two-row transport,
+numbered track headers, separated mixer channels, collapsible returns and
+a larger editor with focused inspector pages and a Fit view action. Roomier controls,
+clear typography, searchable plugin makers and adaptive layouts keep it usable
+on smaller screens. Fast clicks respond immediately; track and
+scene names work across their full label area. The Library button opens the
+sample browser. Familiar F5/F6/F7/F9 navigation and subtle interaction feedback
+make the workflow easier to learn. See [the interface changes](docs/UI-MAKEOVER.md)
+and [the FL Studio usability pass](docs/FL-STUDIO-WORKFLOW.md).
 
 ## Quickstart
 

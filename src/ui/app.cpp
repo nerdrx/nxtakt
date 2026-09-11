@@ -335,7 +335,8 @@ void App::frame() {
         const f32 mainFloor = view_ == MainView::Session
             ? lay::trackHeadH + lay::mixerH + 2.f * lay::slotH : 180.f;
         const f32 maxDetail = std::max(120.f, body.h / s - mainFloor);
-        dHRef = clampv(dHRef, 120.f, maxDetail);
+        const f32 minDetail = std::min(280.f, maxDetail);
+        dHRef = clampv(dHRef, minDetail, maxDetail);
         const f32 gripH = 12.f * s;
         const Rect grip{0, body.bottom() - dHRef * s - gripH * 0.5f, W, gripH};
         const u64 gid = uiId(UiDetailSplit, 0);
@@ -348,7 +349,7 @@ void App::frame() {
         if (detailDrag_) {
             ui_.cursor = Cursor::ResizeV;
             // Keep the mixer and two scene rows reachable while resizing.
-            dHRef = clampv(dHRef - sin.dy / s, 120.f, maxDetail);
+            dHRef = clampv(dHRef - sin.dy / s, minDetail, maxDetail);
         }
         detail = {0, body.bottom() - dHRef * s, W, dHRef * s};
         body.h -= detail.h;
@@ -551,6 +552,20 @@ void App::handleShortcuts() {
     // Above the view split, beside Space, because it is a statement about the
     // transport and the transport is not a view.
     if (in.keyPressed[KeyHome]) send(Cmd::Locate, 0, 0, 0.0);
+    // Familiar FL Studio view shortcuts, alongside the existing NxTakt keys.
+    if (in.keyPressed[KeyF5]) view_ = MainView::Arrangement;
+    if (in.keyPressed[KeyF6]) view_ = MainView::Session;
+    if (in.keyPressed[KeyF7]) {
+        showDetail_ = true;
+        detailTab_ = DetailTab::Clip;
+        midiInspectorPage_ = 0;
+        status_ = "Clip editor: select a pattern to edit notes, or a sample to edit audio";
+    }
+    if (in.keyPressed[KeyF9]) {
+        view_ = MainView::Session;
+        showDetail_ = false;
+        status_ = "Mixer view  -  F7 restores the clip editor";
+    }
     if (in.keyPressed[KeyTab])
         view_ = (view_ == MainView::Session) ? MainView::Arrangement : MainView::Session;
     if (in.keyPressed['b'] && in.ctrl()) showBrowser_ = !showBrowser_;

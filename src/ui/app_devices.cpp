@@ -48,6 +48,22 @@ void microFit(Ui& ui, const Font& f, const Rect& b, const char* s, const Col& c,
     ui.drawTextIn(f, b, s, c, a, pad);
 }
 
+// Human readouts retain the plugin's real units; editing still uses its raw
+// parameter range, so formatting never changes automation or saved values.
+void parameterReadout(char* out, size_t cap, const ParamInfo& info, f32 value) {
+    const double v = value;
+    if (info.unit == "Hz" && std::fabs(v) >= 1000.0)
+        snprintf(out, cap, "%.2f kHz", v / 1000.0);
+    else if (info.unit == "Hz") snprintf(out, cap, std::fabs(v) < 10.0 ? "%.2f Hz" : "%.0f Hz", v);
+    else if (info.unit == "s" && std::fabs(v) < 1.0)
+        snprintf(out, cap, "%.3g ms", v * 1000.0);
+    else if (info.unit == "s") snprintf(out, cap, "%.2f s", v);
+    else if (info.unit == "ms") snprintf(out, cap, "%.3g ms", v);
+    else if (info.unit == "dB") snprintf(out, cap, "%.1f dB", v);
+    else if (info.unit.empty()) snprintf(out, cap, info.isInt ? "%.0f" : "%.2f", v);
+    else snprintf(out, cap, info.isInt ? "%.0f %s" : "%.2f %s", v, info.unit.c_str());
+}
+
 // What a plugin's format chip says. `formatName` spells Internal in full, which
 // is right in a log line and four characters too long for a badge -- at 10px
 // over 0.12em of tracking it does not fit beside a name and a vendor, and a
@@ -654,7 +670,7 @@ void App::drawDeviceDetail(const Rect& r) {
                              (f64)r.w, (f64)r.h);
     }
 
-    const f32 listW = std::min(280 * s, r.w * 0.3f);
+    const f32 listW = std::min(264 * s, r.w * 0.28f);
     Rect list{r.x, r.y, listW, r.h};
     Rect strip{list.right() + 1 * s, r.y, r.right() - list.right() - 1 * s, r.h};
     drawPluginBrowser(list);      // draws the hairline down its own right edge
@@ -682,13 +698,13 @@ void App::drawPluginBrowser(const Rect& r) {
         fromCatalog ? eng_.catalog() : registry_.plugins();
 
     // --- header: the §5 chip language, 10px uppercase over wide tracking ----
-    Rect head{r.x + 12 * s, r.y, r.w - 24 * s, 36 * s};
-    rend_.textIn(fBold_, head, "Devices", nx::text, Align::Left, 0);
+    Rect head{r.x + 16 * s, r.y, r.w - 32 * s, 44 * s};
+    rend_.textIn(fBig_, head, "Devices", nx::text, Align::Left, 0);
     if (scanning) {
         // The daemon is still walking its bundles, so the rows below are this
         // process's own scan standing in. Quiet, not a banner: the list is
         // usable meanwhile and swaps to the catalog the frame it lands.
-        ui_.drawTextIn(fSmall_, head, "Scanning…", nx::muted, Align::Right, 0);
+        ui_.drawTextIn(fSmall_, head, "Scanning...", nx::muted, Align::Right, 0);
         if (ui_.hovered(head))
             ui_.tip = "The engine is scanning its plugins - showing this "
                       "process's own scan until the catalog arrives";
@@ -713,11 +729,19 @@ void App::drawPluginBrowser(const Rect& r) {
     if (query.empty())
         rend_.textIn(fSmall_, filter, "Search name or maker", nx::muted, Align::Left, 6 * s);
 
+    static const char* categories[] = {"All", "Instruments", "Effects"};
+    const Rect categoryRow{filter.x, filter.bottom() + 6 * s, filter.w, 28 * s};
+    if (ui_.tabPill(uiId(10, 900), categoryRow, categories, 3, &pluginCategory_))
+        pluginScroll_ = 0.f;
+
     // --- filtered index, rebuilt each frame: a few hundred string compares ---
     static std::vector<int> shown;                  // reused to avoid churn
     shown.clear();
     for (int i = 0; i < (int)all.size(); ++i)
-        if (icontains(all[i].name, query) || icontains(all[i].vendor, query)) shown.push_back(i);
+        if ((pluginCategory_ == 0 ||
+             (pluginCategory_ == 1 && all[i].kind == PluginKind::Instrument) ||
+             (pluginCategory_ == 2 && all[i].kind == PluginKind::Effect)) &&
+            (icontains(all[i].name, query) || icontains(all[i].vendor, query))) shown.push_back(i);
 
     // The count, now that the filter has had its say -- and BEFORE the list's
     // clip is pushed, which is where the first cut of this put it: microIn into
@@ -727,14 +751,14 @@ void App::drawPluginBrowser(const Rect& r) {
     // filtered browser says both numbers.
     if (!scanning) {
         char cnt[48];
-        if (query.empty()) snprintf(cnt, sizeof cnt, "%u", (unsigned)all.size());
+        if (query.empty() && pluginCategory_ == 0) snprintf(cnt, sizeof cnt, "%u", (unsigned)all.size());
         else               snprintf(cnt, sizeof cnt, "%u / %u", (unsigned)shown.size(),
                                     (unsigned)all.size());
         ui_.drawTextIn(fSmall_, head, cnt, nx::muted, Align::Right, 0);
     }
 
     const f32 rowH = 36 * s;
-    Rect listR{r.x, filter.bottom() + 6 * s, r.w, r.bottom() - filter.bottom() - 6 * s};
+    Rect listR{r.x, categoryRow.bottom() + 6 * s, r.w, r.bottom() - categoryRow.bottom() - 6 * s};
     // A truncated catalog MUST be drawn (engine_handle.h): the list yields one
     // row's height and the footer under it says how many the wire could not
     // carry. Amber -- attention, not damage; a silently short list is the lie.
@@ -907,7 +931,7 @@ void App::drawDeviceStrip(const Rect& r) {
                  ? pal::clipColors[ses_.tracks[devOwner_].colorIdx % pal::clipColorCount]
                  : (ownIsReturn(devOwner_) ? pal::soloBlue : nx::violet);
 
-    Rect head{r.x, r.y, r.w, 28 * s};
+    Rect head{r.x, r.y, r.w, 40 * s};
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s},
                tc);                                       // owner identity chip
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
@@ -919,7 +943,7 @@ void App::drawDeviceStrip(const Rect& r) {
     // full in the status bar (§11: no truncated name without a tip).
     const char* const hint = rackOpenUid_
         ? "Double-click to add inside rack"
-        : "Double-click to add · Drag to reorder";
+        : "Double-click to add / Drag to reorder";
     const f32 hintW = fSmall_.measure(hint) + 16 * s;
     // WHERE THE LATENCY IS. Nothing on this tab said it before, and "what is my
     // sound made of" is not answered by a chain that will not admit it is
@@ -959,7 +983,8 @@ void App::drawDeviceStrip(const Rect& r) {
         snprintf(stTag, sizeof stTag, "%llu state updates refused",
                  (unsigned long long)statesRefused);
     const f32 stW = stTag[0] ? fSmall_.measure(stTag) + 14 * s : 0.f;
-    const std::string owner = ownerName(devOwner_);
+    const std::string owner = ownerName(devOwner_) + " / " +
+                              std::to_string(co.devices->size()) + (co.devices->size() == 1 ? " device" : " devices");
     const Rect nameR{head.x + 10 * s, head.y,
                      std::max(40 * s, std::min(220 * s, head.w - hintW - stW - latW - 18 * s)), head.h};
     rend_.textIn(fBold_, nameR, owner.c_str(), nx::text, Align::Left, 0);
@@ -1000,14 +1025,31 @@ void App::drawDeviceStrip(const Rect& r) {
     if (devices.empty()) {
         // §5's empty state: one short bold line, one muted sentence, centred,
         // and an invitation rather than an apology (§9).
-        char msg[80];
-        snprintf(msg, sizeof msg, "No devices on %s", ownerName(devOwner_).c_str());
-        const f32 lh = fBody_.height();
-        rend_.textIn(fBold_, {area.x, area.cy() - lh - nx::sp1 * 0.5f * s, area.w, lh},
-                     msg, nx::text, Align::Center);
-        rend_.textIn(fSmall_, {area.x, area.cy() + nx::sp1 * 0.5f * s, area.w, lh},
-                     "Double-click a plugin in the browser to add one, or drag it here.",
-                     nx::muted, Align::Center);
+        const f32 cardW = std::min(400 * s, area.w - 32 * s);
+        const Rect welcome{area.cx() - cardW * 0.5f, area.cy() - 90 * s, cardW, 180 * s};
+        rend_.roundRect(welcome, 12 * s, pal::panelAlt);
+        rend_.roundRect({welcome.cx() - 18 * s, welcome.y + 18 * s, 36 * s, 4 * s},
+                         2 * s, nx::violet);
+        rend_.textIn(fBig_, {welcome.x + 16 * s, welcome.y + 34 * s, cardW - 32 * s, 26 * s},
+                     "Build your sound", nx::text, Align::Center, 0);
+        rend_.textIn(fSmall_, {welcome.x + 16 * s, welcome.y + 67 * s, cardW - 32 * s, 18 * s},
+                     "Choose an instrument or effect in Devices.", nx::muted, Align::Center, 0);
+        const auto& catalog = eng_.remoteOpen() && eng_.catalogReady()
+                            ? eng_.catalog() : registry_.plugins();
+        if (pluginSel_ >= 0 && pluginSel_ < (int)catalog.size()) {
+            const PluginDesc& selected = catalog[pluginSel_];
+            const std::string label = "Add " + selected.name;
+            const Rect add{welcome.x + 24 * s, welcome.y + 112 * s, cardW - 48 * s, 36 * s};
+            if (ui_.button(uiId(UiDeviceTip, 2710), add, label.c_str(), true, nx::violet)) {
+                undoPoint("add device");
+                addDevice(devOwner_, selected);
+                rend_.popClip();
+                return;
+            }
+        } else {
+            rend_.textIn(fSmall_, {welcome.x + 16 * s, welcome.y + 108 * s, cardW - 32 * s, 36 * s},
+                         "Double-click to add, or drag it here.", nx::text, Align::Center, 0);
+        }
         // An empty chain still takes a drop: the caret has nowhere to stand, so
         // the lit edge stands in for it -- the same affordance the sampler card
         // wears, and mid-drag only.
@@ -1025,7 +1067,7 @@ void App::drawDeviceStrip(const Rect& r) {
         return;
     }
 
-    const f32 boxW = 208 * s, gap = 10 * s, rackW = 520 * s;
+    const f32 boxW = 320 * s, gap = 16 * s, rackW = 520 * s;
     // Spectra's editor opens the same way a rack does and is laid out to the
     // same constraint -- a dock 200 logical pixels tall -- so it is wide and
     // short. Its width is its own columns added up (lay::spectraPanelW), and it
@@ -1224,13 +1266,16 @@ void App::drawDeviceStrip(const Rect& r) {
         // 16px edge with no overlap at all, and the body below still fits its
         // three rows of knobs.
         Rect title{box.x, box.y, box.w, 62 * s};
-        rend_.rect({title.x + 3 * s, title.y + 5 * s, std::max(1.f, nx::snapPx(3 * s)),
-                    18 * s}, tc.alpha(dim));
+        // A single identity rail reads as one device, not nested boxes.
+        rend_.roundRect({title.x + 10 * s, title.y + 2 * s, title.w - 20 * s, 3 * s},
+                         1.5f * s, (sel ? nx::violet : tc).alpha(dim));
+        rend_.rect({title.x + s, title.y + 6 * s, title.w - 2 * s, 22 * s},
+                    sel ? nx::violet.alpha(0.10f) : pal::panelAlt.alpha(0.35f));
 
         // Both controls are glyph-drawn rather than lettered: at this size the
         // font ellipsises anything longer than a character or two.
         Rect xr{title.right() - 29 * s, title.y + 30 * s, 28 * s, 28 * s};
-        Rect br{xr.x - 28 * s, title.y + 30 * s, 28 * s, 28 * s};
+        Rect br{xr.x - 80 * s, title.y + 30 * s, 80 * s, 28 * s};
 
         // "This device has an inside." Only a rack answers rack() non-null, so
         // this is the whole test -- and it is a virtual call and not a
@@ -1268,9 +1313,12 @@ void App::drawDeviceStrip(const Rect& r) {
         if (i == 0) { devRect("card.chip", kr); devRect("card.bypass", br);
                       devRect("card.remove", xr); }
         ui_.segCluster(ctrls);
+        char parameterCount[32];
+        const int count = d.inst ? d.inst->paramCount() : 0;
+        snprintf(parameterCount, sizeof parameterCount, "%d control%s", count, count == 1 ? "" : "s");
         rend_.textIn(fSmall_, {title.x + 12 * s, ctrls.y,
                                ctrls.x - title.x - 20 * s, ctrls.h},
-                     d.bypass ? "Bypassed" : "Active", nx::muted, Align::Left, 0);
+                     parameterCount, nx::muted, Align::Left, 0);
         // ONE seam per boundary, and a seam at EVERY boundary. kr.right() and
         // br.x are the same coordinate by construction, so the old pair drew the
         // chain/edit seam twice -- a hairline at double alpha, brighter than
@@ -1454,8 +1502,12 @@ void App::drawDeviceStrip(const Rect& r) {
         }
         // Lit cyan = this device is in the signal path; dark = bypassed. §1
         // again: cyan is the light a running thing gives off.
-        rend_.circle(ui_.lastRect.cx(), ui_.lastRect.cy(), 3.5f * s,
-                     d.bypass ? pal::meterAmber : nx::live);
+        rend_.circle(ui_.lastRect.x + 10 * s, ui_.lastRect.cy(), 3 * s,
+                     d.bypass ? nx::muted : nx::cyan);
+        ui_.drawTextIn(fSmall_, {ui_.lastRect.x + 17 * s, ui_.lastRect.y,
+                                ui_.lastRect.w - 20 * s, ui_.lastRect.h},
+                       d.bypass ? "Bypassed" : "Enabled", nx::text, Align::Center, 0);
+        if (ui_.hovered(br)) ui_.tip = d.bypass ? "Enable this device" : "Bypass this device";
         const bool xHot = ui_.segButton(uiId(11, (int)i, 1), xr, false, nx::danger);
         {
             const Rect g = ui_.lastRect;
@@ -1583,7 +1635,7 @@ void App::drawDeviceStrip(const Rect& r) {
         const int cols = 3;
         // 43px is knob (32) + label (11): three rows land exactly inside the
         // panel, so a device with nine or fewer controls never has to scroll.
-        const f32 cw = body.w / (f32)cols, chh = 56 * s;
+        const f32 cw = body.w / (f32)cols, chh = 80 * s;
         const int rows = (n + cols - 1) / cols;
         // A truncated device's grid ends with §1.6's sentence, so the scroll
         // range grows by the line that carries it.
@@ -1612,7 +1664,7 @@ void App::drawDeviceStrip(const Rect& r) {
             Rect cell{body.x + (p % cols) * cw, body.y - paramScroll_ + (p / cols) * chh, cw, chh};
             if (cell.bottom() < body.y || cell.y > body.bottom()) continue;
             const ParamInfo& info = d.inst->paramInfo(p);
-            Rect lbl{cell.x, cell.bottom() - 15 * s, cell.w, 14 * s};
+            Rect lbl{cell.x + 4 * s, cell.y + 2 * s, cell.w - 8 * s, 18 * s};
 
             // Both controls edit a copy and hand the result to the instance, so
             // the value the snapshot reads (serializeDevices asks the instance)
@@ -1631,15 +1683,15 @@ void App::drawDeviceStrip(const Rect& r) {
             const bool ownTrack = ownIsTrack(devOwner_);
             // Hoisted out of the two branches because the MIDI-learn affordance
             // below has to decorate whichever control this parameter got.
-            const Rect tg{cell.cx() - 18 * s, cell.y + 8 * s, 36 * s, 26 * s};
-            const Rect kr{cell.cx() - 20 * s, cell.y + 2 * s, 40 * s, 40 * s};
+            const Rect tg{cell.x + 12 * s, cell.y + 30 * s, cell.w - 24 * s, 30 * s};
+            const Rect kr{cell.x + 10 * s, cell.y + 21 * s, cell.w - 20 * s, 56 * s};
             const Rect ctrlR = info.isBool ? tg : kr;
             if (p == 0) { devRect("param.cell", cell);
                           devRect(info.isBool ? "param.toggle" : "param.knob", ctrlR,
                                   info.isBool ? 2.f * s : 0.f); }
             if (info.isBool) {
                 bool on = d.inst->getParam(p) > 0.5f;
-                if (ui_.grab(2.f * s).squareToggle(wid, tg, "", &on, nx::violet)) {
+                if (ui_.grab(2.f * s).squareToggle(wid, tg, on ? "On" : "Off", &on, nx::violet)) {
                     undoPoint(info.name.c_str());
                     const f32 nv = on ? info.max : info.min;
                     d.inst->setParam(p, nv);
@@ -1658,8 +1710,15 @@ void App::drawDeviceStrip(const Rect& r) {
                 // the master the menu simply has two items instead of three,
                 // which is a better answer than a third item that refuses.
                 if (ownTrack) ui_.offer({Ui::MenuLearn});
-                if (ui_.knob(wid, kr, &v, info.min, info.max,
-                             info.def, info.isInt ? "%.0f" : "%.2f")) {
+                char readout[80];
+                parameterReadout(readout, sizeof readout, info, v);
+                Ui::KnobStyle style;
+                style.lo = info.min; style.hi = info.max; style.def = info.def;
+                style.log = info.isLogarithmic;
+                style.bipolar = info.min < 0.f && info.max > 0.f;
+                style.text = readout;
+                style.dim = dim;
+                if (ui_.knobNx(wid, kr, &v, style)) {
                     undoPoint(info.name.c_str());
                     d.inst->setParam(p, v);
                     if (ownTrack)
@@ -1739,7 +1798,7 @@ void App::drawDeviceStrip(const Rect& r) {
             // A rack's parameters ARE its macros, so they wear the brand: §1,
             // violet is identity, and these eight knobs are the rack's face.
             rend_.textIn(fSmall_, lbl, info.name.c_str(),
-                         (isRack ? nx::violetSoft : nx::muted).alpha(dim), Align::Center, 0);
+                         (isRack ? nx::violetSoft : nx::text).alpha(dim), Align::Center, 0);
         }
         if (parCut) {
             // §1.6's sentence, drawn where the unreachable region begins: the
@@ -2354,7 +2413,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // scrolls anyway, and buy an honest 16.
     Rect clr{list.right() - 56 * s, list.y, 56 * s, 24 * s};
     char cap[48];
-    snprintf(cap, sizeof cap, "Macro %d · %d mappings", rackMacro_ + 1, shown);
+    snprintf(cap, sizeof cap, "Macro %d / %d mappings", rackMacro_ + 1, shown);
     microFit(ui_, fSmall_, {list.x, list.y, list.w - 60 * s, 24 * s}, cap,
              nx::muted, Align::Left, 0);
     devRect("rack.clearMacro", clr, 1.f * s);

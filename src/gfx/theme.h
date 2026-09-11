@@ -1,4 +1,4 @@
-// v0.14 studio palette: opaque charcoal, matte controls and quiet accents.
+// v0.16 studio palette: deep neutral surfaces, NX violet and live cyan.
 // This supersedes the historical glass/nebula values described below.
 // The NX design language, translated.
 //
@@ -43,26 +43,26 @@ namespace nx {
 // §1 / §2  Colour
 // ---------------------------------------------------------------------------
 
-inline constexpr Col bgTop      = rgb(0x1D1E21);   // field, top
-inline constexpr Col bgBottom   = rgb(0x1D1E21);   // field, bottom
-inline constexpr Col panel      = rgb(0x292A2E);
-inline constexpr Col panel2     = rgb(0x36373C);
+inline constexpr Col bgTop      = rgb(0x17171F);   // field, top
+inline constexpr Col bgBottom   = rgb(0x17171F);   // field, bottom
+inline constexpr Col panel      = rgb(0x22222D);
+inline constexpr Col panel2     = rgb(0x30303D);
 
 // The brand anchor. Identical to pal::accent by construction, and the one
 // value in this file that is frozen: actions, focus, identity.
-inline constexpr Col violet     = rgb(0xE6B980);
-inline constexpr Col violetSoft = rgb(0xF2D4AD);
+inline constexpr Col violet     = rgb(0x7700FF);
+inline constexpr Col violetSoft = rgb(0xB995FF);
 
 // Light *inside* materials -- live values, meters, playheads, progress, edges.
 // Never a surface colour: the moment a panel is cyan, violet has stopped
 // leading and the whole thing reads as a different product.
-inline constexpr Col cyan       = rgb(0x68D5C0);
+inline constexpr Col cyan       = rgb(0x00E5FF);
 
 inline constexpr Col amber      = rgb(0xFFB300);   // update / attention, only
 inline constexpr Col danger     = rgb(0xFF5470);   // destructive, only
 inline constexpr Col text       = rgb(0xECECEF);
 inline constexpr Col muted      = rgb(0xB5B6BD);
-inline constexpr Col line       = rgb(0x434449);
+inline constexpr Col line       = rgb(0x404052);
 
 // Semantic aliases. Same values; these are what a view should reach for when
 // it means the *role* rather than the hue, because roles survive a retune.
@@ -299,25 +299,25 @@ inline constexpr Grad linear2(f32 angleDeg, Col a, Col b) {
 
 // --- §2 glass fills: light collects top-left and drains to a cool shadow ----
 
-inline constexpr Grad glassBar = linear2(180.f, rgb(0x292A2E), rgb(0x292A2E));
+inline constexpr Grad glassBar = linear2(180.f, rgb(0x22222D), rgb(0x22222D));
 
-inline constexpr Grad glass1 = linear2(180.f, rgb(0x292A2E), rgb(0x292A2E));
+inline constexpr Grad glass1 = linear2(180.f, rgb(0x22222D), rgb(0x22222D));
 
-inline constexpr Grad glass2 = linear2(180.f, rgb(0x36373C), rgb(0x36373C));
+inline constexpr Grad glass2 = linear2(180.f, rgb(0x30303D), rgb(0x30303D));
 
-inline constexpr Grad glassChip = linear2(180.f, rgb(0x3A3B40), rgb(0x3A3B40));
+inline constexpr Grad glassChip = linear2(180.f, rgb(0x383847), rgb(0x383847));
 
 // Wells are the answer to "glass inside glass reads as fog": a region inside a
 // card recesses, it does not frost again.
-inline constexpr Grad well = linear2(180.f, rgb(0x232428), rgb(0x232428));
+inline constexpr Grad well = linear2(180.f, rgb(0x1B1B24), rgb(0x1B1B24));
 
-inline constexpr Grad wellDeep = linear2(180.f, rgb(0x1B1C1F), rgb(0x1B1C1F));
+inline constexpr Grad wellDeep = linear2(180.f, rgb(0x14141C), rgb(0x14141C));
 
 // --- §2 lit edges: 1px gradient borders, bright top-left -> dark bottom-right
 
-inline constexpr Grad edge = linear2(180.f, rgb(0x44454B), rgb(0x44454B));
+inline constexpr Grad edge = linear2(180.f, rgb(0x404052), rgb(0x404052));
 
-inline constexpr Grad edgeLit = linear2(180.f, rgb(0xE6B980), rgb(0xE6B980));
+inline constexpr Grad edgeLit = linear2(180.f, rgb(0x7700FF), rgb(0x7700FF));
 
 inline constexpr Col edgeTop = rgba(0xFFFFFF, 0.18f);
 
@@ -388,7 +388,7 @@ inline constexpr Grad liquid = {
      {rgba(0x00E5FF, 0.90f), 1.f}}, 3, 90.f};
 
 // Primary button: violet with an inner top highlight, per §5.
-inline constexpr Grad violetFill = linear2(180.f, rgb(0x5C5041), rgb(0x5C5041));
+inline constexpr Grad violetFill = linear2(180.f, rgb(0x7700FF), rgb(0x7700FF));
 
 // ---------------------------------------------------------------------------
 // §2  Elevation

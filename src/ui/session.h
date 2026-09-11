@@ -527,7 +527,7 @@ struct TrackModel {
     f32   pan   = 0.f;                 // -1..1
     f32   sends[kMaxReturns] = {};     // post-fader send levels, 0..1 linear
     bool  mute = false, solo = false, arm = false;
-    f32   width = 94.f;
+    f32   width = 112.f;
 
     // --- the arrangement -----------------------------------------------
     // Sorted by `start` and non-overlapping except for the bounded crossfade;

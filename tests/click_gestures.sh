@@ -5,7 +5,7 @@ set -e
 for i in 1 2 3 4 5; do
     xd mousemove 5 5
     sleep 0.08
-    xd mousemove 228 318 mousedown 1
+    xd mousemove 234 246 mousedown 1
     sleep 0.06
     xd mouseup 1
     sleep 0.08
@@ -18,7 +18,7 @@ assert 'flags 1 0 0' in first, 'five fast clicks must toggle mute five times'
 print('PASS: immediate pointer-move clicks toggle the intended track')
 PY
 # Track names are editable children of a selectable header; both must work.
-clk 612 61
+clk 710 104
 key ctrl+s
 python3 - "$NXTAKT_TEST_PROJECT" <<'PY'
 import sys
@@ -27,7 +27,7 @@ assert 'flags 0 0 1' in keys, 'clicking track name must select and auto-arm keys
 print('PASS: track name click selects and auto-arms the instrument')
 PY
 # A real fader gesture changes the model and one undo restores it.
-drag 230 440 230 478
+drag 237 380 237 418
 key ctrl+s
 python3 - "$NXTAKT_TEST_PROJECT" <<'PY'
 import re, sys

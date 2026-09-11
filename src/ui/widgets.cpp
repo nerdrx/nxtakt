@@ -49,13 +49,14 @@ struct MotionSlot {
     bool hoverOn = false, pressOn = false;
 };
 
+constexpr f32 kPressDuration = 0.090f;
 constexpr int kMotionSlots = 128;
 MotionSlot g_motion[kMotionSlots];
 
 // One channel of the table: hold the target, ease from wherever we were.
-inline f32 rampAt(f64 now, f64 t0, f32 from, bool on) {
+inline f32 rampAt(f64 now, f64 t0, f32 from, bool on, f32 duration = nx::durFast) {
     const f32 to = on ? 1.f : 0.f;
-    return from + (to - from) * nx::easeSoft.at((f32)(now - t0), nx::durFast);
+    return from + (to - from) * nx::easeSoft.at((f32)(now - t0), duration);
 }
 
 // §5's primary fill in an arbitrary hue: the inner top highlight over the
@@ -230,29 +231,32 @@ UiMotion Ui::motion(u64 id, bool hot, bool held) {
         if (m.seen < oldest->seen) oldest = &m;
     }
     if (!s) {
-        // A brand-new id starts settled in whatever state it is already in, so
-        // a widget that appears under the pointer does not play its hover-in.
+        // Untouched controls need no history. Otherwise a large synth panel
+        // evicts the hover it is still drawing by inserting hundreds of idle
+        // knobs into this small table on every frame.
+        if (!hot && !held) return {};
         s = oldest;
         *s = MotionSlot{};
         s->id = id;
         s->hoverT0 = s->pressT0 = now - (f64)nx::durFast;
-        s->hoverFrom = s->hoverOn = hot;
-        s->pressFrom = s->pressOn = held;
+        s->hoverFrom = 0.f; s->hoverOn = false;
+        s->pressFrom = 0.f; s->pressOn = false;
     }
-    s->seen = now;
-
     if (hot != s->hoverOn) {
         s->hoverFrom = rampAt(now, s->hoverT0, s->hoverFrom, s->hoverOn);
         s->hoverOn = hot;
         s->hoverT0 = now;
     }
     if (held != s->pressOn) {
-        s->pressFrom = rampAt(now, s->pressT0, s->pressFrom, s->pressOn);
+        s->pressFrom = rampAt(now, s->pressT0, s->pressFrom, s->pressOn, kPressDuration);
         s->pressOn = held;
         s->pressT0 = now;
     }
-    return {rampAt(now, s->hoverT0, s->hoverFrom, s->hoverOn),
-            rampAt(now, s->pressT0, s->pressFrom, s->pressOn)};
+    const UiMotion result{rampAt(now, s->hoverT0, s->hoverFrom, s->hoverOn),
+                          rampAt(now, s->pressT0, s->pressFrom, s->pressOn, kPressDuration)};
+    // Settled idle controls are recyclable even if they remain on screen.
+    if (hot || held || result.hover > 0.001f || result.press > 0.001f) s->seen = now;
+    return result;
 }
 
 Rect Ui::liftPress(const Rect& b, const UiMotion& m) const {
@@ -273,14 +277,14 @@ void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
 
     const bool selected = kind == Pill::Primary || kind == Pill::Danger;
     if (kind == Pill::Ghost && m.hover < 0.004f && m.press < 0.004f) return;
-    const Col base = selected ? pal::panelAlt.mix(tint, 0.25f) : rgb(0x3C3D42);
+    const Col base = selected ? pal::panelAlt.mix(tint, 0.65f) : pal::panelAlt;
     const Col fill = base.mix(nx::text, 0.05f * m.hover).scale(1.f - 0.10f * m.press);
     // A quiet one-pixel contact shadow gives the face definition without an
     // outline around every control. The pointer geometry remains stationary.
     r->roundRect({b.x, b.y + dpi, b.w, b.h}, rad, rgba(0x000000, 0.14f));
     r->gradRect(b, rad, nx::linear2(180.f, fill.mix(nx::text, 0.025f), fill));
     r->roundRectOutline(b, rad, dpi,
-        selected ? tint.alpha(0.25f) : rgba(0xFFFFFF, 0.055f + 0.045f * m.hover));
+        selected ? tint.mix(nx::text, 0.25f).alpha(0.7f) : rgba(0xFFFFFF, 0.055f + 0.045f * m.hover));
 
 }
 
@@ -476,11 +480,11 @@ bool Ui::tabPill(u64 id, const Rect& b, const char* const* labels, int count, in
     // for every shape->text->shape alternation, and a tab strip that drew each
     // slot complete would cost one per tab.
     const f32 tabRad = std::min(nx::pill * dpi, b.h * 0.5f);
-    r->roundRect(b, tabRad, rgb(0x222327));
+    r->roundRect(b, tabRad, nx::bgTop);
 
     const Rect ind{track.x + slotW * at, track.y, slotW, track.h};
     r->roundRect({ind.x, ind.y + dpi, ind.w, ind.h}, tabRad, rgba(0x000000, 0.22f));
-    r->roundRect(ind, tabRad, rgb(0x53545A));
+    r->roundRect(ind, tabRad, nx::panel2.mix(nx::violet, 0.55f));
     r->roundRectOutline(ind, tabRad, dpi, rgba(0xFFFFFF, 0.08f));
 
     Font* f = fSmall ? fSmall : fBody;
@@ -1113,8 +1117,10 @@ bool Ui::segButton(u64 id, const Rect& b, bool on, Col onCol) {
     const bool danger = onCol.r > 0.6f && onCol.g < 0.45f && onCol.b < 0.55f;
     if (on) {
         pillRect(br, rad, danger ? Pill::Danger : Pill::Primary, onCol, m);
-    } else if (m.hover > 0.01f) {
+    } else if (m.hover > 0.01f || m.press > 0.01f) {
         r->gradRect(br, rad, nx::glassChip, 0.55f * m.hover);
+        // A brief inward darkening reads as contact without moving the face.
+        r->roundRect(br, rad, rgba(0x000000, 0.10f * m.press));
     }
     if (hotNow) cursor = Cursor::Hand;
     return clicked;
@@ -1225,9 +1231,12 @@ bool Ui::knob(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, f32 def, const char
     const f32 t = norm01(*v, lo, hi);
     const f32 ang = kKnobA0 + (kKnobA1 - kKnobA0) * t;
 
-    // Body.
-    r->circle(cx, cy, rad, pal::panelAlt);
-    r->circle(cx, cy, rad - 1.f, pal::panelAlt.scale(0.78f));
+    const UiMotion m = motion(id, hotNow, active == id || typing);
+    const f32 focus = std::max(m.hover, m.press);
+    // The readout and arc stay at the real value throughout every gesture.
+    r->circle(cx, cy, rad, pal::panelAlt.mix(nx::text, 0.06f * focus));
+    r->circle(cx, cy, rad - 1.f,
+              pal::panelAlt.scale(0.78f).mix(nx::text, 0.035f * m.hover));
 
     // Track + value arc, drawn just outside the body.
     const f32 aRad = rad - 1.5f;
@@ -1235,7 +1244,8 @@ bool Ui::knob(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, f32 def, const char
     arc(cx, cy, aRad, kKnobA0, kKnobA1, aTh, pal::divider);
 
     const bool bipolar = (lo < 0.f && hi > 0.f);
-    const Col arcCol = (hotNow || active == id) ? pal::accent : pal::accent.scale(0.85f);
+    const Col arcCol = pal::accent.scale(0.85f + 0.15f * focus)
+                                   .mix(nx::cyan, 0.16f * m.press);
     if (bipolar) {
         // Grow out of 12 o'clock in whichever direction the value sits.
         const f32 centre = kKnobA0 + (kKnobA1 - kKnobA0) * norm01(0.f, lo, hi);
@@ -1259,7 +1269,7 @@ bool Ui::knob(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, f32 def, const char
         char buf[64];
         std::snprintf(buf, sizeof buf, fmt, (double)*v);
         const Rect tr{b.x, b.bottom() - textH, b.w, textH};
-        r->textIn(*vf, tr, buf, (hotNow || active == id) ? pal::text : pal::textDim,
+        r->textIn(*vf, tr, buf, pal::textDim.mix(pal::text, focus),
                   Align::Center, 0.f);
     }
 
@@ -1378,6 +1388,9 @@ bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
     // --- draw --------------------------------------------------------------
     const f32 dim  = clampv(st.dim, 0.f, 1.f);
     const bool live = !st.absent && (hotNow || active == id);
+    const UiMotion m = motion(id, !st.absent && hotNow,
+                              !st.absent && (active == id || typing));
+    const f32 focus = std::max(m.hover, m.press);
     const f32 t   = knobT(st, clampv(*v, lo, hi));
     const f32 ang = kKnobA0 + (kKnobA1 - kKnobA0) * t;
 
@@ -1387,13 +1400,16 @@ bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
     const Rect cap{cx - rad, cy - rad, rad * 2.f, rad * 2.f};
     r->gradRect(cap, rad, nx::glass1, (st.absent ? 0.30f : 0.95f) * dim);
     r->gradStroke(cap, rad, dpi, nx::edge, (st.absent ? 0.28f : 0.85f) * dim);
+    if (!st.absent && focus > 0.005f)
+        r->roundRect(cap, rad, nx::text.alpha(0.045f * focus * dim));
 
     const f32 aRad = rad + 2.5f * dpi;
     const f32 aTh  = std::max(1.5f * dpi, rad * 0.17f);
     arc(cx, cy, aRad, kKnobA0, kKnobA1, aTh, nx::muted.alpha(0.20f * dim));
 
     if (!st.absent) {
-        const Col ac = st.arc.alpha((live ? 1.f : 0.82f) * dim);
+        const Col ac = st.arc.mix(nx::cyan, 0.16f * m.press)
+                              .alpha((0.82f + 0.18f * focus) * dim);
         if (st.bipolar) {
             const f32 centre = kKnobA0 + (kKnobA1 - kKnobA0) * knobT(st, 0.f);
             if (std::fabs(ang - centre) > 1e-3f) arc(cx, cy, aRad, centre, ang, aTh, ac);
@@ -1429,7 +1445,7 @@ bool Ui::knobNx(u64 id, const Rect& b, f32* v, const KnobStyle& st) {
         else                  std::snprintf(buf, sizeof buf, st.fmt, (double)*v);
         const Rect tr{b.x, b.bottom() - textH, b.w, textH};
         const Col c = st.absent ? nx::muted.alpha(0.40f * dim)
-                                : (live ? nx::text : nx::muted).alpha(dim);
+                                : nx::muted.mix(nx::text, focus).alpha(dim);
         drawTextIn(*vf, tr, buf, c, Align::Center, 0.f);
     }
 
@@ -1623,9 +1639,9 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
     r->hairlineH(b.x, b.right(), unityY, nx::hairlineInk, 1.f);
 
     const Rect handle{b.x, std::round(handleY(*t)), b.w, handleH};
-    Col hc = rgb(0xB8B9BF);
-    if (active == id) hc = rgb(0xE0D2BE);
-    else if (hotNow) hc = rgb(0xD0D1D5);
+    const UiMotion m = motion(id, hotNow, active == id);
+    const Col hc = rgb(0xB8B9BF).mix(rgb(0xD0D1D5), m.hover)
+                                  .mix(nx::violetSoft, m.press);
     r->roundRect(handle, 3.f * std::max(1.f, r->dpiScale()), hc);
     // The grip line across the middle of the cap.
     r->hairlineH(handle.x + 1.f, handle.right() - 1.f, std::round(handle.cy()),
