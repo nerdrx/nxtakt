@@ -1,3 +1,4 @@
+#include "click_sequence.h"
 // Native Wayland backend: xdg-shell + EGL, with server-side decorations,
 // fractional scaling via wp_fractional_scale_v1 + wp_viewporter, and xkbcommon
 // keyboard handling. This is the default path on a Wayland session; the X11
@@ -179,8 +180,7 @@ private:
     f64  pendingScale_ = 1.0;
     f32  lastX_ = 0, lastY_ = 0;
     bool haveLast_ = false;
-    std::chrono::steady_clock::time_point lastClick_{};
-    int  lastClickBtn_ = -1;
+    ClickSequence clicks_;
 };
 
 // --- listener tables --------------------------------------------------------
@@ -359,10 +359,9 @@ void WaylandBackend::ptrButton(void* d, wl_pointer*, u32 serial, u32, u32 button
         self->in_->down[idx] = true;
         self->in_->pressed[idx] = true;
         const auto now = std::chrono::steady_clock::now();
-        const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - self->lastClick_).count();
-        if (idx == self->lastClickBtn_ && gap < 400) self->in_->dblClick = true;
-        self->lastClick_ = now;
-        self->lastClickBtn_ = idx;
+        const auto ms = std::chrono::duration<f64, std::milli>(now.time_since_epoch()).count();
+        if (self->clicks_.press(idx, ms, self->in_->mx, self->in_->my, self->scale_))
+            self->in_->dblClick = true;
     } else {
         self->in_->down[idx] = false;
         self->in_->released[idx] = true;
@@ -402,6 +401,7 @@ void WaylandBackend::kbLeave(void* d, wl_keyboard*, u32, wl_surface*) {
     std::memset(self->in_->keyDown, 0, sizeof self->in_->keyDown);
     std::memset(self->in_->scanDown, 0, sizeof self->in_->scanDown);
     self->in_->mods = 0;
+    self->in_->newFrame();
     self->repeating_ = false;
 }
 
@@ -414,8 +414,8 @@ void WaylandBackend::handleKey(u32 key, bool down, bool isRepeat) {
     const xkb_keysym_t sym = xkb_state_key_get_one_sym(xkbState_, kc);
     const int k = mapSym(sym);
     if (k > 0 && k < KeyCount) {
-        in_->keyDown[k] = down;
-        if (down) in_->keyPressed[k] = true;
+        if (down) in_->pressKey(k, in_->mods);
+        else in_->keyDown[k] = false;
     }
     if (down) {
         char buf[64];

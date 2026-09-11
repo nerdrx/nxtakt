@@ -1,3 +1,4 @@
+#include "click_sequence.h"
 // X11 + GLX backend. Kept as the fallback for X sessions and remote displays;
 // on a Wayland session the native backend is preferred.
 #include "window_backend.h"
@@ -101,8 +102,7 @@ private:
     bool closed_ = false;
     f32 lastX_ = 0, lastY_ = 0;
     bool haveLast_ = false;
-    std::chrono::steady_clock::time_point lastClick_{};
-    int lastClickBtn_ = -1;
+    ClickSequence clicks_;
     int w_ = 0, h_ = 0;
     f32 dpi_ = 1.f;
 };
@@ -237,10 +237,8 @@ bool X11Backend::pump() {
             in_->pressed[idx] = true;
             in_->mx = (f32)ev.xbutton.x; in_->my = (f32)ev.xbutton.y;
             const auto now = std::chrono::steady_clock::now();
-            const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastClick_).count();
-            if (idx == lastClickBtn_ && gap < 400) in_->dblClick = true;
-            lastClick_ = now;
-            lastClickBtn_ = idx;
+            const auto ms = std::chrono::duration<f64, std::milli>(now.time_since_epoch()).count();
+            if (clicks_.press(idx, ms, in_->mx, in_->my, dpi_)) in_->dblClick = true;
             break;
         }
         case ButtonRelease: {
@@ -260,7 +258,12 @@ bool X11Backend::pump() {
             // X keycodes are evdev scancode + 8 under evdev/libinput servers.
             const unsigned sc = ev.xkey.keycode - 8;
             if (sc < 256) in_->scanDown[sc] = true;
-            if (k > 0 && k < KeyCount) { in_->keyDown[k] = true; in_->keyPressed[k] = true; }
+            u32 keyMods = 0;
+            if (ev.xkey.state & ShiftMask) keyMods |= ModShift;
+            if (ev.xkey.state & ControlMask) keyMods |= ModCtrl;
+            if (ev.xkey.state & Mod1Mask) keyMods |= ModAlt;
+            if (ev.xkey.state & Mod4Mask) keyMods |= ModSuper;
+            in_->pressKey(k, keyMods);
             if (n > 0 && (u8)buf[0] >= 32 && (u8)buf[0] != 127) in_->textInput.append(buf, (size_t)n);
             break;
         }
@@ -278,6 +281,7 @@ bool X11Backend::pump() {
             std::memset(in_->scanDown, 0, sizeof in_->scanDown);
             std::memset(in_->down, 0, sizeof in_->down);
             in_->mods = 0;
+            in_->newFrame();
             break;
         default: break;
         }
@@ -296,6 +300,13 @@ bool X11Backend::pump() {
                 if (in_->keyDown[KeyShift]) in_->mods |= ModShift;
                 if (in_->keyDown[KeyCtrl])  in_->mods |= ModCtrl;
                 if (in_->keyDown[KeyAlt])   in_->mods |= ModAlt;
+            }
+            if (ev.type == KeyRelease) {
+                const int released = mapKey(XLookupKeysym(&ev.xkey, 0));
+                if (released == KeyShift) in_->mods &= ~ModShift;
+                if (released == KeyCtrl) in_->mods &= ~ModCtrl;
+                if (released == KeyAlt) in_->mods &= ~ModAlt;
+                if (released == KeySuper) in_->mods &= ~ModSuper;
             }
         }
     }

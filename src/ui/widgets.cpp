@@ -16,10 +16,7 @@ namespace lat {
 
 // Text that sits ON a colored fill: dark ink on bright fills (the pastel clip
 // colors), light ink on dark fills (the purple accent). Rec.601 luma.
-static Col inkOn(const Col& fill) {
-    const f32 luma = 0.299f * fill.r + 0.587f * fill.g + 0.114f * fill.b;
-    return luma > 0.45f ? pal::textOnClip : Col(0.94f, 0.92f, 1.f, 1.f);
-}
+
 
 namespace {
 
@@ -67,11 +64,7 @@ inline f32 rampAt(f64 now, f64 t0, f32 from, bool on) {
 // and a clip-coloured launch button are visibly the same material lit by the
 // same lamp. Interned by value, so one hue costs one gradient row per frame
 // however many pills wear it.
-nx::Grad fillOf(const Col& c) {
-    return {{{c.mix(Col(1.f, 1.f, 1.f, c.a), 0.24f), 0.00f},
-             {c,                                     0.55f},
-             {c.scale(0.60f),                        1.00f}}, 3, 170.f};
-}
+
 
 // Knob sweep, measured from 12 o'clock: -135deg .. +135deg. The `arc` helper
 // works in screen angles where 0 points right and the angle grows clockwise,
@@ -263,13 +256,11 @@ UiMotion Ui::motion(u64 id, bool hot, bool held) {
 }
 
 Rect Ui::liftPress(const Rect& b, const UiMotion& m) const {
-    const f32 dpi = r ? std::max(1.f, r->dpiScale()) : 1.f;
-    // Hover lifts 1.5px (§5 says 1-2). Press takes it back down as it shrinks,
-    // so a held button sits into the surface rather than hovering while pressed.
-    const f32 y = b.y - 1.5f * dpi * m.hover * (1.f - m.press);
-    const f32 k = 1.f - 0.04f * m.press;                 // §5: scale to 0.96
-    const f32 dw = b.w * (1.f - k) * 0.5f, dh = b.h * (1.f - k) * 0.5f;
-    return {b.x + dw, y + dh, b.w - dw * 2.f, b.h - dh * 2.f};
+    // Keep the visible face aligned with its hit box. Brightness and border
+    // motion carry feedback; moving the button away from the pointer made
+    // densely packed controls feel slippery.
+    (void)m;
+    return b;
 }
 
 void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
@@ -280,42 +271,17 @@ void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
     // is what made every button an unrelated pill -- see theme.h's geometry note.
     const f32 rad = radius < 0.f ? std::min(nx::pill * dpi, b.h * 0.5f) : radius;
 
-    switch (kind) {
-    case Pill::Primary:
-    case Pill::Danger: {
-        // The glow: §5's "soft violet glow, bloomed on hover". It is the one
-        // shadow in the language that is not black, and it is what makes a
-        // primary action read as lit from within rather than merely filled.
-        // Alpha rides the hover weight -- the SPEC's colour, not the gradient,
-        // so animating it interns nothing.
-        const f32 glow = 0.34f + 0.30f * m.hover;
-        r->shadow(b, rad, nx::ShadowSpec{0.f, 3.f * dpi, 14.f * dpi, -2.f * dpi,
-                                         tint.alpha(glow)});
-        r->gradRect(b, rad, fillOf(tint));
-        // The lit edge, brighter while hovered. One light source, upper left.
-        r->gradStroke(b, rad, dpi, nx::edge, 0.85f + 0.15f * m.hover);
-        break;
-    }
-    case Pill::Ghost:
-        // Nothing at rest; the glass arrives with the pointer. The fill is
-        // faded through gradRect's alphaMul rather than through Grad::faded, so
-        // a row of ghosts sharing one hover value shares one gradient row.
-        if (m.hover > 0.004f || m.press > 0.004f) {
-            r->gradRect(b, rad, nx::glassChip,
-                        clampv(0.55f * m.hover + 0.45f * m.press, 0.f, 1.f));
-            r->gradStroke(b, rad, dpi, nx::edge, 0.75f * m.hover);
-        }
-        break;
-    case Pill::Secondary:
-    default:
-        r->gradRect(b, rad, nx::glassChip, 0.80f + 0.20f * m.hover);
-        r->gradStroke(b, rad, dpi, nx::edge, 0.75f + 0.25f * m.hover);
-        // A hovered secondary lifts into a faint violet wash rather than a
-        // lighter grey: §1, violet leads even in the small states.
-        if (m.hover > 0.004f)
-            r->roundRect(b, rad, nx::violet.alpha(0.10f * m.hover));
-        break;
-    }
+    const bool selected = kind == Pill::Primary || kind == Pill::Danger;
+    if (kind == Pill::Ghost && m.hover < 0.004f && m.press < 0.004f) return;
+    const Col base = selected ? pal::panelAlt.mix(tint, 0.22f) : rgb(0x343A45);
+    const Col fill = base.mix(nx::text, 0.04f * m.hover).scale(1.f - 0.10f * m.press);
+    r->roundRect(b, rad, fill);
+    r->roundRectOutline(b, rad, dpi,
+        selected ? tint.alpha(0.75f) : rgb(0x49515F).alpha(0.65f + 0.35f * m.hover));
+    if (selected)
+        r->rect({b.x + 2.f * dpi, b.bottom() - 2.f * dpi,
+                 std::max(0.f, b.w - 4.f * dpi), dpi}, tint);
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,7 +1078,7 @@ bool Ui::button(u64 id, const Rect& b, const char* label, bool on, Col onCol, f3
     pillRect(br, rad, on ? (danger ? Pill::Danger : Pill::Primary) : Pill::Secondary,
              onCol, m);
 
-    const Col fg = on ? inkOn(onCol)
+    const Col fg = on ? nx::text
                       : nx::muted.mix(nx::text, 0.55f + 0.45f * m.hover);
     if (label && *label && fBody) drawTextIn(*fBody, br, label, fg, Align::Center, 3.f);
     if (hotNow) cursor = Cursor::Hand;
@@ -1188,7 +1154,7 @@ bool Ui::squareToggle(u64 id, const Rect& b, const char* label, bool* value, Col
     Col fg = pal::textDim;
     if (*value) {
         pillRect(br, rad, Pill::Primary, onCol, m);
-        fg = inkOn(onCol);
+        fg = nx::text;
     } else {
         pillRect(br, rad, Pill::Secondary, onCol, m);
         fg = pal::textDim.mix(nx::text, m.hover);

@@ -95,9 +95,16 @@ shot() {
 # window that has not mapped yet is a click into nothing, and the resulting
 # "the gesture did nothing" is the most expensive kind of false finding.
 for _ in $(seq 1 120); do
-    DISPLAY="$DISP" xdotool search --onlyvisible --class . >/dev/null 2>&1 && break
+    if grep -aq 'backend:.*audio:' "$LOG" &&
+       DISPLAY="$DISP" xdotool search --onlyvisible --name '^NxTakt$' >/dev/null 2>&1; then
+        break
+    fi
     sleep 0.25
 done
+grep -aq 'backend:.*audio:' "$LOG" || {
+    echo "drive.sh: application did not finish startup; see $LOG" >&2
+    exit 1
+}
 sleep 1.2
 
 # shellcheck source=/dev/null

@@ -29,8 +29,12 @@ struct Input {
     bool dblClick = false;
     f32  wheel = 0;                  // notches this frame, + is up
     u32  mods = 0;
+    // A chord can be pressed and released between render frames. Keep its
+    // modifiers until the latched key press has been handled.
+    u32  pressedMods = 0;
     bool keyDown[KeyCount]{};
     bool keyPressed[KeyCount]{};     // includes auto-repeat
+    bool keyStarted[KeyCount]{};     // first press, even if released this frame
     // Physical key state, indexed by Linux evdev scancode (KEY_Z = 44, ...).
     // Layout-independent: on QWERTZ or AZERTY the bottom row is still the
     // bottom row. This is what the computer-MIDI piano maps — a piano layout
@@ -42,12 +46,20 @@ struct Input {
     bool scanDown[256]{};
     std::string textInput;           // UTF-8 typed this frame
 
-    bool ctrl()  const { return mods & ModCtrl; }
-    bool shift() const { return mods & ModShift; }
-    bool alt()   const { return mods & ModAlt; }
+    void pressKey(int key, u32 eventMods) {
+        if (key <= 0 || key >= KeyCount) return;
+        keyStarted[key] = keyStarted[key] || !keyDown[key];
+        keyDown[key] = keyPressed[key] = true;
+        // Modifier taps alone must not turn a later plain key into a chord.
+        if (key < KeyShift || key > KeySuper) pressedMods |= eventMods;
+    }
+    bool ctrl()  const { return (mods | pressedMods) & ModCtrl; }
+    bool shift() const { return (mods | pressedMods) & ModShift; }
+    bool alt()   const { return (mods | pressedMods) & ModAlt; }
     void newFrame() {
         for (int i = 0; i < 3; ++i) { pressed[i] = released[i] = false; }
-        for (int i = 0; i < KeyCount; ++i) keyPressed[i] = false;
+        for (int i = 0; i < KeyCount; ++i) keyPressed[i] = keyStarted[i] = false;
+        pressedMods = 0;
         wheel = 0; dx = dy = 0; dblClick = false;
         textInput.clear();
     }

@@ -44,12 +44,8 @@ trap cleanup EXIT
 # Wait for the nested compositor to publish its socket.
 SOCK=""
 for _ in $(seq 1 100); do
-    for s in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/gamescope-*; do
-        [[ -S "$s" ]] || continue
-        cand=$(basename "$s")
-        [[ "$cand" == *.lock || "$cand" == *-ei ]] && continue
-        SOCK="$cand"
-    done
+    SOCK=$(grep -aoE "wayland display '[^']+'" "$LOG" 2>/dev/null |
+           tail -1 | grep -oE "gamescope-[0-9]+")
     [[ -n "$SOCK" ]] && break
     sleep 0.1
 done

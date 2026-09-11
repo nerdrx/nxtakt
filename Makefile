@@ -363,8 +363,18 @@ build/handle_test: tests/handle_test.cpp src/ui/engine_handle.cpp src/audio/engi
 
 # Full headless check: engine unit tests, then a real render that must not be
 # silent, then a plugin scan.
-test: build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
+build/hit_map_test: tests/hit_map_test.cpp src/ui/hit_map.h src/ui/click_sequence.h src/gfx/renderer.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
+
+build/input_test: tests/input_test.cpp src/ui/window.h src/core/common.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
+
+test: build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
       build/timesig_view_test build/handle_test build/render build/gen_demo build/plugin_scan
+	./build/input_test
+	./build/hit_map_test
 	./build/engine_test
 	./build/ipc_test
 	./build/daemon_test

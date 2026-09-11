@@ -45,36 +45,9 @@ namespace {
 // heads cannot drift apart.
 constexpr f32 kCellRadius = nx::radiusSm;
 
-// A card-tier surface that works over THIS field, as ONE gradient.
-//
-// Two things are going on here, and both are worth stating.
-//
-// §2's --glass-1 is a 0.09-alpha white ramp draining to a 0.34-alpha panel
-// tone. It is drawn to sit over the bright shoulder of the nebula, where that
-// is plenty; the session's furniture sits over the app's own ground, which is
-// nearly black, and there the ramp alone adds almost nothing -- the column
-// reads as a hole rather than as a surface. §10 says exactly what to do about
-// that on a toolkit with no compositor blur: "--panel-toned surfaces with a
-// subtle top-light gradient".
-//
-// The obvious way to write that is a --panel fill with --glass-1 over it. This
-// is that, pre-composited into a single three-stop ramp on --glass-1's own
-// 157deg axis: same light, same drain to the panel tone in the bottom-right,
-// one full-height quad per column instead of two. The columns are 715px tall
-// and there are three of them, so the second quad was a third of a megapixel a
-// frame for a difference no eye can find.
-// Tuned against the palette as it stands, not against the hub's: pal::panel is
-// a near-black 0x100B1D at 0.92 now, because expensive is darkness with small
-// luminous accents and a violet wash over square metres of surface is what
-// reads as a toy. So this is that panel with a BREATH of light collecting in
-// the top-left, and nothing more.
-inline constexpr nx::Grad panelGlass = {
-    {{rgba(0x1F1738, 0.86f), 0.00f},
-     {rgba(0x161029, 0.90f), 0.34f},
-     {rgba(0x100B1D, 0.94f), 1.00f}}, 3, 157.f};
-
+// Keep channel furniture quiet so clip colors and live controls stand out.
 void panelSurface(Renderer& r, const Rect& b, f32 radius = 0.f) {
-    r.gradRect(b, radius, panelGlass);
+    r.roundRect(b, radius, pal::panel);
 }
 
 // A rect on whole device pixels. gradStroke() snaps itself; roundRectOutline()
@@ -371,10 +344,12 @@ void App::drawSessionView(const Rect& r) {
     // The reachable height is the grid's own (heads and mixer are fixed), and
     // the scene column shares the offset so the rows cannot skew.
     {
-        const f32 rowsH   = (f32)ses_.scenes.size() * lay::slotH * s;
+        const f32 rowsH   = ((f32)ses_.scenes.size() + 2.f) * lay::slotH * s;
         const f32 gridH   = r.h - (lay::trackHeadH + lay::mixerH) * s;
         const f32 maxY    = std::max(0.f, rowsH - gridH);
-        const bool overRows = (tracksCol.contains(in.mx, in.my) || sceneCol.contains(in.mx, in.my));
+        const bool overRows = (tracksCol.contains(in.mx, in.my) || sceneCol.contains(in.mx, in.my)) &&
+                              in.my >= r.y + lay::trackHeadH * s &&
+                              in.my < r.bottom() - lay::mixerH * s;
         if (overRows && in.wheel != 0.f && !in.shift() && !in.ctrl())
             gridScrollY_ -= in.wheel * lay::slotH * 3.f * s;
         gridScrollY_ = clampv(gridScrollY_, 0.f, maxY);
@@ -412,8 +387,9 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
         // one surface floating is enough to say which one that is.
         const f32 rad = kCellRadius * s;
         if (sel) {
-            rend_.gradRect(cell, rad, nx::glassChip);
-            rend_.gradStroke(cell, rad, s, nx::edge, 0.9f);
+            rend_.roundRect(cell, rad, pal::slotHover);
+            rend_.roundRectOutline(snapRect(cell), rad, std::max(1.f, s),
+                                   nx::violet.alpha(0.7f));
         } else if (hot) {
             rend_.gradRect(cell, rad, nx::glassChip, 0.55f);
         } else {
@@ -434,18 +410,22 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
         if (ui_.textField(nameId, cell, &t.name,
                           Col(0, 0, 0, 0), sel ? nx::text : nx::muted, Align::Left))
             undoPointWith("rename track", t.name, wasName);
+        // The editable name covers the header: a single click still selects
+        // the track, while a double click can enter the name field.
+        const bool hotHeader = hot || ui_.isHot(nameId);
         // A 94px header cuts most real track names, and a cut name with no way
         // to read it is the §11 defect this fixes: the status bar has the room
         // the header does not. Suppressed while the field is being edited --
         // the caret is already showing the whole string.
-        if (hot && ui_.editId != nameId &&
+        if (hotHeader && ui_.editId != nameId &&
             textTruncated(fBody_, t.name.c_str(), cell.w - 8 * s))
             ui_.tip = t.name;
-        if (hot && in.pressed[0]) selectTrack((int)i);
+        if (hotHeader && ui_.editId != nameId) ui_.cursor = Cursor::Hand;
+        if (hotHeader && in.pressed[0]) selectTrack((int)i);
     }
 
     // "+" to append a track.
-    Rect add{x, r.y, 22 * s, h};
+    Rect add{x, r.y, 28 * s, h};
     if (add.x < r.right()) {
         if (ui_.button(uiId(3, 900), add, "+")) { undoPoint("add track"); addTrack(); }
     }
@@ -677,10 +657,10 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
 
     // Launch button zone on the left. Cyan while it plays: §1 reserves cyan for
     // light inside a material -- live values, playheads, running state.
-    const f32 btnW = 14 * s;
+    const f32 btnW = 24 * s;
     Rect btn{cell.x, cell.y, btnW, cell.h};
-    if (playing) ui_.playTriangle(btn.insetXY(4.5f * s, 4.5f * s), nx::live);
-    else         ui_.playTriangle(btn.insetXY(4.5f * s, 4.5f * s), pal::textOnClip.alpha(0.55f));
+    if (playing) ui_.playTriangle(btn.insetXY(8.f * s, 8.f * s), nx::live);
+    else         ui_.playTriangle(btn.insetXY(8.f * s, 8.f * s), pal::textOnClip.alpha(0.55f));
 
     // Recording into a slot that already holds a clip is an overdub, so the
     // slot keeps its playing look and gains the record dot rather than turning
@@ -798,8 +778,8 @@ void App::drawSceneColumn(const Rect& r) {
             rend_.hairlineH(cell.x + nx::sp1 * s, cell.right() - nx::sp1 * s, cell.bottom(),
                             nx::hairlineInk.alpha(0.08f));
 
-        Rect btn{cell.x, cell.y, 14 * s, cell.h};
-        ui_.playTriangle(btn.insetXY(4.5f * s, 4.5f * s), sel ? nx::text : nx::muted);
+        Rect btn{cell.x, cell.y, 24 * s, cell.h};
+        ui_.playTriangle(btn.insetXY(8.f * s, 8.f * s), sel ? nx::text : nx::muted);
         // A scene may carry a TEMPO, and a scene that does changes the transport
         // the moment it is launched. Nothing on this column used to say so: the
         // number was in the set, in the file and in the engine, and invisible.
@@ -815,23 +795,25 @@ void App::drawSceneColumn(const Rect& r) {
             snprintf(bpm, sizeof bpm, "%g", ses_.scenes[si].tempo);
             bpmW = fSmall_.measure(bpm) + 6 * s;
         }
-        const Rect nameR{cell.x + 14 * s, cell.y, cell.w - 16 * s - bpmW, cell.h};
+        const Rect nameR{cell.x + 24 * s, cell.y, cell.w - 26 * s - bpmW, cell.h};
         const u64 nameId = uiId(5, 1000 + si);
         std::string wasName;                     // see drawTrackHeaders
         if (ui_.editId == nameId) wasName = ses_.scenes[si].name;
         if (ui_.textField(nameId, nameR, &ses_.scenes[si].name, Col(0, 0, 0, 0),
                           sel ? nx::text : nx::muted, Align::Left))
             undoPointWith("rename scene", ses_.scenes[si].name, wasName);
+        // The name is part of the launcher until its edit field is active.
+        const bool hotScene = hot || ui_.isHot(nameId);
         if (bpm[0])
             rend_.textIn(fSmall_, {nameR.right(), cell.y, bpmW, cell.h}, bpm,
                          nx::live.alpha(sel ? 0.95f : 0.75f), Align::Right, 2 * s);
 
-        if (hot) ui_.cursor = Cursor::Hand;
+        if (hotScene && ui_.editId != nameId) ui_.cursor = Cursor::Hand;
         // A scene name wide enough to be cut is a name the column cannot show,
         // so the status bar says it in full (§11: no truncated name without a
         // tip). The tempo is named too -- a bare number beside a scene is only
         // obvious once you already know what it does.
-        if (hot && ui_.editId != nameId) {
+        if (hotScene && ui_.editId != nameId) {
             const bool cut = textTruncated(fBody_, ses_.scenes[si].name.c_str(),
                                            nameR.w - 4 * s);
             if (cut || bpm[0]) {
@@ -839,7 +821,10 @@ void App::drawSceneColumn(const Rect& r) {
                 if (bpm[0]) ui_.tip += std::string(" - launches at ") + bpm + " BPM";
             }
         }
-        if (hot && in.pressed[0]) { selSlot_ = si; send(Cmd::LaunchScene, si); }
+        if (hotScene && ui_.editId != nameId && in.pressed[0]) {
+            selSlot_ = si;
+            send(Cmd::LaunchScene, si);
+        }
     }
 
     Rect stopAll{r.x + 2 * s, top + ns * slotH, r.w - 4 * s, slotH - lay::gutter * s};
@@ -851,7 +836,7 @@ void App::drawSceneColumn(const Rect& r) {
     // actions in one cluster spelled two different ways is exactly the
     // inconsistent capitalisation §9 rules out. Uppercase is the spelling every
     // other action chip in the program uses (LOOP, APPLY, MAP, STOP ALL).
-    Rect add{r.x + 2 * s, stopAll.bottom() + 4 * s, r.w - 4 * s, 18 * s};
+    Rect add{r.x + 2 * s, stopAll.bottom() + 4 * s, r.w - 4 * s, 24 * s};
     if (add.bottom() <= r.bottom() - lay::mixerH * s) {
         if (ui_.button(uiId(5, 901), add, "+ SCENE")) { undoPoint("add scene"); addScene(); }
     }
@@ -889,11 +874,8 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         // the eye should group. The plate and the lit edge belong to the
         // cluster; the segments separate by hairline and only fill when they
         // are on.
-        // 16, not 15: the cluster is three CLICK TARGETS and 15 device px at
-        // DPI 1.0 is under the 16 px floor on its short side. The row pitch
-        // below is 20, so the extra pixel comes out of the gap and nothing
-        // moves.
-        const Rect trio{col.x + 6 * s, y, col.w - 12 * s, 16 * s};
+        // Give each switch a full 24px target, with a gap before the sends.
+        const Rect trio{col.x + 6 * s, y, col.w - 12 * s, 24 * s};
         ui_.segCluster(trio);
         const f32 bw = trio.w / 3.f;
         Rect mr{trio.x, y, bw, trio.h};
@@ -925,14 +907,14 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
                         uiId(6, (int)ti, 0));
         }
         ui_.microIn(fSmall_, ui_.lastRect, "M",
-                    t.mute ? nx::inkOn(pal::meterAmber) : nx::muted, Align::Center);
+                    t.mute ? pal::meterAmber : nx::muted, Align::Center);
         if (ui_.segButton(uiId(6, (int)ti, 1), sr, t.solo, pal::soloBlue)) {
             t.solo = !t.solo;
             undoPointWith("solo", t.solo, wasSolo);
             send(Cmd::TrackSolo, (int)ti, t.solo ? 1 : 0);
         }
         ui_.microIn(fSmall_, ui_.lastRect, "S",
-                    t.solo ? nx::inkOn(pal::soloBlue) : nx::muted, Align::Center);
+                    t.solo ? pal::soloBlue : nx::muted, Align::Center);
         // Record-arm is a filled dot in Live, and the glyph atlas is ASCII-only,
         // so draw the dot rather than trying to letter it.
         if (ui_.segButton(uiId(6, (int)ti, 2), ar, t.arm, pal::armRed)) {
@@ -947,25 +929,18 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         }
         rend_.circle(ui_.lastRect.cx(), ui_.lastRect.cy(), 3.5f * s,
                      t.arm ? nx::text : pal::recRed.scale(0.55f));
-        y += 20 * s;
+        y += 28 * s;
 
-        // Sends A-D, above the pan knob as a 2x2 grid. A strip is 94px wide, so
-        // four knobs in a row would be 12px across and unusable; two rows of two
-        // leave room for a 15px knob with its letter beside it, which is the
-        // smallest thing here that still reads as a send and not as a dot.
-        // Anything the user has dialled in also shows as an arc, so a track with
-        // send on it is visible without hovering.
+        // Sends A-D use a spaced 2x2 grid with 24px drag targets and labels.
+        // The arc keeps the current level visible without hovering.
         {
             const f32 cellW = (col.w - 12 * s) * 0.5f;
-            const f32 rowH  = 18 * s;
+            const f32 rowH  = 28 * s;
             for (int rn = 0; rn < kMaxReturns; ++rn) {
                 Rect cell{col.x + 6 * s + (rn % 2) * cellW, y + (rn / 2) * rowH, cellW, rowH};
                 ui_.microIn(fSmall_, {cell.x, cell.y, 9 * s, cell.h}, kReturnLetter[rn],
                             nx::muted.alpha(0.75f), Align::Left, 0);
-                // 16 for the same reason the M/S/arm cluster is: a knob is a
-                // drag target and 15 px is under the floor. The cell is 18 tall
-                // and 41 wide, so it fits with a pixel to spare.
-                Rect kr{cell.x + 10 * s, cell.y + 1 * s, 16 * s, 16 * s};
+                Rect kr{cell.x + 10 * s, cell.y + 2 * s, 24 * s, 24 * s};
                 const f32 wasSend = t.sends[rn];
                 if (ui_.knob(uiId(6, (int)ti, 10 + rn), kr, &t.sends[rn], 0.f, 1.f, 0.f)) {
                     undoPointWith(kSendUndo[rn], t.sends[rn], wasSend);
@@ -978,19 +953,19 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         }
 
         // Pan
-        Rect pan{col.cx() - 11 * s, y, 22 * s, 22 * s};
+        Rect pan{col.cx() - 14 * s, y, 28 * s, 28 * s};
         if (ui_.knob(uiId(6, (int)ti, 3), pan, &t.pan, -1.f, 1.f, 0.f)) {
             undoPointWith("pan", t.pan, wasPan);
             send(Cmd::TrackPan, (int)ti, 0, t.pan);
             autoCapture(addr::trackField(t.uid, "pan"), t.pan, uiId(6, (int)ti, 3));
         }
-        y += 26 * s;
+        y += 32 * s;
 
         // Fader + meter, in a recessed lane. §4: a region inside a glass
         // surface recesses rather than frosting again, and the fader travel and
         // the meter are one instrument, so they share one well.
         const f32 fh = col.bottom() - y - 6 * s;
-        Rect fader{col.x + 10 * s, y, 16 * s, fh};
+        Rect fader{col.x + 10 * s, y, 24 * s, fh};
         Rect meter{fader.right() + 5 * s, y, 9 * s, fh};
         rend_.well({fader.x - 4 * s, y - 4 * s, meter.right() - fader.x + 8 * s, fh + 8 * s},
                    nx::radiusXs * s);
@@ -1072,9 +1047,8 @@ void App::drawReturnStrips(const Rect& r) {
         // they land in read as one row of faders rather than a staircase.
         f32 y = mix.y + 26 * s;
         const f32 fh = mix.bottom() - y - 6 * s;
-        // 16 wide, matching the track faders beside it and clearing the 16 px
-        // floor. The strip is 54 wide and this row spends 10 + 16 + 5 + 9 = 40.
-        Rect fader{mix.x + 10 * s, y, 16 * s, fh};
+        // A 24px fader fits beside the meter within the 54px strip.
+        Rect fader{mix.x + 6 * s, y, 24 * s, fh};
         Rect meter{fader.right() + 5 * s, y, 9 * s, fh};
         rend_.well({fader.x - 4 * s, y - 4 * s, meter.right() - fader.x + 8 * s, fh + 8 * s},
                    nx::radiusXs * s);
@@ -1090,8 +1064,8 @@ void App::drawReturnStrips(const Rect& r) {
 
         if (sel) rend_.roundRectOutline(snapRect(col), rad, std::max(1.f, nx::snapPx(s)),
                                         nx::violet);
-        if (hot) {
-            ui_.cursor = Cursor::Hand;
+        if ((hot && ui_.hotNext == id) || ui_.isHot(nameId)) {
+            if (ui_.editId != nameId) ui_.cursor = Cursor::Hand;
             // The strip is 54px wide: both the bus name and its device names are
             // routinely cut. The tip says whichever the pointer is actually on,
             // the device winning because it is the narrower target.
@@ -1147,7 +1121,7 @@ void App::drawMasterStrip(const Rect& r) {
     static f32 masterFader = 0.85f;
     f32 y = mix.y + 26 * s;
     const f32 fh = mix.bottom() - y - 6 * s;
-    Rect fader{mix.x + 12 * s, y, 16 * s, fh};
+    Rect fader{mix.x + 12 * s, y, 24 * s, fh};
     Rect meterL{fader.right() + 6 * s, y, 9 * s, fh};
     Rect meterR{meterL.right() + 3 * s, y, 9 * s, fh};
     rend_.well({fader.x - 4 * s, y - 4 * s, meterR.right() - fader.x + 8 * s, fh + 8 * s},
@@ -1164,7 +1138,7 @@ void App::drawMasterStrip(const Rect& r) {
 
     if (sel) rend_.roundRectOutline(snapRect(r), rad, std::max(1.f, nx::snapPx(s)), nx::violet);
     if (!devTip.empty()) ui_.tip = devTip;
-    if (hot) {
+    if (hot && ui_.hotNext == id) {
         ui_.cursor = Cursor::Hand;
         if (in.pressed[0]) selectChainOwner(kOwnMaster);
     }

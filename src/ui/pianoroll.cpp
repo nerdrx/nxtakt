@@ -41,10 +41,10 @@ bool probeOn() {
 // about *time*, and the arrangement needs the identical numbers. What stays
 // here is everything that is about a piano roll rather than about a timeline.
 constexpr int kMinFoldRows = 8;     // a one-note clip still needs room to click
-constexpr f32 kKeyW       = 46.f;
-constexpr f32 kRulerH     = 16.f;
-constexpr f32 kLaneH      = 54.f;
-constexpr f32 kRowH       = 12.f;
+constexpr f32 kKeyW       = 72.f;
+constexpr f32 kRulerH     = 28.f;
+constexpr f32 kLaneH      = 78.f;
+constexpr f32 kRowH       = 18.f;
 constexpr int kCentrePitch  = 60;   // C4, the middle of the default C3..C5 view
 constexpr f64 kMaxLoopBeats = 64.0; // ceiling for Ctrl+U, 16 bars in 4/4
 // The note's right-hand RESIZE band, and the share of a short note it may take.
@@ -77,7 +77,7 @@ constexpr int kSweepMaxHits = 512;
 // How far from a stem's x the lane will pick it up. 6 gave a 12 logical px
 // band; 8 gives 16, which is the floor. It is a nearest-match, so a wider band
 // never picks the wrong stem -- it only stops picking NONE.
-constexpr f32 kStemGrab = 8.f;
+constexpr f32 kStemGrab = 12.f;
 // The undo labels the caller reads back off lastEdit().
 constexpr const char* kEditNote = "note edit";
 constexpr const char* kEditAuto = "automation edit";
@@ -688,7 +688,7 @@ void PianoRoll::drawLaneKey(Ui& ui, const Rect& b, ClipModel& clip,
     // the pair reads as one control. A dot marks a target this clip already has
     // a lane for, so the list says where the automation in a set actually is
     // rather than making the user cycle it to find out.
-    const Rect addR{r2.x, r2.y, 18.f * s, r2.h};
+    const Rect addR{r2.x, r2.y, 28.f * s, r2.h};
     const Rect tgtR = r1;
     if (!targets.entries.empty()) {
         std::vector<const char*> tnames;
@@ -788,7 +788,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
 
     // --- layout ------------------------------------------------------------
     const f32 keyW = kKeyW * s, rowH = kRowH * s;
-    const f32 laneH = std::min(kLaneH * s, r.h * 0.32f);
+    const f32 laneH = std::min(kLaneH * s, r.h * 0.42f);
     const Rect ruler{r.x, r.y, r.w, kRulerH * s};
     const Rect body{r.x, ruler.bottom(), r.w, r.h - ruler.h - laneH - 1.f * s};
     const Rect keys{body.x, body.y, keyW, body.h};
@@ -982,7 +982,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
     // The lane's own value axis is AutoLaneView's, built from the same rect the
     // velocity stems use — so switching the lane from VEL to an envelope changes
     // what is drawn and not where it is drawn.
-    const f32 minNoteW = 3.f * s;
+    const f32 minNoteW = 8.f * s;
 
     // --- interaction -------------------------------------------------------
     ui.setHot(gridId, grid);
@@ -1451,11 +1451,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // offered even with no scale set -- it falls back to ALL and the tooltip
         // says why, which is more discoverable than a control that is not there.
         int fm = (int)fold_;
-        // Both of the ruler's controls are ruler.h - 4 = 12 logical px tall,
-        // which is under the 16 px floor at every scale and cannot grow: the
-        // ruler is 16 px and they are already nearly all of it. They get the
-        // 3 px of aim on every side instead, into the ruler's own margin and
-        // the grid line under it -- neither of which is a target.
+        // Full-height controls in a dedicated ruler; small slop eases edge hits.
         ui.grab(3.f * s);
         if (ui.selector(uiId(UiRollFold, 0), foldBox, &fm, kFoldModeNames, kFoldModeCount))
             fold_ = (FoldMode)clampv(fm, 0, kFoldModeCount - 1);
@@ -1510,23 +1506,21 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // Re-derived from the NX palette: the plates are --panel and --panel-2,
         // the key lift is violet-family, and an out-of-scale row drops to the
         // field rather than turning grey. Recession is the language.
-        Col kc = isBlackKey(p) ? tl::panelFill : tl::panelAlt;
+        Col kc = isBlackKey(p) ? rgb(0x20242B) : rgb(0x30353D);
         if (!inKey)                        kc = nx::bgTop.alpha(0.74f);
         else if (showKey && key.isRoot(p)) kc = kc.mix(nx::violet, 0.44f);
         else if (showKey)                  kc = kc.mix(nx::violetSoft, 0.10f);
         rr.rect(kr, kc);
         rr.hairlineH(kr.x, kr.right(), kr.bottom() - 1.f * s,
                      nx::hairlineInk.alpha(0.09f));
-        // The octave label is C every twelve semitones; with a scale on, the
-        // ROOT is labelled too, because "which row is the tonic" is the one
-        // question a key is meant to answer at a glance.
-        if (ui.fSmall && (p % 12 == 0 || (showKey && key.isRoot(p)))) {
+        // Every row names its pitch now that the taller keys can carry it.
+        // Octaves and scale roots keep a stronger label for fast orientation.
+        if (ui.fSmall) {
             char buf[16];
-            if (p % 12 == 0) std::snprintf(buf, sizeof buf, "C%d", p / 12 - 1);
-            else             std::snprintf(buf, sizeof buf, "%s%d",
-                                           kPitchNames[p % 12], p / 12 - 1);
-            rr.textIn(*ui.fSmall, kr, buf,
-                      (showKey && key.isRoot(p)) ? nx::text : nx::muted, Align::Left, 5.f * s);
+            std::snprintf(buf, sizeof buf, "%s%d", kPitchNames[p % 12], p / 12 - 1);
+            const bool anchor = p % 12 == 0 || (showKey && key.isRoot(p));
+            rr.textIn(*ui.fSmall, kr, buf, anchor ? nx::text : nx::muted,
+                      Align::Left, 5.f * s);
         }
     }
     if (hotGrid && midiClip) {
@@ -1551,6 +1545,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
 
     // --- grid: note rows for a pattern, the waveform for a sample -----------
     rr.pushClip(grid);
+    rr.rect(grid, rgb(0x171A20));
     // An audio clip's canvas is the same well the note grid sits in, with the
     // same faint lift a white-key row gets -- one surface family, so a waveform
     // and a pattern are read against the same material.
@@ -1569,10 +1564,10 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // same well with the stripe on it. The key tint is violet-family and
         // re-derived from the NX palette; an out-of-scale row recesses instead
         // of greying, which is what keeps a note sitting on one findable.
-        if (!isBlackKey(p)) rr.rect({grid.x, y, grid.w, rowH}, tl::stripeLift);
+        if (!isBlackKey(p)) rr.rect({grid.x, y, grid.w, rowH}, rgba(0xFFFFFF, 0.025f));
         if (showKey) {
             if (key.isRoot(p))
-                rr.rect({grid.x, y, grid.w, rowH}, nx::violet.alpha(0.26f));
+                rr.rect({grid.x, y, grid.w, rowH}, nx::violet.alpha(0.12f));
             else if (key.contains(p))
                 rr.rect({grid.x, y, grid.w, rowH}, nx::violetSoft.alpha(0.055f));
             else
@@ -1611,6 +1606,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             rr.rect({x, y0, 1.f, std::max(1.f, (mid - lo * halfH) - y0)}, wc);
         }
     }
+    const int hoveredNote = hotGrid ? noteAt(clip.notes, rows, ta, pa, in.mx, in.my, minNoteW) : -1;
     for (size_t i = 0; midiClip && i < clip.notes.size(); ++i) {
         const NoteModel& nt = clip.notes[i];
         const int row = rows.rowOf(nt.pitch);
@@ -1631,25 +1627,38 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             // MUTED (§1: halve anything that shouts). The ghost is quieter than
             // it was, because the solid fraction beside it is the part that
             // carries the number and two loud marks compete.
-            rr.roundRect(nr, 2.f * s, nc.alpha(0.22f));
+            rr.rect(nr, nc.alpha(0.22f));
             const f32 fw = nr.w * ((f32)nt.chance / 100.f);
-            if (fw > 0.5f) rr.roundRect({nr.x, nr.y, fw, nr.h}, 2.f * s, nc);
+            if (fw > 0.5f) rr.rect({nr.x, nr.y, fw, nr.h}, nc);
         } else {
-            rr.roundRect(nr, 2.f * s, nc);
+            rr.rect(nr, nc);
         }
         // The 1px darkened edge. Crisp beats pretty here: without it two notes
         // that touch are one long note, which is a reading error, not a taste
         // one. Skipped under 4 px, where an edge would be the whole note.
         if (nr.w > 4.f * s)
-            rr.roundRectOutline(nr, 2.f * s, std::max(1.f, s), base.scale(0.28f));
+            rr.roundRectOutline(nr, 0.f, std::max(1.f, s), base.scale(0.28f));
         // A velocity range is a band, not a level, so it is drawn as one: a
         // hairline across the block. It is deliberately quiet -- a range changes
         // how a note feels, not whether it happens.
         if (nt.velTo != 0 && nt.velTo != nt.vel && nr.h > 4.f * s)
             rr.rect({nr.x + 1.f * s, nr.cy() - 0.5f * s, std::max(1.f, nr.w - 2.f * s), 1.f * s},
                     nx::inkOn(nc).alpha(0.50f));
-        if (sel_.has((int)i))
-            rr.roundRectOutline(nr, 2.f * s, std::max(1.f, s), nx::violetSoft);
+        const bool selected = sel_.has((int)i);
+        const bool hovered = hoveredNote == (int)i;
+        if (selected || hovered) {
+            rr.roundRectOutline(nr, 0.f, std::max(1.f, s),
+                                selected ? nx::violetSoft : nx::text);
+            if (nr.w >= 14.f * s)
+                rr.rect({nr.right() - 4.f * s, nr.y + 4.f * s,
+                         2.f * s, nr.h - 8.f * s}, nx::inkOn(nc));
+        }
+        if (ui.fSmall && nr.w > 42.f * s) {
+            char name[16];
+            std::snprintf(name, sizeof name, "%s%d", kPitchNames[nt.pitch % 12],
+                          (int)nt.pitch / 12 - 1);
+            rr.textIn(*ui.fSmall, nr, name, nx::inkOn(nc), Align::Left, 5.f * s);
+        }
     }
     // The band goes over the notes it is taking, translucent enough to leave
     // them readable underneath.
@@ -1748,6 +1757,11 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             const NoteModel& nt = clip.notes[(size_t)hover];
             const f32 x0 = beatToX(ta, nt.beat);
             const f32 x1 = std::max(beatToX(ta, nt.beat + nt.len), x0 + minNoteW);
+            char info[160];
+            std::snprintf(info, sizeof info,
+                          "%s%d  |  %.2f beats  |  velocity %d  |  Drag to move; tail to resize; right-click deletes",
+                          kPitchNames[nt.pitch % 12], (int)nt.pitch / 12 - 1, nt.len, (int)nt.vel);
+            ui.tip = info;
             ui.cursor = (in.mx >= x1 - std::min(kNoteEdgeGrab * s,
                                                 (x1 - x0) * kNoteEdgeShare))
                             ? Cursor::ResizeH

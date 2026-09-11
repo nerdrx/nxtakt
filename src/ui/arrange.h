@@ -23,7 +23,7 @@
 namespace lat {
 
 // Layout, in logical px (multiply by the DPI scale).
-inline constexpr f32 kArrHeaderW   = 138.f;  // the track column on the left
+inline constexpr f32 kArrHeaderW   = 160.f;  // the track column on the left
 // The ruler is TWO BANDS, and the split is the whole of how the two things that
 // want to sit on a timeline position stop fighting over one strip of pixels:
 //
@@ -36,17 +36,13 @@ inline constexpr f32 kArrHeaderW   = 138.f;  // the track column on the left
 // it cannot be confused with the right-click that deletes a flag, because the
 // two gestures are not aimed at the same pixels. Nothing is modal and nothing
 // asks which one you meant.
-inline constexpr f32 kArrRulerH    = 20.f;   // the bar band, unchanged
-// 16 and not 15, and the one pixel is the whole of the reason: a flag's hit
-// rect is exactly this band's height, and 15 logical px is 15.0 DEVICE px at
-// scale 1.0 -- under the 16 px floor for a thing that is CLICKED. A flag is
-// clicked (it jumps) as well as dragged, so it answers to the clickable floor
-// and not the drag one, and the band it lives in is what supplies the height.
-inline constexpr f32 kArrMarkerH   = 16.f;   // the marker band, above it
+inline constexpr f32 kArrRulerH    = 28.f;   // the bar band
+// A full 24px band gives locator flags a comfortable click target.
+inline constexpr f32 kArrMarkerH   = 24.f;   // the marker band, above it
 inline constexpr f32 kArrRulerTotal = kArrRulerH + kArrMarkerH;
 // An automation lane needs enough height to aim at and no more (§7.4).
-inline constexpr f32 kArrAutoLaneH = 44.f;
-inline constexpr f32 kArrMinLaneH  = 26.f;
+inline constexpr f32 kArrAutoLaneH = 60.f;
+inline constexpr f32 kArrMinLaneH  = 54.f;
 inline constexpr f32 kArrMaxLaneH  = 320.f;
 // The grab bands, in logical px, and the floors they answer to.
 //
@@ -75,7 +71,7 @@ inline constexpr f32 kArrFadeShare = 0.4f;
 // this pass, was grabbable by neither: a press anywhere on the ruler started a
 // fresh brace from that point, so the only way to move one end was to redraw
 // the whole thing. This is the zone those uprights always looked like they had.
-inline constexpr f32 kArrLoopGrab  = 5.f;
+inline constexpr f32 kArrLoopGrab  = 8.f;
 // A marker flag's zone. THE SIXTEEN-PIXEL FLOOR, applied to a thing whose drawn
 // width is its NAME: a flag called "A" is four pixels of text and would be
 // unhittable at any zoom, so the zone is widened to the floor around the pole
@@ -92,7 +88,7 @@ inline constexpr f32 kArrLoopGrab  = 5.f;
 // 10 + 3 + 3 = 16 lands exactly on it. Nothing about the DRAWN block moves for
 // any flag whose name is wider than ten px, which is every flag the auto-namer
 // produces; only the nameless worst case grows, and only where it can be hit.
-inline constexpr f32 kArrMarkerGrab = 10.f;
+inline constexpr f32 kArrMarkerGrab = 18.f;
 inline constexpr f32 kArrMarkerSlop = 3.f;
 // How wide one flag may get before its name is truncated. Past this a single
 // long name would cover the bars either side of it and hide its neighbours.

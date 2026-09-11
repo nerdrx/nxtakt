@@ -1279,28 +1279,12 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // The disclosure triangle. A filled triangle rather than a glyph: the
         // atlas has no arrows, and a rotated triangle is the same control
         // everywhere it appears.
-        const Rect tri{hb.x + 6.f * s, hb.y + 3.f * s, 12.f * s, 12.f * s};
+        const Rect tri{hb.x + 6.f * s, hb.y + 6.f * s, 12.f * s, 12.f * s};
         const bool open = L.expanded && *L.expanded;
         const u64 triId = uiId(UiArrange, 1, (int)i);
-        // 12x12 logical is 12.0 device px at scale 1.0, under the 16 px floor
-        // for a thing that is CLICKED rather than dragged. The triangle is a
-        // drawn shape and the drawing may not move, so the aim grows instead:
-        // 18x18 to hit, 12x12 to look at.
-        //
-        // AN EXPLICIT CONTAINER, and not `ui.grab(3)`, which is what it was.
-        // A symmetric pad is the wrong tool where two controls sit shoulder to
-        // shoulder: setHot is LAST-WRITER-WINS, so the pad does not share the
-        // contested pixels, it hands all of them to whichever widget is drawn
-        // second. The override chip below sits 3 logical px under this triangle
-        // and is drawn after it, so a 3 px pad on both put the chip's rect over
-        // the bottom quarter of the triangle's -- and a hand aiming at the
-        // disclosure arrow and landing two pixels low sent Back to Arrangement
-        // instead, which is a transport command and not an undoable edit.
-        //
-        // So the two rects are written out, edge to edge and not overlapping:
-        // this one owns hb.y .. hb.y+18, the chip owns hb.y+18 .. hb.y+35. Both
-        // clear the 16 px floor on their short side and neither can steal.
-        const Rect triHit{tri.x - 3.f * s, hb.y, tri.w + 6.f * s, 18.f * s};
+        // The whole title row discloses automation. A clear 26px row avoids
+        // aiming at a tiny arrow and stops before the separate override action.
+        const Rect triHit{hb.x + 3.f * s, hb.y, hb.w - 6.f * s, 26.f * s};
         const bool hotTri = ui.setHot(triId, triHit) && ui.isHot(triId);
         probeRect("track disclosure triangle", triId, triHit);
         const Col tc = hotTri ? nx::text : nx::muted;
@@ -1321,24 +1305,19 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         }
 
         if (ui.fBody)
-            rr.textIn(*ui.fBody, {tri.right() + 4.f * s, hb.y, hb.w - 46.f * s, 16.f * s},
+            rr.textIn(*ui.fBody, {tri.right() + 4.f * s, hb.y, hb.w - 46.f * s, 26.f * s},
                       L.name.c_str(), nx::text, Align::Left, 0);
         if (L.armed)
-            rr.circle(hb.right() - 10.f * s, hb.y + 9.f * s, 3.5f * s, pal::armRed);
+            rr.circle(hb.right() - 10.f * s, hb.y + 13.f * s, 3.5f * s, pal::armRed);
 
         // The override tint, and the way out of it. An overridden track is
         // playing a session clip instead of its lane; the chip both says so and
         // is the Back to Arrangement gesture for that track.
         if (L.overridden) {
-            const Rect ov{hb.x + 6.f * s, hb.y + 18.f * s, 58.f * s, 11.f * s};
+            const Rect ov{hb.x + 6.f * s, hb.y + 28.f * s, 100.f * s, 22.f * s};
             const u64 ovId = uiId(UiArrange, 2, (int)i);
-            // 11 logical px tall, which is 11.0 device px at 1.0. Same fix as
-            // the triangle, and the same shape of fix: the chip keeps the 58x11
-            // it DRAWS and is hit through a container written out here -- 64x17,
-            // starting exactly where the triangle's container stops, so the two
-            // are edge to edge and neither can take a pixel the other was aimed
-            // at. See the note over triHit for what a symmetric pad did here.
-            const Rect ovHit{ov.x - 3.f * s, ov.y, ov.w + 6.f * s, ov.h + 6.f * s};
+            // This explicit action sits below the title with no shared hit area.
+            const Rect ovHit{ov.x - 3.f * s, ov.y, ov.w + 6.f * s, ov.h};
             const bool hotOv = ui.setHot(ovId, ovHit) && ui.isHot(ovId);
             probeRect("override chip", ovId, ovHit);
             // Amber, and §1 means it: this is "attention", the one state on a
@@ -1349,7 +1328,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                                 nx::amber.alpha(hotOv ? 0.55f : 0.30f));
             if (ui.fSmall)
                 tl::microLabel(rr, *ui.fSmall, ov.x + 7.f * s,
-                               ov.y + (ov.h - ui.fSmall->height()) * 0.5f, "session",
+                               ov.y + (ov.h - ui.fSmall->height()) * 0.5f, "back to arrange",
                                nx::amber, ov.w - 10.f * s);
             if (hotOv) {
                 ui.cursor = Cursor::Hand;
@@ -1367,6 +1346,8 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         const u64 gripId = uiId(UiArrange, 3, (int)i);
         const bool hotGrip = ui.setHot(gripId, grip) && ui.isHot(gripId);
         probeRect("lane height grip", gripId, grip);
+        rr.rect({hb.cx() - 14.f * s, hb.bottom() + row.autoH - 2.f * s,
+                 28.f * s, std::max(1.f, s)}, nx::muted.alpha(hotGrip ? 0.9f : 0.35f));
         if (hotGrip && drag_ == Drag::None) {
             ui.cursor = Cursor::ResizeV;
             // 8 logical px tall, which is exactly the drag floor at scale 1.0
@@ -1401,11 +1382,11 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     // address itself where it does not: a lane naming a missing
                     // device must still be findable.
                     const std::string& lbl = tgt ? tgt->label : al.address;
-                    rr.textIn(*ui.fSmall, {ab.x + 6.f * s, ab.y + 4.f * s, ab.w - 30.f * s, 11.f * s},
+                    rr.textIn(*ui.fSmall, {ab.x + 6.f * s, ab.y + 4.f * s, ab.w - 44.f * s, 24.f * s},
                               lbl.c_str(), tgt ? nx::muted : nx::muted.alpha(0.55f),
                               Align::Left, 0);
                 }
-                const Rect onR{ab.right() - 20.f * s, ab.y + 4.f * s, 14.f * s, 12.f * s};
+                const Rect onR{ab.right() - 32.f * s, ab.y + 4.f * s, 26.f * s, 26.f * s};
                 const u64 onId = uiId(UiArrangeLaneHead, (int)i, (int)j);
                 bool on = al.enabled;
                 // 14x12 logical; the short side fails the 16 px floor at both
@@ -1476,7 +1457,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                     // accident. 8 > 3 + 3, so the two zones cannot touch; the
                     // chooser gives up the 4 px and the row's outer edges do
                     // not move.
-                    const Rect selR{cb.x + 6.f * s, cb.y + 5.f * s, cb.w - 38.f * s, 14.f * s};
+                    const Rect selR{cb.x + 6.f * s, cb.y + 5.f * s, cb.w - 48.f * s, 28.f * s};
                     // 14 logical px tall, under the floor at both scales; the
                     // chooser row has 44 px of height above and below to lend.
                     ui.grab(3.f * s);
@@ -1488,7 +1469,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
                                  L.targets->entries[(size_t)tsel].label + "  " +
                                  L.targets->entries[(size_t)tsel].address +
                                  "  --  click cycles, right-click steps back";
-                    const Rect addR{selR.right() + 8.f * s, selR.y, 20.f * s, selR.h};
+                    const Rect addR{selR.right() + 8.f * s, selR.y, 30.f * s, selR.h};
                     if (ui.hovered(addR.inset(-3.f * s)) && ui.tip.empty())
                         ui.tip = "add an automation lane for the chosen target";
                     ui.grab(3.f * s);

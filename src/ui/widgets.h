@@ -11,6 +11,7 @@
 #pragma once
 #include "../gfx/renderer.h"
 #include "window.h"
+#include "hit_map.h"
 #include <string>
 
 namespace lat {
@@ -188,6 +189,7 @@ struct Ui {
 
     u64  hot = 0, active = 0;
     u64  hotNext = 0;
+    HitMap hitMap;
     Cursor cursor = Cursor::Arrow;
     // What a click under the pointer would DO, this frame. Set by whatever is
     // under the pointer; drawn once at the end of the frame by drawBadge(),
@@ -317,7 +319,8 @@ struct Ui {
     // menuBegin() runs FIRST, before anything in the frame has drawn: an open
     // control menu resolves its own click here and then shields the rest of the
     // program from the pointer for the whole frame. See widgets.cpp.
-    void beginFrame() { hotNext = 0; cursor = Cursor::Arrow; badge = Badge::None; tip.clear();
+    void beginFrame() { hot = hitMap.at(in->mx, in->my); hitMap.clear();
+                        hotNext = 0; cursor = Cursor::Arrow; badge = Badge::None; tip.clear();
                         hitPad = 0.f; refusal.clear();
                         keyModalPrev = keyModal; keyModal = false;
                         menuBegin(); }
@@ -355,7 +358,9 @@ struct Ui {
         pendingOffer = MenuOffer{};
         if (menuShield) return false;
         const Rect h = pad > 0.f ? b.inset(-pad) : b;
-        if (h.contains(in->mx, in->my) && r->currentClip().contains(in->mx, in->my)) {
+        const Rect clipped = h.intersect(r->currentClip());
+        hitMap.add(id, clipped);
+        if (clipped.contains(in->mx, in->my)) {
             hotNext = id;
             hotRect = h;
             hotSlop = pad;
@@ -363,7 +368,11 @@ struct Ui {
         }
         return false;
     }
-    bool isHot(u64 id) const { return hot == id; }
+    bool isHot(u64 id) const {
+        // The last layout resolves overlap; the current layout must still
+        // contain the pointer (a panel may have resized or scrolled meanwhile).
+        return hot == id && hitMap.accepts(id, in->mx, in->my);
+    }
 
     // --- widgets ----------------------------------------------------------
     // Returns true on click (release inside).

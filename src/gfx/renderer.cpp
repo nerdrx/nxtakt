@@ -411,6 +411,7 @@ void Renderer::begin(int w, int h, f32 dpiScale) {
     // is harmless: the clear hits the framebuffer, these quads flush later and
     // land on top of it, opaque. Dropping that clear is a tidy-up, not a fix.
     if (bgOn_) background(monoClock());
+    else rect({0, 0, (f32)w, (f32)h}, pal::appBg);
 
     if (st.on) {
         // Fence the background on its own so the number below is that pass and
@@ -802,8 +803,7 @@ void Renderer::frost(const Rect& r, f32 rad, f32 strengthPx) {
 
 void Renderer::glass(const Rect& r, const nx::GlassStyle& st) {
     if (r.w <= 0.f || r.h <= 0.f) return;
-    shadow(r, st.radius, st.elev);
-    if (st.blurPx > 0.f) frost(r, st.radius, st.blurPx);
+    // Matte studio surfaces use separation lines instead of decorative glow.
     if (st.fill) gradRect(r, st.radius, *st.fill);
     switch (st.edgeKind) {
     case nx::EdgeKind::Gradient:

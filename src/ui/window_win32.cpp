@@ -574,10 +574,8 @@ LRESULT Win32Backend::handle(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
         const int k = mapKey((UINT)wp);
-        if (k > 0 && k < KeyCount) {
-            in_->keyDown[k] = true;
-            in_->keyPressed[k] = true;   // auto-repeat included, as on X11
-        }
+        syncMods();
+        in_->pressKey(k, in_->mods);
         if (const int sc = scanCode(lp); sc >= 0) in_->scanDown[sc] = true;
         syncMods();
         // Sys keys fall through so Alt+F4 and Alt+Space keep working.
@@ -625,6 +623,7 @@ LRESULT Win32Backend::handle(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         std::memset(in_->scanDown, 0, sizeof in_->scanDown);
         std::memset(in_->down, 0, sizeof in_->down);
         in_->mods = 0;
+        in_->newFrame();
         haveLast_ = false;
         buttons_ = 0;
         pendingHigh_ = 0;

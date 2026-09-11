@@ -1,3 +1,5 @@
+// v0.14 studio palette: opaque charcoal, matte controls and quiet accents.
+// This supersedes the historical glass/nebula values described below.
 // The NX design language, translated.
 //
 // docs/DESIGN.md §2 is the contract; this header is that contract expressed as
@@ -41,26 +43,26 @@ namespace nx {
 // §1 / §2  Colour
 // ---------------------------------------------------------------------------
 
-inline constexpr Col bgTop      = rgb(0x0A0714);   // field, top
-inline constexpr Col bgBottom   = rgb(0x12091F);   // field, bottom
-inline constexpr Col panel      = rgb(0x171028);
-inline constexpr Col panel2     = rgb(0x1D1433);
+inline constexpr Col bgTop      = rgb(0x191C22);   // field, top
+inline constexpr Col bgBottom   = rgb(0x191C22);   // field, bottom
+inline constexpr Col panel      = rgb(0x22262E);
+inline constexpr Col panel2     = rgb(0x2A2F38);
 
 // The brand anchor. Identical to pal::accent by construction, and the one
 // value in this file that is frozen: actions, focus, identity.
-inline constexpr Col violet     = rgb(0x7700FF);
-inline constexpr Col violetSoft = rgb(0x9A3CFF);
+inline constexpr Col violet     = rgb(0x9B8CDB);
+inline constexpr Col violetSoft = rgb(0xBFB1EE);
 
 // Light *inside* materials -- live values, meters, playheads, progress, edges.
 // Never a surface colour: the moment a panel is cyan, violet has stopped
 // leading and the whole thing reads as a different product.
-inline constexpr Col cyan       = rgb(0x00E5FF);
+inline constexpr Col cyan       = rgb(0x68D5C0);
 
 inline constexpr Col amber      = rgb(0xFFB300);   // update / attention, only
 inline constexpr Col danger     = rgb(0xFF5470);   // destructive, only
-inline constexpr Col text       = rgb(0xEFEAFF);
-inline constexpr Col muted      = rgb(0x9A8FC0);
-inline constexpr Col line       = rgb(0x2A1F45);
+inline constexpr Col text       = rgb(0xE4E7ED);
+inline constexpr Col muted      = rgb(0xABB2BF);
+inline constexpr Col line       = rgb(0x383E49);
 
 // Semantic aliases. Same values; these are what a view should reach for when
 // it means the *role* rather than the hue, because roles survive a retune.
@@ -297,43 +299,25 @@ inline constexpr Grad linear2(f32 angleDeg, Col a, Col b) {
 
 // --- §2 glass fills: light collects top-left and drains to a cool shadow ----
 
-inline constexpr Grad glassBar = {
-    {{rgba(0x2E1E4E, 0.62f), 0.f}, {rgba(0x120B22, 0.72f), 1.f}}, 2, 180.f};
+inline constexpr Grad glassBar = linear2(180.f, rgb(0x22262E), rgb(0x22262E));
 
-inline constexpr Grad glass1 = {
-    {{rgba(0xFFFFFF, 0.090f), 0.00f},
-     {rgba(0xFFFFFF, 0.026f), 0.34f},
-     {rgba(0x171028, 0.340f), 1.00f}}, 3, 157.f};
+inline constexpr Grad glass1 = linear2(180.f, rgb(0x22262E), rgb(0x22262E));
 
-inline constexpr Grad glass2 = {
-    {{rgba(0xFFFFFF, 0.100f), 0.00f},
-     {rgba(0xFFFFFF, 0.030f), 0.30f},
-     {rgba(0x130C22, 0.660f), 1.00f}}, 3, 158.f};
+inline constexpr Grad glass2 = linear2(180.f, rgb(0x2A2F38), rgb(0x2A2F38));
 
-inline constexpr Grad glassChip = {
-    {{rgba(0xFFFFFF, 0.090f), 0.f}, {rgba(0xFFFFFF, 0.028f), 1.f}}, 2, 180.f};
+inline constexpr Grad glassChip = linear2(180.f, rgb(0x353B46), rgb(0x353B46));
 
 // Wells are the answer to "glass inside glass reads as fog": a region inside a
 // card recesses, it does not frost again.
-inline constexpr Grad well = {
-    {{rgba(0x070410, 0.50f), 0.f}, {rgba(0x070410, 0.32f), 1.f}}, 2, 180.f};
+inline constexpr Grad well = linear2(180.f, rgb(0x1D2128), rgb(0x1D2128));
 
-inline constexpr Grad wellDeep = {
-    {{rgba(0x04020A, 0.62f), 0.f}, {rgba(0x04020A, 0.46f), 1.f}}, 2, 180.f};
+inline constexpr Grad wellDeep = linear2(180.f, rgb(0x15181E), rgb(0x15181E));
 
 // --- §2 lit edges: 1px gradient borders, bright top-left -> dark bottom-right
 
-inline constexpr Grad edge = {
-    {{rgba(0xFFFFFF, 0.340f), 0.00f},
-     {rgba(0xFFFFFF, 0.090f), 0.24f},
-     {rgba(0xFFFFFF, 0.015f), 0.52f},
-     {rgba(0x000000, 0.340f), 1.00f}}, 4, 147.f};
+inline constexpr Grad edge = linear2(180.f, rgb(0x444B58), rgb(0x444B58));
 
-inline constexpr Grad edgeLit = {
-    {{rgba(0xE2C8FF, 0.620f), 0.00f},
-     {rgba(0x9A3CFF, 0.280f), 0.30f},
-     {rgba(0x00E5FF, 0.100f), 0.58f},
-     {rgba(0x000000, 0.300f), 1.00f}}, 4, 147.f};
+inline constexpr Grad edgeLit = linear2(180.f, rgb(0x9B8CDB), rgb(0x9B8CDB));
 
 inline constexpr Col edgeTop = rgba(0xFFFFFF, 0.18f);
 
@@ -404,10 +388,7 @@ inline constexpr Grad liquid = {
      {rgba(0x00E5FF, 0.90f), 1.f}}, 3, 90.f};
 
 // Primary button: violet with an inner top highlight, per §5.
-inline constexpr Grad violetFill = {
-    {{rgba(0x9A3CFF, 1.00f), 0.00f},
-     {rgba(0x7700FF, 1.00f), 0.55f},
-     {rgba(0x5C00C4, 1.00f), 1.00f}}, 3, 170.f};
+inline constexpr Grad violetFill = linear2(180.f, rgb(0x454055), rgb(0x454055));
 
 // ---------------------------------------------------------------------------
 // §2  Elevation

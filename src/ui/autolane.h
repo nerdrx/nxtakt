@@ -67,19 +67,10 @@ inline f32 dpiOf(const Ui& ui) {
     return 1.f;
 }
 
-// A breakpoint is a 5 px square, grabbed from a little further out so it can be
-// picked up without the cursor having to land exactly on it.
-//
-// kPtGrab is a Chebyshev RADIUS, so the target it describes is 2*kPtGrab on a
-// side: 7 gave a 14x14 logical square, which is 14.0 device px at scale 1.0 and
-// under the 16 px floor for a thing that is clicked. 8 puts it exactly on the
-// floor at 1.0 and comfortably over at 1.25, and costs nothing anywhere else:
-// pointAt() takes the NEAREST point, so overlapping radii still resolve to one
-// answer, and the only thing a wider radius takes away is the ability to add a
-// new point one pixel from an existing one -- which was never a gesture, it was
-// a mistake waiting to be made.
-inline constexpr f32 kPtSize = 5.f;
-inline constexpr f32 kPtGrab = 8.f;
+// Seven-pixel handles with a 24px target. Nearest-point resolution keeps
+// densely spaced breakpoints individually reachable when their targets overlap.
+inline constexpr f32 kPtSize = 7.f;
+inline constexpr f32 kPtGrab = 12.f;
 // The lane's drawable value band, as an inset on the lane's rect. It was a
 // literal inside AutoLaneView::draw and is named here because a SECOND hit test
 // now needs it: the arrangement's right-drag erase (FL's most-used gesture)

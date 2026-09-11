@@ -566,7 +566,7 @@ private:
     f32  gridScrollY_ = 0.f;
     f32  browserW_ = 210.f;
     // Tall enough for three rows of device knobs under the tab header.
-    f32  detailH_ = 200.f;
+    f32  detailH_ = 330.f;
     bool showBrowser_ = true;
     bool showDetail_ = true;
     DetailTab detailTab_ = DetailTab::Clip;
@@ -1202,7 +1202,7 @@ private:
     // arrangement wants a tall panel for envelope lanes and the session a short
     // one for the grid, and a shared height means every switch between views
     // silently resizes the other. Neither is serialized.
-    f32  detailHArr_ = 260.f;
+    f32  detailHArr_ = 330.f;
     f32& detailHFor(MainView v) { return v == MainView::Session ? detailH_ : detailHArr_; }
     // The splitter's drag, in flight. Not serialized, like the heights it
     // moves: a panel size is a working posture, not part of the set.

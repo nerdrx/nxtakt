@@ -1826,10 +1826,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // for the rack panel's reason: it is open, and open is a state worth seeing
     // from across the screen.
     const f32 rad = nx::radiusSm * s;
-    rend_.shadow(box, rad, nx::shadow);
-    rend_.gradRect(box, rad, nx::glass1);
-    rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
-    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.55f));
+    rend_.roundRect(box, rad, pal::panel);
+    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::muted.alpha(0.22f));
 
     // --- title -------------------------------------------------------------
     // 20 logical pixels and not 16, and the extra four are spent on ONE
@@ -1843,11 +1841,11 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // one pixel each and the close button gets to be square while it is here.
     // The proper fix is tabPill hit-testing the UN-inset slot; filed as
     // ui-filed-src-ui-widgets.h.diff.
-    Rect title{box.x, box.y, box.w, 16 * s};
+    Rect title{box.x, box.y, box.w, 32 * s};
     rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
                 title.h - 8 * s}, tc);
 
-    Rect closeR{title.right() - 18 * s, title.y + 2 * s, 16 * s, 16 * s};
+    Rect closeR{title.right() - 30 * s, title.y + 2 * s, 28 * s, 28 * s};
     if (ui_.grab(slop(closeR)).button(uiId(UiSpectraPanel, 0, 0), closeR, "")) {
         // The same obligation the page tab answers, at the other exit. A close
         // with uncommitted frames does not close: it turns to the DRAW page and
@@ -1879,15 +1877,15 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     }
     if (ui_.hovered(closeR)) ui_.tip = "Close the Spectra panel";
 
-    ui_.microIn(fSmall_, {title.x + 10 * s, title.y, 120 * s, title.h}, "SPECTRA",
-                nx::violetSoft, Align::Left, 0);
+    rend_.textIn(fBold_, {title.x + 12 * s, title.y, 72 * s, title.h}, "Spectra",
+                 nx::text, Align::Left, 0);
 
     // The page tab: §5's one sliding indicator between equal slots. Two faces,
     // because the dock's 200 logical pixels are not negotiable -- see the file
     // comment. Switching pages closes the popover: the chip it hangs from is
     // a MAIN-page control.
     {
-        static const char* const kPages[4] = {"MAIN", "MOD", "ARP", "DRAW"};
+        static const char* const kPages[4] = {"Sound", "Mod", "Arp", "Draw"};
         // 16 tall, and the slots ARE 16: tabPill's 2px inset is a drawing
         // inset for the sliding indicator and is no longer taken out of the
         // hit test (widgets.cpp). This band paid four pixels to work around
@@ -1908,7 +1906,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // you have to aim at, which is the reason v4 refused 29. Twenty-four
         // more pixels out of the amber note beside it (which has 872 and needs
         // about 300) buys 33 a slot.
-        Rect tabR{title.x + 76 * s, title.y + 1.5f * s, 132 * s, 13 * s};
+        Rect tabR{title.x + 90 * s, title.y + 2 * s, 224 * s, 28 * s};
         int page = g_page;
         // grabTo16 because the band is 13 drawn: tabPill re-arms the slop for
         // every slot, so all FOUR tabs come out at the 16px floor rather than
@@ -1951,10 +1949,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             }
         }
         if (ui_.hovered(tabR))
-            ui_.tip = "MAIN is the v1 face; MOD is the parity push - sub & noise, "
-                      "warp, LFO 2/3, ENV 3, the matrix, macros, voice mode; ARP "
-                      "is v4's arpeggiator and its sixteen-step pattern; DRAW is "
-                      "v5's wavetable editor - two pens over 32 frames";
+            ui_.tip = "MAIN: oscillators and tone  |  MOD: modulation and macros  |  "
+                      "ARP: arpeggiator and step pattern  |  DRAW: wavetable editor";
     }
 
     // §9: say what happened, in amber, in one line. Three states can be on
@@ -1966,7 +1962,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         // 216 and not 192: the page band grew by 24 for its fourth slot and the
         // note is where the 24 came from. It had 872 logical pixels for a
         // sentence that measures about 300.
-        const Rect noteR{title.x + 216 * s, title.y, closeR.x - title.x - 222 * s, title.h};
+        const Rect noteR{title.x + 322 * s, title.y, closeR.x - title.x - 328 * s, title.h};
         char note[128];
         if (!real) {
             snprintf(note, sizeof note, "panel forced onto %s - %d of %d parameters",
@@ -2002,18 +1998,18 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
     rend_.pushClip(box);
 
-    const f32 headH = 11 * s;                  // the uppercase micro-label
+    const f32 headH = 16 * s;                  // the uppercase micro-label
     // A SELECTOR ROW IS 16 AND NOT 14. Every segmented cluster, every stepper,
     // every matrix selector and every bool toggle in this panel is exactly this
     // tall, so this one number is what put nineteen controls over the usability
     // floor at once -- and it did it by making the rows bigger rather than by
     // padding them, which is the only cure that does not let a segment steal
     // its neighbour's face. It costs one pixel off each of the two knob rows.
-    const f32 subH  = 16 * s;                  // a selector / cluster row
+    const f32 subH  = 24 * s;                  // a selector / cluster row
     const f32 gap   = 4 * s;
     f32 rowH = (body.h - headH - subH - gap * 3.f) * 0.5f;
     rowH = clampv(rowH, 34 * s, 62 * s);
-    const f32 lblH = 11 * s;                   // the knob's own name
+    const f32 lblH = 14 * s;                   // the knob's own name
 
     // Seven sections, seven columns — lay::spectraColW, which is also what the
     // device strip reserves the panel's width from. BOTH pages are cut on this
@@ -2693,7 +2689,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         ui_.segCluster(r0);
         // 16 and not 14: an arrow is 16 logical px on its short side or it is
         // under the floor, and the name between them can spare the four.
-        const f32 bw = 16 * s;
+        const f32 bw = 24 * s;
         Rect lb{r0.x, r0.y, bw, r0.h}, rb{r0.right() - bw, r0.y, bw, r0.h};
         rend_.hairlineV(lb.right(), r0.y + 2 * s, r0.bottom() - 2 * s);
         rend_.hairlineV(rb.x, r0.y + 2 * s, r0.bottom() - 2 * s);
@@ -4065,7 +4061,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             const Rect pr{c.x, y0, c.w, subH};
             presetRowR = pr;
             ui_.segCluster(pr);
-            const f32 bw = 16 * s;
+            const f32 bw = 24 * s;
             const Rect lb{pr.x, pr.y, bw, pr.h}, rb{pr.right() - bw, pr.y, bw, pr.h};
             rend_.hairlineV(lb.right(), pr.y + 2 * s, pr.bottom() - 2 * s);
             rend_.hairlineV(rb.x, pr.y + 2 * s, pr.bottom() - 2 * s);
@@ -5975,7 +5971,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         const auto endpoint = [&](const Rect& r0, int sub, const char* label,
                                   int* v, int lo, int hi) {
             ui_.segCluster(r0);
-            const f32 bw = 16 * s;
+            const f32 bw = 24 * s;
             const Rect lb{r0.x, r0.y, bw, r0.h}, rb{r0.right() - bw, r0.y, bw, r0.h};
             rend_.hairlineV(lb.right(), r0.y + 2 * s, r0.bottom() - 2 * s);
             rend_.hairlineV(rb.x, r0.y + 2 * s, r0.bottom() - 2 * s);

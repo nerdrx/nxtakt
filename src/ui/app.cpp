@@ -65,10 +65,10 @@ bool App::init(int argc, char** argv) {
     const std::string reg = findSystemFont(false);
     const std::string bold = findSystemFont(true);
     if (reg.empty()) { LOGE("no usable system font found"); return false; }
-    fSmall_.load(reg.c_str(),  (int)std::lround(9.f * s));
-    fBody_.load(reg.c_str(),   (int)std::lround(11.f * s));
-    fBold_.load(bold.empty() ? reg.c_str() : bold.c_str(), (int)std::lround(11.f * s));
-    fBig_.load(bold.empty() ? reg.c_str() : bold.c_str(),  (int)std::lround(15.f * s));
+    fSmall_.load(reg.c_str(),  (int)std::lround(10.f * s));
+    fBody_.load(reg.c_str(),   (int)std::lround(12.f * s));
+    fBold_.load(bold.empty() ? reg.c_str() : bold.c_str(), (int)std::lround(12.f * s));
+    fBig_.load(bold.empty() ? reg.c_str() : bold.c_str(),  (int)std::lround(17.f * s));
 
     ui_.r = &rend_;
     ui_.in = &win_.input();
@@ -332,7 +332,11 @@ void App::frame() {
         // (app_sampler.cpp, app_spectra.cpp) already carry comments apologising
         // for the same missing control; this is that control.
         Input& sin = win_.input();
-        const f32 gripH = 6.f * s;
+        const f32 mainFloor = view_ == MainView::Session
+            ? lay::trackHeadH + lay::mixerH + 2.f * lay::slotH : 180.f;
+        const f32 maxDetail = std::max(120.f, body.h / s - mainFloor);
+        dHRef = clampv(dHRef, 120.f, maxDetail);
+        const f32 gripH = 12.f * s;
         const Rect grip{0, body.bottom() - dHRef * s - gripH * 0.5f, W, gripH};
         const u64 gid = uiId(UiDetailSplit, 0);
         if (ui_.setHot(gid, grip) && ui_.isHot(gid)) {
@@ -343,10 +347,8 @@ void App::frame() {
         if (detailDrag_ && !sin.down[0]) detailDrag_ = false;
         if (detailDrag_) {
             ui_.cursor = Cursor::ResizeV;
-            // Both halves keep a floor: 120 logical px is the smallest panel
-            // that still shows its header and a row, 180 the smallest grid
-            // above it worth having.
-            dHRef = clampv(dHRef - sin.dy / s, 120.f, (f32)H / s - 180.f);
+            // Keep the mixer and two scene rows reachable while resizing.
+            dHRef = clampv(dHRef - sin.dy / s, 120.f, maxDetail);
         }
         detail = {0, body.bottom() - dHRef * s, W, dHRef * s};
         body.h -= detail.h;
@@ -515,16 +517,16 @@ void App::handleShortcuts() {
 
     // Live's Computer MIDI Keyboard toggle. Edge-detected on keyDown[] rather
     // than keyPressed[], which repeats.
-    const bool tgl = in.keyDown['k'] && in.ctrl() && in.shift();
+    const bool tgl = (in.keyDown['k'] || in.keyStarted['k']) && in.ctrl() && in.shift();
     if (tgl && !kbdTogglePrev_) toggleKbdMidi();
     kbdTogglePrev_ = tgl;
 
     // Undo / redo, edge-detected for the same reason: a held Ctrl+Z would run
     // a full session restore every frame. Ctrl+Shift+Z and Ctrl+Y both redo,
     // which is the split the rest of the world never settled.
-    const bool undoChord = in.keyDown['z'] && in.ctrl() && !in.shift();
-    const bool redoChord = (in.keyDown['z'] && in.ctrl() && in.shift()) ||
-                           (in.keyDown['y'] && in.ctrl());
+    const bool undoChord = (in.keyDown['z'] || in.keyStarted['z']) && in.ctrl() && !in.shift();
+    const bool redoChord = ((in.keyDown['z'] || in.keyStarted['z']) && in.ctrl() && in.shift()) ||
+                           ((in.keyDown['y'] || in.keyStarted['y']) && in.ctrl());
     if (undoChord && !undoKeyPrev_) undo();
     if (redoChord && !redoKeyPrev_) redo();
     undoKeyPrev_ = undoChord;

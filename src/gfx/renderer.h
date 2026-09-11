@@ -216,7 +216,7 @@ private:
     int gradCount_ = 0;
     int gradDirtyFrom_ = 0;   // first table row not yet uploaded
 
-    bool bgOn_ = true;
+    bool bgOn_ = false;
     int  frostCount_ = 0;
 };
 

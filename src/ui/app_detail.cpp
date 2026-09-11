@@ -118,13 +118,13 @@ void App::drawDetailPanel(const Rect& r) {
     rend_.gradRect(r, 0.f, nx::glassBar);
     rend_.hairlineH(r.x, r.right(), r.y);
 
-    Rect head{r.x, r.y + 1 * s, r.w, 19 * s};
+    Rect head{r.x, r.y + 1 * s, r.w, 32 * s};
     rend_.hairlineH(head.x, head.right(), head.bottom());
 
     // §5's tab pill: ONE indicator sliding between two equal slots on
     // --ease-spring, not two backgrounds toggling. The enum is the model; the
     // pill speaks in indices, so the conversion happens here and nowhere else.
-    const f32 tabW = 62 * s, tabH = 17 * s;
+    const f32 tabW = 84 * s, tabH = 28 * s;
     Rect tabs{head.x + 6 * s, head.y + (head.h - tabH) * 0.5f, tabW * 2.f + 6 * s, tabH};
     static const char* const kTabs[2] = {"CLIP", "DEVICES"};
     int tab = detailTab_ == DetailTab::Clip ? 0 : 1;
@@ -211,16 +211,16 @@ void App::drawArrangeClipDetail(const Rect& r) {
     const int track = arrSelTrack_;
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
-    Rect head{r.x, r.y + 1 * s, r.w, 20 * s};
+    Rect head{r.x, r.y + 1 * s, r.w, 28 * s};
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s}, ccol);
     rend_.textIn(fBold_, {head.x + 10 * s, head.y, 260 * s, head.h}, m.name.c_str(),
                  nx::text, Align::Left, 0);
     rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
-    const f32 panelW = 250 * s;
+    const f32 panelW = 270 * s;
     Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
     f32 y = ctrl.y;
-    const f32 rowH = 20 * s, lblW = 62 * s;
+    const f32 rowH = 28 * s, lblW = 68 * s;
     // Field labels are §5 micro-labels: 10px, uppercase, wide tracking -- and
     // they sit on the VALUE's baseline, not on their own centre. See
     // baselineRow(): the label and the widget beside it are two different fonts
@@ -457,7 +457,7 @@ void App::drawClipDetail(const Rect& r) {
     const bool midi = m.kind == ClipKind::Midi;
 
     const Col ccol = pal::clipColors[m.colorIdx % pal::clipColorCount];
-    Rect head{r.x, r.y + 1 * s, r.w, 20 * s};
+    Rect head{r.x, r.y + 1 * s, r.w, 28 * s};
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s}, ccol);
     const f32 nameW = std::min(260 * s, fBold_.measure(m.name.c_str()) + 4 * s);
     rend_.textIn(fBold_, {head.x + 10 * s, head.y, nameW, head.h}, m.name.c_str(),
@@ -469,23 +469,14 @@ void App::drawClipDetail(const Rect& r) {
              midi ? "midi" : "audio", midi ? nx::cyan : nx::muted);
     rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
-    // --- controls column ---
-    const f32 panelW = 250 * s;
+    // A single inspector keeps the material as the main working surface.
+    // Clip playback and note tools form two compact groups in the same column.
+    const f32 panelW = 270 * s;
     Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
     f32 y = ctrl.y;
-    const f32 rowH = 20 * s, lblW = 62 * s;
-
-    // A SECOND column, for a pattern only. The panel is a fixed height and the
-    // first column was already using all of it; the key and the note tools are
-    // three more rows and would simply have fallen off the bottom of it.
-    // Widthways there is room to spare -- the roll takes everything to the right
-    // of this and is still the widest thing on screen -- so the EDITOR's
-    // controls go beside the CLIP's rather than under them, which also happens
-    // to be the right grouping: one column is about how this clip launches and
-    // sounds, the other is about how notes get written into it. An audio clip
-    // has neither and gets the width back.
-    Rect ctrl2{ctrl.right() + 10 * s, ctrl.y, panelW, ctrl.h};
-    f32 y2 = ctrl2.y;
+    const f32 rowH = 26 * s, lblW = 68 * s;
+    const Rect ctrl2 = ctrl;
+    f32 y2 = ctrl.y;
 
     // Field labels are §5 micro-labels: 10px, uppercase, wide tracking, sitting
     // on the value column's baseline rather than on their own centre
@@ -531,8 +522,8 @@ void App::drawClipDetail(const Rect& r) {
         }
         // Halve / double, exactly like Live's :2 and *2 buttons -- and one
         // cluster, because they are one control with two directions.
-        Rect h2{dn.right() + 6 * s, row.y, 26 * s, row.h};
-        Rect d2{h2.right(), row.y, 26 * s, row.h};
+        Rect h2{dn.right() + 6 * s, row.y, 28 * s, row.h};
+        Rect d2{h2.right(), row.y, 28 * s, row.h};
         ui_.segCluster({h2.x, h2.y, d2.right() - h2.x, h2.h});
         rend_.hairlineV(d2.x, h2.y + 3 * s, h2.bottom() - 3 * s);
         if (ui_.segButton(uiId(8, 3), h2, false, nx::violet)) {
@@ -613,6 +604,10 @@ void App::drawClipDetail(const Rect& r) {
             pushClip(selTrack_, selSlot_);
         }
         y += rowH + 4 * s;
+    }
+    if (midi) {
+        rend_.hairlineH(ctrl.x, ctrl.right() - 8 * s, y + 1 * s);
+        y2 = y + 8 * s;
     }
     if (midi) {   // The set's KEY: root, scale, and whether edits are held to it.
         // On the clip panel rather than on the control bar, which is where Live
@@ -711,12 +706,12 @@ void App::drawClipDetail(const Rect& r) {
         {
             Rect row{ctrl2.x, y2, ctrl2.w, rowH};
             label("NOTES", row);
-            Rect lg{row.x + lblW, row.y, 52 * s, row.h};
+            Rect lg{row.x + lblW, row.y, 64 * s, row.h};
             Rect dp{lg.right() + 6 * s, row.y, 44 * s, row.h};
             // Down and up are one control with two directions, so they are one
             // cluster with a seam rather than two capsules in a gap.
-            Rect dn{dp.right() + 6 * s, row.y, 22 * s, row.h};
-            Rect up{dn.right(), row.y, 22 * s, row.h};
+            Rect dn{dp.right() + 6 * s, row.y, 28 * s, row.h};
+            Rect up{dn.right(), row.y, 28 * s, row.h};
             ui_.segCluster({dn.x, dn.y, up.right() - dn.x, dn.h});
             rend_.hairlineV(up.x, dn.y + 3 * s, dn.bottom() - 3 * s);
 
@@ -765,7 +760,7 @@ void App::drawClipDetail(const Rect& r) {
         }
     }
     {   // Read-out of what the engine will actually do
-        Rect row{ctrl.x, y, ctrl.w, rowH};
+        Rect row{ctrl.x, midi ? y2 : y, ctrl.w, rowH};
         char buf[96];
         // ASCII ONLY. The glyph atlas is 32..126 (gfx/font.h), so the U+00B7
         // this line used to separate its fields with rendered as the invalid
@@ -797,9 +792,8 @@ void App::drawClipDetail(const Rect& r) {
     // and there is exactly one mapping in the program. The note-specific
     // furniture (FOLD, the keyboard column, the loop-length drag) is suppressed
     // rather than faked.
-    // The editor column only exists for a pattern, so an audio clip's waveform
-    // starts where it always did.
-    const f32 leftEdge = midi ? ctrl2.right() : ctrl.right();
+    // Both material types share the same compact inspector width.
+    const f32 leftEdge = ctrl.right();
     Rect wave{leftEdge + 12 * s, head.bottom() + 6 * s,
               r.right() - leftEdge - 20 * s, r.bottom() - head.bottom() - 12 * s};
 

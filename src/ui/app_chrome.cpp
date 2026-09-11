@@ -168,7 +168,7 @@ static bool ctlChip(Ui& ui, u64 id, const Rect& b, Font& f, const char* label,
     ui.pillRect(br, chipRad, on ? Pill::Primary : Pill::Secondary, nx::violet, m);
     if (!on && wash > 0.f)
         ui.r->roundRect(br, chipRad, nx::violet.alpha(clampv(wash, 0.f, 0.6f)));
-    ui.microIn(f, br, label,
+    ui.drawTextIn(ui.fBody ? *ui.fBody : f, br, label,
                on ? nx::text : pal::textFaint.mix(nx::text, 0.25f + 0.75f * m.hover),
                Align::Center);
     if (hot) ui.cursor = Cursor::Hand;
@@ -312,10 +312,7 @@ void App::drawControlBar(const Rect& r) {
     // erased three calls later. A shadow nobody can see is quads spent on
     // nothing. The fill and the edge are the tier's own, untouched.
     {
-        nx::GlassStyle st = nx::glass(nx::Tier::Bar);
-        st.radius = 0.f;                 // flush to the window's top corners
-        st.elev = nx::noShadow;
-        rend_.glass(r, st);
+        rend_.rect(r, pal::panel);
         // The seam under the bar. §11: hairlines, never a solid rule.
         rend_.hairlineH(r.x, r.right(), r.bottom() - 1 * s, nx::hairlineInk, 1 * s);
     }
@@ -350,7 +347,7 @@ void App::drawControlBar(const Rect& r) {
     // its middle. Widths stay content-sized -- the grid governs the space
     // between things, not the size of a number that has to fit.
     const f32 pad = nx::sp1 * s, gap = nx::sp1 * s, sep = nx::sp2 * s;
-    const f32 h = 22 * s;
+    const f32 h = 30 * s;
     const f32 cy = std::round(r.y + (r.h - h) * 0.5f);
     f32 x = pad;
 
@@ -542,7 +539,7 @@ void App::drawControlBar(const Rect& r) {
     // single lit edge; segments separate by hairline, show a whisper on hover,
     // and only an active state fills. A physical transport is one machined
     // block with three switches in it, and that is what the eye should group.
-    const f32 segW = 30 * s;
+    const f32 segW = 38 * s;
     Rect trioR{x, cy, segW * 3, h};
     ui_.segCluster(trioR);
 
@@ -747,13 +744,25 @@ void App::drawControlBar(const Rect& r) {
     // rather than about the music.
     {
         const u64 id = uiId(UiControlBar, 53);
-        Rect qr{rx - 22 * s, cy, 22 * s, h};
+        Rect qr{rx - 30 * s, cy, 30 * s, h};
         if (ui_.isHot(id))
             ui_.tip = "Keys and gestures  (F1)";
         if (ctlChip(ui_, id, qr, fSmall_, "?", g_keysOpen)) g_keysOpen = !g_keysOpen;
         rx = qr.x - gap;
     }
+    // Keep the library and view controls visible even at the minimum window
+    // width. Optional diagnostics below spend only the space left by music
+    // controls, so widening targets never creates overlapping hit regions.
     {
+        const u64 id = uiId(UiControlBar, 54);
+        Rect browseR{rx - 64 * s, cy, 64 * s, h};
+        if (ctlChip(ui_, id, browseR, fSmall_, "Files", showBrowser_))
+            showBrowser_ = !showBrowser_;
+        if (ui_.isHot(id))
+            ui_.tip = "Show or hide samples and sets  (Ctrl+B)";
+        rx = browseR.x - gap;
+    }
+    if (rx - x >= 244 * s) {
         const f32 cpu = es_.cpu;
         char buf[32];
         snprintf(buf, sizeof buf, "%.0f%%", cpu);
@@ -780,10 +789,12 @@ void App::drawControlBar(const Rect& r) {
         // §7: everything sits on the 8px grid -- including the gap this label
         // was quietly eating.
         const f32 bw = std::max(60.f * s, ui_.microWidth(fSmall_, lbl) + nx::sp1 * s);
-        Rect br{rx - bw, cy, bw, h};
-        ui_.microIn(fSmall_, br, lbl, drv ? pal::textFaint : nx::danger, Align::Right, 0);
-        rx = br.x - sep;
-        ctlSeam(rend_, rx + sep * 0.5f, r, s);
+        if (rx - x >= bw + sep + 172 * s) {
+            Rect br{rx - bw, cy, bw, h};
+            ui_.microIn(fSmall_, br, lbl, drv ? pal::textFaint : nx::danger, Align::Right, 0);
+            rx = br.x - sep;
+            ctlSeam(rend_, rx + sep * 0.5f, r, s);
+        }
     }
     // Computer MIDI keyboard. It belongs with the audio/MIDI readouts because
     // it is an input status: while it is lit the letter keys are notes and not
@@ -791,24 +802,28 @@ void App::drawControlBar(const Rect& r) {
     // carries the octave so PgUp / PgDn have somewhere to show their work, and
     // velocity sits next to it as a number: the FL layout spends C and V on
     // notes, so there are no keys left to nudge it with.
-    {
-        f64 vel = (f64)kbd_.velocity();
-        Rect vr{rx - 34 * s, cy, 34 * s, h};
-        ctlWell(rend_, vr, s);
-        if (ui_.isHot(uiId(16, 0)))
-            ui_.tip = "Computer-keyboard velocity - drag or wheel  -  double-click "
-                      "resets to 100  -  right-click to type it";
-        // step = 1: a MIDI velocity has no fractional value, so the drag snaps
-        // to integers and one wheel notch is exactly one unit -- the widget
-        // layer spends a notch on a whole step wherever a caller declares one.
-        if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f",
-                           Align::Center, nullptr, 1.0, /*def=*/100.0)) {
-            kbd_.setVelocity((int)std::lround(vel));
-            char buf[64];
-            snprintf(buf, sizeof buf, "Keyboard velocity %d", kbd_.velocity());
-            status_ = buf;
+    if (rx - x >= 66 * s) {
+        // Velocity is secondary to the keyboard's on/off state. It returns
+        // automatically when there is room for its own full-width field.
+        if (rx - x >= 108 * s) {
+            f64 vel = (f64)kbd_.velocity();
+            Rect vr{rx - 34 * s, cy, 34 * s, h};
+            ctlWell(rend_, vr, s);
+            if (ui_.isHot(uiId(16, 0)))
+                ui_.tip = "Computer-keyboard velocity - drag or wheel  -  double-click "
+                          "resets to 100  -  right-click to type it";
+            // step = 1: a MIDI velocity has no fractional value, so the drag snaps
+            // to integers and one wheel notch is exactly one unit -- the widget
+            // layer spends a notch on a whole step wherever a caller declares one.
+            if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f",
+                               Align::Center, nullptr, 1.0, /*def=*/100.0)) {
+                kbd_.setVelocity((int)std::lround(vel));
+                char buf[64];
+                snprintf(buf, sizeof buf, "Keyboard velocity %d", kbd_.velocity());
+                status_ = buf;
+            }
+            rx = vr.x - gap;
         }
-        rx = vr.x - gap;
 
         char buf[24];
         snprintf(buf, sizeof buf, "KBD C%d", kbd_.octave());
@@ -827,7 +842,7 @@ void App::drawControlBar(const Rect& r) {
     // reason those do: it says what, other than this window, can currently move
     // something in this set. A chip and not a panel, because the answer is
     // three numbers and there is no fourth thing to say about it.
-    {
+    if (rx - x >= 64 * s) {
         const size_t nb = midiMap_.size();
         const bool learning = midiMap_.learning();
         char buf[24];
@@ -903,16 +918,16 @@ void App::drawBrowser(const Rect& r) {
     // edge was a solid rule and is now a hairline that fades at both ends.
     rend_.hairlineV(r.right() - 1 * s, r.y, r.bottom(), nx::hairlineInk, 1 * s);
 
-    const f32 rowH = 19 * s;
+    const f32 rowH = 28 * s;
     // The header was a painted shelf -- a flat panelAlt rectangle with a hard
     // edge along the bottom -- while SCENES, MASTER, CHAIN, MACRO and every
     // other column head in the program is a micro-label over a hairline that
     // fades at both ends. §11 rules out the solid rule; the inconsistency was
     // the more visible half of it, since the browser sits beside the scene
     // column that does it the other way.
-    Rect head{r.x, r.y, r.w, 22 * s};
-    ui_.microIn(fSmall_, {head.x + 8 * s, head.y, head.w - 16 * s, head.h}, "BROWSER",
-                nx::muted, Align::Left, 0);
+    Rect head{r.x, r.y, r.w, 32 * s};
+    rend_.textIn(fBold_, {head.x + 12 * s, head.y, head.w - 24 * s, head.h}, "Library",
+                 nx::text, Align::Left, 0);
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
     // Places
@@ -922,8 +937,10 @@ void App::drawBrowser(const Rect& r) {
         const std::string& p = browserPlaces_[i];
         const bool sel = p == browserDir_;
         const bool hot = ui_.setHot(uiId(2, 100 + (int)i), row) && ui_.isHot(uiId(2, 100 + (int)i));
-        if (sel)      rend_.rect(row, pal::gridBg);
-        else if (hot) rend_.rect(row, pal::slotHover);
+        if (sel) {
+            rend_.roundRect(row.insetXY(6 * s, 2 * s), 5 * s, pal::accent.alpha(0.16f));
+            rend_.rect({row.x + 6 * s, row.y + 7 * s, 3 * s, row.h - 14 * s}, pal::accent);
+        } else if (hot) rend_.roundRect(row.insetXY(6 * s, 2 * s), 5 * s, pal::slotHover);
         if (hot) ui_.cursor = Cursor::Hand;
         const size_t slash = p.find_last_of('/');
         rend_.textIn(fBody_, row, (slash == std::string::npos ? p : p.substr(slash + 1)).c_str(),
@@ -1009,8 +1026,10 @@ void App::drawBrowser(const Rect& r) {
         const BrowserEntry& e = browserItems_[i];
         const u64 id = uiId(2, 200 + (int)i);
         const bool hot = ui_.setHot(id, row) && ui_.isHot(id);
-        if ((int)i == browserSel_) rend_.rect(row, pal::gridBg);
-        else if (hot)              rend_.rect(row, pal::slotHover);
+        if ((int)i == browserSel_)
+            rend_.roundRect(row.insetXY(4 * s, 2 * s), 5 * s, pal::accent.alpha(0.16f));
+        else if (hot)
+            rend_.roundRect(row.insetXY(4 * s, 2 * s), 5 * s, pal::slotHover);
         if (hot) ui_.cursor = Cursor::Hand;
 
         // Folder / sample / set, and three glyphs rather than two: a set is not
@@ -2010,7 +2029,7 @@ void App::drawEngineBanner(const Rect& r) {
     // a BANNER at a glance rather than as a second toolbar; the hairline
     // closes it below in the same ink so the whole line carries one colour.
     rend_.rect(r, nx::bgTop);
-    rend_.gradRect(r, 0.f, nx::glassBar, 0.9f);
+    rend_.rect(r, pal::panel);
     rend_.rect(r, ink.alpha(busy ? 0.05f : 0.08f));
     rend_.hairlineH(r.x, r.right(), r.bottom() - 1 * s,
                     ink.alpha(nx::hairlinePeak), 1 * s);
@@ -2088,7 +2107,7 @@ void App::drawStatusBar(const Rect& r) {
     // screen is in hand by now, and it is drained into status_ (which persists)
     // rather than into the tip (which vanishes with the pointer).
     if (!ui_.refusal.empty()) status_ = ui_.refusal;
-    rend_.gradRect(r, 0.f, nx::glassBar, 0.55f);
+    rend_.rect(r, pal::panel);
     // §11: the divider is a hairline that fades at both ends, not a rule.
     rend_.hairlineH(r.x, r.right(), r.y, nx::hairlineInk, 1 * s);
     // Ui::tip is what the control under the cursor wants said about itself, and

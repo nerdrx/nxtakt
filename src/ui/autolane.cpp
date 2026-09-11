@@ -475,6 +475,8 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
         }
         seg(px, py, r.right(), py);
 
+        const int hoveredPoint = hot ? pointAt(pts, ta, va, beatBase,
+                                               in.mx, in.my, kPtGrab * s) : -1;
         const f32 half = kPtSize * 0.5f * s;
         for (size_t i = 0; i < pts.size(); ++i) {
             f32 x = 0.f, y = 0.f;
@@ -486,6 +488,13 @@ bool AutoLaneView::draw(Ui& ui, const Rect& r, std::vector<AutoPoint>& pts,
             // breakpoint is something to hit with a cursor, so the shape it
             // presents has to be exactly the shape pointAt() tests.
             const f32 px1 = std::max(1.f, nx::snapPx(s));
+            if ((int)i == hoveredPoint) {
+                rr.roundRectOutline(pr.inset(-3.f * s), 2.f * s, px1, nx::text);
+                char info[128];
+                std::snprintf(info, sizeof info, "%.3g %s  |  Drag to move; right-click deletes; Alt frees snap",
+                              (double)pts[i].value, unit ? unit : "");
+                ui.tip = info;
+            }
             if (sel_.has((int)i)) {
                 rr.rect(pr, ink);
                 if ((int)i == sel_.primary)

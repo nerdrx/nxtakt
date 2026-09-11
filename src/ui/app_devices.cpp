@@ -669,7 +669,7 @@ void App::drawDeviceDetail(const Rect& r) {
                              (f64)r.w, (f64)r.h);
     }
 
-    const f32 listW = 236 * s;
+    const f32 listW = std::min(280 * s, r.w * 0.3f);
     Rect list{r.x, r.y, listW, r.h};
     Rect strip{list.right() + 1 * s, r.y, r.right() - list.right() - 1 * s, r.h};
     drawPluginBrowser(list);      // draws the hairline down its own right edge
@@ -697,8 +697,8 @@ void App::drawPluginBrowser(const Rect& r) {
         fromCatalog ? eng_.catalog() : registry_.plugins();
 
     // --- header: the §5 chip language, 10px uppercase over wide tracking ----
-    Rect head{r.x + nx::sp1 * s, r.y + 4 * s, r.w - nx::sp1 * 2.f * s, 12 * s};
-    ui_.microIn(fSmall_, head, "BROWSER", nx::muted, Align::Left, 0);
+    Rect head{r.x + nx::sp1 * s, r.y + 4 * s, r.w - nx::sp1 * 2.f * s, 22 * s};
+    rend_.textIn(fBold_, head, "Devices", nx::text, Align::Left, 0);
     if (scanning) {
         // The daemon is still walking its bundles, so the rows below are this
         // process's own scan standing in. Quiet, not a banner: the list is
@@ -714,7 +714,7 @@ void App::drawPluginBrowser(const Rect& r) {
 
     // --- filter ---
     const u64 fid = uiId(10, 0);
-    Rect filter{r.x + 6 * s, head.bottom() + 4 * s, r.w - 12 * s, 17 * s};
+    Rect filter{r.x + 6 * s, head.bottom() + 4 * s, r.w - 12 * s, 28 * s};
     // The field is recessed at rest and takes the violet border and the focus
     // ring the moment the caret arrives (§5: never a bare outline). textField
     // paints the focused state itself, so this is only the resting well.
@@ -726,13 +726,13 @@ void App::drawPluginBrowser(const Rect& r) {
     const std::string* live = ui_.liveText(fid);
     const std::string& query = live ? *live : pluginFilter_;
     if (query.empty())
-        rend_.textIn(fSmall_, filter, "Filter plugins", nx::muted.alpha(0.6f), Align::Left, 6 * s);
+        rend_.textIn(fSmall_, filter, "Search name or maker", nx::muted, Align::Left, 6 * s);
 
     // --- filtered index, rebuilt each frame: a few hundred string compares ---
     static std::vector<int> shown;                  // reused to avoid churn
     shown.clear();
     for (int i = 0; i < (int)all.size(); ++i)
-        if (icontains(all[i].name, query)) shown.push_back(i);
+        if (icontains(all[i].name, query) || icontains(all[i].vendor, query)) shown.push_back(i);
 
     // The count, now that the filter has had its say -- and BEFORE the list's
     // clip is pushed, which is where the first cut of this put it: microIn into
@@ -748,7 +748,7 @@ void App::drawPluginBrowser(const Rect& r) {
         ui_.microIn(fSmall_, head, cnt, nx::muted.alpha(0.6f), Align::Right, 0);
     }
 
-    const f32 rowH = 17 * s;
+    const f32 rowH = 36 * s;
     Rect listR{r.x, filter.bottom() + 6 * s, r.w, r.bottom() - filter.bottom() - 6 * s};
     // A truncated catalog MUST be drawn (engine_handle.h): the list yields one
     // row's height and the footer under it says how many the wire could not
@@ -792,18 +792,18 @@ void App::drawPluginBrowser(const Rect& r) {
         const bool hot = ui_.setHot(id, row) && ui_.isHot(id);
         const Rect chipR{row.x + 4 * s, row.y + 1 * s, row.w - 8 * s, row.h - 2 * s};
         if (pi == pluginSel_) {
-            rend_.gradRect(chipR, rowRad, nx::glassChip, 0.85f);
+            rend_.roundRect(chipR, rowRad, pal::panelAlt);
             rend_.rect({nx::snapPx(chipR.x), chipR.y, std::max(1.f, nx::snapPx(2 * s)), chipR.h},
                        nx::violet);
         } else if (hot) {
-            rend_.gradRect(chipR, rowRad, nx::glassChip, 0.45f);
+            rend_.roundRect(chipR, rowRad, pal::slotHover);
         }
         if (hot) ui_.cursor = devDrag.armed ? Cursor::Grab : Cursor::Hand;
 
         Rect tag{row.right() - 46 * s, row.cy() - 6 * s, 40 * s, 12 * s};
         // --radius-xs, not h*0.5: a hand-rolled capsule is exactly the
         // roundness the owner called cheap, and the token is 2px now.
-        rend_.gradRect(tag, nx::radiusXs * s, nx::glassChip, 0.9f);
+        rend_.roundRect(tag, nx::radiusXs * s, pal::panelAlt);
 
         if (hot && in.pressed[0]) {
             pluginSel_ = pi;
@@ -863,12 +863,14 @@ void App::drawPluginBrowser(const Rect& r) {
         microFit(ui_, fSmall_, tag, formatBadge(d.format), nx::muted.alpha(0.85f),
                  Align::Center);
 
-        Rect vendor{tag.x - 70 * s, row.y, 66 * s, row.h};
+        // Keep names readable: the maker is a subtitle rather than a column
+        // that takes half the available width from every instrument name.
+        Rect vendor{row.x + 10 * s, row.y + 19 * s, tag.x - row.x - 16 * s, 14 * s};
         if (!d.vendor.empty())
-            rend_.textIn(fSmall_, vendor, d.vendor.c_str(), nx::muted.alpha(0.7f),
-                         Align::Right, 0);
+            rend_.textIn(fSmall_, vendor, d.vendor.c_str(), nx::muted,
+                         Align::Left, 0);
 
-        Rect name{row.x + 10 * s, row.y, vendor.x - row.x - 14 * s, row.h};
+        Rect name{row.x + 10 * s, row.y + 2 * s, tag.x - row.x - 16 * s, 18 * s};
         rend_.textIn(fBody_, name, d.name.c_str(),
                      sel || hot ? nx::text : nx::muted, Align::Left, 0);
     }
@@ -925,7 +927,7 @@ void App::drawDeviceStrip(const Rect& r) {
                  ? pal::clipColors[ses_.tracks[devOwner_].colorIdx % pal::clipColorCount]
                  : (ownIsReturn(devOwner_) ? pal::soloBlue : nx::violet);
 
-    Rect head{r.x, r.y, r.w, 16 * s};
+    Rect head{r.x, r.y, r.w, 28 * s};
     rend_.rect({head.x, head.y + 3 * s, std::max(1.f, nx::snapPx(3 * s)), head.h - 6 * s},
                tc);                                       // owner identity chip
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
@@ -936,8 +938,8 @@ void App::drawDeviceStrip(const Rect& r) {
     // the file browser has narrowed. A name that has to be cut says itself in
     // full in the status bar (§11: no truncated name without a tip).
     const char* const hint = rackOpenUid_
-        ? "A rack is open - double-click or drag a plugin to add it inside"
-        : "Double-click a plugin to add it, or drag it onto a slot";
+        ? "Double-click to add inside rack"
+        : "Double-click to add · Drag to reorder";
     const f32 hintW = fSmall_.measure(hint) + 16 * s;
     // WHERE THE LATENCY IS. Nothing on this tab said it before, and "what is my
     // sound made of" is not answered by a chain that will not admit it is
@@ -1043,7 +1045,7 @@ void App::drawDeviceStrip(const Rect& r) {
         return;
     }
 
-    const f32 boxW = 150 * s, gap = 5 * s, rackW = 448 * s;
+    const f32 boxW = 208 * s, gap = 10 * s, rackW = 520 * s;
     // Spectra's editor opens the same way a rack does and is laid out to the
     // same constraint -- a dock 200 logical pixels tall -- so it is wide and
     // short. Its width is its own columns added up (lay::spectraPanelW), and it
@@ -1197,12 +1199,11 @@ void App::drawDeviceStrip(const Rect& r) {
         // card in the air stays where it LIVES and goes quiet; the caret in the
         // gap says where it lands. Together those are what a floating card
         // would have said, for two multiplications.
-        rend_.gradRect(box, rad, nx::glass1, (sel ? 1.f : 0.8f) * (d.bypass ? 0.55f : 1.f)
-                                             * (dragSrc ? 0.4f : 1.f));
+        rend_.roundRect(box, rad, (sel ? pal::panelAlt : pal::panel)
+                        .alpha(dragSrc ? 0.45f : 1.f));
         if (fileDragHere) {
             // The drop affordance is the lit edge arriving early, plus the
             // add badge -- the same two words every other drop target says.
-            rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
             ui_.badge = Badge::Add;
             ui_.tip = "Drop to load into the sampler";
             if (in.released[0]) {
@@ -1215,13 +1216,8 @@ void App::drawDeviceStrip(const Rect& r) {
                 drag_ = DragState{};
             }
         }
-        if (sel && !dragSrc) {
-            rend_.gradStroke(box, rad, s, nx::edgeLit, 0.9f);
-            rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)),
-                                   nx::violet.alpha(0.75f));
-        } else {
-            rend_.gradStroke(box, rad, s, nx::edge, 0.85f * dim);
-        }
+        rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)),
+                              fileDragHere ? nx::violet : nx::muted.alpha(sel ? 0.4f : 0.16f));
 
         // WHICH WAY THE SIGNAL GOES. Left to right is only obvious to somebody
         // who already knows; a chain of five cards in a row says nothing about
@@ -1247,14 +1243,14 @@ void App::drawDeviceStrip(const Rect& r) {
         // drawn last). Four pixels of title bar buys all three of them a real
         // 16px edge with no overlap at all, and the body below still fits its
         // three rows of knobs.
-        Rect title{box.x, box.y, box.w, 20 * s};
+        Rect title{box.x, box.y, box.w, 62 * s};
         rend_.rect({title.x + 3 * s, title.y + 5 * s, std::max(1.f, nx::snapPx(3 * s)),
-                    title.h - 10 * s}, tc.alpha(dim));
+                    18 * s}, tc.alpha(dim));
 
         // Both controls are glyph-drawn rather than lettered: at this size the
         // font ellipsises anything longer than a character or two.
-        Rect xr{title.right() - 17 * s, title.y + 2 * s, 16 * s, 16 * s};
-        Rect br{xr.x - 20 * s, title.y + 2 * s, 20 * s, 16 * s};
+        Rect xr{title.right() - 29 * s, title.y + 30 * s, 28 * s, 28 * s};
+        Rect br{xr.x - 28 * s, title.y + 30 * s, 28 * s, 28 * s};
 
         // "This device has an inside." Only a rack answers rack() non-null, so
         // this is the whole test -- and it is a virtual call and not a
@@ -1279,8 +1275,8 @@ void App::drawDeviceStrip(const Rect& r) {
         // and the name beside it is a micro-label that already fits itself, so
         // the four pixels come out of slack rather than out of the name.
         Rect kr{br.x, title.y, 0, title.h};
-        if (isRack)                 kr = Rect{br.x - 38 * s, title.y + 2 * s, 38 * s, 16 * s};
-        else if (isSpec || isSmp)   kr = Rect{br.x - 32 * s, title.y + 2 * s, 32 * s, 16 * s};
+        if (isRack)                 kr = Rect{br.x - 48 * s, title.y + 30 * s, 48 * s, 28 * s};
+        else if (isSpec || isSmp)   kr = Rect{br.x - 42 * s, title.y + 30 * s, 42 * s, 28 * s};
         const bool hasPanel = isRack || isSpec || isSmp;
 
         // The card's controls are ONE cluster, not two or three little capsules
@@ -1292,6 +1288,9 @@ void App::drawDeviceStrip(const Rect& r) {
         if (i == 0) { devRect("card.chip", kr); devRect("card.bypass", br);
                       devRect("card.remove", xr); }
         ui_.segCluster(ctrls);
+        rend_.textIn(fSmall_, {title.x + 12 * s, ctrls.y,
+                               ctrls.x - title.x - 20 * s, ctrls.h},
+                     d.bypass ? "Bypassed" : "Active", nx::muted, Align::Left, 0);
         // ONE seam per boundary, and a seam at EVERY boundary. kr.right() and
         // br.x are the same coordinate by construction, so the old pair drew the
         // chain/edit seam twice -- a hairline at double alpha, brighter than
@@ -1384,7 +1383,7 @@ void App::drawDeviceStrip(const Rect& r) {
 
         // The card's title is a micro-label (§5): 10px, uppercase, wide
         // tracking. A device name is an identity, not a sentence.
-        Rect nameR{title.x + 10 * s, title.y, (hasPanel ? kr.x : br.x) - title.x - 12 * s, title.h};
+        Rect nameR{title.x + 12 * s, title.y, title.w - 24 * s, 28 * s};
         // What the ENGINE made of this slot -- §12.7(3). A device the daemon
         // refused, or has not confirmed yet, is not an ordinary device that
         // happens to be silent, and drawing it as one was the lie: the card
@@ -1399,7 +1398,7 @@ void App::drawDeviceStrip(const Rect& r) {
         const u32  parCut  = (remote && rd && rd->live) ? rd->paramsTruncated : 0;
         // Amber name = attention (refused); a loading name sits quieter than
         // its neighbours -- §5's disabled rule, because it is not sounding yet.
-        microFit(ui_, fSmall_, nameR, d.desc.name.c_str(),
+        rend_.textIn(fBold_, nameR, d.desc.name.c_str(),
                  refused ? pal::meterAmber.alpha(dim)
                          : (sel ? nx::text : nx::muted).alpha(loading ? 0.6f * dim : dim),
                  Align::Left, 0);
@@ -1476,7 +1475,7 @@ void App::drawDeviceStrip(const Rect& r) {
         // Lit cyan = this device is in the signal path; dark = bypassed. §1
         // again: cyan is the light a running thing gives off.
         rend_.circle(ui_.lastRect.cx(), ui_.lastRect.cy(), 3.5f * s,
-                     d.bypass ? nx::inkOn(pal::meterAmber) : nx::live);
+                     d.bypass ? pal::meterAmber : nx::live);
         const bool xHot = ui_.segButton(uiId(11, (int)i, 1), xr, false, nx::danger);
         {
             const Rect g = ui_.lastRect;
@@ -1604,7 +1603,7 @@ void App::drawDeviceStrip(const Rect& r) {
         const int cols = 3;
         // 43px is knob (32) + label (11): three rows land exactly inside the
         // panel, so a device with nine or fewer controls never has to scroll.
-        const f32 cw = body.w / (f32)cols, chh = 43 * s;
+        const f32 cw = body.w / (f32)cols, chh = 56 * s;
         const int rows = (n + cols - 1) / cols;
         // A truncated device's grid ends with §1.6's sentence, so the scroll
         // range grows by the line that carries it.
@@ -1633,7 +1632,7 @@ void App::drawDeviceStrip(const Rect& r) {
             Rect cell{body.x + (p % cols) * cw, body.y - paramScroll_ + (p / cols) * chh, cw, chh};
             if (cell.bottom() < body.y || cell.y > body.bottom()) continue;
             const ParamInfo& info = d.inst->paramInfo(p);
-            Rect lbl{cell.x, cell.bottom() - 11 * s, cell.w, 10 * s};
+            Rect lbl{cell.x, cell.bottom() - 15 * s, cell.w, 14 * s};
 
             // Both controls edit a copy and hand the result to the instance, so
             // the value the snapshot reads (serializeDevices asks the instance)
@@ -1652,8 +1651,8 @@ void App::drawDeviceStrip(const Rect& r) {
             const bool ownTrack = ownIsTrack(devOwner_);
             // Hoisted out of the two branches because the MIDI-learn affordance
             // below has to decorate whichever control this parameter got.
-            const Rect tg{cell.cx() - 11 * s, cell.y + 8 * s, 22 * s, 14 * s};
-            const Rect kr{cell.cx() - 16 * s, cell.y + 2 * s, 32 * s, 32 * s};
+            const Rect tg{cell.cx() - 18 * s, cell.y + 8 * s, 36 * s, 26 * s};
+            const Rect kr{cell.cx() - 20 * s, cell.y + 2 * s, 40 * s, 40 * s};
             const Rect ctrlR = info.isBool ? tg : kr;
             if (p == 0) { devRect("param.cell", cell);
                           devRect(info.isBool ? "param.toggle" : "param.knob", ctrlR,
@@ -1921,10 +1920,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // in the strip that carries the lit-violet edge and an elevation: it is
     // open, and open is a state worth seeing from across the screen.
     const f32 rad = nx::radiusSm * s;
-    rend_.shadow(box, rad, nx::shadow);
-    rend_.gradRect(box, rad, nx::glass1);
-    rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
-    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.55f));
+    rend_.roundRect(box, rad, pal::panel);
+    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::muted.alpha(0.22f));
 
     // A plugin dragged out of the browser and released ON this panel lands
     // INSIDE the rack -- which is exactly what the strip's header already
@@ -1960,11 +1957,11 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // unrelated things that happen to be adjacent -- and the same four pixels
     // buy the close and back buttons a 16px edge, which they were four and
     // four under at DPI 1.0.
-    Rect title{box.x, box.y, box.w, 20 * s};
+    Rect title{box.x, box.y, box.w, 32 * s};
     rend_.rect({title.x + 3 * s, title.y + 5 * s, std::max(1.f, nx::snapPx(3 * s)),
                 title.h - 10 * s}, tc);
 
-    Rect closeR{title.right() - 18 * s, title.y + 2 * s, 16 * s, 16 * s};
+    Rect closeR{title.right() - 30 * s, title.y + 2 * s, 28 * s, 28 * s};
     devRect("rack.close", closeR);
     if (ui_.button(uiId(UiRackPanel, 0, 0), closeR, "")) { rackOpenUid_ = 0; rackPath_.clear(); }
     {
@@ -1972,7 +1969,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         rend_.line(closeR.cx() - k, closeR.cy() - k, closeR.cx() + k, closeR.cy() + k, 1.2f * s, nx::muted);
         rend_.line(closeR.cx() - k, closeR.cy() + k, closeR.cx() + k, closeR.cy() - k, 1.2f * s, nx::muted);
     }
-    Rect backR{closeR.x - 20 * s, title.y + 2 * s, 18 * s, 16 * s};
+    Rect backR{closeR.x - 30 * s, title.y + 2 * s, 28 * s, 28 * s};
     if (!rackPath_.empty()) {
         devRect("rack.back", backR);
         if (ui_.button(uiId(UiRackPanel, 0, 1), backR, "<")) { rackPath_.pop_back(); rackSel_ = -1; }
@@ -1987,7 +1984,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     microFit(ui_, fSmall_, {title.x + 10 * s, title.y, backR.x - title.x - 12 * s, title.h},
              head, nx::violetSoft, Align::Left, 0);
 
-    const f32 colW = 156 * s;
+    const f32 colW = 200 * s;
     Rect left{box.x + 4 * s, title.bottom() + 2 * s, colW, box.bottom() - title.bottom() - 6 * s};
     Rect right{left.right() + 6 * s, left.y, box.right() - left.right() - 10 * s, left.h};
     rend_.hairlineV(left.right() + 2 * s, left.y, left.bottom());
@@ -2009,7 +2006,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
 
     // 16, not 15-plus-a-gap. Same pitch to the pixel, and the row now meets
     // DESIGN.md's 16px floor on its short side instead of missing it by one.
-    const f32 rowH = 16 * s;
+    const f32 rowH = 28 * s;
     const int n = rc.deviceCount();
     Rect addR{left.x, left.bottom() - rowH, left.w, rowH};
     Rect listR{left.x, left.y + 13 * s, left.w,
@@ -2042,19 +2039,19 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
         // Well rows with the specimen's hover treatment: nothing at rest, the
         // glass chip under the pointer, a violet marker on the selected one.
         if (sel) {
-            rend_.gradRect(row, nx::radiusXs * s, nx::glassChip, 0.85f);
+            rend_.roundRect(row, nx::radiusXs * s, pal::panelAlt);
             rend_.rect({nx::snapPx(row.x), row.y, std::max(1.f, nx::snapPx(2 * s)), row.h},
                        nx::violet);
         } else if (hot) {
-            rend_.gradRect(row, nx::radiusXs * s, nx::glassChip, 0.45f);
+            rend_.roundRect(row, nx::radiusXs * s, pal::slotHover);
         }
 
         // Reorder and remove are one cluster of three seams, not three little
         // buttons in a row: they act on the same device and they are the only
         // controls this row has.
-        Rect xr{row.right() - 14 * s, row.y + 1 * s, 12 * s, rowH - 2 * s};
-        Rect dn{xr.x - 12 * s, row.y + 1 * s, 12 * s, rowH - 2 * s};
-        Rect up{dn.x - 12 * s, row.y + 1 * s, 12 * s, rowH - 2 * s};
+        Rect xr{row.right() - 26 * s, row.y + 1 * s, 24 * s, rowH - 2 * s};
+        Rect dn{xr.x - 24 * s, row.y + 1 * s, 24 * s, rowH - 2 * s};
+        Rect up{dn.x - 24 * s, row.y + 1 * s, 24 * s, rowH - 2 * s};
         // The plate arrives with the pointer: eight rows each wearing a
         // permanent chip would be eight competing surfaces in a 156px column.
         const Rect rowCtrls{up.x, up.y, xr.right() - up.x, up.h};
@@ -2214,7 +2211,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // Eight macros, four to a row, each row ONE segmented cluster: this is a
     // chooser -- exactly one macro is being edited -- and a chooser drawn as
     // eight separate capsules is the "buttons that don't belong together" look.
-    const f32 mw = right.w / 4.f, mh = 13 * s;
+    const f32 mw = right.w / 4.f, mh = 24 * s;
     for (int rowN = 0; rowN < 2; ++rowN) {
         const f32 ry0 = right.y + 12 * s + (f32)rowN * (mh + 2 * s);
         ui_.segCluster({right.x, ry0, right.w, mh});
@@ -2375,10 +2372,10 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // the unmap cross, which is destructive too. Three pixels of height and
     // three of top margin on the list below cost one row of a list that
     // scrolls anyway, and buy an honest 16.
-    Rect clr{list.right() - 48 * s, list.y, 48 * s, 14 * s};
+    Rect clr{list.right() - 56 * s, list.y, 56 * s, 24 * s};
     char cap[48];
     snprintf(cap, sizeof cap, "MACRO %d DRIVES %d", rackMacro_ + 1, shown);
-    microFit(ui_, fSmall_, {list.x, list.y, list.w - 52 * s, 14 * s}, cap,
+    microFit(ui_, fSmall_, {list.x, list.y, list.w - 60 * s, 24 * s}, cap,
              nx::muted, Align::Left, 0);
     devRect("rack.clearMacro", clr, 1.f * s);
     if (shown > 0 && ui_.grab(1.f * s).button(uiId(UiRackPanel, 11, 0), clr, "CLEAR")) {
@@ -2394,12 +2391,12 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // cross overlap the one below it, which on a DESTRUCTIVE control is the one
     // overlap that must not exist -- so the pitch grew instead and the pad is
     // the 1px the cross still needs.
-    const f32 lrow = 16 * s;
-    const f32 lmax = std::max(0.f, shown * lrow - (list.h - 16 * s));
+    const f32 lrow = 26 * s;
+    const f32 lmax = std::max(0.f, shown * lrow - (list.h - 28 * s));
     if (ui_.hovered(list) && in.wheel != 0.f) rackListScroll_ -= in.wheel * lrow * 2.f;
     rackListScroll_ = clampv(rackListScroll_, 0.f, lmax);
 
-    f32 ly = list.y + 16 * s - rackListScroll_;
+    f32 ly = list.y + 28 * s - rackListScroll_;
     for (int i = 0; i < rc.mappingCount(); ++i) {
         const RackMapping& m = rc.mapping(i);
         if (m.macro != rackMacro_) continue;
@@ -2413,14 +2410,14 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
             for (int p = 0; p < md->paramCount(); ++p)
                 if (md->paramInfo(p).id == m.param) { pn = md->paramInfo(p).name.c_str(); break; }
         }
-        Rect xr{row.right() - 15 * s, row.y + 1 * s, 14 * s, lrow - 2 * s};
+        Rect xr{row.right() - 25 * s, row.y + 1 * s, 24 * s, lrow - 2 * s};
         if (!i) devRect("rack.unmap", xr, 1 * s);
         char line[160];
         // The arrow points the way the value moves, so an inverted mapping is
         // legible at a glance rather than by comparing two numbers.
         snprintf(line, sizeof line, "%d/%s   %.2f %s %.2f", m.device + 1, pn,
                  (f64)m.min, m.min > m.max ? "\\" : "/", (f64)m.max);
-        rend_.textIn(fSmall_, {row.x, row.y, row.w - 17 * s, row.h}, line,
+        rend_.textIn(fSmall_, {row.x, row.y, row.w - 29 * s, row.h}, line,
                      m.min > m.max ? nx::violetSoft : nx::muted, Align::Left, 0);
         if (ui_.grab(1.f * s).button(uiId(UiRackPanel, 12, i), xr, "")) {
             undoPoint("unmap macro");

@@ -235,8 +235,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
     // --- the card ----------------------------------------------------------
     const f32 rad = nx::radiusSm * s;
-    rend_.shadow(box, rad, nx::shadow);
-    rend_.gradRect(box, rad, nx::glass1);
+    rend_.roundRect(box, rad, pal::panel);
 
     // THE WHOLE PANEL IS THE DROP TARGET, and it is the card's own glue lifted
     // wholesale (app_devices.cpp, the sampler card): the lit edge arriving
@@ -257,7 +256,6 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     const bool fileDrag = drag_.kind == DragState::Kind::BrowserFile && drag_.armed;
     const bool fileDragHere = real && fileDrag && box.contains(in.mx, in.my);
     if (fileDragHere) {
-        rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
         ui_.badge = Badge::Add;
         ui_.tip = "Drop to load into the sampler";
         if (in.released[0]) {
@@ -269,19 +267,18 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             }
             drag_ = DragState{};
         }
-    } else {
-        rend_.gradStroke(box, rad, s, nx::edgeLit, 1.f);
     }
-    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)), nx::violet.alpha(0.55f));
+    rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)),
+                          fileDragHere ? nx::violet : nx::muted.alpha(0.22f));
 
     // --- title -------------------------------------------------------------
     // 18 and not 16, exactly as Spectra's band grew and for the same reason:
     // the close button lives in here and at 16 it could not be 16 tall.
-    Rect title{box.x, box.y, box.w, 18 * s};
+    Rect title{box.x, box.y, box.w, 32 * s};
     rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
                 title.h - 8 * s}, tc);
 
-    Rect closeR{title.right() - 18 * s, title.y + 1.5f * s, 15 * s, 15 * s};
+    Rect closeR{title.right() - 30 * s, title.y + 2 * s, 28 * s, 28 * s};
     if (ui_.grab(slop(closeR)).button(uiId(UiSamplerPanel, 0, 0), closeR, "")) {
         samplerOpenUid_ = 0;
         samplerForced_ = false;
@@ -296,8 +293,8 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     }
     if (ui_.hovered(closeR)) ui_.tip = "Close the Sampler panel";
 
-    ui_.microIn(fSmall_, {title.x + 10 * s, title.y, 120 * s, title.h}, "SAMPLER",
-                nx::violetSoft, Align::Left, 0);
+    rend_.textIn(fBold_, {title.x + 12 * s, title.y, 120 * s, title.h}, "Sampler",
+                 nx::text, Align::Left, 0);
     if (!real) {
         // §9: say what happened. The panel is open on something with no sample
         // player, which is a state only the debug hook can reach -- and amber
@@ -326,16 +323,16 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
 
     rend_.pushClip(box);
 
-    const f32 headH = 11 * s;                  // the uppercase micro-label
+    const f32 headH = 16 * s;                  // the uppercase micro-label
     // A SELECTOR ROW IS 16. Spectra's finding, applied to the panel built in
     // its shape: gate, loop and the preset arrows are all exactly this tall,
     // and at 14 all four were under the floor with nowhere to take slop from
     // that would not steal a neighbour's pixels.
-    const f32 subH  = 16 * s;                  // a selector / cluster row
+    const f32 subH  = 24 * s;                  // a selector / cluster row
     const f32 gap   = 4 * s;
     f32 rowH = (body.h - headH - subH - gap * 3.f) * 0.5f;
     rowH = clampv(rowH, 34 * s, 62 * s);
-    const f32 lblH = 11 * s;                   // the knob's own name
+    const f32 lblH = 14 * s;                   // the knob's own name
 
     // Six sections, six columns — lay::samplerColW, which is also what the
     // device strip reserves the panel's width from.
@@ -590,7 +587,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             // hit-tested last and last setHot() wins: at the degenerate width
             // the handle you are aiming at is the one you get, instead of
             // whichever happened to be drawn second.
-            const f32 hw = 5.f * s;              // half the grab band
+            const f32 hw = 9.f * s;              // half the grab band
             const f32 sx = xOf(st0), ex = xOf(en0);
             const Rect startHit{sx - hw, well.y, hw * 2.f, well.h};
             const Rect endHit  {ex - hw, well.y, hw * 2.f, well.h};
@@ -1010,7 +1007,7 @@ void App::drawSamplerPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             samplerPreset_ = clampv(samplerPreset_, 0, np - 1);
             const Rect pr{c.x, y0, c.w, subH};
             ui_.segCluster(pr);
-            const f32 bw = 16 * s;
+            const f32 bw = 24 * s;
             const Rect lb{pr.x, pr.y, bw, pr.h}, rb{pr.right() - bw, pr.y, bw, pr.h};
             rend_.hairlineV(lb.right(), pr.y + 2 * s, pr.bottom() - 2 * s);
             rend_.hairlineV(rb.x, pr.y + 2 * s, pr.bottom() - 2 * s);

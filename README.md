@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <img alt="NxTakt Session View: an eight-track, sixteen-scene clip grid with the piano roll open on a MIDI clip" src="assets/hero.png" width="900">
+  <img alt="NxTakt Session View: a five-track demo with the compact clip inspector and expanded piano roll" src="assets/hero.png" width="900">
 </p>
 
 The workflow is Ableton Live's: a grid of clips you launch against a global
@@ -79,8 +79,17 @@ the audio.
 | **Windows** | The headless engine cross-builds with mingw-w64 and its test suite runs under Wine on every push. |
 
 <p align="center">
-  <img alt="The device chain: a plugin browser beside Pulse and Calf Reverb on the keys track" src="assets/devices.png" width="820">
+  <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
+
+## Workspace makeover — 0.14
+
+A matte charcoal workspace with restrained violet accents, a compact clip
+inspector, roomier controls, clearer typography and contrast, larger
+piano notes and automation handles, searchable plugin makers, and a toolbar
+that adapts to smaller windows. Fast clicks respond immediately; track and
+scene names work across their full label area. The Files button opens the
+sample browser. See [the interface changes and validation](docs/UI-MAKEOVER.md).
 
 ## Quickstart
 
