@@ -91,7 +91,13 @@ inline constexpr u64 kShmMagic = 0x4C54435F53484D31ull;
 //        client deriving bars from `beat` and its own copy of the signature map —
 //        is wrong precisely when a map was REFUSED, which is the one case where
 //        being wrong is silent.
-inline constexpr u32 kShmVersion = 6;
+//   v7 — the control region's per-device parameter capacity grows from 64 to
+//        256. Metadata/value rows and subsequent section offsets change; old
+//        peers must reject the region before accessing it. Wire command meanings
+//        are unchanged (protocol v12), and the layout hash guards sizes too.
+//        This unreleased revision also adds per-track 128-note gate telemetry
+//        to SharedStateT, mirroring the engine's published velocity snapshot.
+inline constexpr u32 kShmVersion = 7;
 
 // How many return buses SharedStateT carries meters for. This is kMaxReturns
 // from audio/engine.h, written out rather than included: the wire layer knows
@@ -761,6 +767,7 @@ struct SharedStateT {
     std::atomic<f64> clipPhase[NTracks];
     std::atomic<f32> meterL[NTracks];
     std::atomic<f32> meterR[NTracks];
+    std::atomic<u32> liveNotes[NTracks][128]; // per-pitch velocity, 0 = released
     std::atomic<f32> masterMeterL;
     std::atomic<f32> masterMeterR;
 
@@ -830,6 +837,7 @@ struct SharedStateT {
             clipPhase[i].store(0.0, std::memory_order_relaxed);
             meterL[i].store(0.f, std::memory_order_relaxed);
             meterR[i].store(0.f, std::memory_order_relaxed);
+            for (auto& velocity : liveNotes[i]) velocity.store(0, std::memory_order_relaxed);
             recState[i].store(0, std::memory_order_relaxed);
             recSlotIdx[i].store(-1, std::memory_order_relaxed);
         }

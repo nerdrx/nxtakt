@@ -3541,6 +3541,18 @@ static const SpectraParamSpec kSpectraContract[] = {
     { 122, "Arp Chance",   0.f,     100.f,   false, false },
     { 123, "—",            0.f,     1.f,     false, false },
     { 124, "—",            0.f,     1.f,     false, false },
+    { 125, "Chorus Mix", 0.f, 1.f, false, false },
+    { 126, "Chorus Rate", .05f, 5.f, false, true },
+    { 127, "Chorus Depth", 0.f, 1.f, false, false },
+    { 128, "Chorus Width", 0.f, 1.f, false, false },
+    { 129, "Delay Mix", 0.f, 1.f, false, false },
+    { 130, "Delay Time", 20.f, 1500.f, false, true },
+    { 131, "Delay Sync", 0.f, 9.f, true, false },
+    { 132, "Delay Feedback", 0.f, .9f, false, false },
+    { 133, "Reverb Mix", 0.f, 1.f, false, false },
+    { 134, "Reverb Size", 0.f, 1.f, false, false },
+    { 135, "Reverb Decay", 0.f, 1.f, false, false },
+    { 136, "Reverb Damping", 0.f, 1.f, false, false },
 };
 static constexpr int kSpectraContractN =
     (int)(sizeof kSpectraContract / sizeof kSpectraContract[0]);
@@ -3574,15 +3586,20 @@ static const SpectraPresetCat kSpectraBank3[] = {
     { "BA", 6 }, { "LD", 6 }, { "PD", 1 }, { "KY", 2 },
     { "PL", 4 }, { "FX", 1 }, { "SQ", 4 },
 };
+static const SpectraPresetCat kSpectraBank4[] = {
+    { "BA", 12 }, { "LD", 10 }, { "PD", 12 }, { "KY", 8 },
+    { "PL", 10 }, { "FX", 6 }, { "SQ", 6 },
+};
 struct SpectraPresetBank { const SpectraPresetCat* cats; int n; int total; };
 static const SpectraPresetBank kSpectraPresetBanks[] = {
     { kSpectraBank12, 7, 48 },
     { kSpectraBank12, 7, 48 },
     { kSpectraBank3,  7, 24 },
+    { kSpectraBank4,  7, 64 },
 };
 static constexpr int kSpectraPresetBankN =
     (int)(sizeof kSpectraPresetBanks / sizeof kSpectraPresetBanks[0]);
-static constexpr int kSpectraPresetN = 1 + 48 + 48 + 24;
+static constexpr int kSpectraPresetN = 1 + 48 + 48 + 24 + 64;
 static const char* spPresetName(const PluginInstance& s, int k) {
     const char* n = s.presetName(k);
     return n ? n : "(null)";
@@ -7490,8 +7507,8 @@ static void testSpectraV4Contract(PluginRegistry& reg) {
     // table is checked mechanically by testSpectraContract against the
     // transcription above; what is checked HERE is the budget and the defaults
     // the contract argues for in words.
-    CHECK(s->paramCount() == 125, "kSpParamCount is 125 (%d)", s->paramCount());
-    CHECK(s->paramCount() <= 128, "125 <= kMaxParams = 128: v4 fits and the cap is NOT raised");
+    CHECK(s->paramCount() == 137, "kSpParamCount is 137 (%d)", s->paramCount());
+    CHECK(s->paramCount() <= 160, "studio FX fit within the 160-parameter capacity");
 
     // THE BIT-IDENTITY SWITCH. Everything else in the block is reachable only
     // behind it.

@@ -2648,6 +2648,8 @@ void EngineHandle::poll(EngineState& out) {
             out.latencyFrames = s.latencyFrames.load(std::memory_order_relaxed);
 
             for (int t = 0; t < kMaxTracks; ++t) {
+                for (int pitch = 0; pitch < 128; ++pitch)
+                    out.liveNotes[t][pitch] = (u8)s.liveNotes[t][pitch].load(std::memory_order_relaxed);
                 out.slotState[t]   = s.slotState[t].load(std::memory_order_relaxed);
                 out.activeSlot[t]  = s.activeSlot[t].load(std::memory_order_relaxed);
                 out.pendingSlot[t] = s.pendingSlot[t].load(std::memory_order_relaxed);
@@ -2683,6 +2685,9 @@ void EngineHandle::poll(EngineState& out) {
         remote_->reapChild();
         remote_->noteHeartbeat();
         out.link         = remote_->linkState();
+        if (out.link == EngineLink::Lost || out.link == EngineLink::Detached ||
+            out.link == EngineLink::Stopping)
+            for (auto& row : out.liveNotes) for (auto& velocity : row) velocity = 0;
         out.linkSilentMs = out.link == EngineLink::Live ? 0u : remote_->silentMs();
         if (!remote_->cli.alive() && !remote_->loggedLost) {
             remote_->loggedLost = true;
@@ -2738,6 +2743,8 @@ void EngineHandle::poll(EngineState& out) {
     out.latencyFrames = e->latencyFrames.load(std::memory_order_relaxed);
 
     for (int t = 0; t < kMaxTracks; ++t) {
+        for (int pitch = 0; pitch < 128; ++pitch)
+            out.liveNotes[t][pitch] = (u8)e->liveNotes[t][pitch].load(std::memory_order_relaxed);
         out.slotState[t]   = e->slotState[t].load(std::memory_order_relaxed);
         out.activeSlot[t]  = e->activeSlot[t].load(std::memory_order_relaxed);
         out.pendingSlot[t] = e->pendingSlot[t].load(std::memory_order_relaxed);

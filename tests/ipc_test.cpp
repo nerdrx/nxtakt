@@ -1012,9 +1012,13 @@ static void testArrangementClassifiers() {
           (unsigned long long)ipc::arrangementBytes(2, 1));
     CHECK(ipc::kMaxArrLanes == kMaxRtArrLanes,
           "the wire lane bound and the engine's agree (%d)", (int)ipc::kMaxArrLanes);
-    CHECK(ipc::kProtocolVersion == 12 && ipc::kPoolVersion == 9 && ipc::kShmVersion == 6,
+    CHECK(ipc::kProtocolVersion == 12 && ipc::kPoolVersion == 9 && ipc::kShmVersion == 7,
           "protocol v%u, pool v%u, shm v%u", ipc::kProtocolVersion, ipc::kPoolVersion,
           ipc::kShmVersion);
+    CHECK(ipc::kMaxDevParams == 256 && sizeof(ipc::WireDeviceParams) == 1040,
+          "256 device controls cross in a 1040-byte parameter row");
+    CHECK(sizeof(ipc::WireDeviceInfo) == 16704,
+          "the expanded metadata row carries every Spectra control (%zu B)", sizeof(ipc::WireDeviceInfo));
     CHECK(ipc::control::kJournal > ipc::control::kParams &&
           ipc::control::kCatalog >= ipc::control::kJournal + ipc::JournalRing::bytes(),
           "the journal is the ninth section, appended at %zu",

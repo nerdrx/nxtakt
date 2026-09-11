@@ -2581,6 +2581,50 @@ static void testWavetables(ipc::EngineClient& c) {
     CHECK(added, "AddDevice nxtakt:spectra -> device %u", spc);
     if (!added) { c.pushCommand(Cmd::TrackArm, 2, 0); return; }
 
+    // Spectra's matrix/macros/arp/FX must cross the real process boundary.
+    // A local synth test cannot catch the previous 64-control wire truncation.
+    ipc::DeviceMirror spectraInfo;
+    const bool complete = c.readDevice(spc, spectraInfo);
+    CHECK(complete && spectraInfo.params.size() == 137 && spectraInfo.truncatedParams == 0,
+          "Spectra publishes all 137 controls without truncation (%zu, truncated %u)",
+          spectraInfo.params.size(), spectraInfo.truncatedParams);
+    bool stableIds = complete && spectraInfo.params.size() == 137;
+    for (size_t i = 0; i < spectraInfo.params.size(); ++i)
+        if (spectraInfo.params[i].id != i) stableIds = false;
+    CHECK(stableIds, "all Spectra parameter ids survive metadata publication, including the FX tail");
+    if (complete && spectraInfo.params.size() == 137)
+        CHECK(spectraInfo.params[136].name == "Reverb Damping",
+              "the final effect control has its own metadata row");
+    const u64 highWrites = h.paramWrites.load();
+    CHECK(c.setDeviceParam(spc, 68, 9.f) && c.setDeviceParam(spc, 69, 5.f) &&
+          c.setDeviceParam(spc, 70, -1.f) && c.setDeviceParam(spc, 94, .25f) &&
+          c.setDeviceParam(spc, 125, .15f) && c.setDeviceParam(spc, 136, .9f),
+          "matrix, macro, chorus and final reverb controls are writable beyond index 63");
+    CHECK(waitUntil([&] { drainEvents(c); return h.paramWrites.load() >= highWrites + 6; }, 2000),
+          "the daemon applies all six high-index parameter writes to its real instrument");
+    c.setDeviceParam(spc, 125, 0.f);
+    c.setDeviceParam(spc, 136, .45f);
+    c.setDeviceParam(spc, 94, 0.f);
+    sleepMs(300);
+    c.pushMidi(0x90, 60, 110);
+    const f32 macroDry = settledPeak(c, 2, 400);
+    CHECK(c.state().liveNotes[2][60].load(std::memory_order_relaxed) == 110,
+          "the daemon mirrors the played note and velocity into shared telemetry");
+    CHECK(c.setDeviceParam(spc, 94, 1.f), "Macro 1 reaches its full depth over the wire");
+    const f32 macroMuted = settledPeak(c, 2, 500);
+    CHECK(macroDry > .01f && macroMuted < macroDry * .05f,
+          "high-index matrix and macro actually mute osc A in daemon audio (%.4f -> %.4f)",
+          (double)macroDry, (double)macroMuted);
+    c.setDeviceParam(spc, 94, 0.f);
+    const f32 macroRestored = settledPeak(c, 2, 350);
+    CHECK(macroRestored > macroDry * .7f,
+          "the same sounding note returns when Macro 1 is released (%.4f)", (double)macroRestored);
+    c.pushMidi(0xb0, 120, 0);
+    c.setDeviceParam(spc, 68, 0.f); c.setDeviceParam(spc, 69, 0.f); c.setDeviceParam(spc, 70, 0.f);
+    sleepMs(200);
+    CHECK(c.state().liveNotes[2][60].load(std::memory_order_relaxed) == 0,
+          "MIDI panic clears the note on the far side of the process boundary");
+
     // A Table = 8, the custom slot. The enum WIDENED from 0..7 to 0..8 and old
     // values keep their numbers, which is why this is a parameter write and not
     // a new id (docs/SPECTRA-PARAMS.md, "Custom wavetable slots").

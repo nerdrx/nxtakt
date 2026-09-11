@@ -142,6 +142,7 @@ private:
     bool  trackHasNoteDevice(int track) const;
     PluginInstance* drumDeviceFor(int track) const;
     void addDrumTrack();
+    void addSpectraTrack();
     void  createMidiClip(int track, int slot, bool recordUndo = true); // empty pattern
     // Every path that moves the selection goes through here: selecting a track
     // also arms it (see autoArmed_).
@@ -491,7 +492,9 @@ private:
     // three-parameter delay and get a legible panel of empty sockets rather
     // than a crash.
     static bool isSpectra(const PluginInstance* p);
-    void drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc);
+    void drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc, bool embedded = false);
+    bool drawFocusedSpectra(const Rect& bounds);
+    void drawSpectraStudio(const Rect& bounds, DeviceModel& dm);
     // Which slot of `devices` has its panel open, or -1. Resolved from the uid
     // every frame, for the reason rackOpenUid_ is a uid: a chain edit must not
     // slide an open panel onto a different device.

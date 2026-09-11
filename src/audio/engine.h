@@ -629,6 +629,9 @@ public:
     std::atomic<int>  pendingSlot[kMaxTracks]{};  // queued slot, -1 stop, -2 none
     std::atomic<f64>  clipPhase[kMaxTracks]{};    // 0..1 through the running clip
     std::atomic<f32>  meterL[kMaxTracks]{}, meterR[kMaxTracks]{};
+    // Note gates delivered to each track, not inferred from the editor/clip.
+    // 0 is released; 1..127 is the most recent active velocity at that pitch.
+    std::atomic<u32>  liveNotes[kMaxTracks][128]{};
     std::atomic<f32>  masterMeterL{0.f}, masterMeterR{0.f};
     // Health telemetry the GUI/daemon polls. blocksRendered advances once per
     // process() call (a liveness heartbeat that does not depend on transport);
@@ -761,6 +764,11 @@ private:
         // sample-aligned; Engine::latencyFrames publishes the total. The
         // implementation owns the delay-line details.
         const RtChain* chain = nullptr;
+        // Separate clip and keyboard ownership: releasing one cannot erase
+        // the other's held pitch. Frame stamps handle queued out-of-order offs.
+        struct NoteLight { u64 block = 0; int frame = -1; u8 velocity = 0; };
+        NoteLight clipLights[128]{}, keyLights[16][128]{};
+        u64 lightBlock = 0;
         f32 send[kMaxReturns] = {};    // post-fader send levels, linear
         f32 fxL[kMaxBlock]{};
         f32 fxR[kMaxBlock]{};

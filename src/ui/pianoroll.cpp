@@ -1542,7 +1542,11 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         if (!inKey)                        kc = nx::bgTop.alpha(0.74f);
         else if (showKey && key.isRoot(p)) kc = kc.mix(nx::violet, 0.44f);
         else if (showKey)                  kc = kc.mix(nx::violetSoft, 0.10f);
+        const bool sounding = liveVelocity_[p] != 0;
+        if (sounding) kc = kc.mix(nx::cyan, 0.65f);
         rr.rect(kr, kc);
+        if (sounding)
+            rr.rect({kr.right()-3*s,kr.y,3*s,kr.h},nx::cyan);
         rr.hairlineH(kr.x, kr.right(), kr.bottom() - 1.f * s,
                      nx::hairlineInk.alpha(0.09f));
         // Every row names its pitch now that the taller keys can carry it.
@@ -1551,7 +1555,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             char buf[16];
             std::snprintf(buf, sizeof buf, "%s%d", kPitchNames[p % 12], p / 12 - 1);
             const bool anchor = p % 12 == 0 || (showKey && key.isRoot(p));
-            rr.textIn(*ui.fSmall, kr, buf, anchor ? nx::text : nx::muted,
+            rr.textIn(*ui.fSmall, kr, buf, sounding ? nx::inkOn(kc) : anchor ? nx::text : nx::muted,
                       Align::Left, 5.f * s);
         }
     }
@@ -1695,6 +1699,44 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
             std::snprintf(name, sizeof name, "%s%d", kPitchNames[nt.pitch % 12],
                           (int)nt.pitch / 12 - 1);
             rr.textIn(*ui.fSmall, nr, name, nx::inkOn(nc), Align::Left, 5.f * s);
+        }
+    }
+    // Sounding notes are a separate monitor layer: cyan keys, a quiet pitch
+    // guide and a short mark at the playhead (or grid edge when stopped).
+    // These marks never participate in selection, hit tests or the clip model.
+    if (midiClip) {
+        int hidden = 0;
+        char hiddenNames[112] = {};
+        for (int p = 0; p < 128; ++p) {
+            if (!liveVelocity_[p]) continue;
+            const int row = rows.rowOf(p);
+            if (row < firstRow || row > lastRow || row < 0) {
+                if (hidden < 6) {
+                    char name[16];
+                    std::snprintf(name,sizeof name,"%s%s%d",hidden?"  ":"",kPitchNames[p%12],p/12-1);
+                    const size_t used = std::char_traits<char>::length(hiddenNames);
+                    std::snprintf(hiddenNames+used,sizeof hiddenNames-used,"%s",name);
+                }
+                ++hidden;
+                continue;
+            }
+            const f32 y = rowToY(pa,row);
+            rr.rect({grid.x,y,grid.w,rowH},nx::cyan.alpha(0.055f));
+            const f32 px = playing ? beatToX(ta,playheadBeats) : grid.x+4*s;
+            if (px >= grid.x && px < grid.right()) {
+                const f32 width = std::min(20*s,grid.right()-px);
+                rr.roundRect({px,y+2*s,width,std::max(2*s,rowH-4*s)},2*s,nx::cyan.alpha(0.85f));
+            }
+        }
+        // Folded or scrolled-away pitches remain legible without moving the
+        // editor under the hand. This is an indicator, not an editable note.
+        if (hidden && ui.fSmall) {
+            char text[160];
+            std::snprintf(text,sizeof text,"Playing outside view: %s%s",hiddenNames,hidden>6?" ...":"");
+            const f32 width = std::min(grid.w-12*s,360*s);
+            const Rect badge{grid.right()-width-6*s,grid.bottom()-26*s,width,22*s};
+            rr.roundRect(badge,4*s,nx::panel2);
+            rr.textIn(*ui.fSmall,badge,text,nx::cyan,Align::Left,8*s);
         }
     }
     // The band goes over the notes it is taking, translucent enough to leave

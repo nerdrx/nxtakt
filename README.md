@@ -82,6 +82,28 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Spectra Studio — 0.18.0
+
+![Spectra Studio with its preset browser, two oscillators and performance controls](assets/spectra.png)
+
+Press **+ Spectra** to create an instrument track and open its focused sound
+editor. Five pages — **Sound**, **Effects**, **Modulation**, **Arpeggiator** and
+**Wavetable** — give oscillators, routing and pattern editing room to breathe.
+A searchable preset sidebar offers **185 factory entries**, including Init and
+**64 new sounds**. Four performance macros and integrated chorus, ping-pong
+delay and reverb make each patch ready to shape and play.
+
+The piano roll now highlights notes delivered to the selected track from live
+MIDI, the computer keyboard and clip playback. Cyan keys and pitch guides show
+note gates; folded or offscreen pitches remain named. These are visual
+indicators, not recorded notes, and do not follow release tails or notes
+created privately inside an instrument's arpeggiator.
+
+**Upgrade `nxtakt` and `nxtaktd` together.** This release expands parameter
+transport between the interface and audio daemon; both must come from the
+same release. See [the Spectra Studio guide](docs/SPECTRA-STUDIO.md) and
+[the factory sound catalog](docs/SPECTRA-PRESETS.md).
+
 ## Drum studio — 0.17
 
 Press **+ Drums** for an instrument and a ready-to-edit pattern. Eight lanes,

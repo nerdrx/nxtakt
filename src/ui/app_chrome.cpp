@@ -729,6 +729,12 @@ void App::drawControlBar(const Rect& r) {
         if (ui_.hovered(drums)) ui_.tip = "Add a drum track with 808, 707 and 909-inspired kits";
     }
 
+    if (r.w >= 1200 * s) {
+        const Rect synth{r.x + 674 * s, primaryY, 100 * s, 36 * s};
+        if (ui_.button(uiId(UiSpectraStudio, 4000), synth, "+ Spectra")) addSpectraTrack();
+        if (ui_.hovered(synth)) ui_.tip = "Create a Spectra track and open its sound-design workspace";
+    }
+
     // The engine link used to be announced HERE, as amber text squeezed into
     // whatever room the readout left -- which at 1100px wide was text drawn
     // under the tab pill, and at any width was a dead engine announced in the

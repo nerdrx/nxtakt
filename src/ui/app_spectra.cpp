@@ -1713,7 +1713,9 @@ int App::spectraOpenIdx(const std::vector<DeviceModel>& devices) const {
 //  1060..1062    the uncommitted-changes ask: COMMIT & GO, DISCARD, STAY
 // ---------------------------------------------------------------------------
 
-void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
+static u64 g_legacyPresetRevision = 0;
+
+void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc, bool embedded) {
     PluginInstance* inst = dm.inst.get();
     if (!inst) return;
     const f32 s = win_.dpiScale();
@@ -1841,7 +1843,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // one pixel each and the close button gets to be square while it is here.
     // The proper fix is tabPill hit-testing the UN-inset slot; filed as
     // ui-filed-src-ui-widgets.h.diff.
-    Rect title{box.x, box.y, box.w, 32 * s};
+    Rect title{box.x, box.y, box.w, embedded ? 0.f : 32 * s};
+    if (!embedded) {
     rend_.rect({title.x + 3 * s, title.y + 4 * s, std::max(1.f, nx::snapPx(3 * s)),
                 title.h - 8 * s}, tc);
 
@@ -1976,6 +1979,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         }
     }
     rend_.hairlineH(title.x + nx::sp1 * s, title.right() - nx::sp1 * s, title.bottom());
+    }
 
     // --- the column grid ---------------------------------------------------
     //
@@ -2018,7 +2022,10 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
     // below for every page, falls exactly on the matrix's own middle and the
     // panel's bones stand still when the page turns.
     constexpr int   kCols  = lay::spectraCols;
-    const     f32*  kColW  = lay::spectraColW;
+    f32 expandedWidths[kCols];
+    const f32 expansion=embedded?std::max(1.f,(body.w-lay::spectraColGap*s*(kCols-1))/((lay::spectraPanelW-2*lay::spectraPad-lay::spectraColGap*(kCols-1))*s)):1.f;
+    for(int i=0;i<kCols;++i) expandedWidths[i]=lay::spectraColW[i]*expansion;
+    const     f32*  kColW  = expandedWidths;
     const     f32   colGap = lay::spectraColGap * s;
     f32 colX[kCols];
     {
@@ -4074,6 +4081,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 undoPoint("load preset");
                 spectraPreset_ = n;
                 inst->loadPreset(n);
+                ++g_legacyPresetRevision;
                 status_ = std::string("Spectra: ") + presetNameOf(*inst, n);
             };
             const auto chev = [&](const Rect& b, bool leftward) {
@@ -4160,6 +4168,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                             replaced = nm == presetNameOf(*inst, i);
                         char msg[176];
                         if (psSave(inst, nm.c_str())) {
+                            ++g_legacyPresetRevision;
                             const int np2 = inst->presetCount();
                             const int fc2 = clampv(psFactoryCount(inst), 0, np2);
                             for (int i = fc2; i < np2; ++i)
@@ -5320,6 +5329,16 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
         e.fromDevice = weLive && wtReadFrames(inst, e.osc, e.f.data());
         e.srcFrames  = weLive ? wtFrames(inst, e.osc) : 0;
         e.stretched  = e.fromDevice && e.srcFrames > 0 && e.srcFrames < kWeFrames;
+        const bool factoryCopy=embedded && !e.fromDevice && detail::spectraTables();
+        if(factoryCopy) {
+            const auto* tables=detail::spectraTables();
+            const int table=clampv((int)inst->getParam(e.osc?8:0),0,7);
+            for(int frame=0;frame<kWeFrames;++frame) {
+                const f32* source=tables->frame(table,frame);
+                std::copy(source,source+kWeCycle,e.f.begin()+frame*kWeCycle);
+            }
+            e.srcFrames=kWeFrames;
+        }
         e.was = e.f;
         if (g_weSeedView  >= 0) { e.view = g_weSeedView;  g_weSeedView  = -1; }
         if (g_weSeedFrame >= 0) { e.cur  = g_weSeedFrame; g_weSeedFrame = -1; }
@@ -5340,6 +5359,8 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
             e.say(t, 2);
         } else if (e.fromDevice) {
             e.say("opened this oscillator's custom table - 32 frames", 1);
+        } else if(factoryCopy) {
+            e.say("factory table copied - draw or edit harmonics, then Commit", 1);
         } else if (weLive) {
             e.say("blank: this oscillator has no custom table to read", 0);
         }
@@ -6965,6 +6986,7 @@ void App::drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc) {
                 undoPoint("load preset");
                 spectraPreset_ = clampv(preset, 0, np - 1);
                 inst->loadPreset(spectraPreset_);
+                ++g_legacyPresetRevision;
                 status_ = std::string("Spectra: ") + presetNameOf(*inst, spectraPreset_);
                 closeDrop();
             };
@@ -7327,5 +7349,7 @@ void App::debugSeedSpectra() {
         }
     }
 }
+
+#include "spectra_studio.inc"
 
 } // namespace lat

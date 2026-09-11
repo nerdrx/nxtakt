@@ -121,6 +121,12 @@ public:
     };
     static constexpr int kPreviewMax = PreviewQueue::kMax;
 
+    // Frame snapshot of notes delivered to this track. Pure visualization:
+    // never creates notes or auditions them. Pass nullptr when disconnected.
+    void setLiveNotes(const u8* velocity) {
+        for (int p = 0; p < 128; ++p) liveVelocity_[p] = velocity ? velocity[p] : 0;
+    }
+
     // Draws the editor into `r` and handles all interaction within it.
     // Returns true when `clip.notes` (or lengthBeats) changed this frame, in
     // which case the caller must re-push the clip to the engine.
@@ -415,6 +421,7 @@ private:
     // into view, so nudging a note off the top does not lose it.
     bool followSel_ = false;
     PreviewQueue preview_{};
+    u8 liveVelocity_[128]{};
     // Drag state. Band is the one drag with nothing under it — hence the
     // dragNote_ checks that exclude it. The lane's two drags moved into
     // AutoLaneView, where they are deliberately still the same two shapes.

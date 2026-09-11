@@ -314,6 +314,10 @@ void App::frame() {
     drawControlBar(bar);
     if (banner.h > 0.f) drawEngineBanner(banner);
 
+    // An open synthesizer owns a full workspace. No hidden device-strip
+    // controls can react through it, and Back to chain restores the layout.
+    if (!drawFocusedSpectra(body)) {
+
     // UN-GATED (docs/ARRANGEMENT.md §7.6, answer #10). In Arrangement view the
     // CLIP tab shows the selected item's own `src` and edits it IN PLACE, which
     // is Rule 1 paying for itself: because `src` is by value, the roll editing
@@ -479,6 +483,7 @@ void App::frame() {
     }
 
     if (showDetail_) drawDetailPanel(detail);
+    }
     drawStatusBar(status);
     drawDragGhost();
 
@@ -923,7 +928,9 @@ void App::updatePreviews() {
         const ArrangeClip* it = selectedArrItem();
         shown = it ? it->src.uid : 0;
     }
-    if (!live || shown != previewClip_) {
+    const bool synthPreview = showDetail_ && detailTab_ == DetailTab::Devices &&
+                              spectraOpenUid_ && previewClip_ == spectraOpenUid_;
+    if ((!live || shown != previewClip_) && !synthPreview) {
         stopPreviews();
         return;
     }

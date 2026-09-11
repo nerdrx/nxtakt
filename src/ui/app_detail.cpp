@@ -295,6 +295,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
               r.right() - ctrl.right() - 32 * s, r.bottom() - head.bottom() - 12 * s};
 
     if (!arrRoll_) arrRoll_ = std::make_unique<PianoRoll>();
+    arrRoll_->setLiveNotes(es_.liveNotes[arrSelTrack_]);
     AutoTargets targets;
     buildAutoTargets(track, m, targets);
 
@@ -361,6 +362,7 @@ void App::drawClipDetail(const Rect& r) {
                     status_ = "NXTAKT_DEBUG_AUTOLANE: showing lane " + std::to_string(laneNo);
                 }
                 if (!roll_) roll_ = std::make_unique<PianoRoll>();
+    roll_->setLiveNotes(es_.liveNotes[selTrack_]);
                 // laneNo counts ENVELOPES from 1, which is what it meant before
                 // the chooser grew the per-note lanes in front of them; the
                 // offset is asked for rather than assumed so this hook does not
@@ -406,6 +408,7 @@ void App::drawClipDetail(const Rect& r) {
                         break;
                     }
             if (!roll_) roll_ = std::make_unique<PianoRoll>();
+    roll_->setLiveNotes(es_.liveNotes[selTrack_]);
             if (wantScale) {
                 int root = 0, mode = 0, fold = 0, snap = 0;
                 sscanf(wantScale, "%d:%d:%d:%d", &root, &mode, &fold, &snap);
@@ -928,6 +931,7 @@ void App::drawClipDetail(const Rect& r) {
     const f64  phase  = clampv(es_.clipPhase[selTrack_], 0.0, 1.0);
 
     if (!roll_) roll_ = std::make_unique<PianoRoll>();
+    roll_->setLiveNotes(es_.liveNotes[selTrack_]);
 
     AutoTargets targets;
     buildAutoTargets(selTrack_, m, targets);

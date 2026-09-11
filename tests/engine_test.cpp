@@ -1714,6 +1714,8 @@ static void testMidiRouting() {
     inst.count = 0;
     h.push(Cmd::TrackArm, 0, 0);
     h.runBlocks(1);
+    CHECK(inst.count == 2, "disarming releases the two held input notes before closing the route");
+    inst.count = 0;
     h.pushMidi(0x90, 65, 90);
     h.runBlocks(1);
     CHECK(inst.count == 0, "disarming the track stops delivery (%d)", inst.count);
@@ -1806,6 +1808,42 @@ static std::vector<RtNote> twoNoteClip() {
 }
 
 // a. the notes come out where the grid says they should, lap after lap
+static void testLiveNoteTelemetry() {
+    banner("12b. played-note telemetry: keyboard, channels, clips and route cleanup");
+    Host h; h.init();
+    FakeMidiFx inst(false, PluginKind::Instrument);
+    RtChain chain; chain.fx[0] = &inst; chain.count = 1;
+    h.setChain(0, &chain); h.push(Cmd::TrackArm, 0, 1); h.push(Cmd::SetQuantum, 0);
+    h.pushMidi(0x90, 60, 96); h.pushMidiFromGui(0x90, 64, 87); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][60].load() == 96 && h.e.liveNotes[0][64].load() == 87,
+          "hardware and computer-keyboard input publish their actual velocities");
+    CHECK(h.e.liveNotes[1][60].load() == 0, "unarmed tracks do not light up for another track's input");
+    h.pushMidi(0x91, 60, 110); h.pushMidi(0x80, 60, 0); h.pushMidiFromGui(0x90, 64, 0);
+    h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][60].load() == 110, "releasing one MIDI channel leaves another channel's pitch held");
+    CHECK(h.e.liveNotes[0][64].load() == 0, "zero-velocity note-on releases a displayed key");
+    h.pushMidi(0x90, 72, 100, 180); h.pushMidi(0x80, 72, 0, 20); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][72].load() == 100, "note snapshots respect sample offsets even when enqueue order differs");
+    h.pushMidi(0xb0, 123, 0); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][60].load() == 0 && h.e.liveNotes[0][72].load() == 0,
+          "all-notes-off clears displayed input gates");
+    auto notes = twoNoteClip();
+    h.setClip(0, 0, mkMidiClip(notes, 1., true)); h.push(Cmd::LaunchClip, 0, 0); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][60].load() == 100, "clip playback publishes note gates without an editor guess");
+    h.pushMidi(0x90, 60, 88); h.runBlocks(1); h.pushMidi(0x80, 60, 0); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][60].load() == 100, "a keyboard off does not erase the same pitch still owned by a clip");
+    h.push(Cmd::StopTrack, 0); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][60].load() == 0, "stopping the clip flushes its displayed notes");
+    h.pushMidi(0x90, 69, 99); h.runBlocks(1); h.push(Cmd::TrackArm, 0, 0); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][69].load() == 0, "disarming clears held input notes");
+    h.push(Cmd::TrackArm, 0, 1); h.pushMidi(0x90, 71, 102); h.runBlocks(1);
+    h.setChain(0, nullptr); h.runBlocks(1);
+    CHECK(h.e.liveNotes[0][71].load() == 0, "removing the instrument clears its held-note display");
+    h.init();
+    CHECK(h.e.liveNotes[0][60].load() == 0 && h.e.liveNotes[0][71].load() == 0,
+          "engine preparation resets every note gate");
+}
+
 static void midiClipTiming() {
     Host h; h.init();
     NoteSink sink(h.block);
@@ -7805,6 +7843,7 @@ int main() {
     testRecording();
     testFollowActions();
     testMidiRouting();
+    testLiveNoteTelemetry();
     testMidiClips();
     testNoteChance();
     testMidiRecording();

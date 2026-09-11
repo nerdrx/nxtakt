@@ -1021,11 +1021,11 @@ static_assert(offsetof(WireJournal, beat)  == offsetof(ArrJournal, beat));
 // large session.
 inline constexpr u32 kMaxDevices   = 320;
 
-// Controls per device that cross the boundary. §3.7 sketches 256; 64 covers
-// every plugin in practice and keeps the table at 1.4 MiB instead of 5.5.
-// A device with more reports the first 64 and says so in `truncatedParams`,
-// which is a visible, testable degradation rather than a silent one.
-inline constexpr u32 kMaxDevParams = 64;
+// Controls per device that cross the boundary. Spectra alone has 137, so
+// the old 64-control budget silently excluded its matrix, macros, arp and FX.
+// 256 matches the original wire budget and leaves room for other instruments.
+// Larger third-party devices still report truncation explicitly.
+inline constexpr u32 kMaxDevParams = 256;
 
 static_assert(kMaxDevices >= (u32)(kMaxTracks * kMaxChainFx + kMaxReturns * kMaxChainFx + kMaxChainFx),
               "the device table must be able to hold every addressable chain position");
@@ -1670,7 +1670,7 @@ using JournalRing = ShmSpscRing<WireJournal, 4096>;
 // wait for an allocation and a republish must not need one either.
 inline constexpr size_t kClipTableBytes = sizeof(WireClip) * kMaxTracks * kMaxScenes;
 
-// 320 x 4.3 KiB of metadata and 320 x 272 B of values: 1.4 MiB, which on tmpfs
+// 320 x 16.3 KiB of metadata and 320 x 1040 B of values: 5.4 MiB, which on tmpfs
 // costs one page per table until something is written into it. Preallocated for
 // the same reason the clip table is — a device may not wait for an allocation,
 // and neither may a republish.

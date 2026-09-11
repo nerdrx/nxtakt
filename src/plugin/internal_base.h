@@ -138,22 +138,10 @@ public:
     }
 
 protected:
-    // 128, raised from 64 when Spectra v2 arrived with 100 ids (docs/
-    // SPECTRA-PARAMS.md, ids 0..99); 64 itself was raised from 16 when
-    // Spectra v1 arrived with 42. The headroom past 100 is deliberate: the v2
-    // contract appends in blocks with reserved tails, so the next revision
-    // grows the id space without touching this constant again.
-    //
-    // This is a per-instance array bound, not an id space: ids ARE indices and
-    // a saved set stores them, so raising the cap cannot disturb any existing
-    // device -- every id that was 0..15 is still 0..15, and no device gains or
-    // loses a parameter by the change. The cost is 48 unused ParamInfo slots
-    // (a std::string pair each) on every internal instance, which is a few
-    // kilobytes across a whole project and buys the one thing a fixed array
-    // must buy: addParam() can never allocate, so a device's parameter list is
-    // built without a heap call and process() reads a member array with no
-    // indirection.
-    static constexpr int kMaxParams = 128;
+    // Spectra studio FX needs 137 stable ids. This is per-instance capacity,
+    // not a parameter namespace: raising it leaves every existing id intact.
+    // Audio parameter reads remain fixed-array atomic loads without allocation.
+    static constexpr int kMaxParams = 160;
 
     // Transport as last pushed by the host; 0 BPM = never pushed.
     f64  trBpm_ = 0.0;

@@ -309,6 +309,13 @@ build/internal_device_test: tests/internal_device_test.cpp src/plugin/host.cpp \
 	@mkdir -p build
 	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(shell pkg-config --libs lilv-0) -ldl
 
+build/spectra_upgrade_test: tests/spectra_upgrade_test.cpp src/plugin/host.cpp \
+                            src/plugin/lv2_host.cpp src/plugin/clap_host.cpp \
+                            src/plugin/internal_devices.cpp src/core/common.cpp $(INTERNAL_INSTR) $(INTERNAL_SUP) $(INTERNAL_DATA) \
+                            src/plugin/host.h src/audio/sample.h src/plugin/wavetable_io.h
+	@mkdir -p build
+	$(CXX) $(TOOL_CF) $(filter %.cpp,$^) -o $@ $(shell pkg-config --libs lilv-0) -ldl
+
 # The view's bar grid against the engine's own bar arithmetic. Worth its own
 # binary rather than folding into engine_test: the property under test is that
 # two INDEPENDENT pieces of code agree -- every bar line the arrangement ruler
@@ -375,8 +382,9 @@ build/drum_machine_test: tests/drum_machine_test.cpp src/plugin/drum_machine.cpp
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(filter %.cpp,$^) -o $@ -lpthread -lm
 
-test: build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
+test: build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
       build/timesig_view_test build/handle_test build/render build/gen_demo build/plugin_scan
+	./build/spectra_upgrade_test
 	./build/drum_machine_test
 	./build/input_test
 	./build/hit_map_test

@@ -366,13 +366,51 @@ static int followTarget(const RtClip* row, int cur, int action, int track, f64 b
 // are public, which is all a template body needs.
 // ---------------------------------------------------------------------------
 
+// Audio-thread-only note telemetry. It follows the actual delivered events;
+// a plugin's private arpeggiator/voice releases are deliberately not guessed.
+template <class TrackT>
+static void lightNote(TrackT& t, u8 status, u8 pitch, u8 vel, int frame, bool keyboard) {
+    const u8 hi = status & 0xf0, channel = status & 0x0f;
+    if (hi == 0xb0 && (pitch == 120 || pitch == 123)) {
+        auto clear = [&](auto& x) {
+            if (x.block == t.lightBlock && frame < x.frame) return;
+            x.block = t.lightBlock; x.frame = frame; x.velocity = 0;
+        };
+        for (auto& x : t.clipLights) clear(x);
+        for (auto& row : t.keyLights) for (auto& x : row) clear(x);
+        return;
+    }
+    if (hi != 0x80 && hi != 0x90) return;
+    auto& x = keyboard ? t.keyLights[channel][pitch & 127] : t.clipLights[pitch & 127];
+    if (x.block == t.lightBlock && frame < x.frame) return;
+    x.block = t.lightBlock; x.frame = frame;
+    x.velocity = hi == 0x90 ? (vel & 127) : 0;
+}
+
+template <class TrackT>
+static void releaseKeyboard(TrackT& t) {
+    for (int ch = 0; ch < 16; ++ch) for (int p = 0; p < 128; ++p) {
+        auto& x = t.keyLights[ch][p];
+        if (!x.velocity) continue;
+        if (t.chain) for (int i = 0; i < std::min(t.chain->count, kMaxChainFx); ++i) {
+            auto* fx = t.chain->fx[i];
+            if (fx && (fx->desc().hasMidiIn || fx->desc().kind == PluginKind::Instrument)) {
+                const u8 msg[]{(u8)(0x80 | ch), (u8)p, 0};
+                fx->midi(msg, 3, 0);
+            }
+        }
+        x.velocity = 0;
+    }
+}
+
 // One channel-voice message to every note-capable device on the track's chain,
 // with the frame offset the caller worked out. Unlike the live-input path this
 // is deliberately *not* gated on arm: arm decides whether the player's keyboard
 // reaches the instrument, while a launched clip has to sound whatever the arm
 // button says — same as Live.
 template <class TrackT>
-static void sendNote(const TrackT& t, u8 status, u8 pitch, u8 vel, int frame) {
+static void sendNote(TrackT& t, u8 status, u8 pitch, u8 vel, int frame) {
+    lightNote(t, status, pitch, vel, frame, false);
     if (!t.chain || t.chain->count <= 0) return;
     const int cnt = t.chain->count < kMaxChainFx ? t.chain->count : kMaxChainFx;
     const u8 bytes[3] = {status, (u8)(pitch & 0x7F), (u8)(vel & 0x7F)};
@@ -390,7 +428,7 @@ static void sendNote(const TrackT& t, u8 status, u8 pitch, u8 vel, int frame) {
 // dies with the transport would otherwise leave the instrument holding whatever
 // it happened to be playing, and nothing downstream can undo that.
 template <class TrackT, class VoiceT>
-static void flushOffs(const TrackT& t, VoiceT& v, int frame) {
+static void flushOffs(TrackT& t, VoiceT& v, int frame) {
     for (auto& o : v.offs)
         if (o.used) { sendNote(t, 0x80, o.pitch, 0, frame); o.used = false; }
 }
@@ -1566,6 +1604,7 @@ void Engine::prepare(f64 sampleRate, int /*maxBlock*/) {
         slotState[t].store((int)SlotState::Stopped);
         clipPhase[t].store(0.0);
         meterL[t].store(0.f); meterR[t].store(0.f);
+        for (auto& velocity : liveNotes[t]) velocity.store(0, std::memory_order_relaxed);
         recState[t].store(0);
         recSlotIdx[t].store(-1);
         for (int s = 0; s < kMaxScenes; ++s) clips_[t][s] = RtClip{};
@@ -2211,7 +2250,25 @@ void Engine::drainCommands() {
             // Both passes release: the chain the holds name is going away, so
             // there is no instance left for either of them to write back into.
             if (aut) autoRestore(aut->t[c.a], old, nullptr, 0, kClaimAll);
-            t.chain = (const RtChain*)c.p;
+            const auto* next = (const RtChain*)c.p;
+            // Only a routing change clears held input. Republishing the same
+            // instrument with a new effect must not interrupt a held chord.
+            bool sameTargets = true;
+            if (old != next) {
+                for (int i = 0; old && i < std::min(old->count, kMaxChainFx); ++i) {
+                    auto* fx = old->fx[i];
+                    if (!fx || (!fx->desc().hasMidiIn && fx->desc().kind != PluginKind::Instrument)) continue;
+                    bool found = false;
+                    for (int j = 0; next && j < std::min(next->count, kMaxChainFx); ++j)
+                        if (next->fx[j] == fx) found = true;
+                    if (!found) sameTargets = false;
+                }
+            }
+            if (!sameTargets) {
+                releaseKeyboard(t);
+                for (auto& note : t.clipLights) note.velocity = 0;
+            }
+            t.chain = next;
             // The one place a chain's latency is read. It is const after
             // prepare() per the PluginInstance contract, so the cached copy is
             // good until the chain is replaced — and replacing it comes through
@@ -2481,7 +2538,13 @@ void Engine::drainCommands() {
             case Cmd::TrackPan:  if (trackOk) tracks_[c.a].pan  = (f32)clampv(c.x, -1.0, 1.0); break;
             case Cmd::TrackMute: if (trackOk) tracks_[c.a].mute = c.b != 0; break;
             case Cmd::TrackSolo: if (trackOk) tracks_[c.a].solo = c.b != 0; break;
-            case Cmd::TrackArm:  if (trackOk) tracks_[c.a].arm  = c.b != 0; break;
+            case Cmd::TrackArm:
+                if (trackOk) {
+                    Track& track = tracks_[c.a];
+                    if (track.arm && !c.b) releaseKeyboard(track);
+                    track.arm = c.b != 0;
+                }
+                break;
             case Cmd::MasterVol: masterVol_ = (f32)c.x; break;
             case Cmd::ClipGain:  if (slotOk) clips_[c.a][c.b].gain = (f32)c.x; break;
             case Cmd::ClipWarp:  if (slotOk) clips_[c.a][c.b].warp = (int)c.x; break;
@@ -3262,7 +3325,8 @@ void Engine::process(const f32* inL, const f32* inR, f32* outL, f32* outR, int n
 
     // A liveness heartbeat independent of transport: advances every callback so
     // the GUI/daemon can tell the audio thread is running even when stopped.
-    blocksRendered.fetch_add(1, std::memory_order_relaxed);
+    const u64 lightBlock = blocksRendered.fetch_add(1, std::memory_order_relaxed) + 1;
+    for (auto& track : tracks_) track.lightBlock = lightBlock;
 
     // Retry any critical events parked because the ring was full last block,
     // before anything else touches it, so they keep their order (RT-AUDIT §1.6).
@@ -3949,6 +4013,10 @@ void Engine::process(const f32* inL, const f32* inR, f32* outL, f32* outR, int n
 
     for (int ti = 0; ti < kMaxTracks; ++ti) {
         Track& t = tracks_[ti];
+        if (t.arm) for (int mi = 0; mi < midiCount; ++mi) {
+            const auto& m = midi[mi];
+            lightNote(t, m.status, m.d1, m.d2, clampv((int)m.frame, 0, n - 1), true);
+        }
         // A silent path still has to feed its delay line, or the silence never
         // travels down it and the gap comes back out as stale audio.
         if (!live[ti]) { if (comp) pdcFlush(*pdc, ti, n); continue; }
@@ -4207,6 +4275,12 @@ void Engine::publish() {
     constexpr f32 kDecay = 0.72f;
     for (int ti = 0; ti < kMaxTracks; ++ti) {
         Track& t = tracks_[ti];
+        for (int pitch = 0; pitch < 128; ++pitch) {
+            u32 velocity = t.clipLights[pitch].velocity;
+            for (int ch = 0; ch < 16; ++ch)
+                velocity = std::max(velocity, (u32)t.keyLights[ch][pitch].velocity);
+            liveNotes[ti][pitch].store(velocity, std::memory_order_relaxed);
+        }
         meterL[ti].store(t.mL, std::memory_order_relaxed);
         meterR[ti].store(t.mR, std::memory_order_relaxed);
         t.mL *= kDecay; t.mR *= kDecay;

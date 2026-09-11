@@ -5146,6 +5146,9 @@ private:
             }
 
             for (int t = 0; t < kMaxTracks; ++t) {
+                for (int pitch = 0; pitch < 128; ++pitch)
+                    s.liveNotes[t][pitch].store(e.liveNotes[t][pitch].load(std::memory_order_relaxed),
+                                                std::memory_order_relaxed);
                 s.slotState[t].store(e.slotState[t].load(std::memory_order_relaxed),
                                      std::memory_order_relaxed);
                 s.activeSlot[t].store(e.activeSlot[t].load(std::memory_order_relaxed),

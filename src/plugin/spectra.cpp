@@ -392,7 +392,7 @@ enum : int {
     kPArpRate = 111, kPArpSync, kPArpOctaves, kPArpOctMode, kPArpGate,
     kPArpSwing, kPArpHold, kPArpRetrig, kPArpVelMode, kPArpFixedVel,
     kPArpSteps, kPArpChance,          // ...122; 123 and 124 are the tail
-    kSpParamCount = 125
+    kSpParamCount = 137
 };
 
 // The matrix enums, verbatim from the contract's source and destination lists.
@@ -1007,6 +1007,21 @@ public:
         addReserved();                                                // 123
         addReserved();                                                // 124
 
+        // Studio FX append to the saved parameter namespace; zero Mix keeps
+        // every existing patch on its original, bit-identical output path.
+        addParam("Chorus Mix", "", 0.f, 1.f, 0.f);                  // 125
+        addParam("Chorus Rate", "Hz", .05f, 5.f, .35f, true);      // 126
+        addParam("Chorus Depth", "", 0.f, 1.f, .4f);               // 127
+        addParam("Chorus Width", "", 0.f, 1.f, .8f);               // 128
+        addParam("Delay Mix", "", 0.f, 1.f, 0.f);                  // 129
+        addParam("Delay Time", "ms", 20.f, 1500.f, 375.f, true);   // 130
+        addIntParam("Delay Sync", "", 0, 9, 0);                   // 131
+        addParam("Delay Feedback", "", 0.f, .9f, .35f);            // 132
+        addParam("Reverb Mix", "", 0.f, 1.f, 0.f);                 // 133
+        addParam("Reverb Size", "", 0.f, 1.f, .55f);               // 134
+        addParam("Reverb Decay", "", 0.f, 1.f, .5f);               // 135
+        addParam("Reverb Damping", "", 0.f, 1.f, .45f);            // 136
+
         // The pair of oscillator handles this instance owns for the life of it.
         // See the seam's note: they are handles and not indices, so two devices
         // that import two files onto their A oscillators do not collide.
@@ -1027,6 +1042,12 @@ public:
     bool prepare(f64 sampleRate, int maxBlock) override {
         sr_ = sampleRate > 0.0 ? sampleRate : 48000.0;
         maxBlock_ = maxBlock > 0 ? maxBlock : kMaxBlock;
+        chorusRing_.prepare((int)(sr_ * .04) + 4);
+        delayRing_.prepare((int)(sr_ * 8.) + 4);
+        for (auto& line : roomRing_) line.prepare((int)(sr_ * .16) + 4);
+        resetFx();
+        fxSmooth_ = 1.f - std::exp(-1.f / (f32)(sr_ * .02));
+        fxFresh_ = true;
 
         // GUI thread. The one allocation in the device, and only the first
         // instance in the process pays for it. The second line publishes the
@@ -1597,6 +1618,7 @@ public:
 
         Blk b;
         readParams(b);
+        readFx();
 
         f32* dl = out[0];
         f32* dr = channels > 1 ? out[1] : nullptr;
@@ -1649,8 +1671,9 @@ public:
             if (b.anyOneShot)
                 for (Voice& v : voices_) { if (v.active) voiceLfoTick(v, b); }
 
-            const f32 l = accL * b.master;
-            const f32 r = accR * b.master;
+            f32 l = accL * b.master;
+            f32 r = accR * b.master;
+            processFx(l, r);
             if (dl) dl[n] = dr ? l : 0.5f * (l + r);
             if (dr) dr[n] = r;
         }
@@ -1672,6 +1695,110 @@ public:
     }
 
 private:
+    // Delay histories invalidate in O(1) on MIDI panic. Old cells are never
+    // read until overwritten; no buffer clear or allocation enters process().
+    struct FxRing {
+        std::vector<f32> left, right;
+        int pos = 0, valid = 0;
+        void prepare(int count) { left.assign(count, 0.f); right.assign(count, 0.f); reset(); }
+        void reset() { pos = valid = 0; }
+        f32 read(f32 samples, bool r = false) const {
+            const auto& data = r ? right : left;
+            if (data.empty()) return 0.f;
+            samples = clampv(samples, 1.f, (f32)data.size() - 2.f);
+            const int whole = (int)samples;
+            const f32 frac = samples - (f32)whole;
+            int a = pos - whole;
+            if (a < 0) a += (int)data.size();
+            int b = a - 1;
+            if (b < 0) b += (int)data.size();
+            const f32 x = whole <= valid ? data[a] : 0.f;
+            const f32 y = whole + 1 <= valid ? data[b] : 0.f;
+            return x + (y - x) * frac;
+        }
+        void write(f32 l, f32 r = 0.f) {
+            left[pos] = l; right[pos] = r;
+            if (++pos == (int)left.size()) pos = 0;
+            if (valid < (int)left.size()) ++valid;
+        }
+    };
+    FxRing chorusRing_, delayRing_, roomRing_[4];
+    f32 fxTarget_[12]{}, fxValue_[12]{}, roomLow_[4]{};
+    f32 fxSmooth_ = .001f, chorusPhase_ = 0.f;
+    bool fxFresh_ = true, fxDormant_ = false;
+    void resetFx() {
+        chorusRing_.reset(); delayRing_.reset();
+        for (auto& line : roomRing_) line.reset();
+        for (f32& low : roomLow_) low = 0.f;
+        chorusPhase_ = 0.f;
+    }
+    void readFx() {
+        for (int i = 0; i < 12; ++i) fxTarget_[i] = p(125 + i);
+        static constexpr f32 beats[]{0.f,16.f,8.f,4.f,2.f,1.f,.5f,.25f,2.f/3.f,1.f/3.f};
+        const int sync = clampv((int)fxTarget_[6], 0, 9);
+        const f64 bpm = trBpm_ > 0. ? trBpm_ : 120.;
+        fxTarget_[5] = sync ? (f32)(beats[sync] * 60. / bpm * sr_)
+                            : fxTarget_[5] * .001f * (f32)sr_;
+        fxTarget_[5] = clampv(fxTarget_[5], 1.f, (f32)delayRing_.left.size() - 2.f);
+        if (fxFresh_) {
+            for (int i = 0; i < 12; ++i) fxValue_[i] = fxTarget_[i];
+            fxFresh_ = false;
+        }
+    }
+    void processFx(f32& l, f32& r) {
+        if (fxTarget_[0] == 0.f && fxTarget_[4] == 0.f && fxTarget_[8] == 0.f &&
+            fxValue_[0] <= 1e-6f && fxValue_[4] <= 1e-6f && fxValue_[8] <= 1e-6f) {
+            if (!fxDormant_) resetFx();
+            fxDormant_ = true;
+            return;
+        }
+        fxDormant_ = false;
+        for (int i = 0; i < 12; ++i) fxValue_[i] += fxSmooth_ * (fxTarget_[i] - fxValue_[i]);
+        // Even with Mix zero the histories advance: enabling a module cannot
+        // resurrect a frozen tail. Branches preserve the original output bits.
+        const f32 depth = fxValue_[2] * .006f * (f32)sr_;
+        const f32 base = .012f * (f32)sr_;
+        const f32 a = dsp::kTwoPi * chorusPhase_;
+        const f32 cL = chorusRing_.read(base + std::sin(a) * depth);
+        const f32 cR = chorusRing_.read(base + std::sin(a + fxValue_[3] * (.5f * dsp::kTwoPi)) * depth, true);
+        chorusRing_.write(l, r);
+        chorusPhase_ += fxValue_[1] / (f32)sr_;
+        if (chorusPhase_ >= 1.f) chorusPhase_ -= 1.f;
+        if (fxTarget_[0] != 0.f || fxValue_[0] > 1e-6f) {
+            l += (cL - l) * fxValue_[0]; r += (cR - r) * fxValue_[0];
+        }
+        const f32 dL = delayRing_.read(fxValue_[5]);
+        const f32 dR = delayRing_.read(fxValue_[5], true);
+        // Ping-pong feedback crosses channels; a mono source enters only the
+        // left return first, so centered notes still produce stereo echoes.
+        delayRing_.write(.5f * (l + r) + std::tanh(dR) * fxValue_[7],
+                         std::tanh(dL) * fxValue_[7]);
+        if (fxTarget_[4] != 0.f || fxValue_[4] > 1e-6f) {
+            l += (dL - l) * fxValue_[4]; r += (dR - r) * fxValue_[4];
+        }
+        // Four unequal lines, an energy-preserving Hadamard feedback matrix,
+        // and damped feedback form a stereo FDN room with no periodic comb sum.
+        static constexpr f32 seconds[]{.0297f,.0371f,.0411f,.0437f};
+        f32 v[4];
+        const f32 size = .5f + 2.f * fxValue_[9];
+        const f32 damp = .95f - .9f * fxValue_[11];
+        for (int i = 0; i < 4; ++i) {
+            const f32 x = roomRing_[i].read(seconds[i] * size * (f32)sr_);
+            roomLow_[i] += damp * (x - roomLow_[i]);
+            if (std::abs(roomLow_[i]) < 1e-20f) roomLow_[i] = 0.f;
+            v[i] = roomLow_[i];
+        }
+        const f32 gain = .5f * (.55f + .4f * fxValue_[10]);
+        roomRing_[0].write(.3f*l + gain*(v[0]+v[1]+v[2]+v[3]));
+        roomRing_[1].write(.3f*r + gain*(v[0]-v[1]+v[2]-v[3]));
+        roomRing_[2].write(.3f*l + gain*(v[0]+v[1]-v[2]-v[3]));
+        roomRing_[3].write(.3f*r + gain*(v[0]-v[1]-v[2]+v[3]));
+        if (fxTarget_[8] != 0.f || fxValue_[8] > 1e-6f) {
+            const f32 wetL = v[0] + v[2], wetR = v[1] + v[3];
+            l += (wetL - l) * fxValue_[8]; r += (wetR - r) * fxValue_[8];
+        }
+    }
+
     static constexpr int kSpVoices = 16;
     static constexpr int kUni      = 7;
     // 16 samples, 0.33 ms at 48 kHz: the same figure and the same reasoning as
@@ -2884,6 +3011,7 @@ private:
     // CC 120 does the same and additionally clears the arp's sounding-note
     // bookkeeping, since the voices it referred to are gone.
     void allSoundOff() {
+        resetFx();
         for (Voice& v : voices_) v = Voice{};
         nHeld_ = 0;
         latchClear();

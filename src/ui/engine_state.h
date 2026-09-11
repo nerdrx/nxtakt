@@ -119,6 +119,7 @@ struct EngineState {
     f64 clipPhase[kMaxTracks]   = {};
     f32 meterL[kMaxTracks]      = {};
     f32 meterR[kMaxTracks]      = {};
+    u8 liveNotes[kMaxTracks][128] = {}; // routed note gates, 0 released / 1..127 velocity
     i32 recState[kMaxTracks]    = {};    // 0 idle, 1 queued, 2 recording
     i32 recSlotIdx[kMaxTracks]  = {};
 

@@ -3302,3 +3302,39 @@ findings the contract could not have predicted. Nothing above this heading moves
   `wtname` when the table under it changes, so: any change of hash DROPS the
   name, and a rename (which keeps the hash) keeps it. Carrying a label onto new
   content would be a library whose labels lie.
+
+# Studio FX — appended ids 125..136
+
+The integrated chain runs **Chorus → ping-pong Delay → stereo Reverb**, after
+voice summing and Master. No previous id or preset changes meaning. Mix defaults
+are zero and select the original output directly; old patches remain
+bit-identical. The parameter count is now 137, with internal capacity 160.
+
+| id | name | range | default | meaning |
+|----|------|-------|---------|---------|
+|125|Chorus Mix|0..1|0|dry/wet balance|
+|126|Chorus Rate|0.05..5 Hz log|0.35|modulation speed|
+|127|Chorus Depth|0..1|0.4|up to 6 ms around a 12 ms center delay|
+|128|Chorus Width|0..1|0.8|left/right modulation phase difference, 0..180 degrees|
+|129|Delay Mix|0..1|0|dry/wet balance|
+|130|Delay Time|20..1500 ms log|375|free-running delay time|
+|131|Delay Sync|0..9 int|0|same divisions as LFO Sync id33; 0 uses Time|
+|132|Delay Feedback|0..0.9|0.35|cross-channel repeat gain, saturated in feedback|
+|133|Reverb Mix|0..1|0|dry/wet balance|
+|134|Reverb Size|0..1|0.55|room delay scale 0.5..2.5|
+|135|Reverb Decay|0..1|0.5|feedback gain 0.55..0.95|
+|136|Reverb Damping|0..1|0.45|high-frequency absorption|
+
+Delay follows pushed tempo (120 BPM fallback), capped at eight seconds for very
+slow long divisions. A centered signal enters the left echo first and subsequent
+repeats alternate channels. Reverb uses four unequal delays, an orthogonal
+Hadamard feedback matrix and low-pass damping; it is an original algorithmic
+room, not a convolution or sampled space. Continuous controls smooth over 20 ms;
+changing Delay Time/Sync or Reverb Size can produce a deliberate pitch glide.
+
+Buffers allocate only during prepare; the audio callback allocates and locks
+nothing. CC120 invalidates every FX history in constant time and stops tails;
+CC123 releases notes and lets tails decay. When all modules finish fading to
+zero they go dormant and clear their histories; individual bypassed modules
+continue to advance while another module is active, avoiding frozen tails.
+Prepare resets histories, phases and control smoothing for repeatable renders.

@@ -3217,3 +3217,2853 @@ SP(115, 64.f)    // Arp Gate
 SP(119, 2)       // Arp Vel Mode = Pattern
 SPARP("fc84fc84b962b962", "05050705050503050507050505030505")
 SP_END()
+
+// ========================================================================
+// BANK 4 — 64 studio patches. The first 121 rows remain in their original
+// order. Bass 12, Lead 10, Pad 12, Keys 8, Pluck 10, FX 6, Sequence 6.
+// Every new patch maps all four macros; full performance notes live in
+// docs/SPECTRA-PRESETS.md. No external samples or custom-table cache required.
+
+// ------------------------------------------------------------ BA (12), bank 4
+
+// BA Afterburn — A lean FM mid-bass with a clean sub and an envelope-driven metallic edge.
+// Macros: 1 Open | 2 FM bite | 3 Sub weight | 4 Growl.
+SP_PRESET("BA Afterburn")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.18f   ) // A Position
+SP(  4, 0.58f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.62f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 17, 0.3f    ) // Sub
+SP( 18, 1100.f  ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 5.f     ) // Drive
+SP( 22, 0.18f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 29, 100.f   ) // E2 Decay
+SP( 38, 45.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 48, 6       ) // A Warp = FM
+SP( 49, 0.18f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.28f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.32f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.35f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 1       ) // M4 Dst = A Position
+SP( 79, 0.5f    ) // M4 Amt
+SP( 80, 4       ) // M5 Src = ENV2
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.16f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Chrome Reese — Counter-detuned saws beat against a centered sub; opposite slow scans keep the stereo edge moving.
+// Macros: 1 Open | 2 Rasp | 3 Sub weight | 4 Spread detune.
+SP_PRESET("BA Chrome Reese")
+SP(  1, 0.12f   ) // A Position
+SP(  3, -7.f    ) // A Fine
+SP(  4, 0.5f    ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 18.f    ) // A Detune
+SP(  8, 0       ) // B Table = Basic
+SP(  9, 0.38f   ) // B Position
+SP( 11, 7.f     ) // B Fine
+SP( 12, 0.4f    ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 22.f    ) // B Detune
+SP( 15, 0.65f   ) // B Spread
+SP( 17, 0.24f   ) // Sub
+SP( 18, 1500.f  ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 4.f     ) // Drive
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 32, 0.16f   ) // LFO Rate
+SP( 34, 0.08f   ) // LFO>Position
+SP( 38, 45.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.28f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 13      ) // M2 Dst = Drive
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.22f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 2       ) // M5 Dst = B Position
+SP( 82, -0.09f  ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(125, 0.08f   ) // Chorus Mix
+SP_END()
+
+// BA Concrete Sub — A restrained triangle foundation with a softly folded upper layer for small-speaker translation.
+// Macros: 1 Open | 2 Overtones | 3 Sub weight | 4 Drive.
+SP_PRESET("BA Concrete Sub")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.06f   ) // A Position
+SP(  4, 0.24f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 17, 0.65f   ) // Sub
+SP( 18, 420.f   ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 2.f     ) // Drive
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 26, 0.95f   ) // Sustain
+SP( 27, 95.f    ) // Release
+SP( 38, 75.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 42, 1       ) // Sub Shape = Triangle
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.24f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.5f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.2f    ) // M4 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Copper Wobble — Tempo-locked formant motion sweeps a solid low-pass bass without moving the sub.
+// Macros: 1 Open | 2 Vowel | 3 Sub weight | 4 Bite.
+SP_PRESET("BA Copper Wobble")
+SP(  0, 3       ) // A Table = Formant
+SP(  1, 0.27f   ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 9.f     ) // A Detune
+SP(  7, 0.35f   ) // A Spread
+SP( 17, 0.3f    ) // Sub
+SP( 18, 740.f   ) // Cutoff
+SP( 19, 0.32f   ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 3.f     ) // Drive
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 33, 6       ) // LFO Sync = 1/8
+SP( 34, 0.2f    ) // LFO>Position
+SP( 35, 0.18f   ) // LFO>Cutoff
+SP( 37, 1       ) // LFO Shape = Triangle
+SP( 38, 45.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.32f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.24f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 12      ) // M5 Dst = Resonance
+SP( 82, 0.06f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Elastic Rubber — A hollow pulse pluck snaps into a soft mono sustain with note-to-note glide.
+// Macros: 1 Open | 2 Pulse width | 3 Sub weight | 4 Squish.
+SP_PRESET("BA Elastic Rubber")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.63f   ) // A Position
+SP(  4, 0.7f    ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 17, 0.18f   ) // Sub
+SP( 18, 320.f   ) // Cutoff
+SP( 19, 0.55f   ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 22, 0.38f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 190.f   ) // Decay
+SP( 26, 0.38f   ) // Sustain
+SP( 27, 95.f    ) // Release
+SP( 29, 115.f   ) // E2 Decay
+SP( 38, 90.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 41, -0.28f  ) // Env2>Position
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.33f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.26f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 12      ) // M4 Dst = Resonance
+SP( 79, 0.25f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.1f    ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Garage Organ — Octave-separated harmonic oscillators make a round organ bass with a short percussive filter attack.
+// Macros: 1 Open | 2 Upper drawbar | 3 Sub weight | 4 Saturation.
+SP_PRESET("BA Garage Organ")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.18f   ) // A Position
+SP(  4, 0.58f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.45f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.2f    ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 17, 0.2f    ) // Sub
+SP( 18, 800.f   ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 22, 0.16f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 180.f   ) // Decay
+SP( 26, 0.65f   ) // Sustain
+SP( 27, 95.f    ) // Release
+SP( 29, 85.f    ) // E2 Decay
+SP( 40, 0.48f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.28f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 6       ) // M2 Dst = B Level
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.25f   ) // M4 Amt
+SP( 98, 1       ) // Voice Mode = Mono
+SP(125, 0.06f   ) // Chorus Mix
+SP_END()
+
+// BA Granite Bite — Digital transients and a dark saw body make a punchy, deliberately narrow bass.
+// Macros: 1 Open | 2 Crush phase | 3 Sub weight | 4 Warp.
+SP_PRESET("BA Granite Bite")
+SP(  0, 5       ) // A Table = Digital
+SP(  1, 0.48f   ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 0       ) // B Table = Basic
+SP(  9, 0.17f   ) // B Position
+SP( 12, 0.3f    ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 17, 0.25f   ) // Sub
+SP( 18, 600.f   ) // Cutoff
+SP( 19, 0.25f   ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 7.f     ) // Drive
+SP( 22, 0.32f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 26, 0.55f   ) // Sustain
+SP( 27, 95.f    ) // Release
+SP( 29, 75.f    ) // E2 Decay
+SP( 38, 45.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 48, 2       ) // A Warp = Bend positive
+SP( 49, 0.24f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.32f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.22f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 3       ) // M4 Dst = A Warp Amt
+SP( 79, 0.3f    ) // M4 Amt
+SP( 80, 4       ) // M5 Src = ENV2
+SP( 81, 1       ) // M5 Dst = A Position
+SP( 82, 0.18f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Hollow Flex — Ring modulation between a pulse and octave harmonic layer leaves a woody, hollow low end.
+// Macros: 1 Open | 2 Ring color | 3 Sub weight | 4 Pulse bend.
+SP_PRESET("BA Hollow Flex")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.34f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.18f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 17, 0.36f   ) // Sub
+SP( 18, 1400.f  ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 3.f     ) // Drive
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 38, 60.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 48, 7       ) // A Warp = RM
+SP( 49, 0.58f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 1       ) // M4 Dst = A Position
+SP( 79, 0.4f    ) // M4 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Liquid Roller — Warm detuned folds roll under a fast filter envelope; a subtle slow scan prevents a static sustain.
+// Macros: 1 Open | 2 Fold | 3 Sub weight | 4 Resonance.
+SP_PRESET("BA Liquid Roller")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.31f   ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 12.f    ) // A Detune
+SP(  7, 0.35f   ) // A Spread
+SP( 17, 0.3f    ) // Sub
+SP( 18, 520.f   ) // Cutoff
+SP( 19, 0.44f   ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 4.f     ) // Drive
+SP( 22, 0.32f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 29, 140.f   ) // E2 Decay
+SP( 32, 0.31f   ) // LFO Rate
+SP( 34, 0.1f    ) // LFO>Position
+SP( 38, 45.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.32f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 12      ) // M4 Dst = Resonance
+SP( 79, 0.22f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 13      ) // M5 Dst = Drive
+SP( 82, 0.08f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(125, 0.055f  ) // Chorus Mix
+SP_END()
+
+// BA Pressure Drop — A sine-like folded oscillator and a falling pitch transient deliver an 808-style pitched bass, not a drum sample.
+// Macros: 1 Open | 2 Harmonics | 3 Sub weight | 4 Drive.
+SP_PRESET("BA Pressure Drop")
+SP(  0, 7       ) // A Table = Fold
+SP(  4, 0.22f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 17, 0.72f   ) // Sub
+SP( 18, 320.f   ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 24, 1.f     ) // Attack
+SP( 25, 900.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 190.f   ) // Release
+SP( 38, 110.f   ) // Glide
+SP( 40, 0.5f    ) // Master
+SP( 62, 0.1f    ) // E3 Attack
+SP( 63, 35.f    ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.28f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.5f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.3f    ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 7       ) // M5 Dst = A Pitch
+SP( 82, 0.2f    ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP_END()
+
+// BA Satin Pulse — A soft-width pulse against a triangle sub makes an understated synth-pop foundation.
+// Macros: 1 Open | 2 Pulse width | 3 Sub weight | 4 Chorus detune.
+SP_PRESET("BA Satin Pulse")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.18f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 7.f     ) // A Detune
+SP(  7, 0.2f    ) // A Spread
+SP( 17, 0.4f    ) // Sub
+SP( 18, 950.f   ) // Cutoff
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 1.5f    ) // Drive
+SP( 22, 0.12f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 29, 210.f   ) // E2 Decay
+SP( 38, 35.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 42, 1       ) // Sub Shape = Triangle
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.55f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.15f   ) // M4 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(125, 0.09f   ) // Chorus Mix
+SP(126, 0.24f   ) // Chorus Rate
+SP(127, 0.22f   ) // Chorus Depth
+SP_END()
+
+// BA Vowel Engine — Two complementary formant banks sweep in opposite directions over a clean sub.
+// Macros: 1 Open | 2 Vowel | 3 Sub weight | 4 Throat.
+SP_PRESET("BA Vowel Engine")
+SP(  0, 3       ) // A Table = Formant
+SP(  1, 0.16f   ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 8.f     ) // A Detune
+SP(  7, 0.3f    ) // A Spread
+SP(  8, 6       ) // B Table = Vox
+SP(  9, 0.76f   ) // B Position
+SP( 12, 0.28f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 11.f    ) // B Detune
+SP( 15, 0.45f   ) // B Spread
+SP( 17, 0.32f   ) // Sub
+SP( 18, 1700.f  ) // Cutoff
+SP( 19, 0.2f    ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 3.f     ) // Drive
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 27, 95.f    ) // Release
+SP( 33, 5       ) // LFO Sync = 1/4
+SP( 34, 0.12f   ) // LFO>Position
+SP( 38, 45.f    ) // Glide
+SP( 40, 0.48f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.27f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.48f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 2       ) // M4 Dst = B Position
+SP( 79, -0.5f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 2       ) // M5 Dst = B Position
+SP( 82, -0.18f  ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(125, 0.055f  ) // Chorus Mix
+SP_END()
+
+// ------------------------------------------------------------ LD (10), bank 4
+
+// LD Arc Light — A bright, wide saw lead with a quiet lower octave and a velocity-sensitive filter.
+// Macros: 1 Open | 2 Sync edge | 3 Lower octave | 4 Width detune.
+SP_PRESET("LD Arc Light")
+SP(  1, 0.15f   ) // A Position
+SP(  4, 0.56f   ) // A Level
+SP(  5, 5       ) // A Unison
+SP(  6, 21.f    ) // A Detune
+SP(  7, 0.85f   ) // A Spread
+SP(  8, 0       ) // B Table = Basic
+SP(  9, 0.3f    ) // B Position
+SP( 10, -12     ) // B Coarse
+SP( 12, 0.18f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 8.f     ) // B Detune
+SP( 15, 0.45f   ) // B Spread
+SP( 18, 6500.f  ) // Cutoff
+SP( 21, 1.5f    ) // Drive
+SP( 24, 4.f     ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 38, 35.f    ) // Glide
+SP( 40, 0.42f   ) // Master
+SP( 48, 1       ) // A Warp = Sync
+SP( 49, 0.02f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.15f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.25f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.17f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.08f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(129, 0.13f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.26f   ) // Delay Feedback
+SP(133, 0.12f   ) // Reverb Mix
+SP(134, 0.38f   ) // Reverb Size
+SP(135, 0.32f   ) // Reverb Decay
+SP_END()
+
+// LD Brass Satellite — A rounded brass attack opens into harmonic sustain; the second oscillator contributes a subtle octave sheen.
+// Macros: 1 Open | 2 Brass bend | 3 Octave shine | 4 Ensemble.
+SP_PRESET("LD Brass Satellite")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.34f   ) // A Position
+SP(  4, 0.58f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 12.f    ) // A Detune
+SP(  7, 0.6f    ) // A Spread
+SP(  8, 0       ) // B Table = Basic
+SP(  9, 0.14f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.12f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 9.f     ) // B Detune
+SP( 15, 0.6f    ) // B Spread
+SP( 18, 1800.f  ) // Cutoff
+SP( 21, 2.f     ) // Drive
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 24, 22.f    ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 28, 60.f    ) // E2 Attack
+SP( 29, 430.f   ) // E2 Decay
+SP( 30, 0.3f    ) // E2 Sustain
+SP( 40, 0.42f   ) // Master
+SP( 48, 2       ) // A Warp = Bend positive
+SP( 49, 0.08f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.22f   ) // M4 Amt
+SP(125, 0.1f    ) // Chorus Mix
+SP(127, 0.24f   ) // Chorus Depth
+SP(133, 0.12f   ) // Reverb Mix
+SP(134, 0.42f   ) // Reverb Size
+SP(135, 0.35f   ) // Reverb Decay
+SP_END()
+
+// LD Comet Sync — Hard-sync harmonics fall at each attack then settle into a focused mono lead.
+// Macros: 1 Open | 2 Sync sweep | 3 Warmth | 4 Detune.
+SP_PRESET("LD Comet Sync")
+SP(  1, 0.25f   ) // A Position
+SP(  4, 0.65f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 9.f     ) // A Detune
+SP(  7, 0.4f    ) // A Spread
+SP( 18, 5600.f  ) // Cutoff
+SP( 22, 0.12f   ) // Env2>Cutoff
+SP( 24, 4.f     ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 29, 200.f   ) // E2 Decay
+SP( 38, 65.f    ) // Glide
+SP( 40, 0.42f   ) // Master
+SP( 48, 1       ) // A Warp = Sync
+SP( 49, 0.23f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.18f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.45f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 13      ) // M3 Dst = Drive
+SP( 76, 0.18f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP( 80, 4       ) // M5 Src = ENV2
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.16f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(129, 0.15f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.28f   ) // Delay Feedback
+SP(133, 0.08f   ) // Reverb Mix
+SP_END()
+
+// LD Ember Solo — A narrow, expressive pulse solo with breath noise and slow vibrato.
+// Macros: 1 Open | 2 Pulse color | 3 Breath | 4 Drive.
+SP_PRESET("LD Ember Solo")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.42f   ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 16, 0.025f  ) // Noise
+SP( 18, 3300.f  ) // Cutoff
+SP( 21, 2.f     ) // Drive
+SP( 24, 12.f    ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 32, 5.2f    ) // LFO Rate
+SP( 36, 7.f     ) // LFO>Pitch
+SP( 38, 95.f    ) // Glide
+SP( 40, 0.42f   ) // Master
+SP( 44, 0.45f   ) // Noise Color
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.1f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.15f   ) // M4 Amt
+SP( 80, 8       ) // M5 Src = Aftertouch
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.15f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(129, 0.11f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.2f    ) // Delay Feedback
+SP(133, 0.14f   ) // Reverb Mix
+SP(134, 0.4f    ) // Reverb Size
+SP_END()
+
+// LD Glasswire — Bell-spectrum FM adds a glass edge to a stable harmonic lead without drowning its fundamental.
+// Macros: 1 Open | 2 FM glass | 3 Bell layer | 4 Spread detune.
+SP_PRESET("LD Glasswire")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.25f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 8.f     ) // A Detune
+SP(  7, 0.55f   ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.27f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.12f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 7800.f  ) // Cutoff
+SP( 24, 4.f     ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 420.f   ) // Release
+SP( 40, 0.42f   ) // Master
+SP( 48, 6       ) // A Warp = FM
+SP( 49, 0.1f    ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.12f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.22f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.27f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP( 80, 4       ) // M5 Src = ENV2
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.08f   ) // M5 Amt
+SP(129, 0.14f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.3f    ) // Delay Feedback
+SP(133, 0.19f   ) // Reverb Mix
+SP(136, 0.28f   ) // Reverb Damping
+SP_END()
+
+// LD Halo Anthem — Broad saw and pulse fans form a polished chord lead with a gentle attack.
+// Macros: 1 Open | 2 Pulse shine | 3 Pulse layer | 4 Lift detune.
+SP_PRESET("LD Halo Anthem")
+SP(  1, 0.08f   ) // A Position
+SP(  4, 0.46f   ) // A Level
+SP(  5, 7       ) // A Unison
+SP(  6, 25.f    ) // A Detune
+SP(  7, 0.95f   ) // A Spread
+SP(  9, 0.23f   ) // B Position
+SP( 12, 0.22f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 14.f    ) // B Detune
+SP( 15, 0.75f   ) // B Spread
+SP( 18, 6000.f  ) // Cutoff
+SP( 24, 14.f    ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 400.f   ) // Release
+SP( 40, 0.35f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.16f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 2       ) // M2 Dst = B Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP(133, 0.15f   ) // Reverb Mix
+SP(134, 0.58f   ) // Reverb Size
+SP(135, 0.42f   ) // Reverb Decay
+SP(136, 0.5f    ) // Reverb Damping
+SP_END()
+
+// LD Neon Flute — A softly folded tone and filtered breath create a playable airy solo with pressure expression.
+// Macros: 1 Open | 2 Overblow | 3 Breath | 4 Drive.
+SP_PRESET("LD Neon Flute")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.04f   ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 16, 0.035f  ) // Noise
+SP( 18, 5200.f  ) // Cutoff
+SP( 24, 28.f    ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 32, 5.7f    ) // LFO Rate
+SP( 36, 5.f     ) // LFO>Pitch
+SP( 38, 70.f    ) // Glide
+SP( 40, 0.42f   ) // Master
+SP( 44, 0.32f   ) // Noise Color
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.16f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.45f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.08f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.13f   ) // M4 Amt
+SP( 80, 8       ) // M5 Src = Aftertouch
+SP( 81, 1       ) // M5 Dst = A Position
+SP( 82, 0.2f    ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(129, 0.1f    ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.22f   ) // Delay Feedback
+SP(133, 0.18f   ) // Reverb Mix
+SP(134, 0.48f   ) // Reverb Size
+SP_END()
+
+// LD Prism Fifth — A restrained fifth layer adds open harmonic tension to a clean digital lead.
+// Macros: 1 Open | 2 Digital edge | 3 Fifth layer | 4 Phase bend.
+SP_PRESET("LD Prism Fifth")
+SP(  0, 5       ) // A Table = Digital
+SP(  1, 0.19f   ) // A Position
+SP(  4, 0.52f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 11.f    ) // A Detune
+SP(  7, 0.7f    ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.16f   ) // B Position
+SP( 10, 7       ) // B Coarse
+SP( 12, 0.22f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 7.f     ) // B Detune
+SP( 15, 0.6f    ) // B Spread
+SP( 18, 4800.f  ) // Cutoff
+SP( 22, 0.13f   ) // Env2>Cutoff
+SP( 24, 4.f     ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 29, 210.f   ) // E2 Decay
+SP( 40, 0.42f   ) // Master
+SP( 48, 3       ) // A Warp = Bend negative
+SP( 49, 0.15f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.2f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 3       ) // M4 Dst = A Warp Amt
+SP( 79, 0.35f   ) // M4 Amt
+SP(129, 0.13f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.27f   ) // Delay Feedback
+SP(133, 0.1f    ) // Reverb Mix
+SP_END()
+
+// LD Silver Circuit — Quantized phase and tight detuning produce a crisp electronic lead, with the grit on a macro.
+// Macros: 1 Open | 2 Phase crunch | 3 Drive | 4 Harmonics.
+SP_PRESET("LD Silver Circuit")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.35f   ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 6.f     ) // A Detune
+SP( 18, 5800.f  ) // Cutoff
+SP( 21, 2.5f    ) // Drive
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 38, 35.f    ) // Glide
+SP( 40, 0.42f   ) // Master
+SP( 48, 5       ) // A Warp = Quantize
+SP( 49, 0.22f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.16f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.38f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 13      ) // M3 Dst = Drive
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 1       ) // M4 Dst = A Position
+SP( 79, 0.35f   ) // M4 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(129, 0.1f    ) // Delay Mix
+SP(131, 7       ) // Delay Sync = 1/16
+SP(132, 0.22f   ) // Delay Feedback
+SP(133, 0.07f   ) // Reverb Mix
+SP_END()
+
+// LD Violet Ribbon — A warm vocal-formant solo bends gently between notes with a slowly moving upper layer.
+// Macros: 1 Open | 2 Vowel | 3 Octave air | 4 Ensemble.
+SP_PRESET("LD Violet Ribbon")
+SP(  0, 6       ) // A Table = Vox
+SP(  1, 0.23f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 13.f    ) // A Detune
+SP(  7, 0.65f   ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.35f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.15f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 8.f     ) // B Detune
+SP( 15, 0.6f    ) // B Spread
+SP( 18, 4400.f  ) // Cutoff
+SP( 24, 18.f    ) // Attack
+SP( 25, 350.f   ) // Decay
+SP( 26, 0.8f    ) // Sustain
+SP( 27, 230.f   ) // Release
+SP( 32, 0.24f   ) // LFO Rate
+SP( 34, 0.08f   ) // LFO>Position
+SP( 38, 100.f   ) // Glide
+SP( 40, 0.42f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.22f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.5f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.17f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 2       ) // M5 Dst = B Position
+SP( 82, 0.14f   ) // M5 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(125, 0.07f   ) // Chorus Mix
+SP(126, 0.22f   ) // Chorus Rate
+SP(133, 0.17f   ) // Reverb Mix
+SP(135, 0.42f   ) // Reverb Decay
+SP_END()
+
+// ------------------------------------------------------------ PD (12), bank 4
+
+// PD Aurora Bloom — Slowly opening saw and harmonic layers bloom into a wide, soft chord bed.
+// Macros: 1 Open | 2 Harmonics | 3 Octave bloom | 4 Width detune.
+SP_PRESET("PD Aurora Bloom")
+SP(  1, 0.1f    ) // A Position
+SP(  4, 0.42f   ) // A Level
+SP(  5, 5       ) // A Unison
+SP(  6, 24.f    ) // A Detune
+SP(  7, 0.95f   ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.25f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.17f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 17.f    ) // B Detune
+SP( 15, 0.8f    ) // B Spread
+SP( 18, 2300.f  ) // Cutoff
+SP( 22, 0.2f    ) // Env2>Cutoff
+SP( 24, 950.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 2800.f  ) // Release
+SP( 28, 1600.f  ) // E2 Attack
+SP( 29, 2400.f  ) // E2 Decay
+SP( 30, 0.4f    ) // E2 Sustain
+SP( 32, 0.09f   ) // LFO Rate
+SP( 34, 0.1f    ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 2       ) // M2 Dst = B Position
+SP( 73, 0.42f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.24f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP(125, 0.1f    ) // Chorus Mix
+SP(126, 0.18f   ) // Chorus Rate
+SP(127, 0.28f   ) // Chorus Depth
+SP(133, 0.25f   ) // Reverb Mix
+SP(134, 0.76f   ) // Reverb Size
+SP(135, 0.66f   ) // Reverb Decay
+SP(136, 0.55f   ) // Reverb Damping
+SP_END()
+
+// PD Blue Hour — A low-pass pulse pad with minute opposing pitch drift and a warm triangle foundation.
+// Macros: 1 Open | 2 Pulse shape | 3 Saw body | 4 Ensemble.
+SP_PRESET("PD Blue Hour")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.25f   ) // A Position
+SP(  4, 0.46f   ) // A Level
+SP(  5, 4       ) // A Unison
+SP(  7, 0.9f    ) // A Spread
+SP(  8, 0       ) // B Table = Basic
+SP(  9, 0.24f   ) // B Position
+SP( 12, 0.18f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 11.f    ) // B Detune
+SP( 15, 0.7f    ) // B Spread
+SP( 17, 0.06f   ) // Sub
+SP( 18, 1900.f  ) // Cutoff
+SP( 24, 420.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 2400.f  ) // Release
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 42, 1       ) // Sub Shape = Triangle
+SP( 54, 0.13f   ) // L2 Rate
+SP( 57, 0.19f   ) // L3 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.32f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.23f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 7       ) // M5 Dst = A Pitch
+SP( 82, 0.003f  ) // M5 Amt
+SP( 83, 3       ) // M6 Src = LFO3
+SP( 84, 8       ) // M6 Dst = B Pitch
+SP( 85, -0.003f ) // M6 Amt
+SP(125, 0.12f   ) // Chorus Mix
+SP(126, 0.2f    ) // Chorus Rate
+SP(127, 0.32f   ) // Chorus Depth
+SP(133, 0.19f   ) // Reverb Mix
+SP(134, 0.58f   ) // Reverb Size
+SP(135, 0.52f   ) // Reverb Decay
+SP(136, 0.64f   ) // Reverb Damping
+SP_END()
+
+// PD Cloud Choir — Vox and Formant tables drift against each other, with soft filtered air above the choir.
+// Macros: 1 Open | 2 Choir vowel | 3 Throat layer | 4 Air.
+SP_PRESET("PD Cloud Choir")
+SP(  0, 6       ) // A Table = Vox
+SP(  1, 0.22f   ) // A Position
+SP(  4, 0.42f   ) // A Level
+SP(  5, 5       ) // A Unison
+SP(  6, 19.f    ) // A Detune
+SP(  7, 0.95f   ) // A Spread
+SP(  8, 3       ) // B Table = Formant
+SP(  9, 0.65f   ) // B Position
+SP( 12, 0.17f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 16.f    ) // B Detune
+SP( 15, 0.85f   ) // B Spread
+SP( 16, 0.025f  ) // Noise
+SP( 18, 3600.f  ) // Cutoff
+SP( 24, 850.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 3100.f  ) // Release
+SP( 32, 0.11f   ) // LFO Rate
+SP( 34, 0.12f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 44, 0.35f   ) // Noise Color
+SP( 54, 0.07f   ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.2f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.43f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 10      ) // M4 Dst = Noise Level
+SP( 79, 0.07f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 2       ) // M5 Dst = B Position
+SP( 82, -0.17f  ) // M5 Amt
+SP(133, 0.28f   ) // Reverb Mix
+SP(134, 0.82f   ) // Reverb Size
+SP(135, 0.65f   ) // Reverb Decay
+SP(136, 0.6f    ) // Reverb Damping
+SP_END()
+
+// PD Deep Current — A low-register harmonic drone slowly folds and pans; sustain is full for long held chords.
+// Macros: 1 Open | 2 Harmonic shift | 3 Fold layer | 4 Spread.
+SP_PRESET("PD Deep Current")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.14f   ) // A Position
+SP(  2, -12     ) // A Coarse
+SP(  4, 0.5f    ) // A Level
+SP(  5, 4       ) // A Unison
+SP(  6, 12.f    ) // A Detune
+SP(  7, 0.8f    ) // A Spread
+SP(  8, 7       ) // B Table = Fold
+SP(  9, 0.28f   ) // B Position
+SP( 12, 0.18f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 15, 0.9f    ) // B Spread
+SP( 18, 1400.f  ) // Cutoff
+SP( 24, 1300.f  ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 1.f     ) // Sustain
+SP( 27, 3600.f  ) // Release
+SP( 32, 0.06f   ) // LFO Rate
+SP( 34, 0.12f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 54, 0.08f   ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.35f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.45f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.24f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.14f   ) // M5 Amt
+SP(125, 0.08f   ) // Chorus Mix
+SP(126, 0.12f   ) // Chorus Rate
+SP(127, 0.25f   ) // Chorus Depth
+SP(133, 0.24f   ) // Reverb Mix
+SP(134, 0.78f   ) // Reverb Size
+SP(135, 0.7f    ) // Reverb Decay
+SP(136, 0.72f   ) // Reverb Damping
+SP_END()
+
+// PD Frosted Glass — Quiet bell partials sparkle over a wide harmonic sustain with a long, clean release.
+// Macros: 1 Open | 2 Glass color | 3 Warm layer | 4 Warmth detune.
+SP_PRESET("PD Frosted Glass")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.31f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 12.f    ) // A Detune
+SP(  7, 0.85f   ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.24f   ) // B Position
+SP( 12, 0.32f   ) // B Level
+SP( 13, 4       ) // B Unison
+SP( 14, 19.f    ) // B Detune
+SP( 15, 0.95f   ) // B Spread
+SP( 18, 6500.f  ) // Cutoff
+SP( 24, 700.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 3000.f  ) // Release
+SP( 32, 0.12f   ) // LFO Rate
+SP( 34, 0.06f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.15f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 15      ) // M4 Dst = B Detune
+SP( 79, 0.22f   ) // M4 Amt
+SP( 80, 13      ) // M5 Src = Random
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.12f   ) // M5 Amt
+SP(129, 0.08f   ) // Delay Mix
+SP(131, 5       ) // Delay Sync = 1/4
+SP(132, 0.22f   ) // Delay Feedback
+SP(133, 0.26f   ) // Reverb Mix
+SP(134, 0.7f    ) // Reverb Size
+SP(135, 0.62f   ) // Reverb Decay
+SP(136, 0.32f   ) // Reverb Damping
+SP_END()
+
+// PD Garden Static — Dark shaped noise breathes behind a pulse bed; motion lives in the noise color and pulse spectrum.
+// Macros: 1 Open | 2 Pulse color | 3 Rain layer | 4 Ensemble.
+SP_PRESET("PD Garden Static")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.21f   ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  5, 5       ) // A Unison
+SP(  6, 17.f    ) // A Detune
+SP(  7, 0.9f    ) // A Spread
+SP( 16, 0.07f   ) // Noise
+SP( 18, 2900.f  ) // Cutoff
+SP( 24, 800.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 2200.f  ) // Release
+SP( 32, 0.18f   ) // LFO Rate
+SP( 34, 0.12f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 44, 0.24f   ) // Noise Color
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.12f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.25f   ) // M4 Amt
+SP(125, 0.08f   ) // Chorus Mix
+SP(126, 0.16f   ) // Chorus Rate
+SP(133, 0.18f   ) // Reverb Mix
+SP(135, 0.45f   ) // Reverb Decay
+SP(136, 0.68f   ) // Reverb Damping
+SP_END()
+
+// PD Lunar Strings — Saw strings swell through a slow filter envelope with slight independent oscillator drift.
+// Macros: 1 Open | 2 Bow harmonics | 3 Second section | 4 Ensemble.
+SP_PRESET("PD Lunar Strings")
+SP(  1, 0.03f   ) // A Position
+SP(  4, 0.42f   ) // A Level
+SP(  5, 5       ) // A Unison
+SP(  6, 19.f    ) // A Detune
+SP(  7, 0.95f   ) // A Spread
+SP(  8, 0       ) // B Table = Basic
+SP(  9, 0.15f   ) // B Position
+SP( 12, 0.22f   ) // B Level
+SP( 13, 4       ) // B Unison
+SP( 14, 14.f    ) // B Detune
+SP( 15, 0.85f   ) // B Spread
+SP( 18, 3000.f  ) // Cutoff
+SP( 22, 0.18f   ) // Env2>Cutoff
+SP( 24, 520.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 1900.f  ) // Release
+SP( 28, 900.f   ) // E2 Attack
+SP( 29, 1800.f  ) // E2 Decay
+SP( 30, 0.5f    ) // E2 Sustain
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 54, 0.17f   ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.24f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.22f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 8       ) // M5 Dst = B Pitch
+SP( 82, 0.004f  ) // M5 Amt
+SP(133, 0.23f   ) // Reverb Mix
+SP(134, 0.72f   ) // Reverb Size
+SP(135, 0.58f   ) // Reverb Decay
+SP(136, 0.58f   ) // Reverb Damping
+SP_END()
+
+// PD Mirage Motion — Opposed wavefold and mirrored phase movement create an evolving, clear midrange texture.
+// Macros: 1 Open | 2 Mirror | 3 Fifth layer | 4 Fold.
+SP_PRESET("PD Mirage Motion")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.24f   ) // A Position
+SP(  4, 0.43f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 16.f    ) // A Detune
+SP(  7, 0.85f   ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.43f   ) // B Position
+SP( 10, 7       ) // B Coarse
+SP( 12, 0.15f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 9.f     ) // B Detune
+SP( 15, 0.7f    ) // B Spread
+SP( 18, 4500.f  ) // Cutoff
+SP( 24, 650.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 2000.f  ) // Release
+SP( 32, 0.14f   ) // LFO Rate
+SP( 34, 0.1f    ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 48, 4       ) // A Warp = Mirror
+SP( 49, 0.2f    ) // A Warp Amt
+SP( 54, 0.1f    ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.2f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 1       ) // M4 Dst = A Position
+SP( 79, 0.3f    ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.12f   ) // M5 Amt
+SP(129, 0.1f    ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.24f   ) // Delay Feedback
+SP(133, 0.22f   ) // Reverb Mix
+SP(134, 0.68f   ) // Reverb Size
+SP(135, 0.56f   ) // Reverb Decay
+SP_END()
+
+// PD Opal Air — A bright harmonic cloud with a faint octave bell, soft transients and a four-second release.
+// Macros: 1 Open | 2 Harmonic bloom | 3 Bell halo | 4 Ensemble.
+SP_PRESET("PD Opal Air")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.42f   ) // A Position
+SP(  4, 0.42f   ) // A Level
+SP(  5, 6       ) // A Unison
+SP(  6, 22.f    ) // A Detune
+SP(  7, 1.f     ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.18f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.1f    ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 8.f     ) // B Detune
+SP( 15, 0.8f    ) // B Spread
+SP( 16, 0.012f  ) // Noise
+SP( 18, 7800.f  ) // Cutoff
+SP( 24, 1200.f  ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 4000.f  ) // Release
+SP( 32, 0.08f   ) // LFO Rate
+SP( 34, 0.1f    ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 44, 0.5f    ) // Noise Color
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.1f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.18f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP(133, 0.3f    ) // Reverb Mix
+SP(134, 0.85f   ) // Reverb Size
+SP(135, 0.7f    ) // Reverb Decay
+SP(136, 0.4f    ) // Reverb Damping
+SP_END()
+
+// PD Soft Horizon — A simple, deliberately dark saw cushion leaves room for vocals and drums.
+// Macros: 1 Open | 2 Pulse shift | 3 Drive warmth | 4 Width detune.
+SP_PRESET("PD Soft Horizon")
+SP(  1, 0.1f    ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  5, 4       ) // A Unison
+SP(  6, 16.f    ) // A Detune
+SP(  7, 0.85f   ) // A Spread
+SP( 18, 1400.f  ) // Cutoff
+SP( 19, 0.05f   ) // Resonance
+SP( 24, 360.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 1700.f  ) // Release
+SP( 32, 0.2f    ) // LFO Rate
+SP( 34, 0.04f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.38f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.55f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 13      ) // M3 Dst = Drive
+SP( 76, 0.12f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.25f   ) // M4 Amt
+SP(125, 0.09f   ) // Chorus Mix
+SP(126, 0.25f   ) // Chorus Rate
+SP(127, 0.23f   ) // Chorus Depth
+SP(133, 0.14f   ) // Reverb Mix
+SP(134, 0.48f   ) // Reverb Size
+SP(135, 0.42f   ) // Reverb Decay
+SP(136, 0.7f    ) // Reverb Damping
+SP_END()
+
+// PD Tidal Memory — Opposite slow wavetable sweeps move between woody harmonics and breathy vowels.
+// Macros: 1 Open | 2 Harmonic color | 3 Voice layer | 4 Vowel.
+SP_PRESET("PD Tidal Memory")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.4f    ) // A Level
+SP(  5, 4       ) // A Unison
+SP(  6, 17.f    ) // A Detune
+SP(  7, 0.9f    ) // A Spread
+SP(  8, 6       ) // B Table = Vox
+SP(  9, 0.64f   ) // B Position
+SP( 12, 0.23f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 14.f    ) // B Detune
+SP( 15, 0.8f    ) // B Spread
+SP( 18, 3300.f  ) // Cutoff
+SP( 24, 1100.f  ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 2900.f  ) // Release
+SP( 32, 0.07f   ) // LFO Rate
+SP( 34, 0.13f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 54, 0.11f   ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.22f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.42f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 2       ) // M4 Dst = B Position
+SP( 79, -0.4f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 2       ) // M5 Dst = B Position
+SP( 82, -0.2f   ) // M5 Amt
+SP(129, 0.08f   ) // Delay Mix
+SP(131, 5       ) // Delay Sync = 1/4
+SP(132, 0.2f    ) // Delay Feedback
+SP(133, 0.24f   ) // Reverb Mix
+SP(134, 0.72f   ) // Reverb Size
+SP(135, 0.63f   ) // Reverb Decay
+SP(136, 0.62f   ) // Reverb Damping
+SP_END()
+
+// PD Velvet Orbit — A rounded folded pad turns slowly across the stereo field, without a rhythmic gate.
+// Macros: 1 Open | 2 Fold | 3 Pulse body | 4 Ensemble.
+SP_PRESET("PD Velvet Orbit")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.14f   ) // A Position
+SP(  4, 0.47f   ) // A Level
+SP(  5, 5       ) // A Unison
+SP(  6, 18.f    ) // A Detune
+SP(  7, 0.95f   ) // A Spread
+SP(  9, 0.2f    ) // B Position
+SP( 12, 0.15f   ) // B Level
+SP( 13, 3       ) // B Unison
+SP( 14, 12.f    ) // B Detune
+SP( 15, 0.8f    ) // B Spread
+SP( 18, 2100.f  ) // Cutoff
+SP( 24, 580.f   ) // Attack
+SP( 25, 1800.f  ) // Decay
+SP( 26, 0.85f   ) // Sustain
+SP( 27, 2500.f  ) // Release
+SP( 32, 0.12f   ) // LFO Rate
+SP( 34, 0.08f   ) // LFO>Position
+SP( 39, 12      ) // Voices
+SP( 40, 0.38f   ) // Master
+SP( 54, 0.085f  ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.42f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.22f   ) // M5 Amt
+SP(125, 0.06f   ) // Chorus Mix
+SP(126, 0.15f   ) // Chorus Rate
+SP(133, 0.22f   ) // Reverb Mix
+SP(134, 0.66f   ) // Reverb Size
+SP(135, 0.57f   ) // Reverb Decay
+SP(136, 0.64f   ) // Reverb Damping
+SP_END()
+
+// ------------------------------------------------------------ KY (8), bank 4
+
+// KY Amber Tines — A bell attack sits on a softer harmonic body, with velocity opening its tone.
+// Macros: 1 Open | 2 Tine color | 3 Body | 4 Drive warmth.
+SP_PRESET("KY Amber Tines")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.16f   ) // A Position
+SP(  4, 0.36f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.1f    ) // B Position
+SP( 12, 0.3f    ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 5000.f  ) // Cutoff
+SP( 22, 0.12f   ) // Env2>Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 1500.f  ) // Decay
+SP( 26, 0.16f   ) // Sustain
+SP( 27, 650.f   ) // Release
+SP( 29, 450.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.2f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.32f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.12f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.12f   ) // M5 Amt
+SP(125, 0.08f   ) // Chorus Mix
+SP(126, 0.7f    ) // Chorus Rate
+SP(127, 0.2f    ) // Chorus Depth
+SP(133, 0.13f   ) // Reverb Mix
+SP(134, 0.4f    ) // Reverb Size
+SP(135, 0.36f   ) // Reverb Decay
+SP(136, 0.58f   ) // Reverb Damping
+SP_END()
+
+// KY Cassette Ivory — A rounded folded electric key with tiny independent pitch drifts and a short noise transient.
+// Macros: 1 Open | 2 Hammer color | 3 Hammer noise | 4 Detune.
+SP_PRESET("KY Cassette Ivory")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.13f   ) // A Position
+SP(  4, 0.58f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 5.f     ) // A Detune
+SP(  7, 0.45f   ) // A Spread
+SP( 18, 3200.f  ) // Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 1000.f  ) // Decay
+SP( 26, 0.2f    ) // Sustain
+SP( 27, 380.f   ) // Release
+SP( 40, 0.46f   ) // Master
+SP( 44, 0.22f   ) // Noise Color
+SP( 54, 0.6f    ) // L2 Rate
+SP( 62, 0.1f    ) // E3 Attack
+SP( 63, 24.f    ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.27f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.045f  ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.12f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 7       ) // M5 Dst = A Pitch
+SP( 82, 0.0015f ) // M5 Amt
+SP( 83, 5       ) // M6 Src = ENV3
+SP( 84, 10      ) // M6 Dst = Noise Level
+SP( 85, 0.035f  ) // M6 Amt
+SP(133, 0.1f    ) // Reverb Mix
+SP(134, 0.32f   ) // Reverb Size
+SP(135, 0.3f    ) // Reverb Decay
+SP(136, 0.72f   ) // Reverb Damping
+SP_END()
+
+// KY Crystal Rhodes — A gentle FM attack gives a tine-like electric-key voice a distinct velocity-sensitive bell edge.
+// Macros: 1 Open | 2 FM tine | 3 Bell layer | 4 Drive warmth.
+SP_PRESET("KY Crystal Rhodes")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.1f    ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.13f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 6300.f  ) // Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 1600.f  ) // Decay
+SP( 26, 0.18f   ) // Sustain
+SP( 27, 700.f   ) // Release
+SP( 40, 0.46f   ) // Master
+SP( 48, 6       ) // A Warp = FM
+SP( 49, 0.05f   ) // A Warp Amt
+SP( 62, 0.2f    ) // E3 Attack
+SP( 63, 420.f   ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.13f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.14f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.18f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.12f   ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.12f   ) // M5 Amt
+SP( 83, 6       ) // M6 Src = Velocity
+SP( 84, 3       ) // M6 Dst = A Warp Amt
+SP( 85, 0.035f  ) // M6 Amt
+SP(125, 0.16f   ) // Chorus Mix
+SP(126, 0.75f   ) // Chorus Rate
+SP(127, 0.28f   ) // Chorus Depth
+SP(133, 0.14f   ) // Reverb Mix
+SP(134, 0.42f   ) // Reverb Size
+SP(135, 0.4f    ) // Reverb Decay
+SP_END()
+
+// KY Dusk Organ — A stable harmonic organ with a quiet octave drawbar and gentle rotating stereo motion.
+// Macros: 1 Open | 2 Drawbar color | 3 Upper drawbar | 4 Overdrive.
+SP_PRESET("KY Dusk Organ")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.18f   ) // A Position
+SP(  4, 0.5f    ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.38f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.22f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 4400.f  ) // Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 5.f     ) // Attack
+SP( 25, 1100.f  ) // Decay
+SP( 26, 1.f     ) // Sustain
+SP( 27, 110.f   ) // Release
+SP( 40, 0.46f   ) // Master
+SP( 54, 1.3f    ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.2f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.35f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.2f    ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.16f   ) // M5 Amt
+SP(125, 0.13f   ) // Chorus Mix
+SP(126, 1.2f    ) // Chorus Rate
+SP(127, 0.22f   ) // Chorus Depth
+SP(133, 0.08f   ) // Reverb Mix
+SP(134, 0.3f    ) // Reverb Size
+SP(135, 0.25f   ) // Reverb Decay
+SP_END()
+
+// KY Glass Marimba — A short bell strike and low harmonic body make a light mallet voice with key-tracked brightness.
+// Macros: 1 Open | 2 Mallet color | 3 Wood body | 4 Bite.
+SP_PRESET("KY Glass Marimba")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.31f   ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.07f   ) // B Position
+SP( 10, -12     ) // B Coarse
+SP( 12, 0.13f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 5800.f  ) // Cutoff
+SP( 22, 0.16f   ) // Env2>Cutoff
+SP( 23, 0.6f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 430.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 260.f   ) // Release
+SP( 29, 100.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.15f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.15f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.1f    ) // M5 Amt
+SP(133, 0.16f   ) // Reverb Mix
+SP(134, 0.46f   ) // Reverb Size
+SP(135, 0.42f   ) // Reverb Decay
+SP(136, 0.48f   ) // Reverb Damping
+SP_END()
+
+// KY Paper Felt — A muted folded keyboard with a quiet noise hammer and very little stereo spread.
+// Macros: 1 Open | 2 String color | 3 Felt noise | 4 Warmth.
+SP_PRESET("KY Paper Felt")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.04f   ) // A Position
+SP(  4, 0.63f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 4.f     ) // A Detune
+SP(  7, 0.25f   ) // A Spread
+SP( 18, 1800.f  ) // Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 1200.f  ) // Decay
+SP( 26, 0.08f   ) // Sustain
+SP( 27, 450.f   ) // Release
+SP( 40, 0.46f   ) // Master
+SP( 44, 0.18f   ) // Noise Color
+SP( 62, 0.1f    ) // E3 Attack
+SP( 63, 18.f    ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.32f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.04f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.1f    ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 10      ) // M5 Dst = Noise Level
+SP( 82, 0.05f   ) // M5 Amt
+SP( 83, 6       ) // M6 Src = Velocity
+SP( 84, 11      ) // M6 Dst = Cutoff
+SP( 85, 0.12f   ) // M6 Amt
+SP(133, 0.11f   ) // Reverb Mix
+SP(134, 0.32f   ) // Reverb Size
+SP(135, 0.3f    ) // Reverb Decay
+SP(136, 0.74f   ) // Reverb Damping
+SP_END()
+
+// KY Porcelain EP — A clear high-mid electric key uses a soft ring-modulated bell layer and a sustained harmonic core.
+// Macros: 1 Open | 2 Ring sheen | 3 Bell layer | 4 Harmonic body.
+SP_PRESET("KY Porcelain EP")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.15f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.2f    ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.14f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 6800.f  ) // Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 1300.f  ) // Decay
+SP( 26, 0.24f   ) // Sustain
+SP( 27, 550.f   ) // Release
+SP( 40, 0.46f   ) // Master
+SP( 48, 7       ) // A Warp = RM
+SP( 49, 0.2f    ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.13f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.32f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.22f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 1       ) // M4 Dst = A Position
+SP( 79, 0.3f    ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.1f    ) // M5 Amt
+SP(125, 0.1f    ) // Chorus Mix
+SP(126, 0.5f    ) // Chorus Rate
+SP(127, 0.22f   ) // Chorus Depth
+SP(129, 0.06f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.18f   ) // Delay Feedback
+SP(133, 0.12f   ) // Reverb Mix
+SP_END()
+
+// KY Sunday Clav — A tight pulse-and-harmonic key with a percussive resonant filter and velocity bite.
+// Macros: 1 Open | 2 Pulse width | 3 Body | 4 Drive.
+SP_PRESET("KY Sunday Clav")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.68f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.29f   ) // B Position
+SP( 12, 0.18f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 1400.f  ) // Cutoff
+SP( 19, 0.35f   ) // Resonance
+SP( 21, 2.f     ) // Drive
+SP( 22, 0.35f   ) // Env2>Cutoff
+SP( 23, 0.3f    ) // Keytrack
+SP( 24, 3.f     ) // Attack
+SP( 25, 300.f   ) // Decay
+SP( 26, 0.05f   ) // Sustain
+SP( 27, 110.f   ) // Release
+SP( 29, 75.f    ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, -0.4f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.17f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.16f   ) // M5 Amt
+SP(133, 0.06f   ) // Reverb Mix
+SP(134, 0.24f   ) // Reverb Size
+SP(135, 0.2f    ) // Reverb Decay
+SP(136, 0.65f   ) // Reverb Damping
+SP_END()
+
+// ------------------------------------------------------------ PL (10), bank 4
+
+// PL Bamboo Pixel — A woody harmonic pluck with a small digital edge and a dry, short tail.
+// Macros: 1 Open | 2 Wood color | 3 Pixel layer | 4 Drive.
+SP_PRESET("PL Bamboo Pixel")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.19f   ) // A Position
+SP(  4, 0.58f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 5       ) // B Table = Digital
+SP(  9, 0.12f   ) // B Position
+SP( 12, 0.1f    ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 2200.f  ) // Cutoff
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 23, 0.4f    ) // Keytrack
+SP( 24, 0.7f    ) // Attack
+SP( 25, 180.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 110.f   ) // Release
+SP( 29, 95.f    ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.28f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.38f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.17f   ) // M4 Amt
+SP(133, 0.07f   ) // Reverb Mix
+SP(134, 0.28f   ) // Reverb Size
+SP(135, 0.22f   ) // Reverb Decay
+SP_END()
+
+// PL Coral Harp — A warm harmonic harp with a ringing octave and velocity-scaled brightness.
+// Macros: 1 Open | 2 String color | 3 Octave ring | 4 Ensemble.
+SP_PRESET("PL Coral Harp")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.27f   ) // A Position
+SP(  4, 0.53f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 7.f     ) // A Detune
+SP(  7, 0.6f    ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.1f    ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.12f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 3500.f  ) // Cutoff
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 23, 0.5f    ) // Keytrack
+SP( 24, 0.7f    ) // Attack
+SP( 25, 450.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 650.f   ) // Release
+SP( 29, 240.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.22f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.15f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.12f   ) // M5 Amt
+SP(129, 0.13f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.27f   ) // Delay Feedback
+SP(133, 0.2f    ) // Reverb Mix
+SP(134, 0.58f   ) // Reverb Size
+SP_END()
+
+// PL Diamond Pick — A bright bell-spectrum pick with a fast, envelope-shaped phase bend.
+// Macros: 1 Open | 2 Pick bend | 3 Harmonics | 4 Stereo detune.
+SP_PRESET("PL Diamond Pick")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.23f   ) // A Position
+SP(  4, 0.55f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 8.f     ) // A Detune
+SP(  7, 0.55f   ) // A Spread
+SP( 18, 5500.f  ) // Cutoff
+SP( 22, 0.15f   ) // Env2>Cutoff
+SP( 24, 0.7f    ) // Attack
+SP( 25, 230.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 360.f   ) // Release
+SP( 29, 120.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 48, 2       ) // A Warp = Bend positive
+SP( 49, 0.08f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.16f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 1       ) // M3 Dst = A Position
+SP( 76, 0.3f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.15f   ) // M4 Amt
+SP( 80, 4       ) // M5 Src = ENV2
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.1f    ) // M5 Amt
+SP(129, 0.16f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.32f   ) // Delay Feedback
+SP(133, 0.16f   ) // Reverb Mix
+SP(136, 0.3f    ) // Reverb Damping
+SP_END()
+
+// PL Echo Reed — A hollow formant pluck with a soft octave reed and a tempo-synced echo.
+// Macros: 1 Open | 2 Reed vowel | 3 Octave reed | 4 Resonance.
+SP_PRESET("PL Echo Reed")
+SP(  0, 6       ) // A Table = Vox
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.5f    ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 6.f     ) // A Detune
+SP(  9, 0.42f   ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.13f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 2800.f  ) // Cutoff
+SP( 19, 0.23f   ) // Resonance
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 24, 0.7f    ) // Attack
+SP( 25, 310.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 330.f   ) // Release
+SP( 29, 180.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.42f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.22f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 12      ) // M4 Dst = Resonance
+SP( 79, 0.22f   ) // M4 Amt
+SP(129, 0.21f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.4f    ) // Delay Feedback
+SP(133, 0.12f   ) // Reverb Mix
+SP(136, 0.6f    ) // Reverb Damping
+SP_END()
+
+// PL Future Koto — A metallic FM snap rapidly relaxes into a woody harmonic decay.
+// Macros: 1 Open | 2 Metal bite | 3 Modulator tone | 4 Warmth.
+SP_PRESET("PL Future Koto")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.15f   ) // A Position
+SP(  4, 0.62f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.4f    ) // B Position
+SP( 10, 7       ) // B Coarse
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 4300.f  ) // Cutoff
+SP( 22, 0.2f    ) // Env2>Cutoff
+SP( 24, 0.7f    ) // Attack
+SP( 25, 500.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 430.f   ) // Release
+SP( 29, 180.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 48, 6       ) // A Warp = FM
+SP( 49, 0.05f   ) // A Warp Amt
+SP( 62, 0.1f    ) // E3 Attack
+SP( 63, 100.f   ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.2f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.25f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 2       ) // M3 Dst = B Position
+SP( 76, 0.4f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.14f   ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.18f   ) // M5 Amt
+SP(129, 0.11f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.27f   ) // Delay Feedback
+SP(133, 0.15f   ) // Reverb Mix
+SP(134, 0.5f    ) // Reverb Size
+SP_END()
+
+// PL Honey Drop — A resonant pulse pluck opens quickly and falls into a rounded, almost liquid tail.
+// Macros: 1 Open | 2 Pulse color | 3 Drive | 4 Liquid peak.
+SP_PRESET("PL Honey Drop")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.3f    ) // A Position
+SP(  4, 0.64f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 18, 950.f   ) // Cutoff
+SP( 19, 0.48f   ) // Resonance
+SP( 21, 1.5f    ) // Drive
+SP( 22, 0.45f   ) // Env2>Cutoff
+SP( 24, 0.7f    ) // Attack
+SP( 25, 370.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 300.f   ) // Release
+SP( 29, 220.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.5f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 13      ) // M3 Dst = Drive
+SP( 76, 0.15f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 12      ) // M4 Dst = Resonance
+SP( 79, 0.2f    ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.1f    ) // M5 Amt
+SP(129, 0.14f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.3f    ) // Delay Feedback
+SP(133, 0.1f    ) // Reverb Mix
+SP(136, 0.6f    ) // Reverb Damping
+SP_END()
+
+// PL Iridescent — A quiet fifth of bell partials floats over a wide folded pluck.
+// Macros: 1 Open | 2 Fold | 3 Fifth sparkle | 4 Width detune.
+SP_PRESET("PL Iridescent")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 12.f    ) // A Detune
+SP(  7, 0.8f    ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.15f   ) // B Position
+SP( 10, 7       ) // B Coarse
+SP( 12, 0.16f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 5.f     ) // B Detune
+SP( 15, 0.65f   ) // B Spread
+SP( 18, 4800.f  ) // Cutoff
+SP( 22, 0.18f   ) // Env2>Cutoff
+SP( 24, 0.7f    ) // Attack
+SP( 25, 480.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 700.f   ) // Release
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.18f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP(129, 0.17f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.34f   ) // Delay Feedback
+SP(133, 0.22f   ) // Reverb Mix
+SP(134, 0.65f   ) // Reverb Size
+SP(135, 0.58f   ) // Reverb Decay
+SP(136, 0.36f   ) // Reverb Damping
+SP_END()
+
+// PL Moon Kalimba — A soft bell thumb-piano voice with a low harmonic body and long but quiet release.
+// Macros: 1 Open | 2 Tine color | 3 Body | 4 Warmth.
+SP_PRESET("PL Moon Kalimba")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.12f   ) // A Position
+SP(  4, 0.43f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.04f   ) // B Position
+SP( 10, -12     ) // B Coarse
+SP( 12, 0.2f    ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 2600.f  ) // Cutoff
+SP( 22, 0.2f    ) // Env2>Cutoff
+SP( 23, 0.65f   ) // Keytrack
+SP( 24, 0.7f    ) // Attack
+SP( 25, 680.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 500.f   ) // Release
+SP( 29, 330.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.12f   ) // M4 Amt
+SP( 80, 6       ) // M5 Src = Velocity
+SP( 81, 11      ) // M5 Dst = Cutoff
+SP( 82, 0.1f    ) // M5 Amt
+SP(129, 0.1f    ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.23f   ) // Delay Feedback
+SP(133, 0.18f   ) // Reverb Mix
+SP(134, 0.52f   ) // Reverb Size
+SP(135, 0.48f   ) // Reverb Decay
+SP(136, 0.6f    ) // Reverb Damping
+SP_END()
+
+// PL Prism String — A bright, narrow saw pluck uses subtle sync to emphasize the pick instead of more unison.
+// Macros: 1 Open | 2 Sync pick | 3 Pulse color | 4 Stereo detune.
+SP_PRESET("PL Prism String")
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.61f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 8.f     ) // A Detune
+SP(  7, 0.55f   ) // A Spread
+SP( 18, 3700.f  ) // Cutoff
+SP( 19, 0.24f   ) // Resonance
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 24, 0.7f    ) // Attack
+SP( 25, 280.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 240.f   ) // Release
+SP( 29, 130.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 48, 1       ) // A Warp = Sync
+SP( 49, 0.08f   ) // A Warp Amt
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.22f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.25f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 1       ) // M3 Dst = A Position
+SP( 76, 0.4f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.17f   ) // M4 Amt
+SP( 80, 4       ) // M5 Src = ENV2
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.1f    ) // M5 Amt
+SP(129, 0.12f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.26f   ) // Delay Feedback
+SP(133, 0.12f   ) // Reverb Mix
+SP(134, 0.4f    ) // Reverb Size
+SP_END()
+
+// PL Velvet Pizz — A short, muted ensemble pluck supplies warm chord attacks without a sharp top end.
+// Macros: 1 Open | 2 String color | 3 Body | 4 Ensemble.
+SP_PRESET("PL Velvet Pizz")
+SP(  1, 0.12f   ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  5, 4       ) // A Unison
+SP(  6, 13.f    ) // A Detune
+SP(  7, 0.8f    ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.13f   ) // B Position
+SP( 12, 0.14f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 7.f     ) // B Detune
+SP( 15, 0.55f   ) // B Spread
+SP( 18, 1500.f  ) // Cutoff
+SP( 22, 0.22f   ) // Env2>Cutoff
+SP( 24, 4.f     ) // Attack
+SP( 25, 230.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 170.f   ) // Release
+SP( 29, 140.f   ) // E2 Decay
+SP( 40, 0.46f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.32f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP(133, 0.1f    ) // Reverb Mix
+SP(134, 0.38f   ) // Reverb Size
+SP(135, 0.3f    ) // Reverb Decay
+SP(136, 0.65f   ) // Reverb Damping
+SP_END()
+
+// ------------------------------------------------------------ FX (6), bank 4
+
+// FX Ashfall — A soft noise shower surrounds a slow ring-modulated harmonic drone.
+// Macros: 1 Open band | 2 Ring metal | 3 Dust | 4 Harmonics.
+SP_PRESET("FX Ashfall")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.52f   ) // A Position
+SP(  4, 0.32f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 11.f    ) // A Detune
+SP(  7, 0.7f    ) // A Spread
+SP(  8, 5       ) // B Table = Digital
+SP(  9, 0.4f    ) // B Position
+SP( 10, 7       ) // B Coarse
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 16, 0.22f   ) // Noise
+SP( 18, 2300.f  ) // Cutoff
+SP( 19, 0.24f   ) // Resonance
+SP( 20, 1       ) // Filter Type = BP12
+SP( 24, 320.f   ) // Attack
+SP( 25, 1300.f  ) // Decay
+SP( 26, 0.65f   ) // Sustain
+SP( 27, 1800.f  ) // Release
+SP( 40, 0.34f   ) // Master
+SP( 44, 0.36f   ) // Noise Color
+SP( 48, 7       ) // A Warp = RM
+SP( 49, 0.62f   ) // A Warp Amt
+SP( 54, 0.13f   ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 1       ) // M4 Dst = A Position
+SP( 79, 0.35f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.25f   ) // M5 Amt
+SP(129, 0.13f   ) // Delay Mix
+SP(131, 5       ) // Delay Sync = 1/4
+SP(132, 0.38f   ) // Delay Feedback
+SP(133, 0.28f   ) // Reverb Mix
+SP(134, 0.8f    ) // Reverb Size
+SP(135, 0.68f   ) // Reverb Decay
+SP(136, 0.7f    ) // Reverb Damping
+SP_END()
+
+// FX Broken Beacon — Sample-and-hold pitch gestures and a square-filter pulse make a deliberately robotic signal.
+// Macros: 1 Open | 2 Digital tone | 3 Noise | 4 Bite.
+SP_PRESET("FX Broken Beacon")
+SP(  0, 5       ) // A Table = Digital
+SP(  1, 0.42f   ) // A Position
+SP(  4, 0.48f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 18, 3200.f  ) // Cutoff
+SP( 19, 0.35f   ) // Resonance
+SP( 25, 1300.f  ) // Decay
+SP( 26, 0.65f   ) // Sustain
+SP( 27, 180.f   ) // Release
+SP( 33, 6       ) // LFO Sync = 1/8
+SP( 35, 0.22f   ) // LFO>Cutoff
+SP( 37, 3       ) // LFO Shape = Square
+SP( 40, 0.34f   ) // Master
+SP( 55, 7       ) // L2 Sync = 1/16
+SP( 56, 4       ) // L2 Shape = Sample and hold
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.23f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.12f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.2f    ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 7       ) // M5 Dst = A Pitch
+SP( 82, 0.25f   ) // M5 Amt
+SP(129, 0.22f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.43f   ) // Delay Feedback
+SP(133, 0.1f    ) // Reverb Mix
+SP(134, 0.3f    ) // Reverb Size
+SP(135, 0.3f    ) // Reverb Decay
+SP_END()
+
+// FX Gravity Well — A dark pitched drone falls slowly as its formants close, with clean low-frequency support.
+// Macros: 1 Open | 2 Vowel | 3 Depth | 4 Drive.
+SP_PRESET("FX Gravity Well")
+SP(  0, 3       ) // A Table = Formant
+SP(  1, 0.6f    ) // A Position
+SP(  4, 0.46f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 9.f     ) // A Detune
+SP( 17, 0.15f   ) // Sub
+SP( 18, 1700.f  ) // Cutoff
+SP( 24, 180.f   ) // Attack
+SP( 25, 1300.f  ) // Decay
+SP( 26, 0.65f   ) // Sustain
+SP( 27, 1600.f  ) // Release
+SP( 28, 1.f     ) // E2 Attack
+SP( 29, 2600.f  ) // E2 Decay
+SP( 40, 0.34f   ) // Master
+SP( 41, -0.45f  ) // Env2>Position
+SP( 62, 1.f     ) // E3 Attack
+SP( 63, 2500.f  ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.25f   ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 7       ) // M5 Dst = A Pitch
+SP( 82, 0.5f    ) // M5 Amt
+SP( 98, 1       ) // Voice Mode = Mono
+SP(129, 0.11f   ) // Delay Mix
+SP(131, 5       ) // Delay Sync = 1/4
+SP(132, 0.34f   ) // Delay Feedback
+SP(133, 0.27f   ) // Reverb Mix
+SP(134, 0.84f   ) // Reverb Size
+SP(135, 0.72f   ) // Reverb Decay
+SP(136, 0.68f   ) // Reverb Damping
+SP_END()
+
+// FX Laser Orchard — A short high FM chirp drops into a bell tail; random pan distributes repeated hits.
+// Macros: 1 Open | 2 FM bite | 3 Bell color | 4 Drive.
+SP_PRESET("FX Laser Orchard")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.23f   ) // A Position
+SP(  4, 0.5f    ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP(  8, 2       ) // B Table = Harmonic
+SP(  9, 0.4f    ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 7000.f  ) // Cutoff
+SP( 24, 0.1f    ) // Attack
+SP( 25, 430.f   ) // Decay
+SP( 26, 0.f     ) // Sustain
+SP( 27, 250.f   ) // Release
+SP( 40, 0.34f   ) // Master
+SP( 48, 6       ) // A Warp = FM
+SP( 49, 0.2f    ) // A Warp Amt
+SP( 62, 0.1f    ) // E3 Attack
+SP( 63, 95.f    ) // E3 Decay
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.12f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.3f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 1       ) // M3 Dst = A Position
+SP( 76, 0.4f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.14f   ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 7       ) // M5 Dst = A Pitch
+SP( 82, 0.7f    ) // M5 Amt
+SP( 83, 13      ) // M6 Src = Random
+SP( 84, 16      ) // M6 Dst = Pan
+SP( 85, 0.5f    ) // M6 Amt
+SP(129, 0.23f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.42f   ) // Delay Feedback
+SP(133, 0.2f    ) // Reverb Mix
+SP(134, 0.65f   ) // Reverb Size
+SP(135, 0.57f   ) // Reverb Decay
+SP(136, 0.3f    ) // Reverb Damping
+SP_END()
+
+// FX Ocean Terminal — Band-passed air and distant voxel-like formants evolve slowly, without relying on a long reverb.
+// Macros: 1 Open band | 2 Vowel | 3 Surf noise | 4 Ensemble.
+SP_PRESET("FX Ocean Terminal")
+SP(  0, 6       ) // A Table = Vox
+SP(  1, 0.22f   ) // A Position
+SP(  4, 0.34f   ) // A Level
+SP(  5, 4       ) // A Unison
+SP(  6, 18.f    ) // A Detune
+SP(  7, 0.9f    ) // A Spread
+SP( 16, 0.2f    ) // Noise
+SP( 18, 1800.f  ) // Cutoff
+SP( 19, 0.3f    ) // Resonance
+SP( 20, 1       ) // Filter Type = BP12
+SP( 24, 1100.f  ) // Attack
+SP( 25, 1300.f  ) // Decay
+SP( 26, 0.65f   ) // Sustain
+SP( 27, 3200.f  ) // Release
+SP( 32, 0.09f   ) // LFO Rate
+SP( 34, 0.18f   ) // LFO>Position
+SP( 35, 0.08f   ) // LFO>Cutoff
+SP( 40, 0.34f   ) // Master
+SP( 44, 0.4f    ) // Noise Color
+SP( 54, 0.07f   ) // L2 Rate
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.32f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.45f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 10      ) // M3 Dst = Noise Level
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.22f   ) // M4 Amt
+SP( 80, 2       ) // M5 Src = LFO2
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.3f    ) // M5 Amt
+SP(133, 0.3f    ) // Reverb Mix
+SP(134, 0.9f    ) // Reverb Size
+SP(135, 0.75f   ) // Reverb Decay
+SP(136, 0.72f   ) // Reverb Damping
+SP_END()
+
+// FX Voltage Bloom — A slowly rising sync sweep blooms from a low harmonic bed into bright electrical texture.
+// Macros: 1 Open | 2 Sync ceiling | 3 Low body | 4 Noise.
+SP_PRESET("FX Voltage Bloom")
+SP(  1, 0.14f   ) // A Position
+SP(  4, 0.42f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 14.f    ) // A Detune
+SP(  7, 0.8f    ) // A Spread
+SP(  8, 7       ) // B Table = Fold
+SP(  9, 0.1f    ) // B Position
+SP( 10, -12     ) // B Coarse
+SP( 12, 0.17f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 3800.f  ) // Cutoff
+SP( 24, 280.f   ) // Attack
+SP( 25, 1300.f  ) // Decay
+SP( 26, 0.65f   ) // Sustain
+SP( 27, 1400.f  ) // Release
+SP( 40, 0.34f   ) // Master
+SP( 48, 1       ) // A Warp = Sync
+SP( 49, 0.1f    ) // A Warp Amt
+SP( 62, 1800.f  ) // E3 Attack
+SP( 63, 1100.f  ) // E3 Decay
+SP( 64, 0.8f    ) // E3 Sustain
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.22f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 3       ) // M2 Dst = A Warp Amt
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 10      ) // M4 Dst = Noise Level
+SP( 79, 0.1f    ) // M4 Amt
+SP( 80, 5       ) // M5 Src = ENV3
+SP( 81, 3       ) // M5 Dst = A Warp Amt
+SP( 82, 0.38f   ) // M5 Amt
+SP(129, 0.15f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(133, 0.23f   ) // Reverb Mix
+SP(134, 0.7f    ) // Reverb Size
+SP(135, 0.62f   ) // Reverb Decay
+SP_END()
+
+// ------------------------------------------------------------ SQ (6), bank 4
+
+// SQ Cinder Steps — A tight acid phrase alternates low anchors with octave answers and two deliberate rests.
+// Macros: 1 Open | 2 Pulse shift | 3 Sub weight | 4 Acid peak.
+SP_PRESET("SQ Cinder Steps")
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.59f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 17, 0.18f   ) // Sub
+SP( 18, 550.f   ) // Cutoff
+SP( 19, 0.5f    ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 21, 3.f     ) // Drive
+SP( 22, 0.35f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 170.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 100.f   ) // Release
+SP( 29, 95.f    ) // E2 Decay
+SP( 40, 0.43f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.35f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.45f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.25f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 12      ) // M4 Dst = Resonance
+SP( 79, 0.22f   ) // M4 Amt
+SP( 98, 1       ) // Voice Mode = Mono
+SP(109, 1       ) // Arp On = On
+SP(115, 52.f    ) // Arp Gate
+SP(116, 18.f    ) // Arp Swing
+SP(119, 2       ) // Arp Vel Mode = Pattern
+SP(129, 0.09f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.22f   ) // Delay Feedback
+SP(133, 0.06f   ) // Reverb Mix
+SPARP("fc0af9d0fc8af9df", "05050005070505000505030507050507")
+SP_END()
+
+// SQ Glass Constell — A bell pattern crosses two octaves with velocity shaping and a gentle stereo scatter.
+// Macros: 1 Open | 2 Bell color | 3 Drive warmth | 4 Stereo detune.
+SP_PRESET("SQ Glass Constell")
+SP(  0, 4       ) // A Table = Bell
+SP(  1, 0.2f    ) // A Position
+SP(  4, 0.47f   ) // A Level
+SP(  5, 2       ) // A Unison
+SP(  6, 7.f     ) // A Detune
+SP(  7, 0.65f   ) // A Spread
+SP( 18, 5400.f  ) // Cutoff
+SP( 22, 0.16f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 310.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 420.f   ) // Release
+SP( 29, 120.f   ) // E2 Decay
+SP( 40, 0.43f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.16f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 13      ) // M3 Dst = Drive
+SP( 76, 0.1f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.16f   ) // M4 Amt
+SP( 80, 13      ) // M5 Src = Random
+SP( 81, 16      ) // M5 Dst = Pan
+SP( 82, 0.2f    ) // M5 Amt
+SP(109, 1       ) // Arp On = On
+SP(110, 3       ) // Arp Mode = Up Down Exclusive
+SP(113, 2       ) // Arp Octaves
+SP(115, 64.f    ) // Arp Gate
+SP(116, 12.f    ) // Arp Swing
+SP(119, 2       ) // Arp Vel Mode = Pattern
+SP(129, 0.17f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.28f   ) // Delay Feedback
+SP(133, 0.2f    ) // Reverb Mix
+SP(134, 0.58f   ) // Reverb Size
+SPARP("fc9dfb8afc9efb7a", "05050705070503050505070907050503")
+SP_END()
+
+// SQ Midnight Motor — A syncopated mono bass pulse favors the off-beat and uses short ties to connect its roots.
+// Macros: 1 Open | 2 Pulse width | 3 Sub weight | 4 Drive.
+SP_PRESET("SQ Midnight Motor")
+SP(  0, 1       ) // A Table = PWM
+SP(  1, 0.26f   ) // A Position
+SP(  4, 0.57f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 17, 0.23f   ) // Sub
+SP( 18, 670.f   ) // Cutoff
+SP( 19, 0.3f    ) // Resonance
+SP( 20, 3       ) // Filter Type = LP24
+SP( 22, 0.25f   ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 170.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 100.f   ) // Release
+SP( 29, 110.f   ) // E2 Decay
+SP( 38, 40.f    ) // Glide
+SP( 40, 0.43f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.3f    ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.45f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 9       ) // M3 Dst = Sub Level
+SP( 76, 0.27f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 13      ) // M4 Dst = Drive
+SP( 79, 0.22f   ) // M4 Amt
+SP( 98, 2       ) // Voice Mode = Legato
+SP(109, 1       ) // Arp On = On
+SP(115, 74.f    ) // Arp Gate
+SP(116, 35.f    ) // Arp Swing
+SP(119, 2       ) // Arp Vel Mode = Pattern
+SP(129, 0.065f  ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.17f   ) // Delay Feedback
+SPARP("f0bdf0aef0bdf0ac", "05150505000505070515050500050305")
+SP_END()
+
+// SQ Orbit Chords — Whole held chords become a sparse soft pluck rhythm, leaving large spaces between attacks.
+// Macros: 1 Open | 2 Harmonic color | 3 Bell layer | 4 Width detune.
+SP_PRESET("SQ Orbit Chords")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.24f   ) // A Position
+SP(  4, 0.46f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 12.f    ) // A Detune
+SP(  7, 0.8f    ) // A Spread
+SP(  8, 4       ) // B Table = Bell
+SP(  9, 0.1f    ) // B Position
+SP( 10, 12      ) // B Coarse
+SP( 12, 0.12f   ) // B Level
+SP( 14, 0.f     ) // B Detune
+SP( 15, 0.f     ) // B Spread
+SP( 18, 3000.f  ) // Cutoff
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 320.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 460.f   ) // Release
+SP( 29, 120.f   ) // E2 Decay
+SP( 40, 0.35f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.2f    ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.2f    ) // M4 Amt
+SP(109, 1       ) // Arp On = On
+SP(110, 7       ) // Arp Mode = Chord
+SP(115, 44.f    ) // Arp Gate
+SP(116, 15.f    ) // Arp Swing
+SP(119, 2       ) // Arp Vel Mode = Pattern
+SP(129, 0.13f   ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.28f   ) // Delay Feedback
+SP(133, 0.17f   ) // Reverb Mix
+SP(134, 0.52f   ) // Reverb Size
+SP(135, 0.44f   ) // Reverb Decay
+SPARP("f000a0c00e00b0d0", "05000000050005000005000005000500")
+SP_END()
+
+// SQ Paper Satellites — A seven-step melodic figure rotates against the bar, with a woody pluck and modest octave leaps.
+// Macros: 1 Open | 2 Wood color | 3 Drive warmth | 4 Resonance.
+SP_PRESET("SQ Paper Satellites")
+SP(  0, 2       ) // A Table = Harmonic
+SP(  1, 0.14f   ) // A Position
+SP(  4, 0.58f   ) // A Level
+SP(  6, 0.f     ) // A Detune
+SP(  7, 0.f     ) // A Spread
+SP( 18, 2600.f  ) // Cutoff
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 220.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 180.f   ) // Release
+SP( 29, 120.f   ) // E2 Decay
+SP( 40, 0.43f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.27f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.4f    ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 13      ) // M3 Dst = Drive
+SP( 76, 0.15f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 12      ) // M4 Dst = Resonance
+SP( 79, 0.25f   ) // M4 Amt
+SP(109, 1       ) // Arp On = On
+SP(110, 5       ) // Arp Mode = As Played
+SP(115, 56.f    ) // Arp Gate
+SP(119, 2       ) // Arp Vel Mode = Pattern
+SP(121, 7       ) // Arp Steps
+SP(129, 0.1f    ) // Delay Mix
+SP(131, 6       ) // Delay Sync = 1/8
+SP(132, 0.22f   ) // Delay Feedback
+SP(133, 0.09f   ) // Reverb Mix
+SP(134, 0.35f   ) // Reverb Size
+SP(135, 0.3f    ) // Reverb Decay
+SPARP("f9cd8ebfffffffff", "05050705030507050505050505050505")
+SP_END()
+
+// SQ Violet Transit — A folded arpeggio links a rising-falling octave path with a stepped opposite formant scan.
+// Macros: 1 Open | 2 Fold | 3 Voice layer | 4 Ensemble.
+SP_PRESET("SQ Violet Transit")
+SP(  0, 7       ) // A Table = Fold
+SP(  1, 0.15f   ) // A Position
+SP(  4, 0.43f   ) // A Level
+SP(  5, 3       ) // A Unison
+SP(  6, 10.f    ) // A Detune
+SP(  7, 0.75f   ) // A Spread
+SP(  8, 6       ) // B Table = Vox
+SP(  9, 0.68f   ) // B Position
+SP( 12, 0.16f   ) // B Level
+SP( 13, 2       ) // B Unison
+SP( 14, 7.f     ) // B Detune
+SP( 15, 0.6f    ) // B Spread
+SP( 18, 2800.f  ) // Cutoff
+SP( 22, 0.3f    ) // Env2>Cutoff
+SP( 24, 1.f     ) // Attack
+SP( 25, 250.f   ) // Decay
+SP( 26, 0.15f   ) // Sustain
+SP( 27, 300.f   ) // Release
+SP( 29, 120.f   ) // E2 Decay
+SP( 40, 0.43f   ) // Master
+SP( 68, 9       ) // M1 Src = Macro 1
+SP( 69, 11      ) // M1 Dst = Cutoff
+SP( 70, 0.25f   ) // M1 Amt
+SP( 71, 10      ) // M2 Src = Macro 2
+SP( 72, 1       ) // M2 Dst = A Position
+SP( 73, 0.35f   ) // M2 Amt
+SP( 74, 11      ) // M3 Src = Macro 3
+SP( 75, 6       ) // M3 Dst = B Level
+SP( 76, 0.23f   ) // M3 Amt
+SP( 77, 12      ) // M4 Src = Macro 4
+SP( 78, 14      ) // M4 Dst = A Detune
+SP( 79, 0.18f   ) // M4 Amt
+SP( 80, 17      ) // M5 Src = Arp Step
+SP( 81, 2       ) // M5 Dst = B Position
+SP( 82, -0.38f  ) // M5 Amt
+SP(109, 1       ) // Arp On = On
+SP(110, 2       ) // Arp Mode = Up Down Inclusive
+SP(115, 66.f    ) // Arp Gate
+SP(116, 20.f    ) // Arp Swing
+SP(119, 2       ) // Arp Vel Mode = Pattern
+SP(129, 0.15f   ) // Delay Mix
+SP(131, 9       ) // Delay Sync = 1/8 triplet
+SP(132, 0.3f    ) // Delay Feedback
+SP(133, 0.16f   ) // Reverb Mix
+SP(134, 0.5f    ) // Reverb Size
+SP(135, 0.45f   ) // Reverb Decay
+SPARP("9cfb8dfac9eb7dfb", "03050507050709070505030505070503")
+SP_END()
