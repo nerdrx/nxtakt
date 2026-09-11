@@ -70,7 +70,7 @@ struct AutoTargets {
 // blank editor, and a blank editor is never the answer.
 enum class FoldMode : int { All = 0, Used = 1, Key = 2 };
 inline constexpr int kFoldModeCount = 3;
-inline constexpr const char* kFoldModeNames[kFoldModeCount] = {"ALL", "FOLD", "KEY"};
+inline constexpr const char* kFoldModeNames[kFoldModeCount] = {"All", "Used", "Scale"};
 
 // What the bottom lane edits when it is not showing an envelope. These are the
 // per-note fields, and they come FIRST in the lane chooser for a MIDI clip --
@@ -82,7 +82,7 @@ inline constexpr const char* kFoldModeNames[kFoldModeCount] = {"ALL", "FOLD", "K
 // height, and every selected stem takes the value under the cursor.
 enum class NoteLane : int { Velocity = 0, Chance = 1, VelRange = 2 };
 inline constexpr int kNoteLaneCount = 3;
-inline constexpr const char* kNoteLaneNames[kNoteLaneCount] = {"VEL", "CHANCE", "RANGE"};
+inline constexpr const char* kNoteLaneNames[kNoteLaneCount] = {"Velocity", "Chance", "Range"};
 
 class PianoRoll {
 public:

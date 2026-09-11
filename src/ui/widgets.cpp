@@ -273,14 +273,14 @@ void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
 
     const bool selected = kind == Pill::Primary || kind == Pill::Danger;
     if (kind == Pill::Ghost && m.hover < 0.004f && m.press < 0.004f) return;
-    const Col base = selected ? pal::panelAlt.mix(tint, 0.22f) : rgb(0x343A45);
-    const Col fill = base.mix(nx::text, 0.04f * m.hover).scale(1.f - 0.10f * m.press);
-    r->roundRect(b, rad, fill);
+    const Col base = selected ? pal::panelAlt.mix(tint, 0.25f) : rgb(0x3C3D42);
+    const Col fill = base.mix(nx::text, 0.05f * m.hover).scale(1.f - 0.10f * m.press);
+    // A quiet one-pixel contact shadow gives the face definition without an
+    // outline around every control. The pointer geometry remains stationary.
+    r->roundRect({b.x, b.y + dpi, b.w, b.h}, rad, rgba(0x000000, 0.14f));
+    r->gradRect(b, rad, nx::linear2(180.f, fill.mix(nx::text, 0.025f), fill));
     r->roundRectOutline(b, rad, dpi,
-        selected ? tint.alpha(0.75f) : rgb(0x49515F).alpha(0.65f + 0.35f * m.hover));
-    if (selected)
-        r->rect({b.x + 2.f * dpi, b.bottom() - 2.f * dpi,
-                 std::max(0.f, b.w - 4.f * dpi), dpi}, tint);
+        selected ? tint.alpha(0.25f) : rgba(0xFFFFFF, 0.055f + 0.045f * m.hover));
 
 }
 
@@ -379,13 +379,9 @@ void Ui::fieldWell(const Rect& b, f32 focus, bool deep) const {
     const f32 k = clampv(focus, 0.f, 1.f);
     r->roundRectOutline(b, rad, std::max(1.f, std::round(dpi)),
                         nx::line.mix(nx::violet, k));
-    if (k > 0.02f) {
-        const f32 s = std::max(1.f, dpi);
-        r->roundRectOutline(b.inset(-3.5f * s), rad + 3.5f * s, 3.f * s,
-                            nx::violet.alpha(0.20f * k));
-        r->roundRectOutline(b.inset(-1.0f * s), rad + 1.0f * s, 2.f * s,
-                            nx::violet.alpha(0.60f * k));
-    }
+    if (k > 0.02f)
+        r->roundRectOutline(b.inset(-1.f * dpi), rad + dpi, dpi,
+                            nx::violet.alpha(0.55f * k));
 }
 
 // §5's tab pill. ONE indicator, translated -- not two backgrounds toggled.
@@ -480,12 +476,12 @@ bool Ui::tabPill(u64 id, const Rect& b, const char* const* labels, int count, in
     // for every shape->text->shape alternation, and a tab strip that drew each
     // slot complete would cost one per tab.
     const f32 tabRad = std::min(nx::pill * dpi, b.h * 0.5f);
-    r->gradRect(b, tabRad, nx::glassChip, 0.55f);
-    r->gradStroke(b, tabRad, dpi, nx::edge, 0.7f);
+    r->roundRect(b, tabRad, rgb(0x222327));
 
     const Rect ind{track.x + slotW * at, track.y, slotW, track.h};
-    const UiMotion im = motion(id, hotSlot >= 0, active != 0 && hotSlot >= 0);
-    pillRect(ind, std::min(nx::pill * dpi, ind.h * 0.5f), Pill::Primary, nx::violet, im);
+    r->roundRect({ind.x, ind.y + dpi, ind.w, ind.h}, tabRad, rgba(0x000000, 0.22f));
+    r->roundRect(ind, tabRad, rgb(0x53545A));
+    r->roundRectOutline(ind, tabRad, dpi, rgba(0xFFFFFF, 0.08f));
 
     Font* f = fSmall ? fSmall : fBody;
     if (f) {
@@ -496,7 +492,7 @@ bool Ui::tabPill(u64 id, const Rect& b, const char* const* labels, int count, in
             const f32 under = clampv(1.f - std::fabs(at - (f32)i), 0.f, 1.f);
             const Col c = nx::muted.mix(nx::text, under)
                                    .mix(nx::text, i == hotSlot ? 0.4f : 0.f);
-            microIn(*f, s, labels[i] ? labels[i] : "", c, Align::Center);
+            drawTextIn(*f, s, labels[i] ? labels[i] : "", c, Align::Center);
         }
     }
     return changed || was != *idx;
@@ -1235,7 +1231,7 @@ bool Ui::knob(u64 id, const Rect& b, f32* v, f32 lo, f32 hi, f32 def, const char
 
     // Track + value arc, drawn just outside the body.
     const f32 aRad = rad - 1.5f;
-    const f32 aTh = std::max(1.5f, rad * 0.18f);
+    const f32 aTh = std::max(1.5f, rad * 0.12f);
     arc(cx, cy, aRad, kKnobA0, kKnobA1, aTh, pal::divider);
 
     const bool bipolar = (lo < 0.f && hi > 0.f);
@@ -1627,10 +1623,10 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
     r->hairlineH(b.x, b.right(), unityY, nx::hairlineInk, 1.f);
 
     const Rect handle{b.x, std::round(handleY(*t)), b.w, handleH};
-    Col hc = pal::ridge;
-    if (active == id) hc = pal::ridge.scale(1.25f);
-    else if (hotNow) hc = pal::ridge.scale(1.12f);
-    bevel(handle, 2.f, hc, 0.18f);
+    Col hc = rgb(0xB8B9BF);
+    if (active == id) hc = rgb(0xE0D2BE);
+    else if (hotNow) hc = rgb(0xD0D1D5);
+    r->roundRect(handle, 3.f * std::max(1.f, r->dpiScale()), hc);
     // The grip line across the middle of the cap.
     r->hairlineH(handle.x + 1.f, handle.right() - 1.f, std::round(handle.cy()),
                  rgba(0x000000, 0.55f), 1.f);

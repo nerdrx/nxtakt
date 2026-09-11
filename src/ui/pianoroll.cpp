@@ -814,6 +814,16 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         paintPitch_ = -1;
         paintBeat_ = -1.0;
         scrollX_ = scrollY_ = 0.f;
+        // Open on the musical material, including low notes near the edge of
+        // a compact editor. Subsequent edits retain the user's scroll position.
+        if (midiClip && fold_ == FoldMode::All && !clip.notes.empty()) {
+            int low = 127, high = 0;
+            for (const auto& note : clip.notes) {
+                low = std::min(low, (int)note.pitch);
+                high = std::max(high, (int)note.pitch);
+            }
+            scrollY_ = ((f32)kCentrePitch - 0.5f * (f32)(low + high)) * rowH;
+        }
         zoom_ = 0.f;                 // -> fit to width below
         addedLastPress_ = false;
         followSel_ = false;
@@ -1506,7 +1516,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // Re-derived from the NX palette: the plates are --panel and --panel-2,
         // the key lift is violet-family, and an out-of-scale row drops to the
         // field rather than turning grey. Recession is the language.
-        Col kc = isBlackKey(p) ? rgb(0x20242B) : rgb(0x30353D);
+        Col kc = isBlackKey(p) ? rgb(0x27282C) : rgb(0x333438);
         if (!inKey)                        kc = nx::bgTop.alpha(0.74f);
         else if (showKey && key.isRoot(p)) kc = kc.mix(nx::violet, 0.44f);
         else if (showKey)                  kc = kc.mix(nx::violetSoft, 0.10f);
@@ -1545,7 +1555,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
 
     // --- grid: note rows for a pattern, the waveform for a sample -----------
     rr.pushClip(grid);
-    rr.rect(grid, rgb(0x171A20));
+    rr.rect(grid, rgb(0x1D1E21));
     // An audio clip's canvas is the same well the note grid sits in, with the
     // same faint lift a white-key row gets -- one surface family, so a waveform
     // and a pattern are read against the same material.
@@ -1585,7 +1595,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         if (endX < grid.right()) {
             const f32 x = std::max(grid.x, endX);
             rr.rect({x, grid.y, grid.right() - x, grid.h}, tl::deadZone);
-            rr.hairlineV(x, grid.y, grid.bottom(), nx::violetSoft.alpha(0.22f));
+            rr.hairlineV(x, grid.y, grid.bottom(), nx::muted.alpha(0.22f));
         }
     }
     if (!midiClip && clip.sample && clip.sample->peakBuckets > 0) {
@@ -1637,7 +1647,7 @@ bool PianoRoll::draw(Ui& ui, const Rect& r, ClipModel& clip, const AutoTargets& 
         // that touch are one long note, which is a reading error, not a taste
         // one. Skipped under 4 px, where an edge would be the whole note.
         if (nr.w > 4.f * s)
-            rr.roundRectOutline(nr, 0.f, std::max(1.f, s), base.scale(0.28f));
+            rr.roundRectOutline(nr, 0.f, std::max(1.f, s), nc.mix(rgb(0x27282C), 0.32f));
         // A velocity range is a band, not a level, so it is drawn as one: a
         // hairline across the block. It is deliberately quiet -- a range changes
         // how a note feels, not whether it happens.

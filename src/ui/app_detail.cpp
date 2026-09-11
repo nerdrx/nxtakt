@@ -126,7 +126,7 @@ void App::drawDetailPanel(const Rect& r) {
     // pill speaks in indices, so the conversion happens here and nowhere else.
     const f32 tabW = 84 * s, tabH = 28 * s;
     Rect tabs{head.x + 6 * s, head.y + (head.h - tabH) * 0.5f, tabW * 2.f + 6 * s, tabH};
-    static const char* const kTabs[2] = {"CLIP", "DEVICES"};
+    static const char* const kTabs[2] = {"Clip", "Devices"};
     int tab = detailTab_ == DetailTab::Clip ? 0 : 1;
     if (ui_.tabPill(uiId(9, 0), tabs, kTabs, 2, &tab)) {
         detailTab_ = tab == 0 ? DetailTab::Clip : DetailTab::Devices;
@@ -217,17 +217,13 @@ void App::drawArrangeClipDetail(const Rect& r) {
                  nx::text, Align::Left, 0);
     rend_.hairlineH(r.x + nx::sp2 * s, r.right() - nx::sp2 * s, head.bottom());
 
-    const f32 panelW = 270 * s;
+    const f32 panelW = 278 * s;
     Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
     f32 y = ctrl.y;
-    const f32 rowH = 28 * s, lblW = 68 * s;
-    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking -- and
-    // they sit on the VALUE's baseline, not on their own centre. See
-    // baselineRow(): the label and the widget beside it are two different fonts
-    // in one row, and centring each of them independently left the small one a
-    // pixel high all the way down the column.
+    const f32 rowH = 28 * s, lblW = 76 * s;
+    // Field labels share the value baseline and use quiet sentence case.
     auto label = [&](const char* tx, const Rect& row) {
-        ui_.microIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
+        rend_.textIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
                     tx, nx::muted, Align::Left, 0);
     };
     // Every one of these is a placement field, so every one of them goes through
@@ -246,14 +242,14 @@ void App::drawArrangeClipDetail(const Rect& r) {
         }
         y += rowH + 4 * s;
     };
-    num(0, "START",  &it->start,  0.0, 1e6, "%.3f bt");
-    num(1, "LENGTH", &it->length, kMinArrBeats, 1e6, "%.3f bt");
-    num(2, "OFFSET", &it->offset, 0.0, 1e6, "%.3f bt");
-    num(3, "FADE IN",  &it->fadeIn,  0.0, kMaxOverlapBeats, "%.3f bt");
-    num(4, "FADE OUT", &it->fadeOut, 0.0, kMaxOverlapBeats, "%.3f bt");
+    num(0, "Start",  &it->start,  0.0, 1e6, "%.3f bt");
+    num(1, "Length", &it->length, kMinArrBeats, 1e6, "%.3f bt");
+    num(2, "Offset", &it->offset, 0.0, 1e6, "%.3f bt");
+    num(3, "Fade in",  &it->fadeIn,  0.0, kMaxOverlapBeats, "%.3f bt");
+    num(4, "Fade out", &it->fadeOut, 0.0, kMaxOverlapBeats, "%.3f bt");
     {   // Gain and loop, which mean the same thing here as anywhere.
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        label("GAIN", row);
+        label("Gain", row);
         f64 db = gainToDb(m.gain);
         Rect dn{row.x + lblW, row.y, 70 * s, row.h};
         if (ui_.dragNumber(uiId(UiDetailPlacement, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
@@ -263,7 +259,7 @@ void App::drawArrangeClipDetail(const Rect& r) {
             placed = true;
         }
         Rect lp{dn.right() + 6 * s, row.y, 52 * s, row.h};
-        if (ui_.button(uiId(UiDetailPlacement, 6), lp, "LOOP", m.loop, nx::violet)) {
+        if (ui_.button(uiId(UiDetailPlacement, 6), lp, "Loop", m.loop, nx::violet)) {
             undoPoint("clip loop");
             m.loop = !m.loop;
             placed = true;
@@ -471,18 +467,16 @@ void App::drawClipDetail(const Rect& r) {
 
     // A single inspector keeps the material as the main working surface.
     // Clip playback and note tools form two compact groups in the same column.
-    const f32 panelW = 270 * s;
+    const f32 panelW = 278 * s;
     Rect ctrl{r.x + 8 * s, head.bottom() + 6 * s, panelW, r.bottom() - head.bottom() - 12 * s};
     f32 y = ctrl.y;
-    const f32 rowH = 26 * s, lblW = 68 * s;
+    const f32 rowH = 26 * s, lblW = 76 * s;
     const Rect ctrl2 = ctrl;
     f32 y2 = ctrl.y;
 
-    // Field labels are §5 micro-labels: 10px, uppercase, wide tracking, sitting
-    // on the value column's baseline rather than on their own centre
-    // (baselineRow, and the same reason as the arrangement panel's).
+    // Quiet sentence-case labels share the value baseline for a clean inspector.
     auto label = [&](const char* t, const Rect& row) {
-        ui_.microIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
+        rend_.textIn(fSmall_, baselineRow({row.x, row.y, lblW, row.h}, fSmall_, fBody_),
                     t, nx::muted, Align::Left, 0);
     };
 
@@ -490,7 +484,7 @@ void App::drawClipDetail(const Rect& r) {
         Rect row{ctrl.x, y, ctrl.w, rowH};
         Rect lp{row.x + lblW, row.y, 52 * s, row.h};
         if (!midi) {
-            label("WARP", row);
+            label("Warp", row);
             static const char* warpNames[] = {"Off", "Repitch", "Beats"};
             int wi = (int)m.warp;
             Rect sel{row.x + lblW, row.y, 84 * s, row.h};
@@ -501,9 +495,9 @@ void App::drawClipDetail(const Rect& r) {
             }
             lp = {sel.right() + 6 * s, row.y, 52 * s, row.h};
         } else {
-            label("PLAY", row);
+            label("Playback", row);
         }
-        if (ui_.button(uiId(8, 1), lp, "LOOP", m.loop, nx::violet)) {
+        if (ui_.button(uiId(8, 1), lp, "Loop", m.loop, nx::violet)) {
             undoPoint("clip loop");
             m.loop = !m.loop;
             send(Cmd::ClipLoop, selTrack_, selSlot_, m.loop ? 1.0 : 0.0);
@@ -512,7 +506,7 @@ void App::drawClipDetail(const Rect& r) {
     }
     if (!midi) {   // Clip tempo
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        label("CLIP BPM", row);
+        label("Tempo", row);
         f64 bpm = m.clipBpm;
         Rect dn{row.x + lblW, row.y, 70 * s, row.h};
         if (ui_.dragNumber(uiId(8, 2), dn, &bpm, 20.0, 400.0, 0.1, "%.2f")) {
@@ -542,7 +536,7 @@ void App::drawClipDetail(const Rect& r) {
     }
     {   // Gain
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        label("GAIN", row);
+        label("Gain", row);
         f64 db = gainToDb(m.gain);
         Rect dn{row.x + lblW, row.y, 70 * s, row.h};
         if (ui_.dragNumber(uiId(8, 5), dn, &db, -70.0, 12.0, 0.1, "%.1f dB",
@@ -555,7 +549,7 @@ void App::drawClipDetail(const Rect& r) {
     }
     {   // Launch quantum override
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        label("LAUNCH Q", row);
+        label("Launch grid", row);
         static const char* qn[kQuantumCount + 1] = {"Global"};
         static bool qnInit = false;
         if (!qnInit) { for (int i = 0; i < kQuantumCount; ++i) qn[i + 1] = kQuantumNames[i]; qnInit = true; }
@@ -573,7 +567,7 @@ void App::drawClipDetail(const Rect& r) {
         // after `followBeats` of playback, so all three are pure clip state and
         // ride across in the same RtClip as everything else here.
         Rect row{ctrl.x, y, ctrl.w, rowH};
-        label("LAUNCH", row);
+        label("Launch", row);
 
         f64 pct = m.prob * 100.0;
         Rect pr{row.x + lblW, row.y, 48 * s, row.h};
@@ -622,7 +616,7 @@ void App::drawClipDetail(const Rect& r) {
         // not, say, CLIP KEY, and why it goes through undoPoint like any other
         // session edit.
         Rect row{ctrl2.x, y2, ctrl2.w, rowH};
-        label("KEY", row);
+        label("Scale", row);
         static const char* rootNames[12] = {};
         static bool rootInit = false;
         if (!rootInit) { for (int i = 0; i < 12; ++i) rootNames[i] = kPitchNames[i]; rootInit = true; }
@@ -643,7 +637,7 @@ void App::drawClipDetail(const Rect& r) {
             ses_.scale.mode = clScaleMode(mode);
         }
         Rect nr{sr.right() + 6 * s, row.y, 44 * s, row.h};
-        if (ui_.button(uiId(UiDetailKeyRow, 2), nr, "SNAP", ses_.scale.snap, nx::violet)) {
+        if (ui_.button(uiId(UiDetailKeyRow, 2), nr, "Snap", ses_.scale.snap, nx::violet)) {
             undoPoint("scale snap");
             ses_.scale.snap = !ses_.scale.snap;
         }
@@ -668,7 +662,7 @@ void App::drawClipDetail(const Rect& r) {
         // for what it does and not for what it does it to.
         {
             Rect row{ctrl2.x, y2, ctrl2.w, rowH};
-            label("QUANTIZE", row);
+            label("Quantize", row);
             // The grid, as a selector over the divisions a sequencer actually
             // uses. Triplets are in the list because a swung part cannot be
             // quantized by a straight grid at any strength.
@@ -690,8 +684,8 @@ void App::drawClipDetail(const Rect& r) {
                                Align::Center, nullptr, 0.0, /*def=*/0.0))
                 roll_->setQuantStrength((f32)(amt * 0.01));
 
-            Rect qb{ar.right() + 6 * s, row.y, 44 * s, row.h};
-            if (ui_.button(uiId(UiDetailNotes, 2), qb, "APPLY")) {
+            Rect qb{ar.right() + 6 * s, row.y, 48 * s, row.h};
+            if (ui_.button(uiId(UiDetailNotes, 2), qb, "Apply")) {
                 const ClipModel was = m;
                 if (roll_->quantizeSelected(m)) {
                     undoPointWith("quantize", m, was);
@@ -705,9 +699,9 @@ void App::drawClipDetail(const Rect& r) {
         }
         {
             Rect row{ctrl2.x, y2, ctrl2.w, rowH};
-            label("NOTES", row);
+            label("Notes", row);
             Rect lg{row.x + lblW, row.y, 64 * s, row.h};
-            Rect dp{lg.right() + 6 * s, row.y, 44 * s, row.h};
+            Rect dp{lg.right() + 6 * s, row.y, 48 * s, row.h};
             // Down and up are one control with two directions, so they are one
             // cluster with a seam rather than two capsules in a gap.
             Rect dn{dp.right() + 6 * s, row.y, 28 * s, row.h};
@@ -715,7 +709,7 @@ void App::drawClipDetail(const Rect& r) {
             ui_.segCluster({dn.x, dn.y, up.right() - dn.x, dn.h});
             rend_.hairlineV(up.x, dn.y + 3 * s, dn.bottom() - 3 * s);
 
-            if (ui_.button(uiId(UiDetailNotes, 3), lg, "LEGATO")) {
+            if (ui_.button(uiId(UiDetailNotes, 3), lg, "Legato")) {
                 const ClipModel was = m;
                 if (roll_->legatoSelected(m)) {
                     undoPointWith("legato", m, was);
@@ -724,7 +718,7 @@ void App::drawClipDetail(const Rect& r) {
             }
             if (ui_.hovered(lg))
                 ui_.tip = "Stretch each note to where the next one begins";
-            if (ui_.button(uiId(UiDetailNotes, 4), dp, "DUP")) {
+            if (ui_.button(uiId(UiDetailNotes, 4), dp, "Copy")) {
                 const ClipModel was = m;
                 if (roll_->duplicateSelected(m)) {
                     undoPointWith("duplicate notes", m, was);

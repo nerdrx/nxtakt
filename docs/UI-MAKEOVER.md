@@ -1,10 +1,18 @@
-# NxTakt 0.14: workspace makeover
+# NxTakt 0.15: workspace refinement
 
 This release makes the existing DAW easier to read and operate across Session,
 Arrangement, clip editing, automation, browsing, and device panels. Projects and
 the audio engine keep their existing formats and behavior.
 
 This visual direction supersedes the older glass/nebula styling in DESIGN.md.
+
+## 0.15 refinement
+
+Quieter borders, segmented view switches, sentence-case labels, consistent
+library spacing and flatter fader handles establish a calmer hierarchy. Track,
+return and master gain values remain visible. Piano clips open centered on their
+notes, preserving manual scrolling after opening. Shared timeline surfaces now
+match the neutral workspace. Existing larger click targets remain intact.
 
 ## Interaction contract
 
@@ -23,8 +31,8 @@ This visual direction supersedes the older glass/nebula styling in DESIGN.md.
 
 ## Layout and appearance
 
-- Opaque charcoal surfaces, matte controls, restrained violet state accents and clearer secondary text. Decorative glow and the animated background are off by default.
-- Text sizes: 10px supporting labels, 12px body/header, 17px transport readout.
+- Warm graphite surfaces, softly rounded matte controls, restrained amber state accents and clearer secondary text. Decorative glow and the animated background are off by default.
+- Text sizes: 11px supporting labels, 13px body/header, 18px transport readout; Noto Sans preferred with existing system fallbacks.
 - 46px transport bar; 30px transport controls; explicit Files toggle. Optional
   diagnostics disappear as width decreases instead of overlapping transport.
 - 28px Session rows and track headers; 24px mute/solo/arm and send controls;
@@ -66,7 +74,7 @@ and audio detail, Arrangement, device panels, F1 help, 1024x768 actual window
 size and fractional scale. Gamescope's output size alone can scale the image;
 resize the application window when testing its layout.
 
-The source of record is `nerdrx/nxtakt`. `make dist VERSION=0.14.0` creates an
+The source of record is `nerdrx/nxtakt`. `make dist VERSION=0.15.0` creates an
 NX Hub-compatible Linux archive and checksum. Pushing a `v*` tag triggers the
 GitHub release workflow, which builds on Ubuntu, runs the full suite, checks
 the packaged binaries and only then publishes assets. Prefer those portable

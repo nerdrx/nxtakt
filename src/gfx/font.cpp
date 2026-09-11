@@ -103,6 +103,8 @@ std::string findSystemFont(bool bold) {
     return {};
 #else
     static const char* regular[] = {
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -111,6 +113,9 @@ std::string findSystemFont(bool bold) {
         "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         nullptr};
     static const char* boldFonts[] = {
+        "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
         "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",

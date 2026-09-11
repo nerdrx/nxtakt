@@ -21,33 +21,34 @@
 
 namespace lat {
 
-// ---------------------------------------------------------------------------
-// THE JUDGMENT, for this file (docs/DESIGN.md §4, and the specimen sheet's
-// "WORKING SURFACE / FLAT, PRECISE, FAST" strip).
-//
-// The clip grid is an instrument, not a card. It stays flat: palette fills,
-// wells, hairlines, one quad per cell and no gradient, no sheen and no shadow
-// anywhere inside it. Clip colours stay saturated because they are DATA -- the
-// thing the eye is scanning for -- and dimming them to be tasteful would be
-// branding paid for out of the user's ability to read their own set.
-//
-// The furniture around it is chrome and takes the tier table in full: the scene
-// column, the return and master strips and the mixer band get the glass fills,
-// the lit edges and the hairline dividers. That split is the whole of the
-// design decision in this file; everything below is bookkeeping.
-// ---------------------------------------------------------------------------
+// Neutral channel furniture, flat clip colors, and clear selection outlines.
 namespace {
 
-// A working-surface corner. --radius-sm, which after the owner's 2026-08-15
-// geometry call (theme.h) is the instrument-grade 3px rather than the hub's
-// 12px: a 20px clip cell with a 12px corner is a lozenge, and a grid of
-// lozenges is a toy. Spelled once here so the grid, the stop row and the strip
-// heads cannot drift apart.
-constexpr f32 kCellRadius = nx::radiusSm;
+// Working cells stay nearly square; the surrounding controls use the softer
+// theme radius so the grid reads as an instrument rather than a wall of pills.
+constexpr f32 kCellRadius = 3.f;
 
 // Keep channel furniture quiet so clip colors and live controls stand out.
 void panelSurface(Renderer& r, const Rect& b, f32 radius = 0.f) {
     r.roundRect(b, radius, pal::panel);
+}
+
+// Fader positions are nonlinear. Always display the actual output gain.
+void drawFaderValue(Renderer& r, const Font& font, const Rect& b, f32 position,
+                    f32 s, bool stacked = false) {
+    const f32 gain = faderToGain(position);
+    f32 db = gainToDb(gain);
+    if (std::abs(db) < 0.05f) db = 0.f;
+    char value[24];
+    if (gain <= 0.f) std::snprintf(value, sizeof value, "-inf");
+    else std::snprintf(value, sizeof value, db > 0.f ? "+%.1f" : "%.1f", db);
+    if (stacked) {
+        r.textIn(font, {b.x, b.y, b.w, 15.f * s}, value, nx::text, Align::Center, 0);
+        r.textIn(font, {b.x, b.y + 16.f * s, b.w, 14.f * s}, "dB", nx::muted, Align::Center, 0);
+    } else {
+        std::string label = std::string(value) + " dB";
+        r.textIn(font, b, label.c_str(), nx::text, Align::Center, 0);
+    }
 }
 
 // A rect on whole device pixels. gradStroke() snaps itself; roundRectOutline()
@@ -101,7 +102,7 @@ void pushSlotLabel(const Rect& box, const char* s, const Col& ink,
 // of pixels below the device names beside them, which is precisely the kind of
 // thing §11 says is invisible in a diff and obvious in a screenshot.
 //
-// Geometry is now stated once: rows are 12px tall on a 14px pitch, inset 4px,
+// Geometry is stated once: rows are 18px tall on a 22px pitch, inset 4px,
 // starting 4px down -- and the empty label occupies exactly the rect the first
 // row would have, so it lands on that row's baseline by construction rather
 // than by two numbers agreeing.
@@ -110,8 +111,8 @@ void pushSlotLabel(const Rect& box, const char* s, const Col& ink,
 // cut), or an empty string.
 // ---------------------------------------------------------------------------
 
-constexpr f32 kChainRowH   = 12.f;
-constexpr f32 kChainRowPitch = 14.f;
+constexpr f32 kChainRowH   = 18.f;
+constexpr f32 kChainRowPitch = 22.f;
 constexpr f32 kChainInset  = 4.f;
 
 std::string drawChainList(Renderer& r, Ui& ui, const Font& fSmall, const Rect& body,
@@ -121,7 +122,7 @@ std::string drawChainList(Renderer& r, Ui& ui, const Font& fSmall, const Rect& b
     if (devices.empty()) {
         // A micro-label chip, in the first row's own rect: inert, and §5's
         // "muted = inert" is the whole of what it has room to say.
-        ui.microIn(fSmall, first, "no fx", nx::muted.alpha(0.7f), Align::Center, 0);
+        r.textIn(fSmall, first, "No FX", nx::muted, Align::Center, 0);
         return {};
     }
     std::string tip;
@@ -390,10 +391,8 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
             rend_.roundRect(cell, rad, pal::slotHover);
             rend_.roundRectOutline(snapRect(cell), rad, std::max(1.f, s),
                                    nx::violet.alpha(0.7f));
-        } else if (hot) {
-            rend_.gradRect(cell, rad, nx::glassChip, 0.55f);
         } else {
-            rend_.well(cell, rad);
+            rend_.roundRect(cell, rad, hot ? pal::slotHover : pal::panel);
         }
         // Colour chip so the track's identity reads at a glance, as in Live.
         // Inset by the corner radius so it does not overhang the rounding.
@@ -449,31 +448,19 @@ void App::drawClipGrid(const Rect& r, f32 scrollX) {
 
     Rect grid{r.x, clipTop, r.w, mixerTop - clipTop};
     rend_.pushClip(grid);
-    // The working surface recesses: one quad behind the whole grid, and the §3
-    // field goes on showing through it.
-    //
-    // FLAT, deliberately. --well-deep ramps 0.62 -> 0.46 alpha of the same
-    // near-black, which stretched over a third of the window is a gradient
-    // nobody can see -- and the four big gradient fills this view was carrying
-    // measured about 0.1 ms a frame together under NXTAKT_GFX_STATS on the
-    // software rasteriser the headless harness runs on. §1 says halve a
-    // gradient you can see from across the room; a gradient you cannot see up
-    // close should simply be a colour. This one is --well-deep's own top stop.
-    rend_.rect(grid, rgba(0x04020A, 0.55f));
+    // One neutral field and thin rules keep the clip colors legible.
+    rend_.rect(grid, pal::appBg);
     g_slotText.clear();
 
     f32 x = r.x - scrollX;
     for (size_t ti = 0; ti < ses_.tracks.size(); ++ti) {
         const f32 w = ses_.tracks[ti].width * s;
-        // The lanes used to be painted bands, two greys apart. They are rules
-        // now: the selected track carries a whisper of violet (§1, violet
-        // leads) and the boundaries are hairlines that fade at both ends, so
-        // the grid reads as ruled rather than as striped.
-        const Rect lane{x, top, w - lay::gutter * s, grid.h};
+        // The selected lane gets a neutral lift; separators keep the grid calm.
+        const Rect lane{x, clipTop, w - lay::gutter * s, grid.h};
         if (lane.right() >= r.x && lane.x <= r.right()) {
-            if ((int)ti == selTrack_) rend_.rect(lane, nx::violet.alpha(0.04f));
-            rend_.hairlineV(lane.right(), top, grid.bottom(),
-                            nx::hairlineInk.alpha(0.10f));
+            if ((int)ti == selTrack_) rend_.rect(lane, nx::text.alpha(0.025f));
+            rend_.hairlineV(lane.right(), clipTop, grid.bottom(),
+                            nx::hairlineInk.alpha(0.22f));
         }
         for (int si = 0; si < ns; ++si) {
             Rect cell{x, top + si * slotH, w - lay::gutter * s, slotH - lay::gutter * s};
@@ -485,8 +472,9 @@ void App::drawClipGrid(const Rect& r, f32 scrollX) {
         if (stopCell.bottom() <= mixerTop && stopCell.right() >= r.x && stopCell.x <= r.right()) {
             const u64 id = uiId(4, 5000 + (int)ti);
             const bool hot = ui_.setHot(id, stopCell) && ui_.isHot(id);
-            rend_.roundRect(stopCell, kCellRadius * s, hot ? pal::slotHover : pal::slotEmpty);
-            ui_.stopSquare(stopCell, hot ? nx::text : nx::muted);
+            rend_.roundRect(stopCell, kCellRadius * s, hot ? pal::slotHover : pal::panel);
+            ui_.stopSquare({stopCell.cx() - 7 * s, stopCell.cy() - 7 * s, 14 * s, 14 * s},
+                           hot ? nx::text : nx::muted);
             if (hot) ui_.cursor = Cursor::Hand;
             if (hot && win_.input().pressed[0]) send(Cmd::StopTrack, (int)ti);
         }
@@ -578,11 +566,9 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
             rend_.roundRectOutline(snapRect(cell), rad, 1.5f * s,
                                    pal::recRed.scale(0.35f + 0.4f * ph));
         } else {
-            // An empty slot is a well over the field: `slotEmpty` is
-            // translucent, so the nebula goes on breathing through the empty
-            // half of the grid. That is the whole mechanism of §4's faked
-            // glass, and it costs one quad.
-            rend_.roundRect(cell, rad, hot ? pal::slotHover : pal::slotEmpty);
+            if (hot) rend_.roundRect(cell, rad, pal::slotHover);
+            else rend_.rect(cell, pal::slotEmpty.alpha(0.45f));
+            rend_.hairlineH(cell.x, cell.right(), cell.bottom(), nx::hairlineInk.alpha(0.18f));
             // Armed track, record intent lit: this slot is a take waiting to
             // happen, so say so before the click rather than after.
             if (target) rend_.circle(cell.x + 8 * s, cell.cy(), 3 * s,
@@ -649,12 +635,6 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
         fill = base.scale(0.55f + 0.45f * ph);
     }
     rend_.roundRect(cell, rad, fill);
-    // One lit pixel along the top edge, the light arriving upper-left exactly
-    // as it does in every gradient in the system (§11). Flat, so the grid stays
-    // flat: a highlight, not a gradient.
-    rend_.rect({cell.x + rad, cell.y, std::max(0.f, cell.w - rad * 2.f), hair},
-               fill.scale(1.35f).alpha(0.9f));
-
     // Launch button zone on the left. Cyan while it plays: §1 reserves cyan for
     // light inside a material -- live values, playheads, running state.
     const f32 btnW = 24 * s;
@@ -756,7 +736,7 @@ void App::drawSceneColumn(const Rect& r) {
     rend_.hairlineV(r.x, r.y, r.bottom());
 
     Rect head{r.x, r.y, r.w, lay::trackHeadH * s};
-    ui_.microIn(fSmall_, head, "SCENES", nx::muted, Align::Center);
+    rend_.textIn(fBold_, head, "Scenes", nx::text, Align::Center, 0);
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
     const f32 rad = kCellRadius * s;
@@ -770,8 +750,7 @@ void App::drawSceneColumn(const Rect& r) {
         const bool sel = si == selSlot_;
         // Well rows, exactly as the specimen sheet has them: nothing at rest,
         // the glass chip under the pointer, and a hairline between neighbours.
-        if (sel)      rend_.gradRect(cell, rad, nx::glassChip, 0.85f);
-        else if (hot) rend_.gradRect(cell, rad, nx::glassChip, 0.45f);
+        if (sel || hot) rend_.roundRect(cell, rad, pal::slotHover);
         if (sel) rend_.rect({nx::snapPx(cell.x), cell.y, std::max(1.f, nx::snapPx(2 * s)),
                              cell.h}, nx::violet);
         if (si + 1 < ns)
@@ -829,16 +808,13 @@ void App::drawSceneColumn(const Rect& r) {
 
     Rect stopAll{r.x + 2 * s, top + ns * slotH, r.w - 4 * s, slotH - lay::gutter * s};
     if (stopAll.bottom() <= r.bottom() - lay::mixerH * s) {
-        if (ui_.button(uiId(5, 900), stopAll, "STOP ALL")) send(Cmd::StopAll);
+        if (ui_.button(uiId(5, 900), stopAll, "Stop all")) send(Cmd::StopAll);
     }
 
-    // "+ SCENE", not "+ Scene": it sits directly under STOP ALL, and two chrome
-    // actions in one cluster spelled two different ways is exactly the
-    // inconsistent capitalisation §9 rules out. Uppercase is the spelling every
-    // other action chip in the program uses (LOOP, APPLY, MAP, STOP ALL).
+    // Keep the row's add action aligned with the scene launchers above.
     Rect add{r.x + 2 * s, stopAll.bottom() + 4 * s, r.w - 4 * s, 24 * s};
     if (add.bottom() <= r.bottom() - lay::mixerH * s) {
-        if (ui_.button(uiId(5, 901), add, "+ SCENE")) { undoPoint("add scene"); addScene(); }
+        if (ui_.button(uiId(5, 901), add, "+ Scene")) { undoPoint("add scene"); addScene(); }
     }
     rend_.popClip();   // the scene rows' clip, opened before the loop
 }
@@ -850,7 +826,7 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
     rend_.pushClip(mix);
     // A docked band of controls, so it takes the bar fill and a hairline along
     // its top edge rather than the solid rule it used to have.
-    rend_.gradRect(mix, 0.f, nx::glassBar);
+    rend_.rect(mix, pal::panel);
     rend_.hairlineH(mix.x, mix.right(), mix.y);
 
     f32 x = r.x - scrollX;
@@ -860,9 +836,8 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         Rect col{x, top, w - lay::gutter * s, mix.h};
         x += w;
         if (col.right() < r.x || col.x > r.right()) continue;
-        // The same violet wash the selected lane carries upstairs, so a track
-        // reads as one column from its header to its fader.
-        if ((int)ti == selTrack_) rend_.rect(col, nx::violet.alpha(0.04f));
+        // Continue the selected lane's neutral lift down through the mixer.
+        if ((int)ti == selTrack_) rend_.rect(col, nx::text.alpha(0.025f));
         rend_.hairlineV(col.right(), mix.y + nx::sp1 * s, mix.bottom() - nx::sp1 * s,
                         nx::hairlineInk.alpha(0.10f));
 
@@ -952,7 +927,8 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
             y += 2 * rowH + 3 * s;
         }
 
-        // Pan
+        // Pan keeps a visible name alongside its independent drag target.
+        rend_.textIn(fSmall_, {col.x + 6 * s, y, 24 * s, 28 * s}, "Pan", nx::muted, Align::Left, 0);
         Rect pan{col.cx() - 14 * s, y, 28 * s, 28 * s};
         if (ui_.knob(uiId(6, (int)ti, 3), pan, &t.pan, -1.f, 1.f, 0.f)) {
             undoPointWith("pan", t.pan, wasPan);
@@ -980,6 +956,9 @@ void App::drawMixer(const Rect& r, f32 scrollX) {
         const f32 lvl = std::max(es_.meterL[ti], es_.meterR[ti]);
         peakHoldT_[ti] = std::max(lvl, peakHoldT_[ti] * 0.985f);
         ui_.meterV(meter, lvl, peakHoldT_[ti]);
+        drawFaderValue(rend_, fSmall_,
+                       {meter.right() + 3 * s, y + 2 * s, col.right() - meter.right() - 6 * s, 32 * s},
+                       t.fader, s, true);
     }
     rend_.popClip();
 }
@@ -1009,11 +988,10 @@ void App::drawReturnStrips(const Rect& r) {
         // the same last-setHot-wins trick the device boxes use.
         const u64 id = uiId(UiReturnStrip, i, 0);
         const bool hot = ui_.setHot(id, col) && ui_.isHot(id);
-        if (sel) rend_.rect(col, nx::violet.alpha(0.04f));
+        if (sel) rend_.rect(col, nx::text.alpha(0.025f));
 
         Rect head{col.x, col.y, col.w, lay::trackHeadH * s};
-        if (sel) rend_.gradRect(head, rad, nx::glassChip, 0.85f);
-        else     rend_.well(head, rad);
+        rend_.roundRect(head, rad, sel ? pal::slotHover : pal::panel);
         rend_.rect({head.x + rad, head.y, std::max(0.f, head.w - rad * 2.f),
                     std::max(1.f, nx::snapPx(2 * s))}, pal::soloBlue);
         ui_.microIn(fSmall_, {head.x + 3 * s, head.y, 10 * s, head.h}, kReturnLetter[i],
@@ -1058,6 +1036,8 @@ void App::drawReturnStrips(const Rect& r) {
             undoPointWith("return volume", rt.fader, wasFader);
             send(Cmd::ReturnVol, i, 0, faderToGain(rt.fader));
         }
+        drawFaderValue(rend_, fSmall_, {mix.x + 3 * s, mix.y + 4 * s, mix.w - 6 * s, 18 * s},
+                       rt.fader, s);
         const f32 lvl = std::max(es_.returnMeterL[i], es_.returnMeterR[i]);
         peakHoldR_[i] = std::max(lvl, peakHoldR_[i] * 0.985f);
         ui_.meterV(meter, lvl, peakHoldR_[i]);
@@ -1092,7 +1072,7 @@ void App::drawMasterStrip(const Rect& r) {
     // surface in its own right: the card fill, and a hairline off the returns.
     panelSurface(rend_, r);
     rend_.hairlineV(r.x, r.y, r.bottom());
-    if (sel) rend_.rect(r, nx::violet.alpha(0.04f));
+    if (sel) rend_.rect(r, nx::text.alpha(0.025f));
 
     // Same deal as a return: the strip is the handle for the master chain, so
     // the whole column is a click target that the controls in it take back.
@@ -1100,9 +1080,8 @@ void App::drawMasterStrip(const Rect& r) {
     const bool hot = ui_.setHot(id, r) && ui_.isHot(id);
 
     Rect head{r.x, r.y, r.w, lay::trackHeadH * s};
-    if (sel) rend_.gradRect(head, rad, nx::glassChip, 0.85f);
-    else     rend_.well(head, rad);
-    ui_.microIn(fSmall_, head, "MASTER", nx::text, Align::Center);
+    rend_.roundRect(head, rad, sel ? pal::slotHover : pal::panel);
+    rend_.textIn(fBold_, head, "Master", nx::text, Align::Center, 0);
 
     const f32 top = r.bottom() - lay::mixerH * s;
     Rect mix{r.x, top, r.w, lay::mixerH * s};
@@ -1130,6 +1109,8 @@ void App::drawMasterStrip(const Rect& r) {
     if (ui_.vFader(uiId(7, 0), fader, &masterFader))
         send(Cmd::MasterVol, 0, 0, faderToGain(masterFader));
 
+    drawFaderValue(rend_, fSmall_, {mix.x + 4 * s, mix.y + 4 * s, mix.w - 8 * s, 18 * s},
+                   masterFader, s);
     const f32 l = es_.masterMeterL, rr = es_.masterMeterR;
     peakHoldM_[0] = std::max(l, peakHoldM_[0] * 0.985f);
     peakHoldM_[1] = std::max(rr, peakHoldM_[1] * 0.985f);

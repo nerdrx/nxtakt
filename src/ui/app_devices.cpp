@@ -41,26 +41,11 @@ namespace lat {
 
 namespace {
 
-// A micro-label cut to fit its box.
-//
-// Ui::microIn draws glyph by glyph -- that is how it gets §5's tracking -- so
-// unlike textIn it has no ellipsis logic, and a plugin name is arbitrary text
-// off disk. Trimming here is what keeps a long name inside its card without a
-// scissor around it, and a scissor is two draw calls every time it is set.
+// Normal type, native ellipsis, and the same text spacing as the library.
 void microFit(Ui& ui, const Font& f, const Rect& b, const char* s, const Col& c,
               Align a = Align::Left, f32 pad = 0.f) {
-    if (!s || !*s) return;
-    const f32 avail = b.w - pad * 2.f;
-    if (avail <= 1.f) return;
-    char buf[72];
-    snprintf(buf, sizeof buf, "%s", s);
-    if (ui.microWidth(f, buf) > avail) {
-        const f32 dots = ui.microWidth(f, "..");
-        size_t n = strlen(buf);
-        while (n > 1 && ui.microWidth(f, buf) + dots > avail) buf[--n] = 0;
-        if (n + 2 < sizeof buf) { buf[n] = '.'; buf[n + 1] = '.'; buf[n + 2] = 0; }
-    }
-    ui.microIn(f, b, buf, c, a, pad);
+    if (!s || !*s || b.w <= pad * 2.f) return;
+    ui.drawTextIn(f, b, s, c, a, pad);
 }
 
 // What a plugin's format chip says. `formatName` spells Internal in full, which
@@ -697,13 +682,13 @@ void App::drawPluginBrowser(const Rect& r) {
         fromCatalog ? eng_.catalog() : registry_.plugins();
 
     // --- header: the §5 chip language, 10px uppercase over wide tracking ----
-    Rect head{r.x + nx::sp1 * s, r.y + 4 * s, r.w - nx::sp1 * 2.f * s, 22 * s};
+    Rect head{r.x + 12 * s, r.y, r.w - 24 * s, 36 * s};
     rend_.textIn(fBold_, head, "Devices", nx::text, Align::Left, 0);
     if (scanning) {
         // The daemon is still walking its bundles, so the rows below are this
         // process's own scan standing in. Quiet, not a banner: the list is
         // usable meanwhile and swaps to the catalog the frame it lands.
-        ui_.microIn(fSmall_, head, "scanning...", nx::muted.alpha(0.8f), Align::Right, 0);
+        ui_.drawTextIn(fSmall_, head, "Scanning…", nx::muted, Align::Right, 0);
         if (ui_.hovered(head))
             ui_.tip = "The engine is scanning its plugins - showing this "
                       "process's own scan until the catalog arrives";
@@ -714,7 +699,7 @@ void App::drawPluginBrowser(const Rect& r) {
 
     // --- filter ---
     const u64 fid = uiId(10, 0);
-    Rect filter{r.x + 6 * s, head.bottom() + 4 * s, r.w - 12 * s, 28 * s};
+    Rect filter{r.x + 12 * s, head.bottom(), r.w - 24 * s, 30 * s};
     // The field is recessed at rest and takes the violet border and the focus
     // ring the moment the caret arrives (§5: never a bare outline). textField
     // paints the focused state itself, so this is only the resting well.
@@ -745,7 +730,7 @@ void App::drawPluginBrowser(const Rect& r) {
         if (query.empty()) snprintf(cnt, sizeof cnt, "%u", (unsigned)all.size());
         else               snprintf(cnt, sizeof cnt, "%u / %u", (unsigned)shown.size(),
                                     (unsigned)all.size());
-        ui_.microIn(fSmall_, head, cnt, nx::muted.alpha(0.6f), Align::Right, 0);
+        ui_.drawTextIn(fSmall_, head, cnt, nx::muted, Align::Right, 0);
     }
 
     const f32 rowH = 36 * s;
@@ -799,11 +784,6 @@ void App::drawPluginBrowser(const Rect& r) {
             rend_.roundRect(chipR, rowRad, pal::slotHover);
         }
         if (hot) ui_.cursor = devDrag.armed ? Cursor::Grab : Cursor::Hand;
-
-        Rect tag{row.right() - 46 * s, row.cy() - 6 * s, 40 * s, 12 * s};
-        // --radius-xs, not h*0.5: a hand-rolled capsule is exactly the
-        // roundness the owner called cheap, and the token is 2px now.
-        rend_.roundRect(tag, nx::radiusXs * s, pal::panelAlt);
 
         if (hot && in.pressed[0]) {
             pluginSel_ = pi;
@@ -865,12 +845,12 @@ void App::drawPluginBrowser(const Rect& r) {
 
         // Keep names readable: the maker is a subtitle rather than a column
         // that takes half the available width from every instrument name.
-        Rect vendor{row.x + 10 * s, row.y + 19 * s, tag.x - row.x - 16 * s, 14 * s};
+        Rect vendor{row.x + 12 * s, row.y + 19 * s, tag.x - row.x - 20 * s, 14 * s};
         if (!d.vendor.empty())
             rend_.textIn(fSmall_, vendor, d.vendor.c_str(), nx::muted,
                          Align::Left, 0);
 
-        Rect name{row.x + 10 * s, row.y + 2 * s, tag.x - row.x - 16 * s, 18 * s};
+        Rect name{row.x + 12 * s, row.y + 2 * s, tag.x - row.x - 20 * s, 18 * s};
         rend_.textIn(fBody_, name, d.name.c_str(),
                      sel || hot ? nx::text : nx::muted, Align::Left, 0);
     }
@@ -1217,7 +1197,7 @@ void App::drawDeviceStrip(const Rect& r) {
             }
         }
         rend_.roundRectOutline(box, rad, std::max(1.f, nx::snapPx(s)),
-                              fileDragHere ? nx::violet : nx::muted.alpha(sel ? 0.4f : 0.16f));
+                              fileDragHere ? nx::violet : nx::muted.alpha(0.18f));
 
         // WHICH WAY THE SIGNAL GOES. Left to right is only obvious to somebody
         // who already knows; a chain of five cards in a row says nothing about
@@ -1313,7 +1293,7 @@ void App::drawDeviceStrip(const Rect& r) {
             // letters touching the seam, with nothing between them and the
             // enable dot. Fit-with-a-pad is what the "edit" chip already did,
             // and two chips a pixel apart should not be drawn two ways.
-            microFit(ui_, fSmall_, ui_.lastRect, "chain",
+            microFit(ui_, fSmall_, ui_.lastRect, "Chain",
                      open ? nx::text : nx::muted, Align::Center, 2 * s);
             if (tog) {
                 if (open) { rackOpenUid_ = 0; rackPath_.clear(); }
@@ -1350,7 +1330,7 @@ void App::drawDeviceStrip(const Rect& r) {
                 rend_.popClip();
                 return;                   // the strip's layout just changed width
             }
-            microFit(ui_, fSmall_, ui_.lastRect, "edit",
+            microFit(ui_, fSmall_, ui_.lastRect, "Edit",
                      open ? nx::text : nx::muted, Align::Center, 2 * s);
             if (ui_.hovered(kr))
                 ui_.tip = open ? "Close the Spectra panel"
@@ -1373,7 +1353,7 @@ void App::drawDeviceStrip(const Rect& r) {
                 rend_.popClip();
                 return;                   // the strip's layout just changed width
             }
-            microFit(ui_, fSmall_, ui_.lastRect, "edit",
+            microFit(ui_, fSmall_, ui_.lastRect, "Edit",
                      open ? nx::text : nx::muted, Align::Center, 2 * s);
             if (ui_.hovered(kr))
                 ui_.tip = open ? "Close the Sampler panel"
@@ -1977,8 +1957,8 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     }
     // The breadcrumb is the whole of "where am I": a rack in a rack in a rack
     // is a place, and the only thing that says so.
-    std::string crumb = "RACK";
-    for (size_t i = 0; i < rackPath_.size(); ++i) crumb += " / RACK";
+    std::string crumb = "Rack";
+    for (size_t i = 0; i < rackPath_.size(); ++i) crumb += " / Rack";
     char head[96];
     snprintf(head, sizeof head, "%s   %d/%d", crumb.c_str(), rc.deviceCount(), kRackMaxDevices);
     microFit(ui_, fSmall_, {title.x + 10 * s, title.y, backR.x - title.x - 12 * s, title.h},
@@ -2002,7 +1982,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // save. Pinning costs one row of list height and makes the panel's own
     // capacity legible at every size the dock can be.
     // -----------------------------------------------------------------------
-    ui_.microIn(fSmall_, {left.x, left.y, left.w, 11 * s}, "CHAIN", nx::muted, Align::Left, 0);
+    ui_.drawTextIn(fSmall_, {left.x, left.y, left.w, 13 * s}, "Chain", nx::muted, Align::Left, 0);
 
     // 16, not 15-plus-a-gap. Same pitch to the pixel, and the row now meets
     // DESIGN.md's 16px floor on its short side instead of missing it by one.
@@ -2206,7 +2186,7 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // units and are read back CLAMPED, so what the list shows is what the macro
     // will really do rather than what was typed at it.
     // -----------------------------------------------------------------------
-    ui_.microIn(fSmall_, {right.x, right.y, right.w, 11 * s}, "MACRO", nx::muted, Align::Left, 0);
+    ui_.drawTextIn(fSmall_, {right.x, right.y, right.w, 13 * s}, "Macro", nx::muted, Align::Left, 0);
 
     // Eight macros, four to a row, each row ONE segmented cluster: this is a
     // chooser -- exactly one macro is being edited -- and a chooser drawn as
@@ -2374,11 +2354,11 @@ void App::drawRackPanel(const Rect& box, RackControl& rc, const Col& tc) {
     // scrolls anyway, and buy an honest 16.
     Rect clr{list.right() - 56 * s, list.y, 56 * s, 24 * s};
     char cap[48];
-    snprintf(cap, sizeof cap, "MACRO %d DRIVES %d", rackMacro_ + 1, shown);
+    snprintf(cap, sizeof cap, "Macro %d · %d mappings", rackMacro_ + 1, shown);
     microFit(ui_, fSmall_, {list.x, list.y, list.w - 60 * s, 24 * s}, cap,
              nx::muted, Align::Left, 0);
     devRect("rack.clearMacro", clr, 1.f * s);
-    if (shown > 0 && ui_.grab(1.f * s).button(uiId(UiRackPanel, 11, 0), clr, "CLEAR")) {
+    if (shown > 0 && ui_.grab(1.f * s).button(uiId(UiRackPanel, 11, 0), clr, "Clear")) {
         undoPoint("clear macro");
         rc.clearMacro(rackMacro_);
         status_ = "Macro cleared";

@@ -65,10 +65,10 @@ bool App::init(int argc, char** argv) {
     const std::string reg = findSystemFont(false);
     const std::string bold = findSystemFont(true);
     if (reg.empty()) { LOGE("no usable system font found"); return false; }
-    fSmall_.load(reg.c_str(),  (int)std::lround(10.f * s));
-    fBody_.load(reg.c_str(),   (int)std::lround(12.f * s));
-    fBold_.load(bold.empty() ? reg.c_str() : bold.c_str(), (int)std::lround(12.f * s));
-    fBig_.load(bold.empty() ? reg.c_str() : bold.c_str(),  (int)std::lround(17.f * s));
+    fSmall_.load(reg.c_str(),  (int)std::lround(11.f * s));
+    fBody_.load(reg.c_str(),   (int)std::lround(13.f * s));
+    fBold_.load(bold.empty() ? reg.c_str() : bold.c_str(), (int)std::lround(13.f * s));
+    fBig_.load(bold.empty() ? reg.c_str() : bold.c_str(),  (int)std::lround(18.f * s));
 
     ui_.r = &rend_;
     ui_.in = &win_.input();

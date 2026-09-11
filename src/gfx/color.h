@@ -64,31 +64,31 @@ namespace pal {
 // is 90% darkness with small luminous accents, so the base surfaces move
 // toward the field (#0a0714) and keep only a BREATH of violet; saturated
 // color is for clips, accents and live elements, never for square metres.
-constexpr Col appBg        = rgb(0x191C22);   // the "nothing here" fill
-constexpr Col panel        = rgb(0x22262E);   // chrome panels
-constexpr Col panelAlt     = rgb(0x2A2F38);   // controls on panels
-constexpr Col gridBg       = rgb(0x191C22);   // the clip grid's empty field
-constexpr Col slotEmpty    = rgb(0x262B34);
-constexpr Col slotHover    = rgb(0x373C48);
+constexpr Col appBg        = rgb(0x1D1E21);   // the "nothing here" fill
+constexpr Col panel        = rgb(0x292A2E);   // chrome panels
+constexpr Col panelAlt     = rgb(0x36373C);   // controls on panels
+constexpr Col gridBg       = rgb(0x1D1E21);   // the clip grid's empty field
+constexpr Col slotEmpty    = rgb(0x303136);
+constexpr Col slotHover    = rgb(0x424348);
 // Not a divider colour any more: `divider` is used both for separators and for
 // recessed troughs, and only the separators are wrong. It is now the --line
 // token, which is a violet-black rather than a grey. Real dividers should move
 // to Renderer::hairlineH/V -- a solid line is a §11 finding.
-constexpr Col divider      = rgb(0x383E49);
-constexpr Col ridge        = rgb(0x687080);           // raised edges, handles
+constexpr Col divider      = rgb(0x434449);
+constexpr Col ridge        = rgb(0x96989E);           // raised edges, handles
 
 // Text
-constexpr Col text         = rgb(0xE4E7ED);
-constexpr Col textDim      = rgb(0xABB2BF);
-constexpr Col textFaint    = rgb(0x8992A2);
-constexpr Col textOnClip   = rgb(0x160E28);
+constexpr Col text         = rgb(0xECECEF);
+constexpr Col textDim      = rgb(0xB5B6BD);
+constexpr Col textFaint    = rgb(0x909198);
+constexpr Col textOnClip   = rgb(0x222326);
 
 // Accents. The brand accent is the user's chosen electric purple. It is a
 // dark hue, so two rules keep it readable: as small TEXT on dark surfaces use
 // accentHi (a lifted tint), and anything drawn ON an accent fill uses light
 // text — widgets.cpp picks per-luminance.
-constexpr Col accent       = rgb(0x9B8CDB);   // selection / focus / brand
-constexpr Col accentHi     = rgb(0xBFB1EE);   // accent as text on dark
+constexpr Col accent       = rgb(0xE6B980);   // selection / focus / brand
+constexpr Col accentHi     = rgb(0xF2D4AD);   // accent as text on dark
 // Transport and status. Play moves to cyan: §1 reserves cyan for "light inside
 // materials" -- live values, playheads, running state -- which is exactly what
 // a play indicator is, and a lime green on a violet field was the one colour in

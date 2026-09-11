@@ -1314,7 +1314,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // playing a session clip instead of its lane; the chip both says so and
         // is the Back to Arrangement gesture for that track.
         if (L.overridden) {
-            const Rect ov{hb.x + 6.f * s, hb.y + 28.f * s, 100.f * s, 22.f * s};
+            const Rect ov{hb.x + 6.f * s, hb.y + 28.f * s, 110.f * s, 22.f * s};
             const u64 ovId = uiId(UiArrange, 2, (int)i);
             // This explicit action sits below the title with no shared hit area.
             const Rect ovHit{ov.x - 3.f * s, ov.y, ov.w + 6.f * s, ov.h};
@@ -1327,9 +1327,8 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
             rr.roundRectOutline(ov, ov.h * 0.5f, std::max(1.f, s),
                                 nx::amber.alpha(hotOv ? 0.55f : 0.30f));
             if (ui.fSmall)
-                tl::microLabel(rr, *ui.fSmall, ov.x + 7.f * s,
-                               ov.y + (ov.h - ui.fSmall->height()) * 0.5f, "back to arrange",
-                               nx::amber, ov.w - 10.f * s);
+                rr.textIn(*ui.fSmall, ov, "Back to arrange", nx::amber,
+                          Align::Center, 5.f * s);
             if (hotOv) {
                 ui.cursor = Cursor::Hand;
                 ui.tip = "this track is playing the session - click to give the "

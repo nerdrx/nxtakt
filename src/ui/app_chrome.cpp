@@ -366,7 +366,7 @@ void App::drawControlBar(const Rect& r) {
     // looks first, so this bar is where it gets said.
     if (ui_.isHot(uiId(1, 0)))
         ui_.tip = "Tap tempo: click this twice in time with the music";
-    if (ui_.button(uiId(1, 0), tapR, "TAP")) {
+    if (ui_.button(uiId(1, 0), tapR, "Tap")) {
         static f64 lastTap = 0.0;
         const f64 now = nowSeconds();
         if (now - lastTap < 3.0) {
@@ -502,7 +502,7 @@ void App::drawControlBar(const Rect& r) {
     Rect metR{x, cy, 36 * s, h};
     chromeDebugMark("met", metR);
     if (ui_.isHot(uiId(1, 2))) ui_.tip = "Metronome  (M)";
-    if (ui_.button(uiId(1, 2), metR, "MET", ses_.metronome, pal::accent)) {
+    if (ui_.button(uiId(1, 2), metR, "Met", ses_.metronome, pal::accent)) {
         undoPoint("metronome");
         ses_.metronome = !ses_.metronome;
         send(Cmd::SetMetronome, ses_.metronome ? 1 : 0);
@@ -609,7 +609,7 @@ void App::drawControlBar(const Rect& r) {
         Rect autoR{x, cy, 36 * s, h};
         const u64 id = uiId(1, 10);
         if (ui_.segButton(id, autoR, autoArm_, nx::violet)) toggleAutoArm();
-        ui_.microIn(fSmall_, ui_.lastRect, "AUTO",
+        ui_.drawTextIn(fSmall_, ui_.lastRect, "Auto",
                     autoArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
                     Align::Center);
         if (ui_.isHot(id))
@@ -633,7 +633,7 @@ void App::drawControlBar(const Rect& r) {
         Rect arrR{x, cy, 32 * s, h};
         const u64 id = uiId(1, 12);
         const bool pressed = ui_.segButton(id, arrR, arrArm_, nx::violet);
-        ui_.microIn(fSmall_, ui_.lastRect, "ARR",
+        ui_.drawTextIn(fSmall_, ui_.lastRect, "Arr",
                     arrArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
                     Align::Center);
         if (ui_.isHot(id))
@@ -772,7 +772,7 @@ void App::drawControlBar(const Rect& r) {
         // is about to glitch the audio is the one number in this bar that earns
         // either of them.
         const Col c = cpu > 85.f ? nx::danger : cpu > 60.f ? nx::amber : pal::textDim;
-        ui_.microIn(fSmall_, cr, buf, c, Align::Center);
+        ui_.drawTextIn(fSmall_, cr, buf, c, Align::Center);
         // A number with no label is a number nobody can act on. It is not a
         // control, so it takes a hotspot rather than becoming one.
         const u64 idCpu = uiId(UiControlBar, 52);
@@ -791,7 +791,7 @@ void App::drawControlBar(const Rect& r) {
         const f32 bw = std::max(60.f * s, ui_.microWidth(fSmall_, lbl) + nx::sp1 * s);
         if (rx - x >= bw + sep + 172 * s) {
             Rect br{rx - bw, cy, bw, h};
-            ui_.microIn(fSmall_, br, lbl, drv ? pal::textFaint : nx::danger, Align::Right, 0);
+            ui_.drawTextIn(fSmall_, br, lbl, drv ? pal::textDim : nx::danger, Align::Right, 0);
             rx = br.x - sep;
             ctlSeam(rend_, rx + sep * 0.5f, r, s);
         }
@@ -826,7 +826,7 @@ void App::drawControlBar(const Rect& r) {
         }
 
         char buf[24];
-        snprintf(buf, sizeof buf, "KBD C%d", kbd_.octave());
+        snprintf(buf, sizeof buf, "Kbd C%d", kbd_.octave());
         Rect kr{rx - 58 * s, cy, 58 * s, h};
         if (ui_.isHot(uiId(1, 9)))
             ui_.tip = kbdMidi_
@@ -846,8 +846,8 @@ void App::drawControlBar(const Rect& r) {
         const size_t nb = midiMap_.size();
         const bool learning = midiMap_.learning();
         char buf[24];
-        if (learning) snprintf(buf, sizeof buf, "LEARN");
-        else          snprintf(buf, sizeof buf, "MAP %zu", nb);
+        if (learning) snprintf(buf, sizeof buf, "Learn");
+        else          snprintf(buf, sizeof buf, "Map %zu", nb);
 
         Rect mr{rx - 56 * s, cy, 56 * s, h};
         const u64 id = uiId(1, 11);
@@ -925,7 +925,7 @@ void App::drawBrowser(const Rect& r) {
     // fades at both ends. §11 rules out the solid rule; the inconsistency was
     // the more visible half of it, since the browser sits beside the scene
     // column that does it the other way.
-    Rect head{r.x, r.y, r.w, 32 * s};
+    Rect head{r.x, r.y, r.w, 40 * s};
     rend_.textIn(fBold_, {head.x + 12 * s, head.y, head.w - 24 * s, head.h}, "Library",
                  nx::text, Align::Left, 0);
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
@@ -943,8 +943,17 @@ void App::drawBrowser(const Rect& r) {
         } else if (hot) rend_.roundRect(row.insetXY(6 * s, 2 * s), 5 * s, pal::slotHover);
         if (hot) ui_.cursor = Cursor::Hand;
         const size_t slash = p.find_last_of('/');
-        rend_.textIn(fBody_, row, (slash == std::string::npos ? p : p.substr(slash + 1)).c_str(),
-                     sel ? pal::accent : pal::text, Align::Left, 14 * s);
+        const std::string name = p == homeDir() ? "Home"
+                               : p == "/usr/share/sounds" ? "Sounds"
+                               : slash == std::string::npos ? p : p.substr(slash + 1);
+        // Places share a quiet folder glyph and a consistent text inset.
+        const Col icon = sel ? pal::accent : pal::textDim;
+        rend_.roundRectOutline({row.x + 14 * s, row.cy() - 4 * s, 12 * s, 9 * s},
+                               2 * s, s, icon);
+        rend_.line(row.x + 15 * s, row.cy() - 6 * s,
+                   row.x + 20 * s, row.cy() - 6 * s, s, icon);
+        rend_.textIn(fBody_, row, name.c_str(),
+                     sel ? pal::text : pal::textDim, Align::Left, 36 * s);
         if (hot && in.pressed[0]) browseTo(p);
         y += rowH;
     }
@@ -960,7 +969,7 @@ void App::drawBrowser(const Rect& r) {
     // A leading "..." and the tail says it in the same 200px.
     Rect dirRow{r.x, y, r.w, rowH};
     {
-        const f32 avail = dirRow.w - 16 * s;
+        const f32 avail = dirRow.w - 24 * s;
         std::string shown = browserDir_;
         if (fSmall_.measure(shown.c_str()) > avail) {
             const f32 lead = fSmall_.measure("...");
@@ -980,7 +989,7 @@ void App::drawBrowser(const Rect& r) {
         // comfortable contrast over every fill, and "where am I" is not a line
         // to make people squint at.
         static const Col kPathInk = pal::textFaint.mix(pal::textDim, 0.5f);
-        rend_.textIn(fSmall_, dirRow, shown.c_str(), kPathInk, Align::Left, 8 * s);
+        rend_.textIn(fSmall_, dirRow, shown.c_str(), kPathInk, Align::Left, 12 * s);
         if (ui_.hovered(dirRow) && shown != browserDir_) ui_.tip = browserDir_;
     }
     y += rowH;
@@ -1040,12 +1049,12 @@ void App::drawBrowser(const Rect& r) {
         const Col ic = e.isDir ? pal::textDim
                      : isSet   ? nx::violetSoft
                                : pal::accent.mix(pal::text, 0.4f);
-        if (e.isDir)      rend_.roundRect({row.x + 8 * s, row.cy() - 4 * s, 9 * s, 8 * s}, 1.5f * s, ic);
-        else if (isSet)   rend_.roundRectOutline({row.x + 8 * s, row.cy() - 4 * s, 8 * s, 8 * s},
+        if (e.isDir)      rend_.roundRect({row.x + 14 * s, row.cy() - 4 * s, 9 * s, 8 * s}, 1.5f * s, ic);
+        else if (isSet)   rend_.roundRectOutline({row.x + 14 * s, row.cy() - 4 * s, 8 * s, 8 * s},
                                                  1.5f * s, std::max(1.f, s), ic);
-        else              rend_.circle(row.x + 12 * s, row.cy(), 3 * s, ic);
+        else              rend_.circle(row.x + 18 * s, row.cy(), 3 * s, ic);
 
-        rend_.textIn(fBody_, {row.x + 22 * s, row.y, row.w - 26 * s, row.h}, e.name.c_str(),
+        rend_.textIn(fBody_, {row.x + 34 * s, row.y, row.w - 46 * s, row.h}, e.name.c_str(),
                      e.isDir || isSet ? pal::text : pal::textDim, Align::Left, 0);
 
         // WHAT A FILE IN THIS LIST IS FOR. The browser has always supported
@@ -2070,7 +2079,7 @@ void App::drawEngineBanner(const Rect& r) {
     if (engineLinkOffersRestart(es_.link)) {
         const f32 bw = 76 * s, bh = 18 * s;
         Rect rb{r.right() - pad - bw, std::round(r.cy() - bh * 0.5f), bw, bh};
-        if (ui_.button(uiId(1, 40), rb, "RESTART", true, pal::accent)) {
+        if (ui_.button(uiId(1, 40), rb, "Restart", true, pal::accent)) {
             status_ = eng_.restartEngine() ? "Engine restarted"
                                            : "Engine restart failed - see the log";
             // The engine came back empty; everything the model knows goes

@@ -80,42 +80,28 @@ namespace tl {
 
 // --- the grid, as hierarchy rather than as texture --------------------------
 //
-// Three weights off ONE hue -- §2's --line, a violet-black -- so the eye reads
-// depth instead of three greys. The bar is the only one meant to be findable at
-// a glance; the beat is for aiming; the 1/16 is texture you should have to look
-// for. The old values were pal::ridge (#4B3A6E, opaque) at three brightnesses,
-// which put the grid in front of the music.
-//
-// `inline const` and not constexpr only because Col::scale/alpha are not
-// constexpr; these are initialised once and read from hot loops.
-// Quieted from 0.92/0.88/0.42: at those alphas the grid was the loudest thing
-// on the timeline -- a lattice you look AT instead of music you look at
-// THROUGH. A musician needs the bar findable, the beat aimable and the
-// sixteenth barely-there texture; the empty timeline should read as darkness,
-// not as graph paper.
-inline const Col gridBar  = nx::line.scale(1.35f).alpha(0.55f);
-inline const Col gridBeat = nx::line.alpha(0.30f);
-inline const Col gridSub  = nx::line.alpha(0.14f);
+// Neutral grid weights stay behind the material: bars orient the eye, beats
+// support placement, and subdivisions remain a faint guide.
+inline constexpr Col gridBar  = rgba(0xC5C3C0, 0.14f);
+inline constexpr Col gridBeat = rgba(0xC5C3C0, 0.075f);
+inline constexpr Col gridSub  = rgba(0xC5C3C0, 0.030f);
 
 // --- surfaces ---------------------------------------------------------------
 //
-// The ruler and the header column are chrome-adjacent: panel-toned, so they
-// read as the frame the work sits in. The canvas itself is a well (Renderer::
-// well), which is why there is no token for it here -- a well is a gradient,
-// not a colour.
-inline constexpr Col panelFill = rgba(0x171028, 0.92f);   // --panel
-inline constexpr Col panelAlt  = rgba(0x1D1433, 0.92f);   // --panel-2
+// Warm graphite chrome and a restrained neutral lift match the main workspace.
+inline constexpr Col panelFill = rgb(0x292A2E);   // --panel
+inline constexpr Col panelAlt  = rgb(0x303135);   // --panel-2
 // The alternating lane stripe, and the row banding in the roll. Barely there on
 // purpose: §1's "if it is visible from across the room, halve it" -- this is
 // what is left after halving it twice.
-inline constexpr Col stripeLift = rgba(0x9A3CFF, 0.030f);
+inline constexpr Col stripeLift = rgba(0xFFFFFF, 0.022f);
 // A region that is drawn but not editable (past the loop end, past the last
 // item): recessed FURTHER, never greyed. Recession is the language; grey is not.
-inline constexpr Col deadZone   = rgba(0x04020A, 0.46f);
+inline constexpr Col deadZone   = rgba(0x111214, 0.46f);
 
 // --- ink --------------------------------------------------------------------
-inline constexpr Col rulerOnBar  = rgba(0x9A8FC0, 1.00f);   // --muted
-inline constexpr Col rulerOffBar = rgba(0x9A8FC0, 0.52f);
+inline constexpr Col rulerOnBar  = rgba(0xBBBAB7, 1.00f);   // --muted
+inline constexpr Col rulerOffBar = rgba(0xBBBAB7, 0.66f);
 
 // ---------------------------------------------------------------------------
 // The playhead. §1: cyan is light INSIDE the material, and on these surfaces it

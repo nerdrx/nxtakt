@@ -82,9 +82,9 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
-## Workspace makeover — 0.14
+## Workspace refinement — 0.15
 
-A matte charcoal workspace with restrained violet accents, a compact clip
+A warm graphite workspace with soft amber accents, a compact clip
 inspector, roomier controls, clearer typography and contrast, larger
 piano notes and automation handles, searchable plugin makers, and a toolbar
 that adapts to smaller windows. Fast clicks respond immediately; track and
