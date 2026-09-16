@@ -42,7 +42,7 @@ int main() {
 
     const auto missing = lat::loadAudioSettings(dir / "missing.txt");
     assert(missing.alsaOutput == "default" && missing.alsaInput == "default");
-    assert(missing.jackPorts == std::array<std::string, 4>{});
+    assert((missing.jackPorts == std::array<std::string, 4>{}));
 
     const auto old = dir / "existing";
     std::filesystem::create_directory(old);
