@@ -23,5 +23,15 @@ int main() {
     assert(buildScalePattern(key, 60, 8, std::numeric_limits<double>::quiet_NaN(), 0.5, 0.25, 4.0, notes) == 0 && notes.empty());
     assert(buildScalePattern(key, 127, 8, 0.0, 0.5, 0.25, 4.0, notes) == 1);
     assert(notes.front().pitch == 127 && key.contains(notes.front().pitch));
+    assert(buildScalePattern(key, 72, 8, 0, .5, .25, 8, notes, MelodyDirection::Down) == 8);
+    const int descending[] = {72,71,69,67,65,64,62,60};
+    for (int i=0;i<8;++i) assert(notes[i].pitch == descending[i]);
+    assert(buildScalePattern(key, 60, 16, 0, .5, .25, 8, notes, MelodyDirection::UpDown) == 16);
+    const int bounce[] = {60,62,64,65,67,69,71,72,71,69,67,65,64,62,60,62};
+    for (int i=0;i<16;++i) assert(notes[i].pitch == bounce[i]);
+    assert(buildScalePattern(key, 0, 8, 0, .5, .25, 8, notes, MelodyDirection::Down) == 1);
+    assert(buildScalePattern(key, 127, 8, 0, .5, .25, 8, notes, MelodyDirection::UpDown) == 1);
+    assert(buildScalePattern(key, 61, 2, 0, .5, .25, 8, notes, MelodyDirection::Down) == 2);
+    assert(notes[0].pitch == 60 && notes[1].pitch == 59);
     return 0;
 }

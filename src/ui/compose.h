@@ -46,32 +46,43 @@ inline bool buildChord(int root, ChordKind kind, int inversion, std::vector<int>
     return !out.empty();
 }
 
+enum class MelodyDirection { Up, Down, UpDown };
+
 // Build one evenly timed, scale-aware line. Chromatic mode uses semitones;
 // active scales walk only admitted pitches, preserving the chosen root octave.
 inline int buildScalePattern(const ScaleKey& key, int rootPitch, int count,
                              f64 startBeat, f64 beatStep, f64 noteLen,
-                             f64 clipLength, std::vector<NoteModel>& out) {
+                             f64 clipLength, std::vector<NoteModel>& out,
+                             MelodyDirection direction = MelodyDirection::Up) {
     out.clear();
     if (rootPitch < 0 || rootPitch > 127 || count <= 0 || count > 256 || !std::isfinite(startBeat) || !std::isfinite(beatStep) ||
         !std::isfinite(noteLen) || !std::isfinite(clipLength) || startBeat < 0.0 ||
         beatStep <= 0.0 || noteLen <= 0.0 || clipLength <= startBeat)
         return 0;
+    if (direction != MelodyDirection::Up && direction != MelodyDirection::Down &&
+        direction != MelodyDirection::UpDown) return 0;
+    int pitch = rootPitch;
+    const int initialStep = direction == MelodyDirection::Down ? -1 : 1;
+    while (pitch >= 0 && pitch <= 127 && !key.contains(pitch)) pitch += initialStep;
+    const int low = pitch, high = std::min(127, pitch + 12);
+    int walk = initialStep;
     for (int i = 0; i < count; ++i) {
         const f64 beat = startBeat + beatStep * i;
-        if (beat >= clipLength) break;
-        int pitch = clampv(rootPitch, 0, 127);
-        if (key.active() && !key.contains(pitch)) pitch = key.snapPitch(pitch, 1);
-        for (int n = 0; n < i; ++n) {
-            ++pitch;
-            while (pitch < 127 && !key.contains(pitch)) ++pitch;
-        }
-        if (!key.active()) pitch = rootPitch + i;
-        if (pitch < 0 || pitch > 127 || (key.active() && !key.contains(pitch))) break;
+        if (beat >= clipLength || pitch < 0 || pitch > 127) break;
         NoteModel note;
         note.beat = beat;
         note.len = std::min(noteLen, clipLength - beat);
         note.pitch = (u8)pitch;
         out.push_back(note);
+        int next = pitch + walk;
+        while (next >= 0 && next <= 127 && !key.contains(next)) next += walk;
+        if (direction == MelodyDirection::UpDown && (next > high || next < low)) {
+            walk = -walk;
+            next = pitch + walk;
+            while (next >= low && next <= high && !key.contains(next)) next += walk;
+            if (next < low || next > high) break;
+        }
+        pitch = next;
     }
     return (int)out.size();
 }

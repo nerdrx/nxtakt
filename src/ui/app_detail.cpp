@@ -7,6 +7,7 @@
 #include "pianoroll.h"
 #include "drum_sequencer.h"
 #include "compose.h"
+#include "progression.h"
 #include "../core/project.h"
 #include "../gfx/gl.h"
 #include <algorithm>
@@ -522,6 +523,7 @@ void App::drawClipDetail(const Rect& r) {
                 midi ? (drumDevice ? 3 : 4) : 2, &page);
     page = clampv(page, 0, midi ? (drumDevice ? 2 : 3) : 1);
     const bool notesPage = midi && page == 0;
+    static int composeMode=0;
     const bool composePage = midi && !drumDevice && page == 3;
     const bool playbackPage = page == (midi ? 1 : 0);
     const bool launchPage = page == (midi ? 2 : 1);
@@ -530,14 +532,19 @@ void App::drawClipDetail(const Rect& r) {
     const Rect inspectorBody{ctrl.x + 12 * s, pages.bottom() + 12 * s,
                              ctrl.w - 24 * s, std::max(0.f, ctrl.bottom() - pages.bottom() - 44 * s)};
     const f32 required = notesPage ? 3.f * (22 * s + rowH) + (compactInspector ? 12.f : 24.f) * s
-                         : composePage ? 6.f * rowH + 78.f * s
+                         : composePage ? (composeMode==2 ? 8.f*rowH+104.f*s : composeMode==1 ? 7.f*rowH+86.f*s : 5.f*rowH+78.f*s)
                          : launchPage ? 4.f * rowH + 20 * s
                          : (midi ? 2.f : 3.f) * (rowH + 4 * s);
     const f32 maxInspectorScroll = std::max(0.f, required - inspectorBody.h);
     f32& inspectorScroll = inspectorScroll_[midi ? page : page + 3];
     const Input& inspectorInput = win_.input();
-    if (inspectorBody.contains(inspectorInput.mx, inspectorInput.my) && inspectorInput.wheel != 0.f)
+    if (maxInspectorScroll > 0.f && inspectorBody.contains(inspectorInput.mx, inspectorInput.my) &&
+        inspectorInput.wheel != 0.f && !inspectorInput.ctrl() && !inspectorInput.shift()) {
         inspectorScroll -= inspectorInput.wheel * 32 * s;
+        // Consume scrolling before fields see it; scrolling must not change a value
+        // that happens to move beneath the pointer. Ctrl/Shift+wheel still fine-adjusts.
+        ui_.in->wheel = 0.f;
+    }
     inspectorScroll = clampv(inspectorScroll, 0.f, maxInspectorScroll);
     f32 y = inspectorBody.y - inspectorScroll;
     ctrl.x += 12 * s;
@@ -888,7 +895,10 @@ void App::drawClipDetail(const Rect& r) {
     }
     if (composePage) {
         static u64 composeUid=0;
-        static int mode=0,root=60,quality=0,inversion=0,scale=1,count=8;
+        int& mode=composeMode;
+        static int root=60,quality=0,inversion=0,scale=1,count=8,direction=0;
+        static int progression=0,minor=0,seventh=0,voicing=1;
+        static f64 chordBeats=2,gate=90;
         static f64 start=0,chordLength=1,patternLength=.25,step=.5;
         if(composeUid!=m.uid) {
             composeUid=m.uid;
@@ -898,24 +908,24 @@ void App::drawClipDetail(const Rect& r) {
         }
         start=clampv(start,0.0,std::max(0.0,m.lengthBeats-.01));
         Rect row{ctrl2.x,y2,ctrl2.w,rowH};
-        static const char* modes[]={"Chord", "Scale run"};
-        ui_.tabPill(uiId(UiDetailNotes,20),row,modes,2,&mode);
+        static const char* modes[]={"Chord", "Scale run", "Progression"};
+        ui_.tabPill(uiId(UiDetailNotes,20),row,modes,3,&mode);
         row.y+=rowH+10*s;
         label("Start beat",row);
         ui_.dragNumber(uiId(UiDetailNotes,21),{row.x+lblW,row.y,row.w-lblW,rowH},&start,0,std::max(0.0,m.lengthBeats-.01),.25,"%.2f bt");
         row.y+=rowH+6*s;
-        label("Note length",row);
-        f64& length=mode?patternLength:chordLength;
+        label(mode==2?"Chord beats":"Note length",row);
+        f64& length=mode==2?chordBeats:mode==1?patternLength:chordLength;
         ui_.dragNumber(uiId(UiDetailNotes,22),{row.x+lblW,row.y,row.w-lblW,rowH},&length,.0625,16,.25,"%.2f bt");
         row.y+=rowH+10*s;
         const f32 gap=6*s, width=(row.w-2*gap)/3;
-        const char* labels[3]={"Root",mode?"Scale":"Chord",mode?"Notes":"Inversion"};
+        const char* labels[3]={"Root",mode==2?"Key":mode==1?"Scale":"Chord",mode==2?"Voices":mode==1?"Notes":"Inversion"};
         for(int i=0;i<3;++i) rend_.textIn(fSmall_,{row.x+i*(width+gap),row.y,width,18*s},labels[i],nx::muted,Align::Left,0);
         row.y+=22*s;
         char pitch[16];snprintf(pitch,sizeof pitch,"%s%d",kPitchNames[root%12],root/12-1);
         f64 rootValue=root;
         if(ui_.dragNumber(uiId(UiDetailNotes,23),{row.x,row.y,width,rowH},&rootValue,0,127,1,pitch)) root=clampv((int)std::round(rootValue),0,127);
-        if(mode) {
+        if(mode==1) {
             const char* scales[kScaleCount];for(int i=0;i<kScaleCount;++i) scales[i]=kScales[i].name;
             ui_.selector(uiId(UiDetailNotes,24),{row.x+width+gap,row.y,width,rowH},&scale,scales,kScaleCount);
             f64 value=count;
@@ -923,6 +933,26 @@ void App::drawClipDetail(const Rect& r) {
             row.y+=rowH+8*s;
             label("Step",row);
             ui_.dragNumber(uiId(UiDetailNotes,26),{row.x+lblW,row.y,row.w-lblW,rowH},&step,.0625,4,.125,"%.3f bt");
+            row.y+=rowH+8*s;
+            label("Direction",row);
+            static const char* directions[]={"Up","Down","Up / down"};
+            ui_.selector(uiId(UiDetailNotes,30),{row.x+lblW,row.y,row.w-lblW,rowH},&direction,directions,3);
+        } else if(mode==2) {
+            static const char* keys[]={"Major","Minor"};
+            static const char* voices[]={"Triads","Sevenths"};
+            ui_.selector(uiId(UiDetailNotes,31),{row.x+width+gap,row.y,width,rowH},&minor,keys,2);
+            ui_.selector(uiId(UiDetailNotes,32),{row.x+2*(width+gap),row.y,width,rowH},&seventh,voices,2);
+            row.y+=rowH+8*s;
+            static const char* majorPatterns[]={"I - V - vi - IV","I - vi - IV - V","ii - V - I - I","I - IV - V - I"};
+            static const char* minorPatterns[]={"i - v - VI - iv","i - VI - iv - v","ii dim - v - i - i","i - iv - v - i"};
+            ui_.selector(uiId(UiDetailNotes,33),row,&progression,minor?minorPatterns:majorPatterns,4);
+            row.y+=rowH+8*s;
+            label("Voicing",row);
+            static const char* voicings[]={"Root position","Smooth"};
+            ui_.selector(uiId(UiDetailNotes,34),{row.x+lblW,row.y,row.w-lblW,rowH},&voicing,voicings,2);
+            row.y+=rowH+8*s;
+            label("Gate",row);
+            ui_.dragNumber(uiId(UiDetailNotes,35),{row.x+lblW,row.y,row.w-lblW,rowH},&gate,10,100,1,"%.0f%%");
         } else {
             static const char* qualities[]={"Major","Minor","Dim","Aug","7th","Maj 7","Min 7","Sus 2","Sus 4"};
             static const char* inversions[]={"Root","1st","2nd","3rd"};
@@ -932,9 +962,10 @@ void App::drawClipDetail(const Rect& r) {
             ui_.selector(uiId(UiDetailNotes,28),{row.x+2*(width+gap),row.y,width,rowH},&inversion,inversions,voices);
         }
         row.y+=rowH+12*s;
-        if(ui_.button(uiId(UiDetailNotes,29),row,mode?"Insert scale run":"Insert chord",false,nx::violet)) {
+        if(ui_.button(uiId(UiDetailNotes,29),row,mode==2?"Insert progression":mode==1?"Insert scale run":"Insert chord",false,nx::violet)) {
             std::vector<NoteModel> notes;
-            if(mode) buildScalePattern(ScaleKey{root%12,clScaleMode(scale),false},root,count,start,step,length,m.lengthBeats,notes);
+            if(mode==2) buildProgression(root,minor!=0,progression,seventh!=0,voicing!=0,start,chordBeats,gate/100.0,m.lengthBeats,notes);
+            else if(mode==1) buildScalePattern(ScaleKey{root%12,clScaleMode(scale),false},root,count,start,step,length,m.lengthBeats,notes,(MelodyDirection)direction);
             else {
                 std::vector<int> pitches;
                 if(buildChord(root,(ChordKind)quality,inversion,pitches) && start<m.lengthBeats)
@@ -945,7 +976,7 @@ void App::drawClipDetail(const Rect& r) {
                 const ClipModel before=m;
                 m.notes.insert(m.notes.end(),notes.begin(),notes.end());
                 std::stable_sort(m.notes.begin(),m.notes.end(),[](const NoteModel& a,const NoteModel& b) {return a.beat<b.beat || (a.beat==b.beat && a.pitch<b.pitch);});
-                undoPointWith(mode?"insert scale run":"insert chord",m,before);
+                undoPointWith(mode==2?"insert progression":mode==1?"insert scale run":"insert chord",m,before);
                 pushClip(selTrack_,selSlot_);
                 if(roll_) {roll_->clearSelection();roll_->setFoldMode(roll_->foldMode());}
                 status_=std::to_string(notes.size())+" notes inserted - Ctrl+Z to undo";

@@ -82,6 +82,19 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Creative tools — 0.20.0
+
+Session Clip → Compose adds **Progression**. It inserts up to four chords once,
+bounded by the clip: major or natural minor, four fixed sequences (including
+**I - V - vi - IV**), triads or sevenths, and root-position or smooth voicing.
+Set chord-beat spacing, gate percentage, start beat and root. The result is one
+undoable insertion of ordinary editable MIDI notes; it does not auto-extend or
+repeat.
+
+Scale runs now offer **Up** (default), **Down** from the root, and **Up / down**,
+which bounces within one octave above the root. Generated notes stay within the
+clip bounds and remain ordinary editable MIDI notes.
+
 ## Creative tools — 0.19.0
 
 Spectra now offers **Randomize sound**, **Vary macros** and an **Amount** control.

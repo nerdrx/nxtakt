@@ -81,7 +81,7 @@ print('PASS: edited start beat persists into chord insertion')
 CHECK
 key ctrl+z
 drag 210 638 210 653
-clk 230 595
+clk 165 595
 clk 203 740
 wheel 40 610 3 5
 shot scale-controls
