@@ -316,7 +316,8 @@ void App::frame() {
 
     // An open synthesizer owns a full workspace. No hidden device-strip
     // controls can react through it, and Back to chain restores the layout.
-    if (!drawFocusedSpectra(body)) {
+    if (showAudioSettings_) drawAudioSettings(body);
+    else if (!drawFocusedSpectra(body)) {
 
     // UN-GATED (docs/ARRANGEMENT.md §7.6, answer #10). In Arrangement view the
     // CLIP tab shows the selected item's own `src` and edits it IN PLACE, which

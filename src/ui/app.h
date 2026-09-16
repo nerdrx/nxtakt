@@ -96,6 +96,7 @@ private:
     // centres itself in the window. See the note over g_keysOpen in
     // app_chrome.cpp for why its input half rides drawControlBar instead.
     void drawKeysSheet();
+    void drawAudioSettings(const Rect& r);
     // The engine-link banner (docs/GUI-ON-DAEMON.md §6, §12.7 item 2): one
     // full-width line under the control bar, drawn only when
     // engineLinkBanner(es_.link) has something to say. engineBannerH() is its
@@ -576,6 +577,7 @@ private:
     f32  detailH_ = 390.f;
     bool showBrowser_ = true;
     bool showDetail_ = true;
+    bool showAudioSettings_ = false, refreshAudioSettings_ = true;
     DetailTab detailTab_ = DetailTab::Clip;
     int midiInspectorPage_ = 0;
     int audioInspectorPage_ = 0;

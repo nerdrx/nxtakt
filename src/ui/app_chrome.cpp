@@ -809,19 +809,15 @@ void App::drawControlBar(const Rect& r) {
         rx = cr.x - gap;
     }
     {
-        const char* drv = eng_.driverName();
-        const char* lbl = drv ? drv : "no audio";
-        // Sized to the measured micro-label, not to a guess: "DAEMON:JACK"
-        // with 0.12em tracking is wider than the 60px this box used to be,
-        // and the overflow landed inside the velocity well's breathing room.
-        // §7: everything sits on the 8px grid -- including the gap this label
-        // was quietly eating.
-        const f32 bw = std::max(60.f * s, ui_.microWidth(fSmall_, lbl) + nx::sp1 * s);
-        if (rx - x >= bw + sep + 242 * s) {
-            Rect br{rx - bw, cy, bw, h};
-            ui_.drawTextIn(fSmall_, br, lbl, drv ? pal::textDim : nx::danger, Align::Right, 0);
-            rx = br.x - sep;
-            ctlSeam(rend_, rx + sep * 0.5f, {r.x, cy, r.w, h}, s);
+        const f32 bw=94*s;
+        if(rx-x >= bw+sep+242*s) {
+            Rect br{rx-bw,cy,bw,h};
+            if(ctlChip(ui_,uiId(UiControlBar,58),br,fSmall_,"Audio I/O",showAudioSettings_)) {
+                showAudioSettings_=!showAudioSettings_;
+                if(ui_.editId==uiId(UiAudioSettings,1))ui_.editId=0;
+                refreshAudioSettings_=true;
+            }
+            rx=br.x-sep;
         }
     }
     // Computer MIDI keyboard. It belongs with the audio/MIDI readouts because
@@ -2295,8 +2291,10 @@ void App::drawStatusBar(const Rect& r) {
         const u64 idDiag = uiId(UiControlBar, 51);
         const Rect diagR{r.right() - nx::sp1 * s - diagW, r.y, diagW, r.h};
         if (ui_.setHot(idDiag, diagR) && ui_.isHot(idDiag)) {
+            ui_.cursor=Cursor::Hand;
+            if(win_.input().pressed[0]) {showAudioSettings_=true;refreshAudioSettings_=true;}
             ui_.tip = es_.link == EngineLink::Live
-                ? "Audio is connected. Buffer size sets the balance between latency and stability."
+                ? "Click to choose audio inputs and outputs. Buffer size controls latency and stability."
                 : "Audio is unavailable. Use Restart above to reconnect.";
             if (pdc > 0)
                 ui_.tip += " Plugin delay is compensated automatically.";

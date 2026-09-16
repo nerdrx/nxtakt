@@ -275,7 +275,7 @@ DAEMON_LD  := $(shell pkg-config --libs jack alsa lilv-0) -ldl -lrt -lpthread -l
 # builds a SampleBuffer from bytes the GUI decoded, so it now depends on that
 # struct's LAYOUT while still linking none of sample.cpp. A header it compiles
 # against and does not list is the $(IPC_H) lesson with a different filename.
-build/nxtaktd: $(DAEMON_SRC) $(INTERNAL_DATA) $(IPC_H) src/audio/engine.h src/audio/backend.h \
+build/nxtaktd: $(DAEMON_SRC) $(INTERNAL_DATA) $(IPC_H) src/audio/engine.h src/audio/backend.h src/audio/audio_settings.h \
                src/plugin/host.h src/audio/sample.h
 	@mkdir -p build
 	$(CXX) $(DAEMON_CF) $(DAEMON_SRC) -o $@ $(DAEMON_LD)
@@ -390,6 +390,15 @@ build/preset_favorites_test: tests/preset_favorites_test.cpp src/ui/preset_favor
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
 
+build/audio_settings_test: tests/audio_settings_test.cpp src/audio/audio_settings.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Isrc $< -o $@
+
+# Requires a running JACK/PipeWire server; uses only temporary virtual ports.
+build/audio_routing_test: tests/audio_routing_test.cpp src/audio/audio_routing.cpp src/audio/audio_routing.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Isrc tests/audio_routing_test.cpp src/audio/audio_routing.cpp -o $@ $(shell pkg-config --cflags --libs jack alsa)
+
 build/note_feel_test: tests/note_feel_test.cpp src/ui/note_feel.h src/ui/session.h
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
@@ -402,8 +411,9 @@ build/compose_test: tests/compose_test.cpp src/ui/compose.h src/ui/session.h
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
 
-test: build/note_feel_test build/progression_test build/compose_test build/spectra_variation_test build/preset_favorites_test build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
+test: build/audio_settings_test build/note_feel_test build/progression_test build/compose_test build/spectra_variation_test build/preset_favorites_test build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
       build/timesig_view_test build/handle_test build/render build/gen_demo build/plugin_scan
+	./build/audio_settings_test
 	./build/note_feel_test
 	./build/progression_test
 	./build/compose_test

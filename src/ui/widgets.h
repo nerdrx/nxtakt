@@ -110,6 +110,7 @@ enum UiKind : int {
     UiSamplerWave  = 52,
     UiDrumSequencer = 53,
     UiSpectraStudio = 54,
+    UiAudioSettings = 55,
     // The widget layer's OWN families, and the first entries here that are not
     // a view's: the control menu's sheet and rows, and the text field that
     // menu opens over a control. They are spent inside widgets.cpp, which is

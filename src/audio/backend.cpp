@@ -1,5 +1,6 @@
 #include "backend.h"
 #include "engine.h"
+#include "audio_settings.h"
 
 #include <jack/jack.h>
 #include <alsa/asoundlib.h>
@@ -13,6 +14,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <pthread.h>
+#include <unistd.h>
 
 namespace lat {
 
@@ -26,7 +28,8 @@ public:
     bool start(Engine& e) override {
         engine_ = &e;
         jack_status_t st;
-        client_ = jack_client_open("NxTakt", JackNoStartServer, &st);
+        const std::string clientName = "NxTakt-" + std::to_string((long long)getpid());
+        client_ = jack_client_open(clientName.c_str(), (jack_options_t)(JackUseExactName | JackNoStartServer), &st);
         if (!client_) return false;
 
         sr_ = (f64)jack_get_sample_rate(client_);
@@ -49,27 +52,8 @@ public:
         jack_set_xrun_callback(client_, &JackBackend::xrunCb, this);
         if (jack_activate(client_)) { jack_client_close(client_); client_ = nullptr; return false; }
 
-        // Auto-connect to the system playback ports so there is sound without
-        // the user having to open a patchbay.
-        if (const char** ports = jack_get_ports(client_, nullptr, JACK_DEFAULT_AUDIO_TYPE,
-                                                JackPortIsPhysical | JackPortIsInput)) {
-            if (ports[0]) jack_connect(client_, jack_port_name(outL_), ports[0]);
-            if (ports[1]) jack_connect(client_, jack_port_name(outR_), ports[1]);
-            jack_free(ports);
-        }
-        // Same for capture. A physical *source* is an output port from the
-        // graph's point of view, which is why the mask is inverted here.
-        if (inL_ && inR_) {
-            if (const char** ports = jack_get_ports(client_, nullptr, JACK_DEFAULT_AUDIO_TYPE,
-                                                    JackPortIsPhysical | JackPortIsOutput)) {
-                if (ports[0]) jack_connect(client_, ports[0], jack_port_name(inL_));
-                // A mono interface exposes one capture port; feed it to both
-                // sides so a mono source still records as centred stereo.
-                if (ports[1]) jack_connect(client_, ports[1], jack_port_name(inR_));
-                else if (ports[0]) jack_connect(client_, ports[0], jack_port_name(inR_));
-                jack_free(ports);
-            }
-        }
+        const AudioSettings settings = loadAudioSettings();
+        connectConfigured(settings.jackPorts);
         LOGI("JACK backend up: %.0f Hz, %d frames", sr_, bs_);
         return true;
     }
@@ -86,6 +70,33 @@ public:
     const char* name() const override { return "JACK"; }
 
 private:
+    void connectConfigured(const std::array<std::string, 4>& requested) {
+        auto physical = [this](unsigned flags) {
+            const char** ports = jack_get_ports(client_, nullptr, JACK_DEFAULT_AUDIO_TYPE,
+                                                flags | JackPortIsPhysical);
+            std::vector<std::string> result;
+            if (ports) { for (const char** p = ports; *p; ++p) result.emplace_back(*p); jack_free(ports); }
+            return result;
+        };
+        std::array<std::string, 4> route = requested;
+        const auto outs = physical(JackPortIsInput);
+        const auto ins = physical(JackPortIsOutput);
+        for (size_t i = 0; i < 4; ++i) if (route[i].empty()) {
+            const auto& candidates = i < 2 ? outs : ins;
+            const size_t candidate = i < 2 ? i : i - 2;
+            if (candidate < candidates.size()) route[i] = candidates[candidate];
+            else if (i == 3 && !candidates.empty()) route[i] = candidates.front();
+        }
+        jack_port_t* own[] = {outL_, outR_, inL_, inR_};
+        for (size_t i = 0; i < 4; ++i) {
+            if (!own[i] || route[i].empty() || route[i] == "-") continue;
+            const char* source = i < 2 ? jack_port_name(own[i]) : route[i].c_str();
+            const char* dest = i < 2 ? route[i].c_str() : jack_port_name(own[i]);
+            if (jack_connect(client_, source, dest) != 0 && !requested[i].empty())
+                LOGW("JACK: configured route unavailable: %s", route[i].c_str());
+        }
+    }
+
     static int processCb(jack_nframes_t n, void* arg) {
         auto* self = (JackBackend*)arg;
         auto* l = (f32*)jack_port_get_buffer(self->outL_, n);
@@ -276,9 +287,10 @@ public:
 
     bool start(Engine& e) override {
         engine_ = &e;
+        settings_ = loadAudioSettings();
         alsaInstallLogHandler();
         alsaCollectBegin();
-        const bool opened = snd_pcm_open(&pcm_, "default", SND_PCM_STREAM_PLAYBACK, 0) >= 0;
+        const bool opened = snd_pcm_open(&pcm_, settings_.alsaOutput.c_str(), SND_PCM_STREAM_PLAYBACK, 0) >= 0;
         alsaCollectEnd(opened);
         if (!opened) return false;
 
@@ -341,7 +353,7 @@ private:
         // collection, the *expected* case -- a machine with no capture device --
         // prints the entire PCM walk before the one line that explains it.
         alsaCollectBegin();
-        const bool opened = snd_pcm_open(&cap_, "default", SND_PCM_STREAM_CAPTURE, 0) >= 0;
+        const bool opened = snd_pcm_open(&cap_, settings_.alsaInput.c_str(), SND_PCM_STREAM_CAPTURE, 0) >= 0;
         alsaCollectEnd(/*ok=*/true);   // never evidence: the next line is the verdict
         if (!opened) {
             cap_ = nullptr;
@@ -430,6 +442,7 @@ private:
     std::vector<f32> capL_, capR_, capInter_;
     f64 sr_ = 48000.0;
     int bs_ = 256;
+    AudioSettings settings_;
 };
 
 // ---------------------------------------------------------------------------

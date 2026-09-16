@@ -82,6 +82,23 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Audio I/O — 0.22.0
+
+The top-bar **Audio I/O** control and the audio status line open the audio
+settings panel. On Linux, the **JACK / PipeWire** tab exposes four searchable
+routes — output left, output right, input left and input right — with
+**Automatic** and **Disconnected** choices. **Apply and save** applies JACK
+routing to the current engine and saves it; **Refresh** rescans available ports
+while keeping unsaved selections.
+
+The **ALSA fallback** tab lists searchable output and input PCM devices. Saved
+ALSA device choices apply when the audio engine next starts and do not switch
+the active backend. `NXTAKT_AUDIO` remains the backend force switch. JACK / PipeWire
+continues to own sample rate and buffer size, and the Windows panel currently
+uses the system default audio device with no device chooser.
+
+See [Audio settings](docs/AUDIO-SETTINGS.md) for persistence and routing behavior.
+
 ## Creative tools — 0.21.0
 
 Session Clip → Notes adds **Humanize** and **Strum** under the scrollable
@@ -185,8 +202,10 @@ build/gen_demo ~/Music/Demo    # write a four-scene demo set
 build/nxtakt ~/Music/Demo/demo.lattice
 ```
 
-Audio comes up on JACK if it is running — playback *and* capture auto-connected
-— and falls back to ALSA. `NXTAKT_AUDIO=alsa` forces the fallback.
+By default, audio tries JACK first and falls back to ALSA. When JACK starts,
+empty route settings use available physical ports for playback and capture.
+`NXTAKT_AUDIO=jack` or `NXTAKT_AUDIO=alsa` forces a backend. See
+[Audio settings](docs/AUDIO-SETTINGS.md) for route selection and saved devices.
 
 ## Under the hood
 
