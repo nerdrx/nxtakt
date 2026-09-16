@@ -82,6 +82,22 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Creative tools — 0.21.0
+
+Session Clip → Notes adds **Humanize** and **Strum** under the scrollable
+**Feel / expression** section for non-drum MIDI clips. With notes selected, the
+tools edit those notes; with no selection, they edit the whole clip. Both make
+ordinary editable MIDI-note changes, use one undo step, and keep their settings
+temporary.
+
+**Humanize** applies timing variation of ±0–0.25 beats and velocity variation
+of ±0–64. It preserves pitch and note length and clamps note timing to the clip
+bounds.
+**Strum** staggers same-start chord notes by pitch, low to high or high to low.
+Its spread is the total beat distance from first to last note; the spread is
+shortened near the clip end while note lengths stay unchanged. Select a chord’s
+notes first when strumming only one chord.
+
 ## Creative tools — 0.20.0
 
 Session Clip → Compose adds **Progression**. It inserts up to four chords once,

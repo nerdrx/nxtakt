@@ -531,7 +531,7 @@ void App::drawClipDetail(const Rect& r) {
     const f32 rowH = (compactInspector ? 28.f : 32.f) * s, lblW = 90 * s;
     const Rect inspectorBody{ctrl.x + 12 * s, pages.bottom() + 12 * s,
                              ctrl.w - 24 * s, std::max(0.f, ctrl.bottom() - pages.bottom() - 44 * s)};
-    const f32 required = notesPage ? 3.f * (22 * s + rowH) + (compactInspector ? 12.f : 24.f) * s
+    const f32 required = notesPage ? 7.f * rowH + (compactInspector ? 150.f : 168.f) * s
                          : composePage ? (composeMode==2 ? 8.f*rowH+104.f*s : composeMode==1 ? 7.f*rowH+86.f*s : 5.f*rowH+78.f*s)
                          : launchPage ? 4.f * rowH + 20 * s
                          : (midi ? 2.f : 3.f) * (rowH + 4 * s);
@@ -892,6 +892,41 @@ void App::drawClipDetail(const Rect& r) {
                               : std::string("Transpose by a semitone");
             y2 = row.y + rowH + (compactInspector ? 6.f : 12.f) * s;
         }
+    }
+    if (notesPage && roll_ && !drumDevice) {
+        static int feelMode=0, strumDirection=0;
+        static f64 timing=.025, velocity=8, spread=.125;
+        static u64 humanizeSeed=0x4E5854414B54ull;
+        Rect row{ctrl2.x,y2,ctrl2.w,rowH};
+        rend_.textIn(fSmall_,{row.x,row.y,row.w,18*s},"Feel / expression",nx::muted,Align::Left,0);
+        row.y+=22*s;
+        static const char* modes[]={"Humanize","Strum"};
+        ui_.tabPill(uiId(UiDetailNotes,40),row,modes,2,&feelMode);
+        row.y+=rowH+8*s;
+        label(feelMode?"Spread":"Timing",row);
+        f64& amount=feelMode?spread:timing;
+        ui_.dragNumber(uiId(UiDetailNotes,41),{row.x+lblW,row.y,row.w-lblW,rowH},&amount,0,feelMode?1.0:.25,.005,"%.3f bt");
+        row.y+=rowH+8*s;
+        if(feelMode) {
+            label("Direction",row);
+            static const char* directions[]={"Low to high","High to low"};
+            ui_.selector(uiId(UiDetailNotes,42),{row.x+lblW,row.y,row.w-lblW,rowH},&strumDirection,directions,2);
+        } else {
+            label("Velocity",row);
+            ui_.dragNumber(uiId(UiDetailNotes,43),{row.x+lblW,row.y,row.w-lblW,rowH},&velocity,0,64,1,"+/- %.0f");
+        }
+        row.y+=rowH+12*s;
+        if(ui_.button(uiId(UiDetailNotes,44),row,feelMode?"Apply strum":"Humanize notes",false,nx::violet)) {
+            const ClipModel before=m;
+            const bool changed=feelMode?roll_->strumSelected(m,spread,strumDirection==1)
+                                       :roll_->humanizeSelected(m,timing,(int)std::round(velocity),++humanizeSeed);
+            if(changed) {
+                undoPointWith(feelMode?"strum notes":"humanize notes",m,before);
+                pushClip(selTrack_,selSlot_);
+                status_=feelMode?"Chord notes staggered - Ctrl+Z to undo":"Note timing and velocity varied - Ctrl+Z to undo";
+            } else status_=feelMode?"No change - select notes with a shared start and allow room for strumming":"No change - increase Timing or Velocity, or add notes";
+        }
+        if(ui_.hovered(row)) ui_.tip="Changes selected notes, or all notes when none are selected. One Ctrl+Z restores the original notes.";
     }
     if (composePage) {
         static u64 composeUid=0;

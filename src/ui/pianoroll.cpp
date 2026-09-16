@@ -10,6 +10,7 @@
 // state. That is deliberate — the grid mapping, the fold row set and the edit
 // clamps are the parts that are worth testing without a window.
 #include "pianoroll.h"
+#include "note_feel.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -2042,6 +2043,38 @@ bool PianoRoll::quantizeSelected(ClipModel& clip) {
     if (!moved) return false;
     if (hadSel) sortTrackingSet(clip.notes, keys, sel_);
     else        std::sort(clip.notes.begin(), clip.notes.end(), noteLess);
+    followSel_ = true;
+    lastEdit_ = kEditNote;
+    return true;
+}
+
+bool PianoRoll::humanizeSelected(ClipModel& clip, f64 timing, int velocity, u64 seed) {
+    const auto targets = toolTargets(clip);
+    if (!humanizeNotes(clip, targets, timing, velocity, seed)) return false;
+    SelKeys keys;
+    if (owns(clip) && !sel_.empty()) {
+        for (int i : targets) {
+            if (i == sel_.primary) keys.primary = (int)keys.notes.size();
+            keys.notes.push_back(clip.notes[(size_t)i]);
+        }
+        sortTrackingSet(clip.notes, keys, sel_);
+    } else std::sort(clip.notes.begin(), clip.notes.end(), noteLess);
+    followSel_ = true;
+    lastEdit_ = kEditNote;
+    return true;
+}
+
+bool PianoRoll::strumSelected(ClipModel& clip, f64 spread, bool descending) {
+    const auto targets = toolTargets(clip);
+    if (!strumNotes(clip, targets, spread, descending)) return false;
+    SelKeys keys;
+    if (owns(clip) && !sel_.empty()) {
+        for (int i : targets) {
+            if (i == sel_.primary) keys.primary = (int)keys.notes.size();
+            keys.notes.push_back(clip.notes[(size_t)i]);
+        }
+        sortTrackingSet(clip.notes, keys, sel_);
+    } else std::sort(clip.notes.begin(), clip.notes.end(), noteLess);
     followSel_ = true;
     lastEdit_ = kEditNote;
     return true;

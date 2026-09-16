@@ -3,6 +3,27 @@
 NxTakt’s creative helpers keep generated material inside the same editable,
 serializable project model as hand-authored clips and presets.
 
+## Session Notes — 0.21.0
+
+![Strummed chords in the piano roll](../assets/note-feel.png)
+
+The Session MIDI clip inspector’s **Notes** page adds **Humanize** and
+**Strum** under the scrollable **Feel / expression** section. These controls
+are available for MIDI clips other than drum clips. They act on selected notes;
+with no selection, they act on the whole clip.
+
+**Humanize** applies timing variation of ±0–0.25 beats and velocity variation
+of ±0–64. It preserves each note’s pitch and length, and clamps its timing
+inside the clip bounds. **Strum** finds notes with the same start beat and staggers
+each chord by pitch, either **Low to high** or **High to low**. Spread is the
+total beat distance from the first note to the last; it is shortened when the
+clip end leaves less room, while note lengths stay unchanged. Select a chord’s
+notes first to strum only one chord. Apply Strum before Humanize when using
+both: timing variation separates the shared start times that Strum groups.
+
+Both actions write ordinary editable MIDI notes and create one undo step. Feel
+controls are temporary editor settings; they are not stored in the project.
+
 ## Session Compose — 0.20.0
 
 ![Smooth chord progression in the piano roll](../assets/progression.png)

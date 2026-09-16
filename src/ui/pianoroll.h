@@ -314,6 +314,11 @@ public:
     // selected.
     bool transposeSelected(ClipModel& clip, int semitones);
 
+    // Timing/velocity variation and pitch-ordered chord staggering. Same
+    // selection-or-whole-clip scope and no-op/undo contract as the tools above.
+    bool humanizeSelected(ClipModel& clip, f64 timing, int velocity, u64 seed);
+    bool strumSelected(ClipModel& clip, f64 spread, bool descending);
+
     // Quantize settings. Editor tool state, so it lives with the editor: the
     // panel that draws the buttons reads and writes it through here rather than
     // keeping a second copy that could disagree with what the button does.
