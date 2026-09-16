@@ -382,8 +382,23 @@ build/drum_machine_test: tests/drum_machine_test.cpp src/plugin/drum_machine.cpp
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(filter %.cpp,$^) -o $@ -lpthread -lm
 
-test: build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
+build/spectra_variation_test: tests/spectra_variation_test.cpp src/ui/spectra_variation.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
+
+build/preset_favorites_test: tests/preset_favorites_test.cpp src/ui/preset_favorites.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
+
+build/compose_test: tests/compose_test.cpp src/ui/compose.h src/ui/session.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
+
+test: build/compose_test build/spectra_variation_test build/preset_favorites_test build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
       build/timesig_view_test build/handle_test build/render build/gen_demo build/plugin_scan
+	./build/compose_test
+	./build/spectra_variation_test
+	./build/preset_favorites_test
 	./build/spectra_upgrade_test
 	./build/drum_machine_test
 	./build/input_test

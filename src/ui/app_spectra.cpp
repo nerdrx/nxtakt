@@ -187,6 +187,8 @@
 //
 #include "app.h"
 #include "app_internal.h"
+#include "preset_favorites.h"
+#include "spectra_variation.h"
 #include "../gfx/gl.h"
 #include "../plugin/internal_base.h"    // detail::spectraTables() -- see above
 #include <algorithm>

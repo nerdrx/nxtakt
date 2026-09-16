@@ -6,6 +6,7 @@
 #include "arrange.h"
 #include "pianoroll.h"
 #include "drum_sequencer.h"
+#include "compose.h"
 #include "../core/project.h"
 #include "../gfx/gl.h"
 #include <algorithm>
@@ -512,13 +513,16 @@ void App::drawClipDetail(const Rect& r) {
     Rect ctrl{r.x + 16 * s, head.bottom() + 8 * s, panelW, r.bottom() - head.bottom() - 16 * s};
     rend_.roundRect(ctrl, 10 * s, nx::panel2.mix(nx::panel, 0.55f));
     rend_.roundRectOutline(ctrl, 10 * s, s, nx::line.alpha(0.45f));
-    static const char* midiPages[] = {"Notes", "Playback", "Launch"};
+    static const char* midiPages[] = {"Notes", "Playback", "Launch", "Compose"};
     static const char* drumPages[] = {"Kit", "Playback", "Launch"};
     static const char* audioPages[] = {"Playback", "Launch"};
     int& page = midi ? midiInspectorPage_ : audioInspectorPage_;
     const Rect pages{ctrl.x + 8 * s, ctrl.y + 8 * s, ctrl.w - 16 * s, 32 * s};
-    ui_.tabPill(uiId(8, 50), pages, midi ? (drumDevice ? drumPages : midiPages) : audioPages, midi ? 3 : 2, &page);
+    ui_.tabPill(uiId(8, 50), pages, midi ? (drumDevice ? drumPages : midiPages) : audioPages,
+                midi ? (drumDevice ? 3 : 4) : 2, &page);
+    page = clampv(page, 0, midi ? (drumDevice ? 2 : 3) : 1);
     const bool notesPage = midi && page == 0;
+    const bool composePage = midi && !drumDevice && page == 3;
     const bool playbackPage = page == (midi ? 1 : 0);
     const bool launchPage = page == (midi ? 2 : 1);
     const bool compactInspector = ctrl.h < 290 * s;
@@ -526,6 +530,7 @@ void App::drawClipDetail(const Rect& r) {
     const Rect inspectorBody{ctrl.x + 12 * s, pages.bottom() + 12 * s,
                              ctrl.w - 24 * s, std::max(0.f, ctrl.bottom() - pages.bottom() - 44 * s)};
     const f32 required = notesPage ? 3.f * (22 * s + rowH) + (compactInspector ? 12.f : 24.f) * s
+                         : composePage ? 6.f * rowH + 78.f * s
                          : launchPage ? 4.f * rowH + 20 * s
                          : (midi ? 2.f : 3.f) * (rowH + 4 * s);
     const f32 maxInspectorScroll = std::max(0.f, required - inspectorBody.h);
@@ -880,6 +885,73 @@ void App::drawClipDetail(const Rect& r) {
                               : std::string("Transpose by a semitone");
             y2 = row.y + rowH + (compactInspector ? 6.f : 12.f) * s;
         }
+    }
+    if (composePage) {
+        static u64 composeUid=0;
+        static int mode=0,root=60,quality=0,inversion=0,scale=1,count=8;
+        static f64 start=0,chordLength=1,patternLength=.25,step=.5;
+        if(composeUid!=m.uid) {
+            composeUid=m.uid;
+            start=es_.playing && es_.activeSlot[selTrack_]==selSlot_ ? es_.clipPhase[selTrack_]*m.lengthBeats : 0;
+            root=60+ses_.scale.root;scale=clScaleMode(ses_.scale.mode);
+            chordLength=1;patternLength=.25;step=.5;count=8;
+        }
+        start=clampv(start,0.0,std::max(0.0,m.lengthBeats-.01));
+        Rect row{ctrl2.x,y2,ctrl2.w,rowH};
+        static const char* modes[]={"Chord", "Scale run"};
+        ui_.tabPill(uiId(UiDetailNotes,20),row,modes,2,&mode);
+        row.y+=rowH+10*s;
+        label("Start beat",row);
+        ui_.dragNumber(uiId(UiDetailNotes,21),{row.x+lblW,row.y,row.w-lblW,rowH},&start,0,std::max(0.0,m.lengthBeats-.01),.25,"%.2f bt");
+        row.y+=rowH+6*s;
+        label("Note length",row);
+        f64& length=mode?patternLength:chordLength;
+        ui_.dragNumber(uiId(UiDetailNotes,22),{row.x+lblW,row.y,row.w-lblW,rowH},&length,.0625,16,.25,"%.2f bt");
+        row.y+=rowH+10*s;
+        const f32 gap=6*s, width=(row.w-2*gap)/3;
+        const char* labels[3]={"Root",mode?"Scale":"Chord",mode?"Notes":"Inversion"};
+        for(int i=0;i<3;++i) rend_.textIn(fSmall_,{row.x+i*(width+gap),row.y,width,18*s},labels[i],nx::muted,Align::Left,0);
+        row.y+=22*s;
+        char pitch[16];snprintf(pitch,sizeof pitch,"%s%d",kPitchNames[root%12],root/12-1);
+        f64 rootValue=root;
+        if(ui_.dragNumber(uiId(UiDetailNotes,23),{row.x,row.y,width,rowH},&rootValue,0,127,1,pitch)) root=clampv((int)std::round(rootValue),0,127);
+        if(mode) {
+            const char* scales[kScaleCount];for(int i=0;i<kScaleCount;++i) scales[i]=kScales[i].name;
+            ui_.selector(uiId(UiDetailNotes,24),{row.x+width+gap,row.y,width,rowH},&scale,scales,kScaleCount);
+            f64 value=count;
+            if(ui_.dragNumber(uiId(UiDetailNotes,25),{row.x+2*(width+gap),row.y,width,rowH},&value,1,64,1,"%.0f")) count=(int)std::round(value);
+            row.y+=rowH+8*s;
+            label("Step",row);
+            ui_.dragNumber(uiId(UiDetailNotes,26),{row.x+lblW,row.y,row.w-lblW,rowH},&step,.0625,4,.125,"%.3f bt");
+        } else {
+            static const char* qualities[]={"Major","Minor","Dim","Aug","7th","Maj 7","Min 7","Sus 2","Sus 4"};
+            static const char* inversions[]={"Root","1st","2nd","3rd"};
+            ui_.selector(uiId(UiDetailNotes,27),{row.x+width+gap,row.y,width,rowH},&quality,qualities,9);
+            const int voices=quality>=4 && quality<=6?4:3;
+            inversion=clampv(inversion,0,voices-1);
+            ui_.selector(uiId(UiDetailNotes,28),{row.x+2*(width+gap),row.y,width,rowH},&inversion,inversions,voices);
+        }
+        row.y+=rowH+12*s;
+        if(ui_.button(uiId(UiDetailNotes,29),row,mode?"Insert scale run":"Insert chord",false,nx::violet)) {
+            std::vector<NoteModel> notes;
+            if(mode) buildScalePattern(ScaleKey{root%12,clScaleMode(scale),false},root,count,start,step,length,m.lengthBeats,notes);
+            else {
+                std::vector<int> pitches;
+                if(buildChord(root,(ChordKind)quality,inversion,pitches) && start<m.lengthBeats)
+                    for(int pitchValue:pitches) notes.push_back(NoteModel{start,std::min(length,m.lengthBeats-start),(u8)pitchValue,100,100,0});
+            }
+            if(notes.empty()) status_="No notes fit - lower the root or move the start inside the clip";
+            else {
+                const ClipModel before=m;
+                m.notes.insert(m.notes.end(),notes.begin(),notes.end());
+                std::stable_sort(m.notes.begin(),m.notes.end(),[](const NoteModel& a,const NoteModel& b) {return a.beat<b.beat || (a.beat==b.beat && a.pitch<b.pitch);});
+                undoPointWith(mode?"insert scale run":"insert chord",m,before);
+                pushClip(selTrack_,selSlot_);
+                if(roll_) {roll_->clearSelection();roll_->setFoldMode(roll_->foldMode());}
+                status_=std::to_string(notes.size())+" notes inserted - Ctrl+Z to undo";
+            }
+        }
+        if(ui_.hovered(row)) ui_.tip="Adds ordinary MIDI notes at Start beat, preserving existing notes. One Ctrl+Z removes this insertion.";
     }
     rend_.popClip();
     if (maxInspectorScroll > 0.f && inspectorBody.h > 0.f) {

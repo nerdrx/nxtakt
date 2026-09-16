@@ -5,7 +5,9 @@ struct SpectraStudioState {
     u64 uid = 0;
     int page = 0, category = 0, selected = -1, popup = -1, assignDest = -1;
     f32 scroll = 0, presetScroll = 0, advancedScroll = 0;
-    bool browser = true, files = false, motionTools = false, soundTools = false;
+    bool browser = true, files = false, motionTools = false, soundTools = false, favoritesOnly = false;
+    f64 variationAmount = 35;
+    u32 variationSeed = 0x4e585350;
     std::string query, lastQuery, saveName, baselineState;
     std::vector<f32> baseline;
     std::vector<std::string> options;
@@ -64,9 +66,17 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
     const int pc = inst->paramCount();
+    static PresetFavorites favorites([] {
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        return (xdg && *xdg ? std::string(xdg) : homeDir()+"/.config") + "/nxtakt/spectra-favorites.txt";
+    }());
+    auto favoriteKey = [&](int p) {
+        return std::string(p < inst->factoryPresetCount() ? "factory:" : "user:") + presetNameOf(*inst,p);
+    };
     if (st.uid != dm.uid) {
         st = SpectraStudioState{};
         st.uid = dm.uid;
+        st.variationSeed ^= (u32)(nowSeconds()*1000.0) ^ (u32)dm.uid;
         g_drop.open = false;
         if (g_edit.open) g_edit.release();
         // A restored project may be an edited sound, so never call it Init.
@@ -102,6 +112,23 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
         snapshot();
         status_ = std::string("Spectra: ") + presetNameOf(*inst, p);
     };
+    auto matchesPreset = [&](int p) {
+        const char* name=presetNameOf(*inst,p);
+        const int category=p>=inst->factoryPresetCount()?8:presetCatOf(name)+1;
+        if(st.category && category!=st.category) return false;
+        if(st.favoritesOnly && !favorites.contains(favoriteKey(p))) return false;
+        const std::string query=studioLower(ui_.editId==id(8)?ui_.editBuf:st.query);
+        return query.empty() || studioLower(name).find(query)!=std::string::npos;
+    };
+    auto stepPreset = [&](int direction) {
+        const int count=inst->presetCount();
+        const int start=st.selected<0?(direction>0?-1:0):st.selected;
+        for(int step=1;step<=count;++step) {
+            const int p=((start+step*direction)%count+count)%count;
+            if(matchesPreset(p)) {load(p);return;}
+        }
+        status_="No presets match the current filters";
+    };
     bool modified = st.selected >= 0 && st.baseline.size() == (size_t)pc;
     if (modified) {
         modified = inst->stateString() != st.baselineState;
@@ -128,9 +155,9 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
     const char* sub = st.selected < 0 ? "Browse a sound or start designing" : modified ? "Modified - save your sound" : "Factory / user preset";
     rend_.textIn(fSmall_, {patch.x + 12*s, patch.y + 23*s, patch.w - 24*s, 16*s}, sub, modified ? nx::cyan : nx::muted, Align::Left, 0);
     f32 hx = patch.right() + 6*s;
-    if (ui_.button(id(1), {hx, header.y, 34*s, 42*s}, "<")) load(st.selected <= 0 ? inst->presetCount()-1 : st.selected-1);
+    if (ui_.button(id(1), {hx, header.y, 34*s, 42*s}, "<")) stepPreset(-1);
     hx += 40*s;
-    if (ui_.button(id(2), {hx, header.y, 34*s, 42*s}, ">")) load((st.selected + 1) % std::max(1, inst->presetCount()));
+    if (ui_.button(id(2), {hx, header.y, 34*s, 42*s}, ">")) stepPreset(1);
     hx += 44*s;
     if (ui_.button(id(3), {hx, header.y, 78*s, 42*s}, "Presets", st.browser)) {finishSidebarEdit();st.browser=!st.browser;st.files=false;}
     if (ui_.button(id(12), {header.right()-232*s,header.y,86*s,42*s}, "Files",st.files)) {finishSidebarEdit();st.files=!st.files;st.browser=false;}
@@ -174,7 +201,10 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
         const Rect browser{content.x, content.y, bw, content.h};
         rend_.roundRect(browser, 9*s, nx::panel);
         char count[64]; snprintf(count, sizeof count, "%d SOUNDS", inst->presetCount());
-        rend_.textIn(fSmall_, {browser.x + 12*s, browser.y + 8*s, browser.w-24*s, 20*s}, count, nx::cyan, Align::Left, 0);
+        rend_.textIn(fSmall_, {browser.x + 12*s, browser.y + 8*s, browser.w-118*s, 20*s}, count, nx::cyan, Align::Left, 0);
+        if(ui_.button(id(16),{browser.right()-106*s,browser.y+5*s,96*s,26*s},"Favorites",st.favoritesOnly)) {
+            st.favoritesOnly=!st.favoritesOnly;st.presetScroll=0;
+        }
         const Rect search{browser.x + 10*s, browser.y + 36*s, browser.w - 20*s, 34*s};
         const std::string oldQuery = st.query;
         ui_.textField(id(8), search, &st.query, nx::bgTop, nx::text, Align::Left, false);
@@ -189,10 +219,7 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
         const std::string query = studioLower(ui_.editId==id(8)?ui_.editBuf:st.query);
         if(query!=st.lastQuery) {st.presetScroll=0;st.lastQuery=query;}
         for (int p = 0; p < inst->presetCount(); ++p) {
-            const char* n = presetNameOf(*inst, p);
-            const int cat = p >= inst->factoryPresetCount() ? 8 : presetCatOf(n)+1;
-            if (st.category && cat != st.category) continue;
-            if (!query.empty() && studioLower(n).find(query) == std::string::npos) continue;
+            if (!matchesPreset(p)) continue;
             matches.push_back(p);
         }
         const f32 rowH = 34*s;
@@ -204,9 +231,24 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
             const Rect row{list.x, list.y+i*rowH-st.presetScroll, list.w-6*s, rowH-2*s};
             if (row.bottom()<list.y || row.y>list.bottom()) continue;
             const int p = matches[i];
-            if (ui_.button(id(1000+p), row, presetNameOf(*inst,p), p==st.selected)) load(p);
+            const Rect star{row.right()-32*s,row.y,32*s,row.h};
+            if (ui_.button(id(1000+p), {row.x,row.y,row.w-36*s,row.h}, presetNameOf(*inst,p), p==st.selected)) load(p);
+            const bool saved=favorites.contains(favoriteKey(p));
+            if(ui_.button(id(5000+p),star,"",saved)) {
+                status_=favorites.toggle(favoriteKey(p)) ? (saved?"Removed from favorites":"Added to favorites") : "Could not save favorites - check your configuration folder";
+            }
+            if(ui_.hovered(star)) ui_.tip=saved?"Remove this preset from favorites":"Add this preset to favorites";
+            // Draw the star natively; the font atlas does not include Unicode icons.
+            for(int point=0;point<10;++point) {
+                const f32 a=point*0.62831853f-1.57079633f, b=(point+1)*0.62831853f-1.57079633f;
+                const f32 ra=(point%2?3.8f:8.f)*s, rb=(point%2?8.f:3.8f)*s;
+                const f32 ax=star.cx()+std::cos(a)*ra, ay=star.cy()+std::sin(a)*ra;
+                const f32 bx=star.cx()+std::cos(b)*rb, by=star.cy()+std::sin(b)*rb;
+                if(saved) rend_.triangle(star.cx(),star.cy(),ax,ay,bx,by,nx::text);
+                else rend_.line(ax,ay,bx,by,1.3f*s,nx::muted);
+            }
         }
-        if (matches.empty()) rend_.textIn(fSmall_, list, "No matching sounds", nx::muted, Align::Center, 0);
+        if (matches.empty()) rend_.textIn(fSmall_, list, st.favoritesOnly?"No matching favorites":"No matching sounds", nx::muted, Align::Center, 0);
         rend_.popClip();
         if (maxScroll>0) {
             const f32 th = std::max(20*s,list.h*list.h/(matches.size()*rowH));
@@ -229,6 +271,47 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
             } else status_="Could not save preset - check its name and preset folder";
         }
         content.x += bw+14*s; content.w -= bw+14*s;
+    }
+    // Variations edit the patch through the same undo and automation path as knobs.
+    if(st.page==0 && !st.soundTools) {
+        const Rect bar{content.x,content.y,content.w,44*s};
+        rend_.roundRect(bar,8*s,nx::panel);
+        rend_.textIn(fSmall_,{bar.x+12*s,bar.y,94*s,bar.h},"VARIATIONS",nx::muted,Align::Left,0);
+        const bool sound=ui_.button(id(17),{bar.x+106*s,bar.y+6*s,136*s,32*s},"Randomize sound");
+        const bool macros=ui_.button(id(18),{bar.x+250*s,bar.y+6*s,124*s,32*s},"Vary macros");
+        rend_.textIn(fSmall_,{bar.x+390*s,bar.y,64*s,bar.h},"Amount",nx::muted,Align::Left,0);
+        ui_.dragNumber(id(19),{bar.x+452*s,bar.y+6*s,84*s,32*s},&st.variationAmount,0,100,1,"%.0f%%");
+        if(ui_.hovered(bar)) ui_.tip="Create a variation of this patch. Amount controls the change. Ctrl+Z restores the previous sound.";
+        if(sound || macros) {
+            if(g_edit.open && g_edit.anyDirty()) status_="Apply or discard the wavetable drawing before making a variation";
+            else {
+                SpectraParamValues base{};
+                for(int p=0;p<std::min(pc,kSpectraVariationParamCount);++p) base[(size_t)p]=get(p);
+                auto changes=macros?makeSpectraMacroVariation(base,++st.variationSeed,(f32)st.variationAmount/100.f)
+                                   :makeSpectraVariation(base,++st.variationSeed,(f32)st.variationAmount/100.f);
+                if(macros) {
+                    changes.erase(std::remove_if(changes.begin(),changes.end(),[&](const SpectraParamChange& change) {
+                        for(int m=0;m<8;++m) if((int)get(68+3*m)==change.id-94+9 && get(69+3*m)>0) return false;
+                        return true;
+                    }),changes.end());
+                }
+                if(changes.empty()) status_=st.variationAmount==0?"Raise Amount to create a variation":"This patch has no assigned macros - choose a mapped preset or add routes on Modulation";
+                else {
+                    if(g_edit.open) {wtCancelPreview(inst,g_edit.osc);g_edit.release();}
+                    undoPoint(macros?"vary Spectra macros":"randomize Spectra sound",id(sound?17:18));
+                    for(const auto& change:changes) {
+                        if(change.id>=pc) continue;
+                        const auto& info=inst->paramInfo(change.id);
+                        f32 value=clampv(change.value,info.min,info.max);
+                        if(info.isInt) value=std::round(value);
+                        inst->setParam(change.id,value);
+                        if(ownIsTrack(devOwner_)) autoCapture(addr::deviceParam(ses_.tracks[devOwner_].uid,dm.uid,info.id),value,id(sound?17:18));
+                    }
+                    status_=macros?"New macro variation - Ctrl+Z restores the previous sound":"New sound variation - tuning, custom tables and routing preserved; Ctrl+Z to restore";
+                }
+            }
+        }
+        content.y+=54*s;content.h-=54*s;
     }
     // Shared controls use the instrument's parameter metadata, so ranges,
     // logarithmic drags and automation stay aligned with the sound engine.

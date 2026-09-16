@@ -82,6 +82,19 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Creative tools — 0.19.0
+
+Spectra now offers **Randomize sound**, **Vary macros** and an **Amount** control.
+Create variations while retaining tuning, wavetable choices, master gain,
+modulation routing and arpeggiator settings. Star presets to save favorites;
+search, categories and previous/next navigation respect the Favorites filter.
+
+The Session MIDI inspector's **Compose** page inserts chords with nine qualities
+and inversions, or ascending scale runs with chosen timing and note lengths.
+Generated notes remain editable, save normally and undo in one step. Move the
+finished clip into Arrangement when ready; Compose controls currently live in
+Session. See [Creative tools](docs/CREATIVE-TOOLS.md).
+
 ## Spectra Studio — 0.18.0
 
 ![Spectra Studio with its preset browser, two oscillators and performance controls](assets/spectra.png)
