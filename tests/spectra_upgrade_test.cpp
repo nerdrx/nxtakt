@@ -1,5 +1,6 @@
 // Integrated Spectra FX through the public internal-device factory.
 #include "../src/plugin/host.h"
+#include "../src/ui/spectra_compare.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -115,6 +116,21 @@ int main() {
         restored->setParam(id,1e6f);check(restored->getParam(id)==restored->paramInfo(id).max,"FX upper clamp");
         restored->setParam(id,-1e6f);check(restored->getParam(id)==restored->paramInfo(id).min,"FX lower clamp");
     }
+    // Compare actual Spectra patches, including state absent from parameter pairs.
+    auto compared=synth();
+    const auto patchA=captureSpectraSound(*compared);
+    compared->prepare(48000,4096);
+    const auto audioA=render(*compared,18000);
+    enable(*compared);
+    check(compared->setStateString("nxspc1;cc=74;lfo1=0123456789abcdef"),"comparison non-parameter state accepted");
+    const auto patchB=captureSpectraSound(*compared);
+    check(restoreSpectraSound(*compared,patchA),"comparison recalls A");
+    check(compared->stateString()==patchA.state,"comparison clears B modulation state when A has no state");
+    compared->prepare(48000,4096);
+    check(same(audioA,render(*compared,18000)),"recalled A produces identical audio after phase reset");
+    check(restoreSpectraSound(*compared,patchB),"comparison recalls B");
+    const auto recalledB=captureSpectraSound(*compared);
+    check(recalledB.params==patchB.params && recalledB.state==patchB.state,"comparison restores every B parameter and non-parameter field");
     std::printf("Spectra studio FX: %d passed, %d failed\n",passed,failed);
     return failed ? 1 : 0;
 }

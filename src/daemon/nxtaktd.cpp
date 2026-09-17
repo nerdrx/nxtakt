@@ -4106,7 +4106,9 @@ private:
         //    does not know, re-escape a path), and demanding byte equality would
         //    make this a stricter contract than host.h's and would fail on
         //    exactly the forward compatibility that format was designed for.
-        if (!text.empty() && d->inst->stateString().empty()) {
+        const bool spectraReset = text == "nxspc1" &&
+                                  d->inst->desc().uri == "nxtakt:spectra";
+        if (!text.empty() && d->inst->stateString().empty() && !spectraReset) {
             logDevice("SetDeviceState: device %u took a %zu-byte state and kept nothing",
                       id, text.size());
             failDeviceState(w, id, ipc::RejectNotStateful);

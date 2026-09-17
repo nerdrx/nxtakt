@@ -82,6 +82,22 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Spectra A/B comparison — 0.25.0
+
+Use **Store A** and **Store B** to capture two sounds, then click **A** or **B**
+to recall them. Each snapshot includes all parameters and Spectra's additional
+state, including drawn modulation, arpeggiator patterns and wavetable references.
+Edits do not overwrite a slot until you press its Store button again.
+
+Recall creates one undo step; recalling the already-active sound is a no-op.
+Undo and Redo restore the full patch, including clearing modulation or custom
+tables when returning to a default-state sound. Unapplied wavetable drawings
+must be applied or discarded before storing or recalling a snapshot.
+
+Slots are temporary workspace tools and reset when you open another Spectra instance.
+They are not written into the project or preset bank. Save the active sound as
+a preset for permanent storage; the project saves whichever sound is active.
+
 ## Drum pattern tools — 0.24.0
 
 **Copy bar** copies the visible bar's eight drum lanes. **Paste bar** replaces

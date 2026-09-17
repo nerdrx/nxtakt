@@ -292,7 +292,12 @@ void App::materializeDevices(std::vector<LiveDevice>* reuse) {
                 // `rack()` path they have always ridden; no rack overrides
                 // stateString(), so the two can never both be asked and the
                 // string can never be written by one and read by the other.
-                if (!inst->setStateString(sd.state))
+                // Empty saved Spectra state means defaults; its generic empty
+                // setter is a no-op, which would retain a rebound instance's
+                // old modulation or wavetable state during Undo/Redo.
+                const std::string restoreState = sd.state.empty() && inst->desc().uri == "nxtakt:spectra"
+                    ? "nxspc1" : sd.state;
+                if (!inst->setStateString(restoreState))
                     LOGW("%s: device state did not parse, contents not restored",
                          sd.name.c_str());
             }

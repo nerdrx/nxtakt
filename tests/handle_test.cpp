@@ -3076,11 +3076,32 @@ int main() {
             // Clearing: the state goes back to naming nothing, the oscillator
             // returns to the factory fallback, and no further table is shipped.
             const u64 sentBefore = eng.wavetablesPublished();
+            const u64 statesBeforeClear = eng.deviceStatesPublished();
+            const u64 refusedBeforeClear = eng.deviceStatesRefused();
             CHECK(spInst->setStateString(""), "an empty state is accepted as a no-op");
+            CHECK(spInst->wavetable()->hasCustom(0), "empty state retains the custom wavetable");
+            CHECK(spInst->setStateString("nxspc1"),
+                  "the explicit Spectra canonical reset is accepted");
             for (int i = 0; i < 80; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+            CHECK(eng.deviceStatesPublished() > statesBeforeClear,
+                  "clearing a live Spectra publishes its canonical reset state");
+            CHECK(eng.deviceStatesRefused() == refusedBeforeClear,
+                  "the canonical Spectra reset is accepted by the daemon");
             CHECK(eng.wavetablesPublished() == sentBefore,
                   "and nothing new goes into the pool for a state that names no table "
                   "(%llu)", (unsigned long long)eng.wavetablesPublished());
+            on2(127);
+            const f32 resetPeak = peakTrack2(900);
+            off2();
+            CHECK(std::fabs(resetPeak - factoryPeak) < 0.01f,
+                  "the daemon returns to the factory oscillator after clear: %.4f vs %.4f",
+                  (double)resetPeak, (double)factoryPeak);
+            const u64 resetStates = eng.deviceStatesPublished();
+            for (int i = 0; i < 40; ++i) { eng.poll(es); while (eng.popEvent(e)) {} sleepMs(5); }
+            CHECK(eng.deviceStatesPublished() == resetStates &&
+                      eng.deviceStatesRefused() == refusedBeforeClear &&
+                      eng.wavetablesPublished() == sentBefore,
+                  "the canonical reset deduplicates without another table upload");
 
             Command clear2{};
             clear2.type = Cmd::SetChain; clear2.a = 2; clear2.p = nullptr;

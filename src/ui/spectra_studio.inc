@@ -10,6 +10,7 @@ struct SpectraStudioState {
     u32 variationSeed = 0x4e585350;
     std::string query, lastQuery, saveName, baselineState;
     std::vector<f32> baseline;
+    SpectraSoundSnapshot compare[2];
     std::vector<std::string> options;
 } g_studio;
 std::string studioLower(std::string s) {
@@ -271,6 +272,43 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
             } else status_="Could not save preset - check its name and preset folder";
         }
         content.x += bw+14*s; content.w -= bw+14*s;
+    }
+    // Fixed snapshots stay independent of undo and ordinary knob edits.
+    {
+        const Rect bar{content.x,content.y,content.w,44*s};
+        rend_.roundRect(bar,8*s,nx::panel);
+        rend_.textIn(fSmall_,{bar.x+12*s,bar.y,82*s,bar.h},"COMPARE",nx::muted,Align::Left,0);
+        const auto current=captureSpectraSound(*inst);
+        for(int slot=0;slot<2;++slot) {
+            auto& saved=st.compare[slot];
+            const f32 x=bar.x+(106+slot*164)*s;
+            const Rect store{x,bar.y+6*s,100*s,32*s};
+            const Rect recall{x+106*s,store.y,44*s,32*s};
+            const bool matches=saved.valid && saved.params==current.params && saved.state==current.state;
+            if(ui_.button(id(24+slot*2),store,slot?"Store B":"Store A")) {
+                if(g_edit.open && g_edit.anyDirty()) status_="Apply or discard the wavetable drawing before storing a comparison";
+                else {saved=current;status_=slot?"Spectra B stored - click B to recall":"Spectra A stored - click A to recall";}
+            }
+            if(ui_.hovered(store)) ui_.tip="Store the current sound in this temporary comparison slot. Does not write a preset file.";
+            if(ui_.button(id(25+slot*2),recall,slot?"B":"A",matches)) {
+                if(!saved.valid) status_=slot?"Store B first":"Store A first";
+                else if(g_edit.open && g_edit.anyDirty()) status_="Apply or discard the wavetable drawing before comparing sounds";
+                else if(!matches) {
+                    stopPreviews();
+                    if(g_edit.open) {wtCancelPreview(inst,g_edit.osc);g_edit.release();}
+                    undoPoint(slot?"recall Spectra B":"recall Spectra A");
+                    if(restoreSpectraSound(*inst,saved)) {
+                        st.selected=spectraPreset_=-1;
+                        st.baseline.clear();st.baselineState.clear();
+                        status_=slot?"Spectra B recalled - Ctrl+Z restores the previous sound":"Spectra A recalled - Ctrl+Z restores the previous sound";
+                    } else status_="Could not restore comparison - previous sound restored";
+                }
+            }
+            if(ui_.hovered(recall)) ui_.tip=saved.valid
+                ? "Recall this stored sound, including modulation and wavetable state. Edits are stored only when you press Store. Undo restores the previous sound."
+                : "Store a sound in this slot first";
+        }
+        content.y+=54*s;content.h-=54*s;
     }
     // Variations edit the patch through the same undo and automation path as knobs.
     if(st.page==0 && !st.soundTools) {

@@ -34,12 +34,12 @@ else: assert not changed,changed
 print('PASS:',sys.argv[3],len(changed),'changed parameters')
 CHECK
 }
-clk 457 228
+clk 457 282
 check_patch sound
 shot variation
 key ctrl+z
 check_patch undo
-clk 597 228
+clk 597 282
 check_patch macros
 key ctrl+z
 check_patch undo

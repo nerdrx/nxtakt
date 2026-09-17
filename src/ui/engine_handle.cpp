@@ -1828,6 +1828,13 @@ struct RemoteEngine {
                 if (s.src->rack()) continue;            // see above
 
                 const std::string text = s.src->stateString();
+                // Spectra's empty state is a real reset only after this slot
+                // has carried state. Its setter treats empty as a no-op, so
+                // give the daemon the canonical reset record while retaining
+                // the source's raw empty spelling for the model.
+                const std::string wireText =
+                    (text.empty() && s.stateSent && s.src->desc().uri == "nxtakt:spectra")
+                        ? "nxspc1" : text;
                 // The buffer is held for the whole publication, on purpose: the
                 // pool write below is a memcpy of every sample, and a sampler
                 // re-pointed during it would otherwise leave the copy reading a
@@ -1861,9 +1868,9 @@ struct RemoteEngine {
                 ipc::EngineClient::WavetableUpload wtUp[ipc::kMaxWavetables];
                 u64 wtHash[ipc::kMaxWavetables];
                 int wtN = 0;
-                if (!text.empty()) {
+                if (!wireText.empty()) {
                     u64 want[ipc::kMaxWavetables];
-                    const int n = wt::hashesInDeviceState(text.c_str(), want,
+                    const int n = wt::hashesInDeviceState(wireText.c_str(), want,
                                                           (int)ipc::kMaxWavetables);
                     for (int i = 0; i < n; ++i) {
                         const wt::Table* t = wt::find(want[i]);
@@ -1878,14 +1885,14 @@ struct RemoteEngine {
                     }
                 }
 
-                const u64 finger = deviceStateFingerprint(text, buf.get(), wtHash, wtN);
+                const u64 finger = deviceStateFingerprint(wireText, buf.get(), wtHash, wtN);
                 if (finger == s.stateFinger) continue;
 
                 // Nothing to say, and nothing has ever been said. Almost every
                 // device in a set lands here exactly once and never again.
                 if (text.empty() && !buf && !s.stateSent) { s.stateFinger = finger; continue; }
 
-                if (text.size() + 1 > ipc::kMaxDeviceState) {
+                if (wireText.size() + 1 > ipc::kMaxDeviceState) {
                     // A silent truncation would install a DIFFERENT state, not a
                     // shorter one -- for a sampler, a different FILE -- so it is
                     // refused and tombstoned like any other permanent failure.
@@ -1909,7 +1916,7 @@ struct RemoteEngine {
                 // the one that matters: a sampler's audio is the largest single
                 // thing this handle ever writes, so a full pool shows up here
                 // first and shows up as an instrument that will not load.
-                if (!cli.setDeviceState(s.id, gen, text.c_str(),
+                if (!cli.setDeviceState(s.id, gen, wireText.c_str(),
                                         buf ? buf->data.data() : nullptr,
                                         buf ? buf->frames      : 0,
                                         buf ? buf->channels    : 0,

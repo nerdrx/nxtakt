@@ -3,6 +3,24 @@
 NxTakt’s creative helpers keep generated material inside the same editable,
 serializable project model as hand-authored clips and presets.
 
+## Spectra A/B comparison — 0.25.0
+
+![Spectra comparison slots](../assets/spectra-compare.png)
+
+Use **Store A** and **Store B** to capture two sounds, then click **A** or **B**
+to recall them. Each snapshot includes all parameters and Spectra's additional
+state, including drawn modulation, arpeggiator patterns and wavetable references.
+Edits do not overwrite a slot until you press its Store button again.
+
+Recall creates one undo step; recalling the already-active sound is a no-op.
+Undo and Redo restore the full patch, including clearing modulation or custom
+tables when returning to a default-state sound. Unapplied wavetable drawings
+must be applied or discarded before storing or recalling a snapshot.
+
+Slots are temporary workspace tools and reset when you open another Spectra instance.
+They are not written into the project or preset bank. Save the active sound as
+a preset for permanent storage; the project saves whichever sound is active.
+
 ## Drum pattern tools — 0.24.0
 
 ![Drum pattern tools](../assets/drum-pattern-tools.png)
