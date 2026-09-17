@@ -82,6 +82,14 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Drum rhythms — 0.23.0
+
+Select a drum lane, choose **Hits**, **Shift**, and **Vel**, then click
+**Generate rhythm** to create an evenly spaced 16-step pattern. Generation
+replaces only the selected lane on the visible page; one Undo restores it.
+Set Hits to zero to clear that lane. Generated notes remain editable and save
+with your project. See [Creative tools](docs/CREATIVE-TOOLS.md).
+
 ## Audio I/O — 0.22.0
 
 The top-bar **Audio I/O** control and the audio status line open the audio

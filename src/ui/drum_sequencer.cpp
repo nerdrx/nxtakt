@@ -1,4 +1,5 @@
 #include "drum_sequencer.h"
+#include "drum_rhythm.h"
 #include "autolane.h" // dpiOf
 #include <algorithm>
 #include <cmath>
@@ -50,7 +51,7 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
     Renderer& rr = *ui.r;
     Input& in = *ui.in;
     const f32 s = std::max(0.5f, ui.r->dpiScale());
-    if (r.w < 320 * s || r.h < 140 * s) return false;
+    if (r.w < 320 * s || r.h < (r.w < 600*s ? 190 : 154) * s) return false;
     if (clipUid_ != clip.uid) {
         clipUid_ = clip.uid;
         page_ = 0;
@@ -109,8 +110,10 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
     }
 
     const Rect footer{r.x, r.bottom() - 34 * s, r.w, 34 * s};
+    const bool narrowRhythm = r.w < 600*s;
+    const Rect rhythm{r.x,footer.y-(narrowRhythm?72:36)*s,r.w,(narrowRhythm?72:36)*s};
     const Rect heading{r.x, toolbar.bottom(), r.w, 26 * s};
-    const Rect body{r.x, heading.bottom(), r.w, std::max(24 * s, footer.y - heading.bottom())};
+    const Rect body{r.x, heading.bottom(), r.w, std::max(24 * s, rhythm.y - heading.bottom())};
     const f32 nameW = 108 * s;
     const Rect grid{body.x + nameW, body.y, body.w - nameW - 6 * s, body.h};
     const f32 rowH = std::max(24 * s, std::min(34 * s, body.h / kLanes));
@@ -140,8 +143,11 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
         if (row.bottom() <= body.y || row.y >= body.bottom()) continue;
         Rect name{row.x + 4 * s, y, nameW - 10 * s, rowH};
         // Name targets are at least 24px tall except where the viewport clips.
-        if (ui.button(uiId(UiDrumSequencer, 10, lane), name, kNames[lane])) preview(kPitches[lane]);
-        if (ui.hovered(name)) ui.tip = std::string("Audition ") + kNames[lane];
+        if (ui.button(uiId(UiDrumSequencer, 10, lane), name, kNames[lane],rhythmLane_==lane)) {
+            rhythmLane_=lane;
+            preview(kPitches[lane]);
+        }
+        if (ui.hovered(name)) ui.tip = std::string("Audition and select ") + kNames[lane] + " for rhythm generation";
         rr.pushClip(grid);
         for (int step = 0; step < kSteps; ++step) {
             const int absolute = page_ * kSteps + step;
@@ -208,6 +214,29 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
         rr.roundRect({r.right() - 4 * s, body.y + travel * scrollY_ / (rowH * kLanes - body.h),
                       3 * s, thumbH}, 1.5f * s, nx::muted.alpha(0.55f));
     }
+    rr.rect(rhythm,nx::panel2);
+    Rect laneBox{rhythm.x+6*s,rhythm.y+4*s,104*s,28*s};
+    ui.selector(uiId(UiDrumSequencer,40),laneBox,&rhythmLane_,kNames,kLanes);
+    Rect hitsBox{laneBox.right()+6*s,laneBox.y,82*s,28*s};
+    rr.roundRect(hitsBox,4*s,nx::panel);
+    ui.dragNumber(uiId(UiDrumSequencer,41),hitsBox,&rhythmHits_,0,16,1,"Hits %.0f",Align::Center,nullptr,1,4);
+    Rect rotationBox{hitsBox.right()+6*s,laneBox.y,82*s,28*s};
+    rr.roundRect(rotationBox,4*s,nx::panel);
+    ui.dragNumber(uiId(UiDrumSequencer,42),rotationBox,&rhythmRotation_,0,15,1,"Shift %.0f",Align::Center,nullptr,1,0);
+    Rect velocityBox{narrowRhythm?laneBox.x:rotationBox.right()+6*s,
+                     narrowRhythm?laneBox.y+36*s:laneBox.y,82*s,28*s};
+    rr.roundRect(velocityBox,4*s,nx::panel);
+    ui.dragNumber(uiId(UiDrumSequencer,43),velocityBox,&rhythmVelocity_,1,127,1,"Vel %.0f",Align::Center,nullptr,1,100);
+    Rect generate{velocityBox.right()+6*s,velocityBox.y,116*s,28*s};
+    if(ui.button(uiId(UiDrumSequencer,44),generate,rhythmHits_<.5?"Clear lane":"Generate rhythm",true,nx::violet)) {
+        if(generateDrumRhythm(clip,kPitches[rhythmLane_],page_,(int)std::round(rhythmHits_),
+                              (int)std::round(rhythmRotation_),(int)std::round(rhythmVelocity_))) {
+            changed=true;
+            lastEdit_="generate drum rhythm";
+        }
+    }
+    if(ui.hovered(generate) || ui.hovered(hitsBox) || ui.hovered(rotationBox) || ui.hovered(velocityBox))
+        ui.tip="Evenly distribute Hits across 16 steps, rotated by Shift. Replaces only this lane on this bar; zero Hits clears it. One Undo restores it.";
     rr.rect(footer, nx::panel);
     static const char* presets[] = {"808 basic", "House", "Hip hop"};
     Rect presetBox{footer.x + 6 * s, footer.y + 3 * s, 112 * s, 28 * s};

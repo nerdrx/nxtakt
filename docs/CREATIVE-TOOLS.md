@@ -3,6 +3,25 @@
 NxTakt’s creative helpers keep generated material inside the same editable,
 serializable project model as hand-authored clips and presets.
 
+## Drum rhythm generator — 0.23.0
+
+![Generated drum rhythms](../assets/drum-rhythm.png)
+
+The Session drum grid has a rhythm generator below its lanes. Click a lane name
+to select and audition the generator lane. Set **Hits** from 0 to 16, **Shift**
+from 0 to 15, and **Vel** from 1 to 127, then press **Generate rhythm**. The
+generator distributes Hits across 16 evenly spaced steps using a Euclidean
+pattern. With Hits set to 0, the button becomes **Clear lane**.
+
+Generation replaces only the selected lane on the current page. Other pitches
+and pages remain unchanged. Generated material is ordinary saved MIDI notes,
+and one undo restores the previous lane. Repeating identical generation without
+an intervening change is a no-op and creates no undo entry.
+
+The final page can contain fewer than 16 steps. Generation skips steps beyond
+that page or the clip end, so the pattern never extends the clip. **Shift**
+rotates the pattern forward across its 16 steps.
+
 ## Session Notes — 0.21.0
 
 ![Strummed chords in the piano roll](../assets/note-feel.png)
