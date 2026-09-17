@@ -52,15 +52,7 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
     Input& in = *ui.in;
     const f32 s = std::max(0.5f, ui.r->dpiScale());
     const bool narrowFooter = r.w < 650 * s;
-    if (r.w < 320 * s || r.h < ((r.w < 600*s ? 190 : 154) + (narrowFooter ? 34 : 0)) * s) {
-        rr.pushClip(r);
-        if (ui.fBody) rr.textIn(*ui.fBody,{r.x,r.y,r.w,28*s},
-            "Drum editor needs more room",nx::text,Align::Center,0);
-        if (ui.fSmall) rr.textIn(*ui.fSmall,{r.x,r.y+30*s,r.w,24*s},
-            "Enlarge the window or reduce UI scale.",nx::muted,Align::Center,0);
-        rr.popClip();
-        return false;
-    }
+    if (r.w < 320 * s || r.h < ((r.w < 600*s ? 190 : 154) + (narrowFooter ? 34 : 0)) * s) return false;
     if (clipUid_ != clip.uid) {
         clipUid_ = clip.uid;
         page_ = 0;
