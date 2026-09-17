@@ -3,6 +3,21 @@
 NxTakt’s creative helpers keep generated material inside the same editable,
 serializable project model as hand-authored clips and presets.
 
+## Drum pattern tools — 0.24.0
+
+![Drum pattern tools](../assets/drum-pattern-tools.png)
+
+**Copy bar** copies the visible bar's eight drum lanes. **Paste bar** replaces
+those lanes on the destination bar, preserving other bars and non-drum pitches.
+Copy between drum clips or between Session and Arrangement. The clipboard
+lasts for the current app session; pasted notes save normally with the project.
+An empty copied bar clears the destination drum lanes.
+
+**Double pattern** doubles the clip length and repeats its MIDI notes, up to
+64 steps. It opens the repeated section so you can turn it into a fill.
+Clip automation stays unchanged. Paste and Double pattern each create one
+undo step; repeating an identical paste adds no undo entry.
+
 ## Drum rhythm generator — 0.23.0
 
 ![Generated drum rhythms](../assets/drum-rhythm.png)

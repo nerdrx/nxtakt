@@ -1,5 +1,6 @@
 #pragma once
 #include "session.h"
+#include "drum_pattern.h"
 #include "widgets.h"
 
 namespace lat {
@@ -15,6 +16,7 @@ public:
 
 private:
     void preview(int pitch);
+    inline static DrumPage pageClipboard_;
     u64 clipUid_ = ~u64{0};
     int page_ = 0, lengthChoice_ = 0, preset_ = 0;
     int rhythmLane_=0;

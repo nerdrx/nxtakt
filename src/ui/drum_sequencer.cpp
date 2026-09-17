@@ -51,7 +51,16 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
     Renderer& rr = *ui.r;
     Input& in = *ui.in;
     const f32 s = std::max(0.5f, ui.r->dpiScale());
-    if (r.w < 320 * s || r.h < (r.w < 600*s ? 190 : 154) * s) return false;
+    const bool narrowFooter = r.w < 650 * s;
+    if (r.w < 320 * s || r.h < ((r.w < 600*s ? 190 : 154) + (narrowFooter ? 34 : 0)) * s) {
+        rr.pushClip(r);
+        if (ui.fBody) rr.textIn(*ui.fBody,{r.x,r.y,r.w,28*s},
+            "Drum editor needs more room",nx::text,Align::Center,0);
+        if (ui.fSmall) rr.textIn(*ui.fSmall,{r.x,r.y+30*s,r.w,24*s},
+            "Enlarge the window or reduce UI scale.",nx::muted,Align::Center,0);
+        rr.popClip();
+        return false;
+    }
     if (clipUid_ != clip.uid) {
         clipUid_ = clip.uid;
         page_ = 0;
@@ -109,7 +118,8 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
         if (ui.fSmall) rr.textIn(*ui.fSmall, pageLabel, label, nx::muted, Align::Center, 0);
     }
 
-    const Rect footer{r.x, r.bottom() - 34 * s, r.w, 34 * s};
+    const f32 footerH = (narrowFooter ? 68 : 34) * s;
+    const Rect footer{r.x, r.bottom() - footerH, r.w, footerH};
     const bool narrowRhythm = r.w < 600*s;
     const Rect rhythm{r.x,footer.y-(narrowRhythm?72:36)*s,r.w,(narrowRhythm?72:36)*s};
     const Rect heading{r.x, toolbar.bottom(), r.w, 26 * s};
@@ -268,9 +278,33 @@ bool DrumSequencer::draw(Ui& ui, const Rect& r, ClipModel& clip,
         lastEdit_ = "replace drum page";
     }
     if (ui.hovered(apply)) ui.tip = "Replace this page's eight drum lanes with the chosen pattern. Other pages and pitches are kept.";
-    if (ui.fSmall && footer.w > 630 * s)
-        rr.textIn(*ui.fSmall, {apply.right() + 12 * s, footer.y, footer.right() - apply.right() - 20 * s, footer.h},
-                  "Click steps  /  Scroll lanes  /  Ctrl + scroll velocity", nx::muted, Align::Right, 0);
+    Rect copy{narrowFooter ? presetBox.x : apply.right()+12*s,
+              narrowFooter ? presetBox.y+34*s : presetBox.y,82*s,28*s};
+    Rect paste{copy.right()+6*s,copy.y,82*s,28*s};
+    Rect twice{paste.right()+6*s,copy.y,110*s,28*s};
+    if (ui.button(uiId(UiDrumSequencer,45),copy,"Copy bar"))
+        pageClipboard_ = copyDrumPage(clip,page_);
+    if (ui.hovered(copy)) ui.tip="Copy this bar's eight drum lanes. Paste into another bar or drum clip.";
+    if (ui.button(uiId(UiDrumSequencer,46),paste,"Paste bar",pageClipboard_.valid)) {
+        if (!pageClipboard_.valid) ui.refusal="Copy a drum bar first";
+        else if (pasteDrumPage(clip,page_,pageClipboard_)) {
+            changed=true;
+            lastEdit_="paste drum bar";
+        }
+    }
+    if (ui.hovered(paste)) ui.tip=pageClipboard_.valid
+        ? "Replace this bar's drum notes with the copied bar. Other bars and pitches stay unchanged. Undo restores it."
+        : "Copy a drum bar first";
+    if (ui.button(uiId(UiDrumSequencer,47),twice,"Double pattern")) {
+        const double oldLength=clip.lengthBeats;
+        if (doubleDrumPattern(clip)) {
+            lengthChoice_=clip.lengthBeats<=4 ? 0 : clip.lengthBeats<=8 ? 1 : 2;
+            page_=(int)(oldLength/4);
+            changed=true;
+            lastEdit_="double drum pattern";
+        } else ui.refusal="Double pattern supports up to 64 steps";
+    }
+    if (ui.hovered(twice)) ui.tip="Double the clip length and repeat its MIDI notes, up to 64 steps. Automation is unchanged. Undo restores it.";
     if (changed) sortNotes(clip);
     rr.popClip();
     return changed;

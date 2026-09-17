@@ -399,6 +399,10 @@ build/audio_routing_test: tests/audio_routing_test.cpp src/audio/audio_routing.c
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra -Isrc tests/audio_routing_test.cpp src/audio/audio_routing.cpp -o $@ $(shell pkg-config --cflags --libs jack alsa)
 
+build/drum_pattern_test: tests/drum_pattern_test.cpp src/ui/drum_pattern.h src/ui/drum_rhythm.h src/ui/session.h
+	@mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
+
 build/drum_rhythm_test: tests/drum_rhythm_test.cpp src/ui/drum_rhythm.h src/ui/session.h
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
@@ -415,8 +419,9 @@ build/compose_test: tests/compose_test.cpp src/ui/compose.h src/ui/session.h
 	@mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra $< -o $@
 
-test: build/drum_rhythm_test build/audio_settings_test build/note_feel_test build/progression_test build/compose_test build/spectra_variation_test build/preset_favorites_test build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
+test: build/drum_pattern_test build/drum_rhythm_test build/audio_settings_test build/note_feel_test build/progression_test build/compose_test build/spectra_variation_test build/preset_favorites_test build/spectra_upgrade_test build/drum_machine_test build/input_test build/hit_map_test build/engine_test build/ipc_test build/daemon_test build/internal_device_test \
       build/timesig_view_test build/handle_test build/render build/gen_demo build/plugin_scan
+	./build/drum_pattern_test
 	./build/drum_rhythm_test
 	./build/audio_settings_test
 	./build/note_feel_test
