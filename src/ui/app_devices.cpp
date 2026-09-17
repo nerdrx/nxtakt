@@ -312,6 +312,8 @@ void App::addDevice(int owner, const PluginDesc& d) {
 
     DeviceModel dm;
     dm.uid = ses_.newUid();
+    // Undo can rewind nextUid; a newly created device must not inherit discarded slots.
+    spectraComparisons_.erase(dm.uid);
     dm.desc = d;
     dm.inst = std::move(inst);
     devices.push_back(std::move(dm));

@@ -378,6 +378,7 @@ void App::releaseAllChains() {
 // thing in this file.
 void App::adoptSession(Session&& next, const std::vector<ClipSample>* restore) {
     const bool restoring = restore != nullptr;
+    if (!restoring) spectraComparisons_.clear();
     // A recording pass in flight names a track, a slot and a clip uid in the
     // session that is about to stop existing. Cancelled rather than finished:
     // finishing would run the simplification over a vector that is one move

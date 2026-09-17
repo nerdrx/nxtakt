@@ -5,6 +5,9 @@
 // translation units; a member add rebuilds those but not src/core or the roll.
 #pragma once
 #include "session.h"
+#include "spectra_compare.h"
+#include <array>
+#include <map>
 // Where the engine is, and what it looked like this frame. App holds no Engine,
 // no AudioBackend and no MidiInput of its own any more: EngineHandle owns the
 // ipc::EngineClient and the MIDI reader (and, on the Windows port only, the
@@ -504,6 +507,8 @@ private:
     // device of track 0 whatever that device is, and NXTAKT_DEBUG_SPECTRAPOS
     // sweeps A Position through the slider's own code path. Inert without them.
     void debugSeedSpectra();
+    // Temporary per-device sounds survive focus changes and undo, not project replacement.
+    std::map<u64, std::array<SpectraSoundSnapshot, 2>> spectraComparisons_;
     u64  spectraOpenUid_ = 0;          // 0 = no Spectra panel open
     // Set only by the debug hook: "open this panel even though the device is
     // not a Spectra", which is how the guarded states get a screenshot.

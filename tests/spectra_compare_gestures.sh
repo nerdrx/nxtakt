@@ -6,6 +6,7 @@ patch() {
  python3 - "$NXTAKT_TEST_PROJECT" "$OUT/$2.json" "$1" <<'CHECK'
 import json,re,sys
 s=open(sys.argv[1]).read()
+s=s.split('track '+__import__('os').environ.get('COMPARE_TRACK','0')+'\n',1)[1].split('endtrack',1)[0]
 p={'params':{k:float(v) for k,v in re.findall(r'^    param (\d+) (\S+)',s,re.M)},
    'state':re.findall(r'^    state (.*)$',s,re.M)}
 assert len(p['params'])==137,len(p['params'])
@@ -61,3 +62,39 @@ patch check A
 clk 648 228
 patch check B
 shot compact-compare
+
+# Independent per-instrument slots survive focus changes and session restores.
+xd windowsize "$wid" 1360 860
+sleep 1
+clk 724 26
+export COMPARE_TRACK=1
+clk 120 388
+patch store second-A
+clk 440 228
+clk 120 260
+xd type --clearmodifiers 'Acid Line'
+key Return
+clk 120 388
+patch store second-B
+clk 603 228
+clk 1270 117
+clk 270 104
+clk 460 571
+export COMPARE_TRACK=0
+clk 518 228
+patch check A
+clk 682 228
+patch check B
+key ctrl+z
+patch check A
+key ctrl+shift+z
+patch check B
+clk 1270 117
+clk 380 104
+clk 460 571
+export COMPARE_TRACK=1
+clk 518 228
+patch check second-A
+clk 682 228
+patch check second-B
+shot independent-slots

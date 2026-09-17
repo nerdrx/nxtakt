@@ -3,7 +3,7 @@
 NxTakt’s creative helpers keep generated material inside the same editable,
 serializable project model as hand-authored clips and presets.
 
-## Spectra A/B comparison — 0.25.0
+## Spectra A/B comparison — 0.25.1
 
 ![Spectra comparison slots](../assets/spectra-compare.png)
 
@@ -17,7 +17,8 @@ Undo and Redo restore the full patch, including clearing modulation or custom
 tables when returning to a default-state sound. Unapplied wavetable drawings
 must be applied or discarded before storing or recalling a snapshot.
 
-Slots are temporary workspace tools and reset when you open another Spectra instance.
+Each Spectra instrument has its own A/B slots. Switching tracks or instruments,
+Undo and Redo preserve them. Opening a project or closing NxTakt clears them.
 They are not written into the project or preset bank. Save the active sound as
 a preset for permanent storage; the project saves whichever sound is active.
 

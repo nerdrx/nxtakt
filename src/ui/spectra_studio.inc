@@ -10,7 +10,6 @@ struct SpectraStudioState {
     u32 variationSeed = 0x4e585350;
     std::string query, lastQuery, saveName, baselineState;
     std::vector<f32> baseline;
-    SpectraSoundSnapshot compare[2];
     std::vector<std::string> options;
 } g_studio;
 std::string studioLower(std::string s) {
@@ -280,7 +279,7 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
         rend_.textIn(fSmall_,{bar.x+12*s,bar.y,82*s,bar.h},"COMPARE",nx::muted,Align::Left,0);
         const auto current=captureSpectraSound(*inst);
         for(int slot=0;slot<2;++slot) {
-            auto& saved=st.compare[slot];
+            auto& saved=spectraComparisons_[dm.uid][slot];
             const f32 x=bar.x+(106+slot*164)*s;
             const Rect store{x,bar.y+6*s,100*s,32*s};
             const Rect recall{x+106*s,store.y,44*s,32*s};
@@ -289,7 +288,7 @@ void App::drawSpectraStudio(const Rect& r, DeviceModel& dm) {
                 if(g_edit.open && g_edit.anyDirty()) status_="Apply or discard the wavetable drawing before storing a comparison";
                 else {saved=current;status_=slot?"Spectra B stored - click B to recall":"Spectra A stored - click A to recall";}
             }
-            if(ui_.hovered(store)) ui_.tip="Store the current sound in this temporary comparison slot. Does not write a preset file.";
+            if(ui_.hovered(store)) ui_.tip="Store the current sound for this instrument. Slots survive track changes until you open a project or close NxTakt. Does not write a preset file.";
             if(ui_.button(id(25+slot*2),recall,slot?"B":"A",matches)) {
                 if(!saved.valid) status_=slot?"Store B first":"Store A first";
                 else if(g_edit.open && g_edit.anyDirty()) status_="Apply or discard the wavetable drawing before comparing sounds";
