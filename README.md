@@ -24,6 +24,14 @@
 </p>
 
 <p align="center">
+  <a href="https://nx-workshop.pages.dev/products/takt#trailer">
+    <img alt="Watch the NxTakt trailer — Make your next move" src="assets/trailer-poster.jpg" width="900">
+  </a><br>
+  <a href="https://nx-workshop.pages.dev/products/takt#trailer"><b>▶ Watch the 32-second trailer</b></a>
+  · <a href="https://nx-workshop.pages.dev/media/nxtakt-trailer.mp4">Direct MP4</a>
+</p>
+
+<p align="center">
   <img alt="NxTakt Session View: a five-track demo with the compact clip inspector and expanded piano roll" src="assets/hero.png" width="900">
 </p>
 
