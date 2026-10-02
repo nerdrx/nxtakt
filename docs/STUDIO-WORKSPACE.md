@@ -13,20 +13,27 @@ plays: the separate **Song / Pattern** control chooses the transport source.
 3. The small **P** action opens pattern notes. Double-click a channel name
    to open its Sound editor.
 4. Choose **Pattern**, then press Space to audition the selected pattern.
-5. **Place** copies the selected pattern's playable tracks to the next free bar
+5. Enable **Paint** in the toolbar or Rack, then drag across the Playlist to
+   repeat the selected pattern. One Undo removes the entire stroke. Painting
+   switches to Song mode without starting playback; Escape returns to normal editing.
+   **Place** copies the selected pattern's playable tracks to the next free bar
    of the Playlist. Edit placements separately from the original rack pattern.
 6. Choose **Song**, then Space to play the timeline.
 
 Pattern mode excludes timeline lanes that have no clip in the chosen pattern.
 Song mode returns all tracks to the timeline. Changing mode stops playback.
 
+Fresh projects start with one lane and one pattern in Pattern mode.
+Use **+ Sound** to create drums, Spectra or an audio/plugin channel. An unused
+lane is reused, and Spectra opens its dedicated synth editor.
+
 ## Arrange your tools
 
 Drag a window's title to move it. Drag its bottom-right corner to resize.
 The title buttons minimize, maximize and close the tool.
 Double-click a title to maximize or restore. The toolbar reopens tools;
-The toolbar menu exposes **Reset layout**, recording controls and the optional
-Clips view. It stays above the floating tools while open. Windows stay inside the workspace when
+The Studio menu groups **Add sound**, **Record** and **Setup**. Setup contains
+**Reset layout** and the optional Live clip grid. It stays above the floating tools while open. Windows stay inside the workspace when
 resizing the application or changing display scale.
 
 Your tool geometry, order and rack/mixer/browser visibility are saved under
@@ -46,6 +53,8 @@ The mixer remains docked with the master on the left. Sends, pan and effects
 follow the selected channel in the inspector on the right.
 Double-click a track heading to open its device chain.
 
+![Studio menu with separate sound creation, recording and setup pages](../assets/studio-menu.png)
+
 ## Audio
 
 **Audio** opens a floating settings window. Select a paired output device
@@ -54,11 +63,14 @@ or restart the engine there without reopening your project. See
 
 ## Development validation
 
-Run `tools/studio-smoke.sh` after building `nxtakt`, `nxtaktd` and `gen_demo`.
+Run `tools/studio-smoke.sh`, `tools/pattern-paint-smoke.sh` and
+`tools/fresh-flow-smoke.sh` after building `nxtakt`, `nxtaktd` and `gen_demo`.
 It creates a disposable demo and isolated, disconnected audio preferences,
 then drives the real GUI in headless Gamescope. It verifies pattern placement,
 independent source edits, Undo/Redo and retained notes after engine restart
 against saved project data. Rename and fader edits also verify Undo;
-screenshots remain in `build/studio-smoke/`.
+screenshots remain in the corresponding `build/*-smoke/` directories.
+Pattern painting checks duplicates, independent strokes and source notes.
+The fresh-project flow verifies empty-lane reuse and instrument creation Undo/Redo.
 Gamescope, gamescopectl, xdotool and Python 3 are required. `DRIVE_BIN` can select
 an extracted release binary for the same test.

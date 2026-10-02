@@ -12,10 +12,18 @@ PluginInstance* App::drumDeviceFor(int track) const {
 
 void App::addDrumTrack() {
     if(!closeFocusedSpectra()) return;
-    if (ses_.tracks.size() >= kMaxTracks) { status_ = "Track limit reached"; return; }
+    int reuse = -1;
+    if (selTrack_ >= 0 && selTrack_ < (int)ses_.tracks.size()) {
+        const TrackModel& candidate = ses_.tracks[(size_t)selTrack_];
+        bool emptySlots = true;
+        for (const ClipModel& clip : candidate.slots) emptySlots &= !clip.valid();
+        if (candidate.devices.empty() && candidate.arrange.empty() && emptySlots)
+            reuse = selTrack_;
+    }
+    if (reuse < 0 && ses_.tracks.size() >= kMaxTracks) { status_ = "Track limit reached"; return; }
     undoPoint("add drum track");
-    addTrack();
-    const int track = (int)ses_.tracks.size() - 1;
+    if (reuse < 0) addTrack();
+    const int track = reuse >= 0 ? reuse : (int)ses_.tracks.size() - 1;
     ses_.tracks[(size_t)track].name = "Drums";
     ses_.tracks[(size_t)track].colorIdx = 1;
     addDevice(track, detail::drumMachineDesc());
@@ -31,7 +39,13 @@ void App::addDrumTrack() {
     activateStudioWindow(1);
     midiInspectorPage_ = 0;
     drumEditor_ = 0;
-    status_ = "Drum Machine ready: click steps, then launch the pattern";
+    bool hasArrangement = false;
+    for (const TrackModel& t : ses_.tracks) hasArrangement |= !t.arrange.empty();
+    if (!hasArrangement) {
+        if (studioSongMode_ && es_.playing) { send(Cmd::SetPlaying, 0); autoRecFinish(); }
+        studioSongMode_ = false;
+    }
+    status_ = "Click steps, then press Play. Place adds pattern to Playlist.";
 }
 
 } // namespace lat

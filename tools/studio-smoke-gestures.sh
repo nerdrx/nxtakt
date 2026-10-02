@@ -49,8 +49,7 @@ drag 737 620 795 660
 shot rack-resized
 mark sound-editor
 clk 125 25
-clk 168 143
-clk 125 25
+clk 290 284
 shot spectra-front
 clk 1198 244
 shot presets-compact
@@ -84,6 +83,5 @@ key ctrl+s
 cp "$NXTAKT_STUDIO_QA_PROJECT" "$OUT/fader-undone.lattice"
 mark drum-floating
 clk 125 25
-clk 64 143
-clk 125 25
+clk 290 212
 shot drum-floating

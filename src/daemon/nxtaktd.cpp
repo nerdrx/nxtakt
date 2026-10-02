@@ -1695,7 +1695,11 @@ private:
 
         if (c.valid) {
             if (c.isMidi) {
-                if (!c.notesRef || c.noteCount <= 0) { reason = ipc::RejectBadClip; return false; }
+                // New MIDI patterns legitimately contain no notes. Payload
+                // presence must still agree with the count in both directions.
+                if ((c.notesRef == 0) != (c.noteCount == 0)) {
+                    reason = ipc::RejectBadClip; return false;
+                }
                 if (c.lengthBeats <= 0.0)            { reason = ipc::RejectBadClip; return false; }
             } else {
                 if (!c.sampleRef || c.frames <= 0)   { reason = ipc::RejectBadClip; return false; }

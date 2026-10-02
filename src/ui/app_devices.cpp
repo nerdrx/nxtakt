@@ -329,6 +329,18 @@ void App::addDevice(int owner, const PluginDesc& d) {
     }
     selDevice_ = (int)devices.size() - 1;
     paramScroll_ = 0.f;
+    // A newly-created default Audio lane should identify the instrument that
+    // now gives it a sound. Preserve any name the user has already chosen.
+    if (ownIsTrack(owner) && d.kind == PluginKind::Instrument &&
+        owner >= 0 && owner < (int)ses_.tracks.size()) {
+        TrackModel& track = ses_.tracks[(size_t)owner];
+        char defaultName[32];
+        snprintf(defaultName, sizeof defaultName, "%d Audio", owner + 1);
+        if (track.name == defaultName) {
+            track.name = d.name;
+            pushTrack(owner);
+        }
+    }
     status_ = "Added " + d.name;
 }
 
@@ -846,7 +858,51 @@ void App::drawPluginBrowser(const Rect& r) {
                 }
             } else {
                 undoPoint("add device");
+                const ChainOwner beforeOwner = chainOwner(devOwner_);
+                const size_t beforeCount = beforeOwner.devices ? beforeOwner.devices->size() : 0;
                 addDevice(devOwner_, d);
+                // In a fresh project there is no Playlist to play yet. Make
+                // the newly-added note instrument immediately auditionable
+                // from the selected pattern; an occupied slot is left intact.
+                if (ownIsTrack(devOwner_) && d.kind == PluginKind::Instrument &&
+                    devOwner_ >= 0 && devOwner_ < (int)ses_.tracks.size() &&
+                    beforeOwner.devices && beforeOwner.devices->size() > beforeCount) {
+                    bool hasArrangement = false;
+                    for (const TrackModel& track : ses_.tracks)
+                        hasArrangement |= !track.arrange.empty();
+                    if (!hasArrangement) {
+                        if (ses_.scenes.empty()) addScene();
+                        if (!ses_.scenes.empty()) {
+                            selSlot_ = clampv(selSlot_, 0, (int)ses_.scenes.size() - 1);
+                            if (!ses_.tracks[(size_t)devOwner_].slots[selSlot_].valid())
+                                createMidiClip(devOwner_, selSlot_, false);
+                        }
+                        if (studioSongMode_ && es_.playing) {
+                            send(Cmd::SetPlaying, 0);
+                            autoRecFinish();
+                        }
+                        studioSongMode_ = false;
+                    }
+                }
+                // The browser is the generic entry point for instruments too.
+                // Focus the compact Spectra editor immediately after a
+                // successful load, while keeping the normal device chain and
+                // its undo/dirty guards as the owner of the instrument.
+                if (d.uri == "nxtakt:spectra" && devOwner_ >= 0 &&
+                    devOwner_ < (int)ses_.tracks.size()) {
+                    TrackModel& track = ses_.tracks[(size_t)devOwner_];
+                    if (track.devices.size() > beforeCount && !track.devices.empty() &&
+                        track.devices.back().inst &&
+                        isSpectra(track.devices.back().inst.get())) {
+                        showDetail_ = true;
+                        detailTab_ = DetailTab::Devices;
+                        selDevice_ = (int)track.devices.size() - 1;
+                        spectraOpenUid_ = track.devices.back().uid;
+                        spectraForced_ = false;
+                        spectraScrollTo_ = true;
+                        activateStudioWindow(2);
+                    }
+                }
             }
         }
     }

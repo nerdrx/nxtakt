@@ -19,7 +19,14 @@ std::string studioLower(std::string s) {
 }
 
 void App::addSpectraTrack() {
-    if(ses_.tracks.size()>=kMaxTracks) {status_="Track limit reached";return;}
+    int reuse=-1;
+    if(selTrack_>=0 && selTrack_<(int)ses_.tracks.size()) {
+        const TrackModel& candidate=ses_.tracks[(size_t)selTrack_];
+        bool emptySlots=true;
+        for(const ClipModel& clip:candidate.slots) emptySlots&=!clip.valid();
+        if(candidate.devices.empty() && candidate.arrange.empty() && emptySlots) reuse=selTrack_;
+    }
+    if(reuse<0 && ses_.tracks.size()>=kMaxTracks) {status_="Track limit reached";return;}
     if(!closeFocusedSpectra()) return;
     if(g_edit.open && g_edit.anyDirty()) {status_="Apply or discard the wavetable drawing first";return;}
     stopPreviews();
@@ -33,8 +40,8 @@ void App::addSpectraTrack() {
     detail::scanInternal(stock);
     for(const auto& desc:stock) if(desc.uri=="nxtakt:spectra") {
         undoPoint("add Spectra track");
-        addTrack();
-        const int track=(int)ses_.tracks.size()-1;
+        if(reuse<0) addTrack();
+        const int track=reuse>=0?reuse:(int)ses_.tracks.size()-1;
         ses_.tracks[track].name="Spectra";ses_.tracks[track].colorIdx=11;
         addDevice(track,desc);
         if(ses_.tracks[track].devices.empty()) return;
@@ -46,7 +53,13 @@ void App::addSpectraTrack() {
         spectraOpenUid_=ses_.tracks[track].devices[0].uid;
         showDetail_=true;detailTab_=DetailTab::Devices;
         activateStudioWindow(2);
-        status_="Spectra ready - choose a preset, then play your keyboard";
+        bool hasArrangement=false;
+        for(const TrackModel& t:ses_.tracks) hasArrangement|=!t.arrange.empty();
+        if(!hasArrangement) {
+            if(studioSongMode_ && es_.playing) {send(Cmd::SetPlaying,0);autoRecFinish();}
+            studioSongMode_=false;
+        }
+        status_="Choose preset; Piano adds notes; Pattern Play auditions them.";
         return;
     }
 }

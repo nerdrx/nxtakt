@@ -79,7 +79,10 @@ private:
     // --- views ---
     void drawControlBar(const Rect& r);
     void drawControlBarTools(const Rect& r);
-    bool studioToolsOpen_=false;
+    bool studioToolsOpen_=false, studioMenuCreate_=false;
+    int studioMenuPage_=0;
+    f32 studioMenuScroll_=0;
+    Rect studioMenuRect() const;
     void drawBrowser(const Rect& r);
     void drawSessionView(const Rect& r);
     void drawTrackHeaders(const Rect& r, f32 scrollX);
@@ -94,6 +97,9 @@ private:
     void drawPluginBrowser(const Rect& r);
     void drawDeviceStrip(const Rect& r);
     void drawArrangementView(const Rect& r);
+    bool paintPatternAt(f64 beat, u64 gesture);
+    f64 patternPaintLength() const;
+    void togglePatternPaint();
     void drawStatusBar(const Rect& r);
     // F1: src/ui/keymap.h drawn as a full-screen reference card, the same table
     // `nxtakt --help` prints. Called from the tail of drawStatusBar because it
@@ -599,7 +605,9 @@ private:
     bool showChannelRack_ = true, showStudioMixer_ = true;
     f32 studioMixerScrollX_ = 0.f, channelRackScrollY_ = 0.f;
     f32 studioMasterFader_ = .85f;
-    bool studioSongMode_ = true;
+    bool studioSongMode_ = false;
+    bool studioPatternPaint_ = false, studioPatternStroke_ = false;
+    i64 studioPaintCell_ = -1;
     bool studioLayoutLoaded_ = false, studioLayoutDirty_ = false;
     struct StudioWindow {
         Rect bounds{}; // logical pixels, independent of display scale

@@ -60,6 +60,8 @@ void App::drawChannelRack(const Rect& r) {
             studioSongMode_ = true;
         }
     }
+    if (ui_.hovered(place))
+        ui_.tip = "Place this pattern's clips in the Playlist at the next free bar";
 
     const f32 navW = 22.f*s;
     Rect next{place.x - navW - 4.f*s, add.y, navW, add.h};
@@ -77,21 +79,30 @@ void App::drawChannelRack(const Rect& r) {
     } else {
         selSlot_ = clampv(selSlot_, 0, (int)ses_.scenes.size() - 1);
         std::string patternLabel = ses_.scenes[(size_t)selSlot_].name;
+        char defaultName[32];
+        std::snprintf(defaultName, sizeof defaultName, "Scene %d", selSlot_ + 1);
+        if (patternLabel == defaultName) {
+            char fallback[32];
+            std::snprintf(fallback, sizeof fallback, "Pattern %d", selSlot_ + 1);
+            patternLabel = fallback;
+        }
         if (ui_.button(uiId(UiChannelRack, 3), pattern, patternLabel.c_str())) {
-            studioSongMode_ = false;
-            send(Cmd::LaunchScene, selSlot_, 1);
+            showDetail_=true;
+            detailTab_=DetailTab::Clip;
+            activateStudioWindow(1);
         }
+        if (ui_.hovered(pattern))
+            ui_.tip = "Open this pattern in Piano; use Play in Pattern mode to audition";
     }
-    Rect addChannel{pattern.right()+5.f*s,head.y,84.f*s,22.f*s};
-    if(ui_.button(uiId(UiChannelRack,5),addChannel,"+ Channel")) {
-        if(ses_.tracks.size()>=kMaxTracks) status_="Track limit reached";
-        else {
-            undoPoint("add track"); addTrack();
-            const int track=(int)ses_.tracks.size()-1;
-            selectTrack(track); detailTab_=DetailTab::Devices; showDetail_=true;
-            activateStudioWindow(1); ensurePluginScan();
-        }
+    Rect addChannel{pattern.right()+5.f*s,head.y,100.f*s,22.f*s};
+    if(ui_.button(uiId(UiChannelRack,5),addChannel,"+ Sound")) {
+        studioToolsOpen_ = true;
+        studioMenuCreate_ = true;
     }
+    if(ui_.hovered(addChannel)) ui_.tip="Create a track, instrument, or drum channel";
+    const Rect brush{addChannel.right()+8*s,head.y,64*s,22*s};
+    if(ui_.button(uiId(UiChannelRack,6),brush,"Paint",studioPatternPaint_,rgb(0x007A85))) togglePatternPaint();
+    if(ui_.hovered(brush)) ui_.tip="Drag repeated copies of this pattern into the Playlist";
     rend_.hairlineH(r.x + pad, r.right() - pad, head.bottom() + 2.f * s,
                     nx::hairlineInk.alpha(0.32f));
 
@@ -136,7 +147,7 @@ void App::drawChannelRack(const Rect& r) {
             ui_.cursor=Cursor::Hand;
             if(in.pressed[0]) selectTrack((int)ti);
             if(in.dblClick) openSound();
-            ui_.tip="Click to select; double-click to open Sound";
+            ui_.tip="Select channel; double-click to open its Sound editor";
         }
         const u64 renameId=uiId(UiChannelRack,18,(int)ti);
         Rect rename{row.x+121*s,nameY+6*s,16*s,18*s};
@@ -176,7 +187,7 @@ void App::drawChannelRack(const Rect& r) {
             }
         }
 
-        if(ui_.hovered(piano)) ui_.tip="Open Piano Roll (F7)";
+        if(ui_.hovered(piano)) ui_.tip="Edit this pattern's notes in Piano Roll";
         Rect mute{row.x+161*s,row.y+7*s,22*s,20*s};
         Rect solo{mute.right()+2*s,row.y+7*s,22*s,20*s};
         const bool wasMute = track.mute;

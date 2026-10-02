@@ -49,6 +49,14 @@ Rect App::studioWindowRect(int index) const {
     return r;
 }
 
+Rect App::studioMenuRect() const {
+    const f32 s=win_.dpiScale(), W=win_.width(), H=win_.height();
+    const f32 y=(W<880*s?92.f:54.f)*s+engineBannerH()*s+6*s;
+    const f32 width=std::min(360*s,std::max(0.f,W-16*s));
+    return {std::min((W<620*s?62.f:110.f)*s,std::max(8*s,W-width-8*s)),y,width,
+            std::min(390*s,std::max(0.f,H-y-lay::statusH*s-8*s))};
+}
+
 void App::prepareStudioWindows(const Rect& area) {
     const bool firstLayout=!studioLayoutLoaded_;
     studioArea_ = area;
@@ -105,9 +113,8 @@ void App::prepareStudioWindows(const Rect& area) {
     if(studioCapture_>=0 && !visible[studioCapture_]) {studioCapture_=-1;studioGesture_=0;}
     studioPointerOwner_=-1;
     for(int i:studioOrder_) if(visible[i] && studioWindowRect(i).contains(studioRawInput_.mx,studioRawInput_.my)) studioPointerOwner_=i;
-    if(studioToolsOpen_ && Rect{area.x,area.y,area.w,112*s}.contains(studioRawInput_.mx,studioRawInput_.my))
-        studioPointerOwner_=-1; // the expanded toolbar paints above floating tools
     if(studioCapture_>=0) studioPointerOwner_=studioCapture_;
+    if(studioToolsOpen_) studioPointerOwner_=-3; // menu shields every editor underneath
     if(studioRawInput_.pressed[0]) {
         studioFocus_=studioPointerOwner_;
         if(std::getenv("NXTAKT_DEBUG_PROBE")) LOGI("NXTAKT_DEBUG_PROBE: workspace focus %d",studioFocus_);

@@ -300,8 +300,8 @@ void App::drawControlBar(const Rect& r) {
     const bool tight=r.w<620*s;
     if(!tight) rend_.textIn(fBig_,{54*s,y,49*s,h},"Takt",nx::text,Align::Left,0);
     const f32 menuX=(tight?62.f:110.f)*s;
-    if(ui_.button(uiId(UiControlBar,90),{menuX,y,30*s,h},"")) studioToolsOpen_=!studioToolsOpen_;
-    if(ui_.hovered({menuX,y,30*s,h})) ui_.tip="Recording and advanced controls";
+    if(ui_.button(uiId(UiControlBar,90),{menuX,y,30*s,h},"")) {studioToolsOpen_=!studioToolsOpen_;studioMenuPage_=0;studioMenuScroll_=0;}
+    if(ui_.hovered({menuX,y,30*s,h})) ui_.tip="Add sounds, recording and workspace settings";
     for(int i=0;i<3;++i) rend_.line(menuX+9*s,y+(12+i*5)*s,menuX+22*s,y+(12+i*5)*s,s,nx::muted);
     f32 x=(tight?104.f:156.f)*s;
     if(r.w>1300*s) {
@@ -332,7 +332,7 @@ void App::drawControlBar(const Rect& r) {
     mode(false,"Pattern",0);mode(true,"Song",modeW);x+=(modeW*2+14)*s;
     f64 bpm=ses_.tempo;
     Rect tempo{x,y,(tight?68.f:78.f)*s,h};ctlWell(rend_,tempo,s);
-    if(ui_.dragNumber(uiId(UiControlBar,97),tempo,&bpm,20.,999.,.15,"%.1f BPM",Align::Center,nullptr,0.,120.)) {undoPoint("tempo");setTempo(bpm);}
+    if(ui_.dragNumber(uiId(UiControlBar,97),tempo,&bpm,20.,999.,.15,tight?"%.0f BPM":"%.1f BPM",Align::Center,nullptr,0.,120.)) {undoPoint("tempo");setTempo(bpm);}
     chromeDebugMark("tempo",tempo);x+=(tight?80.f:90.f)*s;
     const bool compact=r.w<1100*s,wrapped=r.h>60*s;
     char pos[48];snprintf(pos,sizeof pos,"%02d:%02d:%02d",es_.posBar,es_.posBeat,es_.posSixteenth);
@@ -341,12 +341,22 @@ void App::drawControlBar(const Rect& r) {
     if(!wrapped&&rx-x>105*s) {
         char pattern[48];snprintf(pattern,sizeof pattern,"Pattern %02d",selSlot_+1);
         Rect b{x,y,std::min(180*s,rx-x-8*s),h};
+        const Rect brush{b.right()-58*s,b.y,58*s,b.h};
+        b.w-=62*s;
         if(ui_.button(uiId(UiControlBar,96),b,pattern)) {showChannelRack_=true;activateStudioWindow(0);}
+        if(ui_.button(uiId(UiControlBar,145),brush,"Paint",studioPatternPaint_,rgb(0x007A85))) togglePatternPaint();
+        if(ui_.hovered(brush)) ui_.tip="Drag repeated copies of the selected pattern into the Playlist";
     }
     f32 tx=wrapped?r.x+14*s:std::max(x,rx);
     const f32 ty=wrapped?r.y+49*s:y;
     auto tool=[&](int id,const char* label,f32 w,bool on,auto action) {
         if(ui_.button(uiId(UiStudioShelf,id),{tx,ty,w*s,wrapped?32*s:h},label,on&&id==0,nx::violet)) {action();studioLayoutDirty_=true;}
+        if(ui_.hovered({tx,ty,w*s,wrapped?32*s:h})) {
+            const char* tips[]={"Playlist: arrange patterns into a song (F5)","", "Channel Rack: build and place patterns (F6)",
+                "Piano Roll: edit the selected pattern's notes (F7)","Sound: open the instrument editor for a channel",
+                "Mixer: adjust channel levels and effects (F9)","Audio: choose devices or restart the engine"};
+            if(id>=0&&id<7) ui_.tip=tips[id];
+        }
         tx+=(w+5)*s;
     };
     tool(0,"Playlist",compact?65:75,view_==MainView::Arrangement,[&]{view_=MainView::Arrangement;});
@@ -358,28 +368,82 @@ void App::drawControlBar(const Rect& r) {
 }
 
 void App::drawControlBarTools(const Rect& r) {
-    const f32 s=win_.dpiScale(), gap=6*s, h=28*s;
-    const f32 y1=r.y+7*s, y2=r.y+41*s, y3=r.y+75*s;
+    const f32 s=win_.dpiScale(), h=32*s;
     const Input& in=win_.input();
-    rend_.rect(r,rgb(0x0B0E12));
-    rend_.hairlineH(r.x,r.right(),r.y,nx::hairlineInk,s);
-    rend_.hairlineH(r.x+12*s,r.right()-12*s,y2-4*s,pal::divider,s);
-    rend_.hairlineH(r.x+12*s,r.right()-12*s,y3-4*s,pal::divider,s);
-    rend_.hairlineH(r.x,r.right(),r.bottom()-s,nx::hairlineInk,s);
-
-    // Row 1: musical setup, clips, browser and help.
-    f32 x=r.x+12*s;
-    Rect tap{x,y1,34*s,h};
-    if(ui_.isHot(uiId(UiControlBar,120))) ui_.tip="Tap tempo: click twice in time with the music";
-    if(ui_.button(uiId(UiControlBar,120),tap,"Tap")) {
-        static f64 lastTap=0;
-        const f64 now=nowSeconds();
-        if(now-lastTap<3.0) {undoPoint("tempo");setTempo(clampv(60.0/(now-lastTap),20.0,999.0));}
-        lastTap=now;
+    if(studioMenuCreate_) {studioMenuPage_=0;studioMenuScroll_=0;studioMenuCreate_=false;}
+    ui_.keyModal=true;
+    rend_.roundRect({r.x-3*s,r.y+4*s,r.w+6*s,r.h+5*s},9*s,rgb(0x000000).alpha(.7f));
+    rend_.roundRect(r,8*s,rgb(0x10141A));
+    rend_.roundRectOutline(r,8*s,s,rgb(0x303843));
+    rend_.pushClip(r);
+    rend_.textIn(fBold_,{r.x+16*s,r.y+10*s,r.w-62*s,24*s},"Studio",nx::text,Align::Left,0);
+    const Rect close{r.right()-42*s,r.y+8*s,28*s,28*s};
+    if(ui_.button(uiId(UiControlBar,140),close,"")) studioToolsOpen_=false;
+    rend_.line(close.cx()-4*s,close.cy()-4*s,close.cx()+4*s,close.cy()+4*s,s,nx::muted);
+    rend_.line(close.cx()+4*s,close.cy()-4*s,close.cx()-4*s,close.cy()+4*s,s,nx::muted);
+    const char* tabs[]={"Add sound","Record","Setup"};
+    const f32 tw=(r.w-32*s)/3;
+    for(int i=0;i<3;++i) {
+        Rect tab{r.x+16*s+i*tw,r.y+42*s,tw-3*s,32*s};
+        if(ui_.button(uiId(UiControlBar,141+i),tab,tabs[i],studioMenuPage_==i,nx::violet)) {
+            studioMenuPage_=i;studioMenuScroll_=0;
+        }
     }
-    x=tap.right()+gap;
+    const Rect body{r.x+16*s,r.y+88*s,r.w-32*s,std::max(0.f,r.h-116*s)};
+    if(body.contains(in.mx,in.my)) studioMenuScroll_-=in.wheel*28*s;
+    studioMenuScroll_=clampv(studioMenuScroll_,0.f,std::max(0.f,(studioMenuPage_==2?280.f:272.f)*s-body.h));
+    rend_.pushClip(body);
+    f32 y=body.y-studioMenuScroll_;
+    auto row=[&](const char* label) {
+        rend_.textIn(fBody_,{body.x,y,body.w-122*s,h},label,nx::text,Align::Left,0);
+        Rect field{body.right()-110*s,y,110*s,h};y+=40*s;return field;
+    };
+    if(studioMenuPage_==0) {
+        rend_.textIn(fSmall_,{body.x,y,body.w,24*s},"Choose what you want to make.",nx::muted,Align::Left,0);y+=32*s;
+        auto add=[&](u64 id,const char* label,const char* hint,Col color,auto action) {
+            Rect card{body.x,y,body.w,64*s};
+            if(ui_.button(id,card,"")) {studioToolsOpen_=false;action();}
+            rend_.roundRect({card.x+10*s,card.y+13*s,3*s,38*s},s,color);
+            rend_.textIn(fBold_,{card.x+24*s,card.y+9*s,card.w-40*s,23*s},label,nx::text,Align::Left,0);
+            rend_.textIn(fSmall_,{card.x+24*s,card.y+33*s,card.w-40*s,22*s},hint,nx::muted,Align::Left,0);
+            y+=72*s;
+        };
+        add(uiId(UiDrumSequencer,1000),"Drum machine","808 / 707 / 909 kits + step sequencer",nx::amber,[&]{addDrumTrack();});
+        add(uiId(UiSpectraStudio,4000),"Spectra synthesizer","Play notes, browse presets, design sounds",nx::cyan,[&]{addSpectraTrack();});
+        add(uiId(UiControlBar,144),"Audio / plugin track","Drop a sample or choose an instrument",nx::muted,[&]{
+            if(ses_.tracks.size()>=kMaxTracks) {status_="Track limit reached";return;}
+            undoPoint("add track");addTrack();selectTrack((int)ses_.tracks.size()-1);
+            showDetail_=true;detailTab_=DetailTab::Devices;activateStudioWindow(1);ensurePluginScan();
+        });
+    } else if(studioMenuPage_==1) {
+        Rect autoR=row("Record knob movements");
+        if(ui_.button(uiId(UiControlBar,128),autoR,autoArm_?"Armed":"Off",autoArm_,nx::violet)) toggleAutoArm();
+        Rect arrR=row("Record onto the Playlist");
+        if(ui_.button(uiId(UiControlBar,129),arrR,arrArm_?"Armed":"Off",arrArm_,nx::violet)) {
+            arrArm_=!arrArm_;if(!arrArm_&&takeOpen_) commitTake();
+        }
+        rend_.hairlineH(body.x,body.right(),y+3*s,pal::divider,s);y+=16*s;
+        Rect keys=row("Play with computer keys");
+        if(ui_.button(uiId(UiControlBar,130),keys,kbdMidi_?"On":"Off",kbdMidi_,nx::violet)) toggleKbdMidi();
+        f64 velocity=kbd_.velocity();Rect vel=row("Note velocity");ctlWell(rend_,vel,s);
+        if(ui_.dragNumber(uiId(16,0),vel,&velocity,1,127,.35,"%.0f",Align::Center,nullptr,1,100)) kbd_.setVelocity((int)std::lround(velocity));
+        char keyboard[80];snprintf(keyboard,sizeof keyboard,"Octave C%d  ·  Page Up / Down changes octave",kbd_.octave());
+        rend_.textIn(fSmall_,{body.x,y,body.w,24*s},keyboard,nx::muted,Align::Left,0);y+=32*s;
+        const bool learning=midiMap_.learning();
+        std::string midi=learning?"Cancel learn":std::to_string(midiMap_.size())+" mappings";
+        Rect midiR=row("MIDI controller");
+        if(ctlChip(ui_,uiId(UiControlBar,131),midiR,fSmall_,midi.c_str(),learning)&&learning) midiMap_.cancelLearn();
+        if(ui_.hovered(midiR)) ui_.tip=learning?"Move a MIDI control to map "+midiMap_.learnAddress():"Right-click an instrument control to start MIDI learn";
+        if(osc_.running()) rend_.circle(midiR.right()-8*s,midiR.y+5*s,2*s,osc_.wide()?nx::amber:nx::cyan);
+    } else {
+        Rect met=row("Metronome");
+        if(ui_.button(uiId(UiControlBar,123),met,ses_.metronome?"On":"Off",ses_.metronome,nx::violet)) {
+            undoPoint("metronome");ses_.metronome=!ses_.metronome;send(Cmd::SetMetronome,ses_.metronome?1:0);
+        }
+        Rect sigField=row("Time signature");
+        const f32 x=sigField.x,y1=sigField.y;
     const SigChange cur=ses_.sigAtBar(std::max(0,es_.posBar-1));
-    const Rect sig{x,y1,52*s,h}, numR{x,y1,25*s,h}, denR{x+27*s,y1,25*s,h};
+    const Rect sig{x,y1,110*s,h}, numR{x,y1,54*s,h}, denR{x+56*s,y1,54*s,h};
     const u64 numId=uiId(UiControlBar,121), denId=uiId(UiControlBar,122);
     ui_.setHot(numId,numR);ui_.setHot(denId,denR);
     const bool sigHot=ui_.isHot(numId)||ui_.isHot(denId)||ui_.active==numId||ui_.active==denId;
@@ -402,86 +466,28 @@ void App::drawControlBarTools(const Rect& r) {
     char sigText[16];std::snprintf(sigText,sizeof sigText,"%d/%d",es_.posSigNum,es_.posSigDen);
     ui_.drawTextIn(fSmall_,sig,sigText,sigHot?nx::text:pal::textDim,Align::Center);
     if(sigHot) {ui_.cursor=Cursor::ResizeV;ui_.tip="Time signature: drag numerator or denominator";}
-    x=sig.right()+gap;
-    Rect met{x,y1,48*s,h};
-    if(ui_.isHot(uiId(UiControlBar,123))) ui_.tip="Metronome  (M)";
-    if(ui_.button(uiId(UiControlBar,123),met,"Click",ses_.metronome,nx::violet)) {
-        undoPoint("metronome");ses_.metronome=!ses_.metronome;send(Cmd::SetMetronome,ses_.metronome?1:0);
-    }
-    x=met.right()+gap;
-    rend_.textIn(fSmall_,{x,y1,44*s,h},"Launch",pal::textDim,Align::Left,0);
-    Rect quant{x+44*s,y1,70*s,h};
-    const int wasQuantum=ses_.quantumIdx;
-    if(ui_.selector(uiId(UiControlBar,124),quant,&ses_.quantumIdx,kQuantumNames,kQuantumCount)) {
-        undoPointWith("launch quantum",ses_.quantumIdx,wasQuantum);send(Cmd::SetQuantum,ses_.quantumIdx);
-    }
-    x=quant.right()+gap;
-    Rect clips{x,y1,50*s,h};
-    if(ui_.button(uiId(UiControlBar,125),clips,"Clips",view_==MainView::Session,nx::violet)) view_=MainView::Session;
-    x=clips.right()+gap;
-    Rect browser{x,y1,74*s,h};
-    if(ui_.button(uiId(UiControlBar,126),browser,"Browser",showBrowser_,nx::violet)) {showBrowser_=!showBrowser_;studioLayoutDirty_=true;}
-    x=browser.right()+gap;
-    Rect help{x,y1,28*s,h};
-    if(ui_.button(uiId(UiControlBar,127),help,"?",g_keysOpen,nx::violet)) g_keysOpen=!g_keysOpen;
-    if(ui_.isHot(uiId(UiControlBar,127))) ui_.tip="Keys and gestures  (F1)";
 
-    // Row 2: automation, timeline recording and MIDI input status.
-    x=r.x+12*s;
-    Rect autoR{x,y2,72*s,h};
-    if(ui_.button(uiId(UiControlBar,128),autoR,"Auto arm",autoArm_,nx::violet)) toggleAutoArm();
-    if(ui_.isHot(uiId(UiControlBar,128))) ui_.tip="Automation arm: record control moves into the playing clip";
-    x=autoR.right()+gap;
-    Rect arrR{x,y2,86*s,h};
-    if(ui_.button(uiId(UiControlBar,129),arrR,"Timeline rec",arrArm_,nx::violet)) {
-        arrArm_=!arrArm_;
-        if(arrArm_) status_="Arrangement arm on - recording lands on the timeline";
-        else if(takeOpen_) commitTake();
-        else status_="Arrangement arm off";
+        Rect quant=row("Clip launch timing");const int wasQuantum=ses_.quantumIdx;
+        if(ui_.selector(uiId(UiControlBar,124),quant,&ses_.quantumIdx,kQuantumNames,kQuantumCount)) {
+            undoPointWith("launch quantum",ses_.quantumIdx,wasQuantum);send(Cmd::SetQuantum,ses_.quantumIdx);
+        }
+        Rect tap=row("Tap to set tempo");
+        if(ui_.button(uiId(UiControlBar,120),tap,"Tap tempo")) {
+            static f64 lastTap=0;const f64 now=nowSeconds();
+            if(now>lastTap&&now-lastTap<3) {undoPoint("tempo");setTempo(clampv(60/(now-lastTap),20.,999.));}lastTap=now;
+        }
+        Rect browser=row("Sample browser");
+        if(ui_.button(uiId(UiControlBar,126),browser,showBrowser_?"Hide":"Show")) {showBrowser_=!showBrowser_;studioLayoutDirty_=true;studioToolsOpen_=false;}
+        Rect clips=row("Live clip grid");
+        if(ui_.button(uiId(UiControlBar,125),clips,"Open")) {view_=MainView::Session;studioToolsOpen_=false;}
+        Rect reset=row("Workspace layout");
+        if(ui_.button(uiId(UiControlBar,98),reset,"Reset")) {for(auto& w:studioWindows_)w=StudioWindow{};studioLayoutDirty_=true;studioToolsOpen_=false;status_="Workspace layout reset";}
     }
-    if(ui_.isHot(uiId(UiControlBar,129))) ui_.tip="Arrangement arm: record armed tracks onto the timeline";
-    x=arrR.right()+gap;
-    char keyLabel[24];std::snprintf(keyLabel,sizeof keyLabel,"Keys C%d",kbd_.octave());
-    Rect keys{x,y2,66*s,h};
-    if(ctlChip(ui_,uiId(UiControlBar,130),keys,fSmall_,keyLabel,kbdMidi_)) toggleKbdMidi();
-    if(ui_.isHot(uiId(UiControlBar,130))) ui_.tip=kbdMidi_?"Computer MIDI keyboard on  (Ctrl+Shift+K)":"Computer MIDI keyboard  (Ctrl+Shift+K)";
-    x=keys.right()+gap;
-    f64 velocity=kbd_.velocity();
-    Rect vel{x,y2,42*s,h};ctlWell(rend_,vel,s);
-    if(ui_.dragNumber(uiId(16,0),vel,&velocity,1,127,.35,"%.0f",Align::Center,nullptr,1,100)) {
-        kbd_.setVelocity((int)std::lround(velocity));status_="Keyboard velocity "+std::to_string(kbd_.velocity());
-    }
-    if(ui_.isHot(uiId(16,0))) ui_.tip="Keyboard velocity: drag or wheel; right-click to type";
-    x=vel.right()+gap;
-    const size_t bindings=midiMap_.size();const bool learning=midiMap_.learning();
-    char midiLabel[24];
-    if(learning) std::snprintf(midiLabel,sizeof midiLabel,"Learn");
-    else std::snprintf(midiLabel,sizeof midiLabel,"MIDI %zu",bindings);
-    Rect midi{x,y2,86*s,h};
-    const f64 sinceHit=nowSeconds()-ctlFlashAt_;
-    const f32 wash=learning?.10f+.30f*ctlPulse01():(sinceHit<.1?.22f:0.f);
-    const bool midiPressed=ctlChip(ui_,uiId(UiControlBar,131),midi,fSmall_,midiLabel,false,wash);
-    if(osc_.running()) rend_.circle(midi.right()-8*s,midi.y+6*s,2.2f*s,osc_.wide()?nx::amber:nx::cyan);
-    if(ui_.isHot(uiId(UiControlBar,131))) {
-        if(learning) ui_.tip="MIDI learn: move a control to map "+midiMap_.learnAddress()+"  (click to cancel)";
-        else if(osc_.running()) ui_.tip=std::string("MIDI ")+std::to_string(bindings)+"  -  OSC "+osc_.addr()+":"+std::to_string(osc_.port())+(osc_.wide()?" (open to network)":"");
-        else ui_.tip="MIDI "+std::to_string(bindings)+" bindings  -  OSC off";
-    }
-    if(midiPressed&&learning) {midiMap_.cancelLearn();status_="MIDI learn cancelled";}
-
-    // Row 3: creation actions and workspace reset. Stable coordinates support
-    // the screenshot and automation probes at every supported window width.
-    Rect drums{r.x+16*s,y3,96*s,h};
-    if(ui_.button(uiId(UiDrumSequencer,1000),drums,"+ Drums")) addDrumTrack();
-    if(ui_.isHot(uiId(UiDrumSequencer,1000))) ui_.tip="Add a drum track with 808, 707 and 909-inspired kits";
-    Rect spectra{r.x+120*s,y3,96*s,h};
-    if(ui_.button(uiId(UiSpectraStudio,4000),spectra,"+ Spectra")) addSpectraTrack();
-    if(ui_.isHot(uiId(UiSpectraStudio,4000))) ui_.tip="Create a Spectra track with a sound-design workspace";
-    Rect reset{r.right()-112*s,y3,96*s,h};
-    if(ui_.button(uiId(UiControlBar,98),reset,"Reset layout")) {
-        for(auto& w:studioWindows_) w=StudioWindow{};
-        studioLayoutDirty_=true;status_="Workspace layout reset";
-    }
+    rend_.popClip();
+    Rect help{r.x+16*s,r.bottom()-24*s,r.w-32*s,18*s};
+    if(ui_.segButton(uiId(UiControlBar,127),help,false,nx::violet)) {studioToolsOpen_=false;g_keysOpen=true;}
+    rend_.textIn(fSmall_,help,"Keyboard shortcuts  ·  F1",nx::muted,Align::Left,0);
+    rend_.popClip();
 }
 
 // ---------------------------------------------------------------------------
@@ -1501,7 +1507,46 @@ void App::drawArrangementView(const Rect& r) {
     for (size_t i = 0; i < ses_.tracks.size() && i < kMaxTracks; ++i)
         if (arrExpanded_[i]) autosBefore_.push_back({(int)i, ses_.tracks[i].arrangeAutos});
 
+    Input& input = win_.input();
+    const f32 scale = win_.dpiScale();
+    const Rect canvas{r.x+kArrHeaderW*scale,r.y+kArrRulerTotal*scale,
+                      r.w-kArrHeaderW*scale,r.h-kArrRulerTotal*scale};
+    const bool brushHot = studioPatternPaint_ && canvas.contains(input.mx,input.my);
+    const u64 strokeId = uiId(UiArrange,3000);
+    if (brushHot && input.pressed[0]) {
+        studioPatternStroke_=true;
+        studioPaintCell_=-1;
+        ui_.active=strokeId;
+    }
+    if (studioPatternStroke_ && !input.down[0]) studioPatternStroke_=false;
+    if (brushHot) {
+        ui_.cursor=Cursor::Hand;
+        ui_.tip="Paint the selected pattern · Escape: return to editing";
+        if (studioPatternStroke_ && input.down[0]) {
+            const f64 length=patternPaintLength();
+            const TimeAxis axis=arrView_->paintAxis(r,scale);
+            const i64 cell=(i64)std::floor(std::max(0.0,xToBeat(axis,input.mx))/length);
+            const i64 from=studioPaintCell_<0?cell:studioPaintCell_;
+            bool painted=false;
+            const i64 direction=cell>=from?1:-1;
+            i64 visited=from;
+            for(int n=0;n<128;++n,visited+=direction) {
+                painted=paintPatternAt(visited*length,strokeId)||painted;
+                if(visited==cell) break;
+            }
+            studioPaintCell_=visited==cell?cell:visited-direction;
+            if(painted) status_="Pattern painted into the Playlist. One undo removes this stroke.";
+        }
+    }
+    // The brush owns left gestures in the canvas; scrolling and right-click
+    // editing still pass through to the existing arrangement editor.
+    const auto savedInput=input;
+    if(brushHot || studioPatternStroke_) {
+        input.pressed[0]=input.released[0]=input.down[0]=false;
+        input.dblClick=false;
+    }
     const u32 changed = arrView_->draw(ui_, r, ctx);
+    input=savedInput;
     arrangeCommit(ctx, changed);
 }
 

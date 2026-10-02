@@ -90,8 +90,8 @@ bool App::init(int argc, char** argv) {
     // a default-constructed one.
     eng_.poll(es_);
 
-    // Default set: eight audio tracks, eight scenes, same as a fresh Live set.
-    ses_.tracks.resize(8);
+    // A fresh project starts with one reusable lane and one pattern.
+    ses_.tracks.resize(1);
     for (size_t i = 0; i < ses_.tracks.size(); ++i) {
         char buf[32];
         snprintf(buf, sizeof buf, "%zu Audio", i + 1);
@@ -99,10 +99,10 @@ bool App::init(int argc, char** argv) {
         ses_.tracks[i].name = buf;
         ses_.tracks[i].colorIdx = (int)(i * 3 + 4) % pal::clipColorCount;
     }
-    ses_.scenes.resize(8);
+    ses_.scenes.resize(1);
     for (size_t i = 0; i < ses_.scenes.size(); ++i) {
         char buf[32];
-        snprintf(buf, sizeof buf, "Scene %zu", i + 1);
+        snprintf(buf, sizeof buf, "Pattern %zu", i + 1);
         ses_.scenes[i].uid = ses_.newUid();
         ses_.scenes[i].name = buf;
     }
@@ -299,6 +299,12 @@ void App::frame() {
         if (!ui_.active && !(arrows && undoGesture_ == kArrowGesture)) undoGesture_ = 0;
     }
 
+    // Dismiss menus without sending the dismissal click into a musical editor.
+    if(studioToolsOpen_ && win_.input().pressed[0] &&
+       !studioMenuRect().contains(win_.input().mx,win_.input().my)) {
+        studioToolsOpen_=false;
+        win_.input().pressed[0]=false;ui_.active=0;
+    }
     handleShortcuts();
 
     Rect full{0, 0, W, H};
@@ -309,8 +315,7 @@ void App::frame() {
     // The body SHRINKS to make room rather than being covered, because §8's
     // Detached mode is a working mode, not a moment.
     Rect banner = {0, bar.bottom(), W, std::round(engineBannerH() * s)};
-    const f32 toolsHeight=studioToolsOpen_?112*s:0;
-    Rect body = {0, banner.bottom()+toolsHeight, W, status.y-banner.bottom()-toolsHeight};
+    Rect body = {0, banner.bottom(), W, status.y-banner.bottom()};
 
     drawControlBar(bar);
     if (banner.h > 0.f) drawEngineBanner(banner);
@@ -364,6 +369,26 @@ void App::frame() {
             send(Cmd::Locate, 0, 0, dueBeat);
 
         drawArrangementView(main);
+        const bool emptyPlaylist=std::all_of(ses_.tracks.begin(),ses_.tracks.end(),
+            [](const TrackModel& track){return track.arrange.empty();});
+        if(emptyPlaylist && !studioPatternPaint_ && main.w>480*s && main.h>240*s) {
+            bool hasPattern=false;
+            for(const TrackModel& track:ses_.tracks) for(const ClipModel& clip:track.slots) hasPattern|=clip.valid();
+            const Rect guide{main.x+190*s,main.y+140*s,std::min(330*s,main.w-200*s),138*s};
+            rend_.roundRect(guide,7*s,rgb(0x10141A));
+            rend_.roundRectOutline(guide,7*s,s,pal::divider);
+            rend_.textIn(fBig_,{guide.x+16*s,guide.y+12*s,guide.w-32*s,25*s},
+                hasPattern?"From pattern to song":"Start with a sound",nx::text,Align::Left,0);
+            rend_.textIn(fSmall_,{guide.x+16*s,guide.y+42*s,guide.w-32*s,24*s},
+                hasPattern?"1. Add notes or steps in the Rack.":"1. Choose a drum machine or instrument.",nx::muted,Align::Left,0);
+            rend_.textIn(fSmall_,{guide.x+16*s,guide.y+64*s,guide.w-32*s,24*s},
+                "2. Paint or place it into your Playlist.",nx::muted,Align::Left,0);
+            if(ui_.button(uiId(UiStudioShelf,20),{guide.x+16*s,guide.y+98*s,guide.w-32*s,28*s},
+                hasPattern?"Open Channel Rack":"Add sound")) {
+                if(hasPattern) {showChannelRack_=true;activateStudioWindow(0);}
+                else {studioToolsOpen_=true;studioMenuCreate_=true;}
+            }
+        }
 
         // ONE request per frame -- one pointer, one thing at a time. The undo
         // point goes FIRST on every arm that mutates, because an entry that
@@ -450,8 +475,8 @@ void App::frame() {
     studioInput(-2);
     drawStudioWindows(studioBounds);
     if(studioToolsOpen_) {
-        studioInput(-1);
-        drawControlBarTools({0,banner.bottom(),W,112*s});
+        studioInput(-2);
+        drawControlBarTools(studioMenuRect());
         studioInput(-2);
     }
     drawStatusBar(status);
@@ -481,6 +506,11 @@ void App::handleShortcuts() {
     // Ahead of the edit guard on purpose: when a text field takes focus while a
     // piano key is still held, this call is what releases the note.
     updateKbdPiano();
+    if(studioToolsOpen_) {
+        if(in.keyPressed[KeyF1]) studioToolsOpen_=false;
+        if(in.keyPressed[KeyEscape]) {studioToolsOpen_=false;in.keyPressed[KeyEscape]=false;ui_.active=0;}
+        return;
+    }
 
     // TYPING, AN OPEN MENU OR ANY MODAL SURFACE TAKES PRECEDENCE.
     //
@@ -692,7 +722,8 @@ void App::handleShortcuts() {
     // again — or with nothing selected — reaches the global stop, which is
     // what it has always done and what a panicking user expects of it.
     if (in.keyPressed[KeyEscape]) {
-        if (noteSel) roll->clearSelection();
+        if(studioPatternPaint_) {studioPatternPaint_=false;studioPatternStroke_=false;}
+        else if (noteSel) roll->clearSelection();
         else         send(Cmd::StopAll);
     }
     // Delete with a note selected removes the note, not the clip that contains
@@ -774,7 +805,7 @@ void App::updateKbdPiano() {
     // A focused text field must type, and a modified chord must stay a command
     // (Ctrl+S saves; it does not play a G). Closing the gate mid-hold releases
     // whatever is sounding, and reopening it never retriggers a still-held key.
-    const bool live = kbdMidi_ && !ui_.editId &&
+    const bool live = kbdMidi_ && !studioToolsOpen_ && !ui_.editId &&
                       !in.ctrl() && !in.alt() && !(in.mods & ModSuper);
 
     // scanDown[] rather than keyDown[]: the piano is a set of key *positions*

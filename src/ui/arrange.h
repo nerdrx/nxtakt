@@ -341,6 +341,9 @@ public:
     // The zoom and scroll, so a screenshot can be taken at a known place on the
     // timeline rather than wherever the last gesture left it.
     void setView(f32 pxPerBeat, f32 scrollX) { zoom_ = pxPerBeat; scrollX_ = scrollX; }
+    TimeAxis paintAxis(const Rect& r, f32 scale) const {
+        return {r.x + kArrHeaderW * scale, zoom_ * scale, scrollX_};
+    }
     // Where a split would land. Nothing inside gamescope can put a cursor
     // somewhere, and a split at beat 0 is a split the verb correctly refuses.
     void setCursorBeat(f64 b) { cursorBeat_ = b; }

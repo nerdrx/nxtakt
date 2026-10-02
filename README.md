@@ -92,17 +92,20 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
-## Studio workspace — 0.26.0
+## Studio workspace — 0.26.2
 
 - **Playlist first:** build a song on the timeline, with optional Clips view.
 - **Floating tools:** move, resize, minimize and maximize the Channel Rack,
   piano/sample editor, instrument editor and audio settings. Workspace layout
   saves between launches; **Reset layout** restores the starting arrangement.
 - **Channel Rack:** select a pattern, edit its sixteen steps, open a track's
-  Piano or Sound editor, and **Place** the pattern in the Playlist. Pattern
+  Piano or Sound editor, and **Paint** repeated patterns across the Playlist
+  with one drag and one Undo. **Place** appends a pattern. Pattern
   clips and timeline placements remain independent copies.
 - **Song / Pattern:** Space plays the Playlist in Song mode or loops the
   selected rack pattern in Pattern mode. Switching modes stops playback.
+- **Clear start:** one lane, one pattern, and an Add sound menu for drums,
+  Spectra or audio/plugin channels. Recording and setup have their own menu pages.
 - **OLED design:** compact black surfaces, a single toolbar, colored musical
   content, and a smaller Spectra sound-design window. Deeper tools stay available.
 - **Slim mixer:** narrow color-coded channels, mute/solo/arm, a pinned master
@@ -214,7 +217,7 @@ Session. See [Creative tools](docs/CREATIVE-TOOLS.md).
 
 ![Spectra Studio with its preset browser, two oscillators and performance controls](assets/spectra.png)
 
-Press **+ Spectra** to create an instrument track and open its focused sound
+Choose **Studio → Add sound → Spectra synthesizer** to create an instrument track and open its focused sound
 editor. Five pages — **Sound**, **Effects**, **Modulation**, **Arpeggiator** and
 **Wavetable** — give oscillators, routing and pattern editing room to breathe.
 A searchable preset sidebar offers **185 factory entries**, including Init and
@@ -234,7 +237,7 @@ same release. See [the Spectra Studio guide](docs/SPECTRA-STUDIO.md) and
 
 ## Drum studio — 0.17
 
-Press **+ Drums** for an instrument and a ready-to-edit pattern. Eight lanes,
+Choose **Studio → Add sound → Drum machine** for an instrument and a ready-to-edit pattern. Eight lanes,
 click-to-toggle steps, velocity editing and 16/32/64-step patterns bring a
 familiar drum programming workflow to the clip editor. **Play pattern** starts
 your beat; switch to **Piano** for free timing and detailed MIDI editing.

@@ -1230,6 +1230,37 @@ static void testMidiClip(ipc::EngineClient& c) {
     c.pushCommand(Cmd::StopAll);
     c.pushCommand(Cmd::SetTempo, 0, 0, 120.0);
 
+    ipc::WireClip empty = ipc::defaultWireClip();
+    empty.isMidi = empty.valid = 1;
+    empty.lengthBeats = 4.0;
+    drainEvents(c);
+    std::vector<ipc::WireEvent> emptyEvents;
+    auto waitEmpty = [&] {
+        return waitUntil([&] {
+            drainEvents(c, &emptyEvents);
+            return !c.clipBusy(1, 1);
+        }, 2000);
+    };
+    CHECK(c.setClip(1, 1, empty) && waitEmpty(),
+          "a new MIDI pattern with no notes is acknowledged");
+    auto clipAck = [&]() -> const ipc::WireEvent* {
+        for(const auto& event : emptyEvents)
+            if(event.type==ipc::EvClipAck && event.a==1 && event.b==1) return &event;
+        return nullptr;
+    };
+    const auto* accepted = clipAck();
+    CHECK(accepted && !(accepted->flags & ipc::ClipAckRefused),
+          "empty MIDI pattern is not refused");
+    empty.noteCount = 1;
+    emptyEvents.clear();
+    CHECK(c.setClip(1, 1, empty) && waitEmpty(),
+          "submit a malformed MIDI count without its notes payload");
+    const auto* rejected = clipAck();
+    CHECK(rejected && (rejected->flags & ipc::ClipAckRefused) &&
+          (u32)rejected->x == ipc::RejectBadClip,
+          "nonempty MIDI still requires its notes payload");
+    c.clearClip(1, 1);
+
     std::vector<ipc::WireNote> notes = makeNotes(8, 60, 0.5, 0.25);
     const u64 nref = c.poolWriteNotes(notes.data(), (i64)notes.size(), 0);
     CHECK(nref != 0, "poolWriteNotes 8 notes -> offset %llu", (unsigned long long)nref);
