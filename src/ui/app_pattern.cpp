@@ -2,8 +2,67 @@
 #include "app_internal.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace lat {
+
+std::string App::studioPatternName(int index) const {
+    if (index < 0 || index >= (int)ses_.scenes.size()) return {};
+    const std::string& name = ses_.scenes[(size_t)index].name;
+    char legacy[32], pattern[32];
+    snprintf(legacy, sizeof legacy, "Scene %d", index + 1);
+    if (name != legacy) return name;
+    snprintf(pattern, sizeof pattern, "Pattern %d", index + 1);
+    return pattern;
+}
+
+void App::selectStudioPattern(int index) {
+    if (index < 0 || index >= (int)ses_.scenes.size() || index >= kMaxScenes) return;
+    selSlot_ = index;
+    stopPreviews();
+    if (!studioSongMode_ && es_.playing) send(Cmd::LaunchScene, index, 1);
+}
+
+void App::newStudioPattern() {
+    if (ses_.scenes.size() >= kMaxScenes) {status_="Pattern limit reached";return;}
+    undoPoint("add pattern");
+    addScene();
+    const int index = (int)ses_.scenes.size() - 1;
+    char name[32];
+    snprintf(name, sizeof name, "Pattern %d", index + 1);
+    ses_.scenes[(size_t)index].name = name;
+    for (size_t track = 0; track < ses_.tracks.size(); ++track)
+        pushClip((int)track, index);
+    selectStudioPattern(index);
+}
+
+void App::cloneStudioPattern() {
+    if (ses_.scenes.size() >= kMaxScenes) {status_="Pattern limit reached";return;}
+    const int source = selSlot_;
+    if (source < 0 || source >= (int)ses_.scenes.size() || source >= kMaxScenes) return;
+
+    undoPoint("clone pattern");
+    addScene();
+    const int index = (int)ses_.scenes.size() - 1;
+    const std::string base=studioPatternName(source)+" copy";
+    std::string name=base;
+    for(int suffix=2;std::any_of(ses_.scenes.begin(),ses_.scenes.end(),
+        [&](const SceneModel& scene){return scene.name==name;});++suffix)
+        name=base+" "+std::to_string(suffix);
+    ses_.scenes[(size_t)index].name=name;
+    ses_.scenes[(size_t)index].tempo = ses_.scenes[(size_t)source].tempo;
+
+    for (size_t track = 0; track < ses_.tracks.size(); ++track) {
+        ClipModel& destination = ses_.tracks[track].slots[(size_t)index];
+        const ClipModel& original = ses_.tracks[track].slots[(size_t)source];
+        if (original.valid() || !original.path.empty()) {
+            destination = original;
+            destination.uid = ses_.newUid();
+        }
+        pushClip((int)track, index);
+    }
+    selectStudioPattern(index);
+}
 
 bool App::paintPatternAt(f64 beat, u64 gesture) {
     if (!std::isfinite(beat) || beat < 0.0 || selSlot_ < 0 ||

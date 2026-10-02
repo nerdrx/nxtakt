@@ -300,7 +300,7 @@ void App::drawControlBar(const Rect& r) {
     const bool tight=r.w<620*s;
     if(!tight) rend_.textIn(fBig_,{54*s,y,49*s,h},"Takt",nx::text,Align::Left,0);
     const f32 menuX=(tight?62.f:110.f)*s;
-    if(ui_.button(uiId(UiControlBar,90),{menuX,y,30*s,h},"")) {studioToolsOpen_=!studioToolsOpen_;studioMenuPage_=0;studioMenuScroll_=0;}
+    if(ui_.button(uiId(UiControlBar,90),{menuX,y,30*s,h},"")) {studioPatternPickerOpen_=false;studioToolsOpen_=!studioToolsOpen_;studioMenuPage_=0;studioMenuScroll_=0;}
     if(ui_.hovered({menuX,y,30*s,h})) ui_.tip="Add sounds, recording and workspace settings";
     for(int i=0;i<3;++i) rend_.line(menuX+9*s,y+(12+i*5)*s,menuX+22*s,y+(12+i*5)*s,s,nx::muted);
     f32 x=(tight?104.f:156.f)*s;
@@ -339,11 +339,12 @@ void App::drawControlBar(const Rect& r) {
     if(!compact) {rend_.textIn(fBold_,{x,y,86*s,h},pos,es_.playing?nx::cyan:nx::text,Align::Center,0);x+=100*s;}
     const f32 toolsW=(compact?340.f:435.f)*s,rx=r.right()-toolsW-10*s;
     if(!wrapped&&rx-x>105*s) {
-        char pattern[48];snprintf(pattern,sizeof pattern,"Pattern %02d",selSlot_+1);
+        const std::string pattern=studioPatternName(selSlot_);
         Rect b{x,y,std::min(180*s,rx-x-8*s),h};
         const Rect brush{b.right()-58*s,b.y,58*s,b.h};
         b.w-=62*s;
-        if(ui_.button(uiId(UiControlBar,96),b,pattern)) {showChannelRack_=true;activateStudioWindow(0);}
+        if(ui_.button(uiId(UiControlBar,96),b,pattern.c_str())) openStudioPatternPicker(b);
+        if(ui_.hovered(b)) ui_.tip="Choose, rename or clone a pattern";
         if(ui_.button(uiId(UiControlBar,145),brush,"Paint",studioPatternPaint_,rgb(0x007A85))) togglePatternPaint();
         if(ui_.hovered(brush)) ui_.tip="Drag repeated copies of the selected pattern into the Playlist";
     }
@@ -1519,23 +1520,31 @@ void App::drawArrangementView(const Rect& r) {
         ui_.active=strokeId;
     }
     if (studioPatternStroke_ && !input.down[0]) studioPatternStroke_=false;
+    bool hasPattern=false;
+    if(brushHot && selSlot_>=0 && selSlot_<(int)ses_.scenes.size() && selSlot_<kMaxScenes)
+        for(const TrackModel& track:ses_.tracks) hasPattern|=track.slots[(size_t)selSlot_].valid();
     if (brushHot) {
         ui_.cursor=Cursor::Hand;
-        ui_.tip="Paint the selected pattern · Escape: return to editing";
+        ui_.tip=hasPattern?"Paint the selected pattern · Escape: return to editing":
+            "This pattern is empty. Add notes or steps in the Rack.";
         if (studioPatternStroke_ && input.down[0]) {
-            const f64 length=patternPaintLength();
-            const TimeAxis axis=arrView_->paintAxis(r,scale);
-            const i64 cell=(i64)std::floor(std::max(0.0,xToBeat(axis,input.mx))/length);
-            const i64 from=studioPaintCell_<0?cell:studioPaintCell_;
-            bool painted=false;
-            const i64 direction=cell>=from?1:-1;
-            i64 visited=from;
-            for(int n=0;n<128;++n,visited+=direction) {
-                painted=paintPatternAt(visited*length,strokeId)||painted;
-                if(visited==cell) break;
+            if (!hasPattern) {
+                status_="This pattern is empty. Add notes or steps in the Rack.";
+            } else {
+                const f64 length=patternPaintLength();
+                const TimeAxis axis=arrView_->paintAxis(r,scale);
+                const i64 cell=(i64)std::floor(std::max(0.0,xToBeat(axis,input.mx))/length);
+                const i64 from=studioPaintCell_<0?cell:studioPaintCell_;
+                bool painted=false;
+                const i64 direction=cell>=from?1:-1;
+                i64 visited=from;
+                for(int n=0;n<128;++n,visited+=direction) {
+                    painted=paintPatternAt(visited*length,strokeId)||painted;
+                    if(visited==cell) break;
+                }
+                studioPaintCell_=visited==cell?cell:visited-direction;
+                if(painted) status_="Pattern painted into the Playlist. One undo removes this stroke.";
             }
-            studioPaintCell_=visited==cell?cell:visited-direction;
-            if(painted) status_="Pattern painted into the Playlist. One undo removes this stroke.";
         }
     }
     // The brush owns left gestures in the canvas; scrolling and right-click
@@ -1548,6 +1557,27 @@ void App::drawArrangementView(const Rect& r) {
     const u32 changed = arrView_->draw(ui_, r, ctx);
     input=savedInput;
     arrangeCommit(ctx, changed);
+    if (brushHot) {
+        const TimeAxis axis=arrView_->paintAxis(r,scale);
+        const f64 length=patternPaintLength();
+        const f64 beat=std::max(0.0,xToBeat(axis,input.mx));
+        const f64 start=std::floor(beat/length)*length;
+        const f32 x0=beatToX(axis,start), x1=beatToX(axis,start+length);
+        const Rect preview{std::max(canvas.x,x0),canvas.y,
+                           std::min(canvas.right(),x1)-std::max(canvas.x,x0),canvas.h};
+        if (preview.w>0.f && preview.h>0.f) {
+            const Col ink=rgb(0x27DCE5);
+            rend_.rect(preview,ink.alpha(0.09f));
+            rend_.line(preview.x,preview.y,preview.right(),preview.y,1.f*scale,ink.alpha(0.85f));
+            rend_.line(preview.x,preview.bottom(),preview.right(),preview.bottom(),1.f*scale,ink.alpha(0.85f));
+            rend_.line(preview.x,preview.y,preview.x,preview.bottom(),1.f*scale,ink.alpha(0.85f));
+            rend_.line(preview.right(),preview.y,preview.right(),preview.bottom(),1.f*scale,ink.alpha(0.85f));
+            const std::string name=studioPatternName(selSlot_);
+            ui_.drawTextIn(fSmall_,{preview.x+5*scale,preview.y+3*scale,
+                                    std::max(0.f,preview.w-10*scale),16*scale},
+                           name.c_str(),ink,Align::Left,0);
+        }
+    }
 }
 
 // The Autos half of the commit, split out only because it is the half with a

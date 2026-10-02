@@ -305,6 +305,11 @@ void App::frame() {
         studioToolsOpen_=false;
         win_.input().pressed[0]=false;ui_.active=0;
     }
+    if(studioPatternPickerOpen_ && win_.input().pressed[0] &&
+       !studioPatternMenuRect().contains(win_.input().mx,win_.input().my)) {
+        closeStudioPatternPicker();
+        win_.input().pressed[0]=false;ui_.active=0;
+    }
     handleShortcuts();
 
     Rect full{0, 0, W, H};
@@ -479,6 +484,7 @@ void App::frame() {
         drawControlBarTools(studioMenuRect());
         studioInput(-2);
     }
+    if(studioPatternPickerOpen_) {studioInput(-2);drawStudioPatternPicker();}
     drawStatusBar(status);
     drawDragGhost();
 
@@ -506,6 +512,12 @@ void App::handleShortcuts() {
     // Ahead of the edit guard on purpose: when a text field takes focus while a
     // piano key is still held, this call is what releases the note.
     updateKbdPiano();
+    if(studioPatternPickerOpen_) {
+        if(in.keyPressed[KeyEscape] && ui_.editId!=uiId(UiStudioShelf,150)) {
+            closeStudioPatternPicker(false);in.keyPressed[KeyEscape]=false;
+        }
+        return;
+    }
     if(studioToolsOpen_) {
         if(in.keyPressed[KeyF1]) studioToolsOpen_=false;
         if(in.keyPressed[KeyEscape]) {studioToolsOpen_=false;in.keyPressed[KeyEscape]=false;ui_.active=0;}
@@ -538,6 +550,11 @@ void App::handleShortcuts() {
     if (redoChord && !redoKeyPrev_) redo();
     undoKeyPrev_ = undoChord;
     redoKeyPrev_ = redoChord;
+    if(in.keyPressed[KeyEscape] && studioPatternPaint_) {
+        studioPatternPaint_=studioPatternStroke_=false;
+        ui_.active=0;in.keyPressed[KeyEscape]=false;
+        return;
+    }
 
     // While the piano is on it owns the printable keys, so an unmodified letter
     // is a note and not a shortcut — see KbdPiano::consumes for why this is now
@@ -722,8 +739,7 @@ void App::handleShortcuts() {
     // again — or with nothing selected — reaches the global stop, which is
     // what it has always done and what a panicking user expects of it.
     if (in.keyPressed[KeyEscape]) {
-        if(studioPatternPaint_) {studioPatternPaint_=false;studioPatternStroke_=false;}
-        else if (noteSel) roll->clearSelection();
+        if (noteSel) roll->clearSelection();
         else         send(Cmd::StopAll);
     }
     // Delete with a note selected removes the note, not the clip that contains
@@ -805,7 +821,7 @@ void App::updateKbdPiano() {
     // A focused text field must type, and a modified chord must stay a command
     // (Ctrl+S saves; it does not play a G). Closing the gate mid-hold releases
     // whatever is sounding, and reopening it never retriggers a still-held key.
-    const bool live = kbdMidi_ && !studioToolsOpen_ && !ui_.editId &&
+    const bool live = kbdMidi_ && !studioToolsOpen_ && !studioPatternPickerOpen_ && !ui_.editId &&
                       !in.ctrl() && !in.alt() && !(in.mods & ModSuper);
 
     // scanDown[] rather than keyDown[]: the piano is a set of key *positions*

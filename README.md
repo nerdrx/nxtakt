@@ -92,12 +92,14 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
-## Studio workspace — 0.26.2
+## Studio workspace — 0.26.3
 
 - **Playlist first:** build a song on the timeline, with optional Clips view.
 - **Floating tools:** move, resize, minimize and maximize the Channel Rack,
   piano/sample editor, instrument editor and audio settings. Workspace layout
   saves between launches; **Reset layout** restores the starting arrangement.
+- **Pattern picker:** choose patterns by name, see their channel counts, rename
+  with Ctrl+A, and clone independent variations. Paint previews the next placement.
 - **Channel Rack:** select a pattern, edit its sixteen steps, open a track's
   Piano or Sound editor, and **Paint** repeated patterns across the Playlist
   with one drag and one Undo. **Place** appends a pattern. Pattern

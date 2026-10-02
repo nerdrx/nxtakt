@@ -20,9 +20,7 @@ void App::drawChannelRack(const Rect& r) {
     Rect add{head.right() - 28.f*s, head.y, 26.f*s, 22.f*s};
     if (ui_.button(uiId(UiChannelRack, 0), add, "+") &&
         ses_.scenes.size() < kMaxScenes) {
-        undoPoint("add pattern");
-        addScene();
-        selSlot_ = (int)ses_.scenes.size() - 1;
+        newStudioPattern();
     }
     Rect place{add.x - 54.f*s, add.y, 50.f*s, add.h};
     if (ui_.button(uiId(UiChannelRack, 4), place, "Place") && !ses_.scenes.empty()) {
@@ -67,32 +65,18 @@ void App::drawChannelRack(const Rect& r) {
     Rect next{place.x - navW - 4.f*s, add.y, navW, add.h};
     Rect prev{next.x - navW - 3.f*s, next.y, navW, add.h};
     if (ui_.button(uiId(UiChannelRack, 1), prev, "<") && !ses_.scenes.empty())
-        {selSlot_ = (selSlot_ + (int)ses_.scenes.size() - 1) % (int)ses_.scenes.size();
-         if(!studioSongMode_ && es_.playing) send(Cmd::LaunchScene,selSlot_,1);}
+        selectStudioPattern((selSlot_+(int)ses_.scenes.size()-1)%(int)ses_.scenes.size());
     if (ui_.button(uiId(UiChannelRack, 2), next, ">") && !ses_.scenes.empty())
-        {selSlot_ = (selSlot_ + 1) % (int)ses_.scenes.size();
-         if(!studioSongMode_ && es_.playing) send(Cmd::LaunchScene,selSlot_,1);}
+        selectStudioPattern((selSlot_+1)%(int)ses_.scenes.size());
 
     Rect pattern{head.x,head.y+1.f*s,150.f*s,22.f*s};
     if (ses_.scenes.empty()) {
         rend_.textIn(fSmall_, pattern, "No patterns", nx::muted, Align::Center, 0);
     } else {
         selSlot_ = clampv(selSlot_, 0, (int)ses_.scenes.size() - 1);
-        std::string patternLabel = ses_.scenes[(size_t)selSlot_].name;
-        char defaultName[32];
-        std::snprintf(defaultName, sizeof defaultName, "Scene %d", selSlot_ + 1);
-        if (patternLabel == defaultName) {
-            char fallback[32];
-            std::snprintf(fallback, sizeof fallback, "Pattern %d", selSlot_ + 1);
-            patternLabel = fallback;
-        }
-        if (ui_.button(uiId(UiChannelRack, 3), pattern, patternLabel.c_str())) {
-            showDetail_=true;
-            detailTab_=DetailTab::Clip;
-            activateStudioWindow(1);
-        }
-        if (ui_.hovered(pattern))
-            ui_.tip = "Open this pattern in Piano; use Play in Pattern mode to audition";
+        const std::string patternLabel=studioPatternName(selSlot_);
+        if(ui_.button(uiId(UiChannelRack,3),pattern,patternLabel.c_str())) openStudioPatternPicker(pattern);
+        if(ui_.hovered(pattern)) ui_.tip="Choose, rename or clone a pattern";
     }
     Rect addChannel{pattern.right()+5.f*s,head.y,100.f*s,22.f*s};
     if(ui_.button(uiId(UiChannelRack,5),addChannel,"+ Sound")) {

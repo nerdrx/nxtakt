@@ -114,7 +114,7 @@ void App::prepareStudioWindows(const Rect& area) {
     studioPointerOwner_=-1;
     for(int i:studioOrder_) if(visible[i] && studioWindowRect(i).contains(studioRawInput_.mx,studioRawInput_.my)) studioPointerOwner_=i;
     if(studioCapture_>=0) studioPointerOwner_=studioCapture_;
-    if(studioToolsOpen_) studioPointerOwner_=-3; // menu shields every editor underneath
+    if(studioToolsOpen_ || studioPatternPickerOpen_) studioPointerOwner_=-3; // menu shields every editor underneath
     if(studioRawInput_.pressed[0]) {
         studioFocus_=studioPointerOwner_;
         if(std::getenv("NXTAKT_DEBUG_PROBE")) LOGI("NXTAKT_DEBUG_PROBE: workspace focus %d",studioFocus_);

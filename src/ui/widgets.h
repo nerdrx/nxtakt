@@ -268,6 +268,7 @@ struct Ui {
     u64  editId = 0;
     std::string editBuf;
     int  caret = 0;
+    bool textSelectAll = false;
     bool editCommitted = false;
 
     // Tooltip requested this frame.

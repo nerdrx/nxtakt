@@ -911,6 +911,7 @@ void Ui::beginTypeIn(u64 id, f64 value) {
     typeInId = id;
     typeInBuf = buf;
     typeInFresh = true;                   // opens "selected": see Ui::typeInFresh
+    textSelectAll=false;
     editId = id ^ 0x7479706549u;          // 'typeI' -- UiCtlTypeIn's live id
     editBuf = typeInBuf;
     caret = (int)editBuf.size();
@@ -1816,6 +1817,7 @@ bool Ui::textField(u64 id, const Rect& b, std::string* value, Col bg, Col fg,
 
     auto beginEdit = [&]() {
         editId = id;
+        textSelectAll=false;
         editBuf = *value;
         caret = (int)editBuf.size();
         active = id;
@@ -1825,12 +1827,14 @@ bool Ui::textField(u64 id, const Rect& b, std::string* value, Col bg, Col fg,
     auto commit = [&]() {
         *value = editBuf;
         editId = 0;
+        textSelectAll=false;
         if (active == id) active = 0;
         editCommitted = true;
         committed = true;
     };
     auto cancel = [&]() {
         editId = 0;
+        textSelectAll=false;
         if (active == id) active = 0;
         editCommitted = false;
     };
@@ -1850,30 +1854,36 @@ bool Ui::textField(u64 id, const Rect& b, std::string* value, Col bg, Col fg,
         ++blink;
         caret = clampv(caret, 0, (int)editBuf.size());
 
-        if (!in->textInput.empty()) {
+        if(in->ctrl() && !in->alt() && in->keyPressed['a']) {textSelectAll=true;caret=(int)editBuf.size();blink=0;}
+        auto eraseSelection=[&]() {
+            if(!textSelectAll) return false;
+            editBuf.clear();caret=0;textSelectAll=false;blink=0;return true;
+        };
+        if (!in->textInput.empty() && (!in->ctrl() || in->alt())) {
             std::string filtered;
             filtered.reserve(in->textInput.size());
             for (char c : in->textInput)
                 if ((unsigned char)c >= 0x20 && c != 0x7F) filtered.push_back(c);
             if (!filtered.empty()) {
+                eraseSelection();
                 editBuf.insert((size_t)caret, filtered);
                 caret += (int)filtered.size();
                 blink = 0;
             }
         }
-        if (in->keyPressed[KeyBackspace] && caret > 0) {
+        if (in->keyPressed[KeyBackspace] && !eraseSelection() && caret > 0) {
             editBuf.erase((size_t)(caret - 1), 1);
             --caret;
             blink = 0;
         }
-        if (in->keyPressed[KeyDelete] && caret < (int)editBuf.size()) {
+        if (in->keyPressed[KeyDelete] && !eraseSelection() && caret < (int)editBuf.size()) {
             editBuf.erase((size_t)caret, 1);
             blink = 0;
         }
-        if (in->keyPressed[KeyLeft])  { caret = clampv(caret - 1, 0, (int)editBuf.size()); blink = 0; }
-        if (in->keyPressed[KeyRight]) { caret = clampv(caret + 1, 0, (int)editBuf.size()); blink = 0; }
-        if (in->keyPressed[KeyHome])  { caret = 0; blink = 0; }
-        if (in->keyPressed[KeyEnd])   { caret = (int)editBuf.size(); blink = 0; }
+        if (in->keyPressed[KeyLeft])  { caret = textSelectAll?0:clampv(caret - 1, 0, (int)editBuf.size()); textSelectAll=false;blink = 0; }
+        if (in->keyPressed[KeyRight]) { caret = textSelectAll?(int)editBuf.size():clampv(caret + 1, 0, (int)editBuf.size()); textSelectAll=false;blink = 0; }
+        if (in->keyPressed[KeyHome])  { caret = 0; textSelectAll=false;blink = 0; }
+        if (in->keyPressed[KeyEnd])   { caret = (int)editBuf.size(); textSelectAll=false;blink = 0; }
         if (in->keyPressed[KeyEscape]) cancel();
         else if (in->keyPressed[KeyEnter]) commit();
     }
@@ -1913,8 +1923,9 @@ bool Ui::textField(u64 id, const Rect& b, std::string* value, Col bg, Col fg,
             if (tx + caretRel > inner.right()) tx = inner.right() - caretRel;
             if (tx + caretRel < inner.x)       tx = inner.x - caretRel;
             const f32 ty = b.y + (b.h - f->height()) * 0.5f;
+            if(textSelectAll) r->rect({tx,ty,tw,f->height()},nx::violet.alpha(.35f));
             r->text(*f, tx, ty, s, fg);
-            if (((blink / 30) & 1) == 0) {
+            if (!textSelectAll && ((blink / 30) & 1) == 0) {
                 r->rect({std::round(tx + caretRel), std::round(ty + 1.f), 1.f,
                          std::max(2.f, f->height() - 2.f)}, pal::accent);
             }

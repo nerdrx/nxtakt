@@ -6,7 +6,11 @@ plays: the separate **Song / Pattern** control chooses the transport source.
 
 ## From a pattern to a song
 
-1. Open **Rack** (F6), choose a pattern with the arrows, or add one with `+`.
+1. Click the pattern name in the toolbar or **Rack** (F6). The picker shows
+   every pattern by name and channel count. Select a row, use **New pattern**,
+   or **Clone pattern** to make a variation with independent clips and fresh identities.
+   Click **Pattern name** to rename; Ctrl+A selects the full name. Up/Down select
+   patterns when the name field is inactive; Enter closes the picker without starting playback.
 2. Toggle MIDI steps in a track row. Audio clips display a label and keep their
    waveform editing in the sample editor. Drum tracks use their kick pitch for
    this quick row; open Piano for the full drum sequencer and its other lanes.
@@ -14,11 +18,14 @@ plays: the separate **Song / Pattern** control chooses the transport source.
    to open its Sound editor.
 4. Choose **Pattern**, then press Space to audition the selected pattern.
 5. Enable **Paint** in the toolbar or Rack, then drag across the Playlist to
-   repeat the selected pattern. One Undo removes the entire stroke. Painting
+   repeat the selected pattern. A translucent snapped preview shows its extent
+   before you click. Empty patterns explain where to add notes. One Undo removes the entire stroke. Painting
    switches to Song mode without starting playback; Escape returns to normal editing.
    **Place** copies the selected pattern's playable tracks to the next free bar
    of the Playlist. Edit placements separately from the original rack pattern.
 6. Choose **Song**, then Space to play the timeline.
+
+![Pattern picker with named patterns and New / Clone actions](../assets/pattern-picker.png)
 
 Pattern mode excludes timeline lanes that have no clip in the chosen pattern.
 Song mode returns all tracks to the timeline. Changing mode stops playback.
@@ -64,7 +71,7 @@ or restart the engine there without reopening your project. See
 ## Development validation
 
 Run `tools/studio-smoke.sh`, `tools/pattern-paint-smoke.sh` and
-`tools/fresh-flow-smoke.sh` after building `nxtakt`, `nxtaktd` and `gen_demo`.
+`tools/fresh-flow-smoke.sh`, and `tools/pattern-picker-smoke.sh` after building `nxtakt`, `nxtaktd` and `gen_demo`.
 It creates a disposable demo and isolated, disconnected audio preferences,
 then drives the real GUI in headless Gamescope. It verifies pattern placement,
 independent source edits, Undo/Redo and retained notes after engine restart

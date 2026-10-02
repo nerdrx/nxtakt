@@ -100,6 +100,17 @@ private:
     bool paintPatternAt(f64 beat, u64 gesture);
     f64 patternPaintLength() const;
     void togglePatternPaint();
+    void newStudioPattern();
+    void cloneStudioPattern();
+    void selectStudioPattern(int slot);
+    std::string studioPatternName(int slot) const;
+    void openStudioPatternPicker(const Rect& anchor);
+    void closeStudioPatternPicker(bool commit = true);
+    Rect studioPatternMenuRect() const;
+    void drawStudioPatternPicker();
+    bool studioPatternPickerOpen_ = false;
+    Rect studioPatternAnchor_{};
+    f32 studioPatternScroll_ = 0;
     void drawStatusBar(const Rect& r);
     // F1: src/ui/keymap.h drawn as a full-screen reference card, the same table
     // `nxtakt --help` prints. Called from the tail of drawStatusBar because it

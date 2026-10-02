@@ -570,7 +570,7 @@ bool App::openProject(const std::string& path) {
     // The history belonged to the set that was open a moment ago. Undoing into
     // it would silently overwrite the one just loaded.
     clearUndo();
-    studioPatternPaint_=studioPatternStroke_=false;
+    studioPatternPaint_=studioPatternStroke_=studioPatternPickerOpen_=false;
     studioSongMode_=std::any_of(ses_.tracks.begin(),ses_.tracks.end(),
         [](const TrackModel& track){return !track.arrange.empty();});
     return true;
