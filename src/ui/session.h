@@ -336,7 +336,7 @@ inline constexpr f64 kMinArrBeats = 1.0 / 64.0;
 inline constexpr f64 kArrOverlapEps = 1e-9;
 // A track's default lane height in the arrangement, in logical px. Named because
 // the project writer suppresses `arrheight` at exactly this value.
-inline constexpr f32 kArrHeightDefault = 68.f;
+inline constexpr f32 kArrHeightDefault = 48.f;
 
 // One clip placed on the timeline.
 //

@@ -105,7 +105,15 @@ grep -aq 'backend:.*audio:' "$LOG" || {
     echo "drive.sh: application did not finish startup; see $LOG" >&2
     exit 1
 }
+# Match the application surface to the requested compositor size. Gamescope
+# otherwise scales the app's default 1360x860 window, hiding responsive bugs.
+APP_WINDOW=$(xd search --onlyvisible --name '^NxTakt$' | head -1)
+xd windowsize "$APP_WINDOW" "$W" "$H"
 sleep 1.2
+xd getwindowgeometry --shell "$APP_WINDOW" > "$OUT/window-geometry.txt"
+grep -q "^WIDTH=$W$" "$OUT/window-geometry.txt" && grep -q "^HEIGHT=$H$" "$OUT/window-geometry.txt" || {
+    echo "drive.sh: application size differs from requested test surface" >&2; exit 1;
+}
 
 # shellcheck source=/dev/null
 source "$REPO/tools/drive-lib.sh"

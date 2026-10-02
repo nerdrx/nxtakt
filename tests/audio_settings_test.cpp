@@ -15,10 +15,12 @@ int main() {
     expected.jackPorts = {"system:playback_1", "", "-", "port with \"quotes\""};
     expected.alsaOutput = "hw:USB Audio,0";
     expected.alsaInput = "input with spaces";
+    expected.discordCaptureBus = true;
     assert(lat::saveAudioSettings(expected, path));
     assert(lat::loadAudioSettings(path).jackPorts == expected.jackPorts);
     assert(lat::loadAudioSettings(path).alsaOutput == expected.alsaOutput);
     assert(lat::loadAudioSettings(path).alsaInput == expected.alsaInput);
+    assert(lat::loadAudioSettings(path).discordCaptureBus);
 
     auto oversized = expected;
     oversized.alsaOutput = std::string(4097, 'x');
@@ -39,9 +41,11 @@ int main() {
     assert(invalid.jackPorts[2] == "-");
     assert(invalid.alsaOutput == "default");
     assert(invalid.alsaInput == "default");
+    assert(!invalid.discordCaptureBus);
 
     const auto missing = lat::loadAudioSettings(dir / "missing.txt");
     assert(missing.alsaOutput == "default" && missing.alsaInput == "default");
+    assert(!missing.discordCaptureBus);
     assert((missing.jackPorts == std::array<std::string, 4>{}));
 
     const auto old = dir / "existing";

@@ -36,13 +36,13 @@ inline constexpr f32 kArrHeaderW   = 160.f;  // the track column on the left
 // it cannot be confused with the right-click that deletes a flag, because the
 // two gestures are not aimed at the same pixels. Nothing is modal and nothing
 // asks which one you meant.
-inline constexpr f32 kArrRulerH    = 28.f;   // the bar band
+inline constexpr f32 kArrRulerH    = 24.f;   // the bar band
 // A full 24px band gives locator flags a comfortable click target.
-inline constexpr f32 kArrMarkerH   = 24.f;   // the marker band, above it
+inline constexpr f32 kArrMarkerH   = 22.f;   // the marker band, above it
 inline constexpr f32 kArrRulerTotal = kArrRulerH + kArrMarkerH;
 // An automation lane needs enough height to aim at and no more (§7.4).
 inline constexpr f32 kArrAutoLaneH = 60.f;
-inline constexpr f32 kArrMinLaneH  = 54.f;
+inline constexpr f32 kArrMinLaneH  = 48.f;
 inline constexpr f32 kArrMaxLaneH  = 320.f;
 // The grab bands, in logical px, and the floors they answer to.
 //

@@ -22,7 +22,7 @@ namespace lat {
 
 // Layout constants, in logical px before the DPI scale is applied.
 namespace lay {
-inline constexpr f32 controlBarH = 84.f;
+inline constexpr f32 controlBarH = 54.f;
 inline constexpr f32 statusH     = 20.f;
 inline constexpr f32 trackHeadH  = 40.f;
 inline constexpr f32 slotH       = 32.f;

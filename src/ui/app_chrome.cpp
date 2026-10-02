@@ -183,15 +183,6 @@ static void ctlWell(Renderer& r, const Rect& b, f32 dpi, bool deep = false) {
     r.well(b, std::min(nx::radiusSm * dpi, b.h * 0.5f), deep);
 }
 
-// The group separator. §11: no solid grey lines anywhere -- a hairline that
-// fades to nothing at both ends, inset from the bar's own edges so it reads as
-// a seam in the glass rather than as a rule drawn across it.
-static void ctlSeam(Renderer& r, f32 x, const Rect& bar, f32 dpi) {
-    const f32 inset = bar.h * 0.24f;
-    r.hairlineV(std::round(x), bar.y + inset, bar.bottom() - inset,
-                nx::hairlineInk, dpi);
-}
-
 // NXTAKT_DEBUG_SIG's second half, and the only assertion in this program that a
 // screenshot genuinely cannot make: THAT THE MAP REACHED THE ENGINE.
 //
@@ -302,633 +293,196 @@ void App::drawControlBar(const Rect& r) {
             kin.mx = kin.my = -1.0e4f;
         }
     }
-    // THE BAR TIER (§4). Not a flat panel rect any more: --glass-bar over the
-    // living background, with the 1px top highlight the tier is entitled to and
-    // a hairline where it ends.
-    //
-    // Assembled rather than taken whole from nx::glass(Tier::Bar), for one
-    // reason: that style carries --shadow-bar, and this bar is drawn FIRST and
-    // then painted over by the session view, so a downward shadow would be
-    // erased three calls later. A shadow nobody can see is quads spent on
-    // nothing. The fill and the edge are the tier's own, untouched.
-    {
-        rend_.rect(r, pal::panel);
-        // The seam under the bar. §11: hairlines, never a solid rule.
-        rend_.hairlineH(r.x, r.right(), r.bottom() - 1 * s, nx::hairlineInk, 1 * s);
+    rend_.rect(r,rgb(0x090B0E));
+    rend_.hairlineH(r.x,r.right(),r.bottom()-s,nx::hairlineInk,s);
+    const f32 y=r.y+9*s,h=34*s;
+    rend_.textIn(fBig_,{14*s,y,38*s,h},"nx",nx::violet,Align::Left,0);
+    const bool tight=r.w<620*s;
+    if(!tight) rend_.textIn(fBig_,{54*s,y,49*s,h},"Takt",nx::text,Align::Left,0);
+    const f32 menuX=(tight?62.f:110.f)*s;
+    if(ui_.button(uiId(UiControlBar,90),{menuX,y,30*s,h},"")) studioToolsOpen_=!studioToolsOpen_;
+    if(ui_.hovered({menuX,y,30*s,h})) ui_.tip="Recording and advanced controls";
+    for(int i=0;i<3;++i) rend_.line(menuX+9*s,y+(12+i*5)*s,menuX+22*s,y+(12+i*5)*s,s,nx::muted);
+    f32 x=(tight?104.f:156.f)*s;
+    if(r.w>1300*s) {
+        rend_.textIn(fSmall_,{x,y,144*s,h},ses_.name.c_str(),nx::text,Align::Left,0);x+=154*s;
     }
-
-    // ONE BATCH OF SHAPES, THEN ONE OF LABELS. Every widget in this bar draws a
-    // gradient and then a string, and the batcher breaks on the texture change
-    // between them -- which, since the re-skin, also costs a gradient-table
-    // upload apiece. The bar's controls do not overlap and nothing here pushes
-    // a clip, which is exactly the promise Ui::beginDeferText asks for. Closed
-    // at the bottom of this function, on every path (there is no early return).
-    ui_.beginDeferText();
-
-    // The playhead as a musician reads it — from the ENGINE's own counters,
-    // which cross in the snapshot now (posBar/posBeat/posSixteenth and the
-    // signature at the playhead). The session's map produces identical numbers
-    // right up until a publication is ever refused: sigMapValid rejects a map
-    // whose bar lines do not follow from its own bar lengths and leaves the
-    // engine at 4/4 — and in exactly that state a session-derived readout
-    // would confidently display 7/8 over an engine playing 4/4, with nothing
-    // anywhere to show the disagreement. Reading the engine's numbers makes
-    // that state impossible to render.
-    BarPos pos = sigMapOf(ses_).posAt(es_.beat);   // fallback: fills barStart etc.
-    pos.bar = es_.posBar - 1;                      // engine's are one-based
-    pos.beat = es_.posBeat - 1;
-    pos.sixteenth = es_.posSixteenth - 1;
-    pos.num = es_.posSigNum;
-    pos.den = es_.posSigDen;
-    const Input& in = win_.input();
-
-    // §11: all spacing on the 8px grid. `gap` separates controls inside a
-    // group, `sep` separates the groups themselves and carries a hairline down
-    // its middle. Widths stay content-sized -- the grid governs the space
-    // between things, not the size of a number that has to fit.
-    const f32 pad = 16 * s, gap = 8 * s, sep = 16 * s;
-    const f32 primaryY = r.y + 8 * s, settingsY = r.y + 48 * s;
-    f32 h = 36 * s, cy = primaryY;
-    // One command surface, two clear levels: performance above, setup below.
-    rend_.rect({r.x, settingsY - 2 * s, r.w, 38 * s}, pal::panelAlt.alpha(0.45f));
-    rend_.roundRect({r.x + pad, primaryY, 36 * s, 36 * s}, 8 * s, nx::violet);
-    ui_.drawTextIn(fBold_, {r.x + pad, primaryY, 36 * s, 36 * s}, "NX", nx::text, Align::Center, 0);
-    ui_.drawTextIn(fBold_, {r.x + 60 * s, primaryY, 44 * s, 36 * s}, "Takt", nx::text, Align::Left, 0);
-    f32 x = r.x + 112 * s;
-
-    // --- tempo ---
-    Rect tapR{x, cy, 44 * s, h};
-    // EVERY CONTROL IN THIS BAR NOW SAYS WHAT IT IS AND WHAT ITS GESTURES ARE.
-    //
-    // Before this pass four of the fifteen did (the signature, AUTO, ARR, MAP)
-    // and eleven were a three-letter label and nothing else -- which is fine
-    // for MET and useless for TAP, whose entire behaviour is "do it twice in
-    // time and I will work out a tempo". The status bar is already the one
-    // surface with room for a sentence, the tip already wins over `status_`
-    // while the pointer is on a control, and the widget layer's new vocabulary
-    // (wheel, Ctrl for fine, double-click to reset, right-click to type in)
-    // is invisible until something says it out loud. This bar is where a user
-    // looks first, so this bar is where it gets said.
-    if (ui_.isHot(uiId(1, 0)))
-        ui_.tip = "Tap tempo: click this twice in time with the music";
-    if (ui_.button(uiId(1, 0), tapR, "Tap")) {
-        static f64 lastTap = 0.0;
-        const f64 now = nowSeconds();
-        if (now - lastTap < 3.0) {
-            undoPoint("tempo");
-            setTempo(clampv(60.0 / (now - lastTap), 20.0, 999.0));
+    const Rect stop{x,y,34*s,h};
+    chromeDebugMark("stop",stop);
+    if(ui_.button(uiId(UiControlBar,91),stop,"")) {send(Cmd::SetPlaying,0);autoRecFinish();}
+    ui_.stopSquare(stop.insetXY(12*s,12*s),nx::text);x+=38*s;
+    const Rect play{x,y,34*s,h};
+    chromeDebugMark("play",play);
+    if(ui_.button(uiId(UiControlBar,92),play,"",es_.playing,nx::violet)) togglePlay();
+    ui_.playTriangle(play.insetXY(12*s,10*s),nx::text);x+=38*s;
+    const Rect rec{x,y,34*s,h};
+    chromeDebugMark("rec",rec);
+    if(ui_.button(uiId(UiControlBar,93),rec,"",recIntent_,pal::armRed)) recIntent_=!recIntent_;
+    rend_.circle(rec.cx(),rec.cy(),5*s,pal::recRed);x+=48*s;
+    const f32 modeW=tight?50.f:62.f;
+    ui_.segCluster({x,y,modeW*2*s,h});
+    auto mode=[&](bool song,const char* label,f32 dx) {
+        Rect b{x+dx*s,y,modeW*s,h};
+        if(ui_.segButton(uiId(UiControlBar,94+song),b,studioSongMode_==song,nx::violet)) {
+            if(es_.playing) {send(Cmd::SetPlaying,0);autoRecFinish();}
+            studioSongMode_=song;
         }
-        lastTap = now;
+        ui_.drawTextIn(fSmall_,b,label,nx::text,Align::Center,0);
+    };
+    mode(false,"Pattern",0);mode(true,"Song",modeW);x+=(modeW*2+14)*s;
+    f64 bpm=ses_.tempo;
+    Rect tempo{x,y,(tight?68.f:78.f)*s,h};ctlWell(rend_,tempo,s);
+    if(ui_.dragNumber(uiId(UiControlBar,97),tempo,&bpm,20.,999.,.15,"%.1f BPM",Align::Center,nullptr,0.,120.)) {undoPoint("tempo");setTempo(bpm);}
+    chromeDebugMark("tempo",tempo);x+=(tight?80.f:90.f)*s;
+    const bool compact=r.w<1100*s,wrapped=r.h>60*s;
+    char pos[48];snprintf(pos,sizeof pos,"%02d:%02d:%02d",es_.posBar,es_.posBeat,es_.posSixteenth);
+    if(!compact) {rend_.textIn(fBold_,{x,y,86*s,h},pos,es_.playing?nx::cyan:nx::text,Align::Center,0);x+=100*s;}
+    const f32 toolsW=(compact?340.f:435.f)*s,rx=r.right()-toolsW-10*s;
+    if(!wrapped&&rx-x>105*s) {
+        char pattern[48];snprintf(pattern,sizeof pattern,"Pattern %02d",selSlot_+1);
+        Rect b{x,y,std::min(180*s,rx-x-8*s),h};
+        if(ui_.button(uiId(UiControlBar,96),b,pattern)) {showChannelRack_=true;activateStudioWindow(0);}
     }
-    x += tapR.w + gap;
-
-    // The tempo is a FIELD, so it recesses (§5). dragNumber draws nothing over
-    // a well at rest and takes the well over itself while the drag owns it, so
-    // the two agree about what a number being edited looks like.
-    Rect tempoR{x, cy, 82 * s, h};
-    chromeDebugMark("tempo", tempoR);
-    ctlWell(rend_, tempoR, s);
-    f64 bpm = ses_.tempo;
-    // The number is edited through a copy, so the session still holds the old
-    // tempo here and a plain undoPoint is enough; the drag coalesces on the
-    // widget's id.
-    if (ui_.isHot(uiId(1, 1)))
-        ui_.tip = "Tempo - drag or wheel (Ctrl = fine)  -  double-click resets to 120  "
-                  "-  right-click to type a value";
-    if (ui_.dragNumber(uiId(1, 1), tempoR, &bpm, 20.0, 999.0, 0.15, "%.2f",
-                        Align::Center, nullptr, 0.0, /*def=*/120.0)) {
-        undoPoint("tempo");
-        setTempo(bpm);
-    }
-    x += tempoR.w + gap;
-    const f32 primaryTempoEnd = x;
-    x = r.x + pad; cy = settingsY; h = 28 * s;
-
-    // --- time signature ---
-    //
-    // What it SHOWS is the signature in force at the playhead, not ses_.sigNum:
-    // in a re-barred set those are different numbers from the first change on,
-    // and the one a transport bar is for is the one you are hearing.
-    //
-    // What it EDITS is the entry that signature comes from -- sigAtBar(pos.bar),
-    // whose own bar is where it starts. Not "insert a change at the playhead's
-    // bar": dragging the number in bar 37 of a set in plain 4/4 means "this
-    // piece is in 3/4", not "and from bar 37 it is", and a control that quietly
-    // laid down a change every time it was touched would fill the ruler with
-    // markers nobody asked for. Putting a change at a specific bar is the
-    // ruler's job (right-click), and once one is there, locating into it points
-    // this chip at it.
-    //
-    // It draws EXACTLY what it drew when it was a read-only label -- same rect,
-    // same font, same colour, same string -- and adds a hover tint and a cursor
-    // that only exist while the pointer is on it. That is deliberate: "a set
-    // that has never been re-barred renders bit-identically" is this wave's
-    // gate, and it is a gate a redesigned chip could not pass.
-    Rect sigR{x, cy, 64 * s, h};
-    {
-        // Two invisible halves, split on the slash: numerator left, denominator
-        // right. Hand-rolled rather than two Ui::dragNumbers because those draw
-        // their own text and this one has to keep drawing "4 / 4" as one string.
-        const Rect numR{sigR.x, sigR.y, sigR.w * 0.5f, sigR.h};
-        const Rect denR{sigR.x + sigR.w * 0.5f, sigR.y, sigR.w * 0.5f, sigR.h};
-        const u64 idN = uiId(1, 20), idD = uiId(1, 21);
-        ui_.setHot(idN, numR);
-        ui_.setHot(idD, denR);
-        const bool hotN = ui_.isHot(idN), hotD = ui_.isHot(idD);
-        const bool live = hotN || hotD || ui_.active == idN || ui_.active == idD;
-
-        // The entry this chip is pointing at. sigAtBar answers "which entry
-        // covers this bar"; its own `bar` is the one setSignature has to be
-        // given, or the drag would fork a new entry off the one it is editing.
-        const SigChange cur = ses_.sigAtBar(pos.bar);
-        const int editBar = cur.bar;
-
-        const auto press = [&](u64 id) {
-            if (in.pressed[0] && ui_.isHot(id)) {
-                ui_.active = id;
-                ui_.dragAccum = 0.f;
-                // The exponent for the denominator, the numerator itself.
-                f64 st = (f64)cur.num;
-                if (id == idD) { int k = 0; while ((1 << k) < cur.den) ++k; st = (f64)k; }
-                ui_.dragStart = st;
-            }
-        };
-        press(idN);
-        press(idD);
-        if (in.released[0] && (ui_.active == idN || ui_.active == idD)) ui_.active = 0;
-
-        if ((ui_.active == idN || ui_.active == idD) && in.dy != 0.f) {
-            const bool den = ui_.active == idD;
-            ui_.dragAccum += -in.dy;                  // drag up = increase
-            // A denominator moves an octave at a time and needs a long throw to
-            // do it; a numerator moves one unit per few pixels, like every other
-            // integer in this bar.
-            const f64 nv = ui_.dragStart + (f64)ui_.dragAccum * (den ? 0.03 : 0.12);
-            int want = (int)std::floor(nv + 0.5);
-            int n = cur.num, d = cur.den;
-            if (den) { want = (int)clampv((i64)want, (i64)0, (i64)5); d = 1 << want; }
-            else     { n = want; }
-            // THE CLAMPS AND THE DEDUPE LIVE IN session.h. setSignature runs
-            // clSigNum / clSigDen / clSigBar and then normalizes, so nothing
-            // here has to know that a denominator is a power of two or that a
-            // second entry at one bar replaces the first.
-            if (clSigNum(n) != cur.num || clSigDen(d) != cur.den) {
-                undoPoint("time signature", ui_.active);
-                ses_.setSignature(editBar, n, d);
-                const SigChange now = ses_.sigAtBar(editBar);
-                char sb[80];
-                if (editBar == 0)
-                    snprintf(sb, sizeof sb, "Time signature %d/%d", now.num, now.den);
-                else
-                    snprintf(sb, sizeof sb, "Time signature %d/%d from bar %d",
-                             now.num, now.den, editBar + 1);
-                status_ = sb;
-            }
-        }
-
-        char buf[16];
-        snprintf(buf, sizeof buf, "%d / %d", pos.num, pos.den);
-        // The same well the tempo wears, because it is the same kind of thing:
-        // a number in the bar that can be dragged. The hover state is a violet
-        // wash inside the recess rather than a lighter plate -- §1, violet
-        // leads even here.
-        ctlWell(rend_, sigR, s);
-        if (live) rend_.roundRect(sigR, std::min(nx::radiusSm * s, sigR.h * 0.5f),
-                                  nx::violet.alpha(0.16f));
-        ui_.drawTextIn(fBody_, sigR, buf, live ? nx::text : pal::textDim, Align::Center);
-        if (live) {
-            ui_.cursor = Cursor::ResizeV;
-            ui_.tip = editBar == 0
-                          ? "Time signature: drag the numerator or the denominator"
-                          : "Time signature from bar " + std::to_string(editBar + 1) +
-                                ": drag to change it";
-        }
-    }
-    x += sigR.w + gap;
-
-    Rect metR{x, cy, 60 * s, h};
-    chromeDebugMark("met", metR);
-    if (ui_.isHot(uiId(1, 2))) ui_.tip = "Metronome  (M)";
-    if (ui_.button(uiId(1, 2), metR, "Click", ses_.metronome, pal::accent)) {
-        undoPoint("metronome");
-        ses_.metronome = !ses_.metronome;
-        send(Cmd::SetMetronome, ses_.metronome ? 1 : 0);
-    }
-    x += metR.w + sep;
-    ctlSeam(rend_, x - sep * 0.5f, {r.x, cy, r.w, h}, s);
-
-    // --- global launch quantum ---
-    ui_.drawTextIn(fSmall_, {x, cy, 42 * s, h}, "Launch", pal::textDim, Align::Left, 0);
-    Rect quantR{x + 42 * s + gap, cy, 76 * s, h};
-    // The selector writes into the session and only then reports the change,
-    // so the entry needs the index handed back to it.
-    const int wasQuantum = ses_.quantumIdx;
-    if (ui_.isHot(uiId(1, 3)))
-        ui_.tip = "Launch quantum: when a clip, a scene or a marker jump actually "
-                  "fires  -  click to step, right-click back, wheel to scrub";
-    if (ui_.selector(uiId(1, 3), quantR, &ses_.quantumIdx, kQuantumNames, kQuantumCount)) {
-        undoPointWith("launch quantum", ses_.quantumIdx, wasQuantum);
-        send(Cmd::SetQuantum, ses_.quantumIdx);
-    }
-    x = quantR.right() + sep;
-    ctlSeam(rend_, x - sep * 0.5f, {r.x, cy, r.w, h}, s);
-
-    const f32 settingsRoutingX = x;
-    x = primaryTempoEnd + gap; cy = primaryY; h = 36 * s;
-
-    // --- transport ---
-    //
-    // PLAY IS VIOLET, NOT CYAN, and this is §1 rather than a preference: cyan
-    // is light inside a material, never a surface -- the moment a control is
-    // filled with it, violet has stopped leading. So the primary action wears
-    // the primary fill, and "playing" is said by the fill arriving at all,
-    // by the glow under it, and by the position counter turning cyan. The
-    // glyphs are drawn into ui_.lastRect so they ride the pill's lift and press
-    // instead of standing still while it moves.
-    // One CLUSTER, not three buttons. The trio shares a single plate and a
-    // single lit edge; segments separate by hairline, show a whisper on hover,
-    // and only an active state fills. A physical transport is one machined
-    // block with three switches in it, and that is what the eye should group.
-    const f32 segW = 48 * s;
-    Rect trioR{x, cy, segW * 3, h};
-    ui_.segCluster(trioR);
-
-    Rect playR{x, cy, segW, h};
-    chromeDebugMark("play", playR);
-    const bool playing = es_.playing;
-    if (ui_.isHot(uiId(1, 4)))
-        ui_.tip = playing ? "Stop  (Space)" : "Play  (Space)";
-    if (ui_.segButton(uiId(1, 4), playR, playing, pal::accent)) togglePlay();
-    ui_.playTriangle(ui_.lastRect.insetXY(17 * s, 10 * s),
-                     playing ? nx::text : pal::textDim.mix(nx::text, 0.5f));
-    x += segW;
-    rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
-
-    Rect stopR{x, cy, segW, h};
-    // The one thing about this button a user cannot see: it does NOT rewind.
-    // Home does, and nothing on screen has ever said so.
-    if (ui_.isHot(uiId(1, 5)))
-        ui_.tip = "Stop - the playhead stays where it is  (Home returns it to the start)";
-    if (ui_.segButton(uiId(1, 5), stopR, false, pal::accent)) send(Cmd::SetPlaying, 0);
-    ui_.stopSquare(ui_.lastRect.insetXY(17 * s, 10 * s), pal::textDim.mix(nx::text, 0.5f));
-    x += segW;
-    rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
-
-    // Session record. This is an *intent*, not a transport action: while it is
-    // lit, clicking an empty slot on an armed track starts a take in that slot;
-    // while it is unlit, the same click only moves the selection. The circle
-    // additionally lights while any track is actually capturing, so the bar
-    // says what the engine is doing and not just what was asked for.
-    Rect recR{x, cy, segW, h};
-    chromeDebugMark("rec", recR);
-    bool anyRec = false;
-    for (size_t t = 0; t < ses_.tracks.size(); ++t)
-        if (es_.recState[t] != 0) { anyRec = true; break; }
-    // RED, AND STILL §1. Red is reserved for the destructive-adjacent, and a
-    // record button is exactly that: the one control in the bar whose click
-    // begins overwriting what is in a slot. It is not an exception to the rule,
-    // it is the case the rule was written for -- which is also why nothing else
-    // in this bar is allowed near it.
-    //
-    // Three states that never read as the same light: capturing is a full
-    // --danger pill under a white dot, armed is the dark plate under a bright
-    // red dot, and inert is plain glass under a dimmed one.
-    const Col recPlate = anyRec ? pal::recRed : pal::armRed;
-    if (ui_.isHot(uiId(1, 6)))
-        ui_.tip = anyRec ? "Recording - click to stop the take"
-                : recIntent_ ? "Record armed: click a slot on an armed track to start a take"
-                             : "Record intent - arm it, then click a slot on an armed track";
-    if (ui_.segButton(uiId(1, 6), recR, recIntent_ || anyRec, recPlate)) recIntent_ = !recIntent_;
-    const Rect rr = ui_.lastRect;
-    rend_.circle(rr.cx(), rr.cy(), 5 * s,
-                 anyRec ? nx::text : (recIntent_ ? pal::recRed : pal::recRed.scale(0.55f)));
-    x += segW + gap;
-    const f32 primaryPositionX = x + gap;
-    x = settingsRoutingX; cy = settingsY; h = 28 * s;
-
-    // Automation Arm — its own control, immediately right of the record circle
-    // (docs/AUTOMATION.md §5.1, decision #10). Not implied by record-arm:
-    // recording notes and recording knob moves are genuinely different intents,
-    // and one control for both would surprise in whichever direction it guessed.
-    // Drawn as the KBD chip is — accentHi on dark rather than a filled plate —
-    // because it is a MODE the transport row reports, not a transport action,
-    // and the row already reads "the red thing is record".
-    // AUTO and ARR are one cluster: two record-destination modes, one plate.
-    // They kept reading as strays while every other control found a group --
-    // which is exactly the "buttons that don't belong together" complaint.
-    ui_.segCluster({x, cy, 192 * s, h});
-    {
-        Rect autoR{x, cy, 96 * s, h};
-        const u64 id = uiId(1, 10);
-        if (ui_.segButton(id, autoR, autoArm_, nx::violet)) toggleAutoArm();
-        ui_.drawTextIn(fSmall_, ui_.lastRect, "Automation",
-                    autoArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
-                    Align::Center);
-        if (ui_.isHot(id))
-            ui_.tip = "Automation arm: record control moves into the playing clip";
-        x = autoR.right();
-        rend_.hairlineV(x, cy + 4 * s, cy + h - 4 * s);
-    }
-
-    // Arrangement arm -- a THIRD independent chip, immediately right of AUTO and
-    // before the position readout (docs/ARRANGEMENT.md §7.7, answer #12), in
-    // AUTO's own style because it is likewise a MODE the transport row reports
-    // and not a transport action.
-    //
-    // Rejected, and worth recording at the call site: folding it into REC.
-    // "Record into the session grid" and "record onto the timeline" are
-    // different destinations, and one button would have to pick between them
-    // from view_ -- which means the same click does two different things
-    // depending on which tab is open. That is the modality AUTOMATION.md §5.1
-    // refused when it made the automation arm its own control.
-    {
-        Rect arrR{x, cy, 96 * s, h};
-        const u64 id = uiId(1, 12);
-        const bool pressed = ui_.segButton(id, arrR, arrArm_, nx::violet);
-        ui_.drawTextIn(fSmall_, ui_.lastRect, "Timeline rec",
-                    arrArm_ ? nx::text : pal::textFaint.mix(nx::text, 0.25f),
-                    Align::Center);
-        if (ui_.isHot(id))
-            ui_.tip = "Arrangement arm: record armed tracks onto the timeline";
-        if (pressed) {
-            arrArm_ = !arrArm_;
-            if (arrArm_) {
-                status_ = "Arrangement arm on - recording lands on the timeline";
-            } else if (takeOpen_) {
-                // Disarming mid-pass is "stop recording", not "throw the take
-                // away": what has been played has been played, and the journal
-                // already holds it stamped by the engine. commitTake reports
-                // what it did, so this sets no status of its own.
-                commitTake();
-            } else {
-                status_ = "Arrangement arm off";
-            }
-        }
-        x = arrR.right() + sep;
-        ctlSeam(rend_, x - sep * 0.5f, {r.x, cy, r.w, h}, s);
-    }
-
-    const f32 settingsEnd = x;
-    x = primaryPositionX; cy = primaryY; h = 36 * s;
-
-    // --- position readout ---
-    {
-        // bar.beat.sixteenth, ONE-BASED. The three numbers come out of the map
-        // (BarPos is 0-based and the readout adds one, exactly as engine.h
-        // specifies), not out of `beat / ses_.sigNum` -- that division is wrong
-        // from the first signature change on, and it is wrong quietly: it keeps
-        // counting, it just counts bars that are not on the ruler.
-        //
-        // In a set with one signature and a denominator of 4 this is
-        // character-for-character what the division produced: sigPosAt reduces to
-        // floor(beat/4), floor(beat mod 4) and floor(frac(beat)*4) there, which
-        // is the pre-change expression term for term.
-        //
-        // The numbers come from the engine's snapshot fields (overwritten into
-        // `pos` at the top of the bar) -- the debt the paragraph above used to
-        // describe is paid, and the session's map is only the fallback that
-        // fills the fields the engine does not publish (barStart, unit).
-        char buf[48];
-        snprintf(buf, sizeof buf, "%d.%d.%d", pos.bar + 1, pos.beat + 1, pos.sixteenth + 1);
-        // The deepest well in the bar, because this is the number the bar is
-        // FOR. §1's cyan lands here and almost nowhere else in the chrome: a
-        // running counter is a live value, which is precisely what cyan is
-        // reserved for, and it is legible against a --well-deep recess in a way
-        // no glass fill would make it.
-        Rect posR{x, cy, 136 * s, h};
-        ctlWell(rend_, posR, s, true);
-        // Tabular figures, synthesised (§7): the system font's digits are
-        // proportional, and a centred proportional counter breathes four times
-        // a beat while playing. Every digit sits centred in its own fixed cell
-        // -- the widest digit's advance -- separators in theirs, the group
-        // centred in the well. The readout is optically still while the
-        // numbers run; only a change in digit COUNT moves anything.
-        {
-            f32 dig = 0.f;
-            for (char d = '0'; d <= '9'; ++d)
-                dig = std::max(dig, fBig_.glyph((u32)d).advance);
-            const f32 dotW = fBig_.glyph((u32)'.').advance;
-            f32 wsum = 0.f;
-            for (const char* p = buf; *p; ++p) wsum += (*p == '.') ? dotW : dig;
-            f32 px = std::round(posR.cx() - wsum * 0.5f);
-            const Col ink = playing ? nx::cyan : nx::text;
-            for (const char* p = buf; *p; ++p) {
-                const f32 cw = (*p == '.') ? dotW : dig;
-                const char one[2] = {*p, 0};
-                ui_.drawTextIn(fBig_, {px, posR.y, cw, posR.h}, one, ink,
-                               Align::Center, 0.f);
-                px += cw;
-            }
-        }
-        x += posR.w + sep;
-    }
-
-    if (r.w >= 1000 * s) {
-        const Rect drums{r.x + 566 * s, primaryY, 100 * s, 36 * s};
-        if (ui_.button(uiId(UiDrumSequencer, 1000), drums, "+ Drums")) addDrumTrack();
-        if (ui_.hovered(drums)) ui_.tip = "Add a drum track with 808, 707 and 909-inspired kits";
-    }
-
-    if (r.w >= 1200 * s) {
-        const Rect synth{r.x + 674 * s, primaryY, 100 * s, 36 * s};
-        if (ui_.button(uiId(UiSpectraStudio, 4000), synth, "+ Spectra")) addSpectraTrack();
-        if (ui_.hovered(synth)) ui_.tip = "Create a Spectra track and open its sound-design workspace";
-    }
-
-    // The engine link used to be announced HERE, as amber text squeezed into
-    // whatever room the readout left -- which at 1100px wide was text drawn
-    // under the tab pill, and at any width was a dead engine announced in the
-    // one place §12.7 says it should not be: inside a bar full of controls,
-    // where prose reads as another control. It is a full-width line of its own
-    // now -- drawEngineBanner(), §12.7 item 2 -- drawn under this bar and
-    // spending its space on nothing else.
-
-    // --- right side: CPU + view switch ---
-    f32 rx = r.right() - pad;
-    {
-        // THE TAB PILL (§5), and the identity move of this whole bar: ONE
-        // indicator that slides between the two slots on --ease-spring, never
-        // two backgrounds toggling. Two lit buttons side by side is what this
-        // was, and it is exactly the pattern the spec names and refuses.
-        Rect vs{rx - 192 * s, cy, 192 * s, h};
-        // Half the pill, so the cursor lands on the tab that is NOT current.
-        chromeDebugMark("tab", {vs.x + vs.w * 0.5f, vs.y, vs.w * 0.5f, vs.h});
-        static const char* const kViews[2] = {"Session", "Arrange"};
-        int vi = view_ == MainView::Session ? 0 : 1;
-        // tabPill hashes a sub-id per slot; either one hot means the pill is.
-        if (ui_.hovered(vs))
-            ui_.tip = "Session (F6) / Arrangement (F5)  -  Tab switches";
-        if (ui_.tabPill(uiId(1, 7), vs, kViews, 2, &vi))
-            view_ = vi == 0 ? MainView::Session : MainView::Arrangement;
-        rx = vs.x - sep;
-        ctlSeam(rend_, rx + sep * 0.5f, {r.x, cy, r.w, h}, s);
-    }
-    // THE "?" -- and it is here because F1 is worth nothing if nobody knows
-    // about F1. A key with no visible affordance is documentation about
-    // documentation. Twenty-two logical pixels square, immediately left of the
-    // view switch, in the mode-chip language so it reads as chrome and not as
-    // an action: it is the only control in this bar that is about the program
-    // rather than about the music.
-    {
-        const u64 id = uiId(UiControlBar, 53);
-        Rect qr{rx - 36 * s, cy, 36 * s, h};
-        if (ui_.isHot(id))
-            ui_.tip = "Keys and gestures  (F1)";
-        if (ctlChip(ui_, id, qr, fSmall_, "?", g_keysOpen)) g_keysOpen = !g_keysOpen;
-        rx = qr.x - gap;
-    }
-    // Keep the library and view controls visible even at the minimum window
-    // width. Optional diagnostics below spend only the space left by music
-    // controls, so widening targets never creates overlapping hit regions.
-    {
-        const u64 id = uiId(UiControlBar, 54);
-        Rect browseR{rx - 80 * s, cy, 80 * s, h};
-        if (ctlChip(ui_, id, browseR, fSmall_, "Library", showBrowser_))
-            showBrowser_ = !showBrowser_;
-        if (ui_.isHot(id))
-            ui_.tip = "Show or hide samples and sets  (Ctrl+B)";
-        rx = browseR.x - gap;
-    }
-    cy = settingsY; h = 28 * s; x = settingsEnd; rx = r.right() - pad;
-    if (rx - x >= 314 * s) {
-        const f32 cpu = es_.cpu;
-        char buf[32];
-        snprintf(buf, sizeof buf, "CPU %.0f%%", cpu);
-        Rect cr{rx - 64 * s, cy, 64 * s, h};
-        ctlWell(rend_, cr, s);
-        // Amber means attention and red means danger -- §1, and a CPU load that
-        // is about to glitch the audio is the one number in this bar that earns
-        // either of them.
-        const Col c = cpu > 85.f ? nx::danger : cpu > 60.f ? nx::amber : pal::textDim;
-        ui_.drawTextIn(fSmall_, cr, buf, c, Align::Center);
-        // A number with no label is a number nobody can act on. It is not a
-        // control, so it takes a hotspot rather than becoming one.
-        const u64 idCpu = uiId(UiControlBar, 52);
-        if (ui_.setHot(idCpu, cr) && ui_.isHot(idCpu))
-            ui_.tip = "Audio engine load - over 85% and the audio will glitch";
-        rx = cr.x - gap;
-    }
-    {
-        const f32 bw=94*s;
-        if(rx-x >= bw+sep+242*s) {
-            Rect br{rx-bw,cy,bw,h};
-            if(ctlChip(ui_,uiId(UiControlBar,58),br,fSmall_,"Audio I/O",showAudioSettings_)) {
-                showAudioSettings_=!showAudioSettings_;
-                if(ui_.editId==uiId(UiAudioSettings,1))ui_.editId=0;
-                refreshAudioSettings_=true;
-            }
-            rx=br.x-sep;
-        }
-    }
-    // Computer MIDI keyboard. It belongs with the audio/MIDI readouts because
-    // it is an input status: while it is lit the letter keys are notes and not
-    // shortcuts, and that must be visible without opening anything. The label
-    // carries the octave so PgUp / PgDn have somewhere to show their work, and
-    // velocity sits next to it as a number: the FL layout spends C and V on
-    // notes, so there are no keys left to nudge it with.
-    if (rx - x >= 98 * s) {
-        // Velocity is secondary to the keyboard's on/off state. It returns
-        // automatically when there is room for its own full-width field.
-        if (rx - x >= 152 * s) {
-            f64 vel = (f64)kbd_.velocity();
-            Rect vr{rx - 46 * s, cy, 46 * s, h};
-            ctlWell(rend_, vr, s);
-            if (ui_.isHot(uiId(16, 0)))
-                ui_.tip = "Computer-keyboard velocity - drag or wheel  -  double-click "
-                          "resets to 100  -  right-click to type it";
-            // step = 1: a MIDI velocity has no fractional value, so the drag snaps
-            // to integers and one wheel notch is exactly one unit -- the widget
-            // layer spends a notch on a whole step wherever a caller declares one.
-            if (ui_.dragNumber(uiId(16, 0), vr, &vel, 1.0, 127.0, 0.35, "%.0f",
-                               Align::Center, nullptr, 1.0, /*def=*/100.0)) {
-                kbd_.setVelocity((int)std::lround(vel));
-                char buf[64];
-                snprintf(buf, sizeof buf, "Keyboard velocity %d", kbd_.velocity());
-                status_ = buf;
-            }
-            rx = vr.x - gap;
-        }
-
-        char buf[24];
-        snprintf(buf, sizeof buf, "Keys C%d", kbd_.octave());
-        Rect kr{rx - 90 * s, cy, 90 * s, h};
-        if (ui_.isHot(uiId(1, 9)))
-            ui_.tip = kbdMidi_
-                ? "Computer MIDI keyboard is ON - the letter keys play the armed "
-                  "track, PgUp / PgDn move the octave  (Ctrl+Shift+K)"
-                : "Computer MIDI keyboard: play the armed track from the letter "
-                  "keys  (Ctrl+Shift+K)";
-        if (ctlChip(ui_, uiId(1, 9), kr, fSmall_, buf, kbdMidi_)) toggleKbdMidi();
-        rx = kr.x - gap;
-    }
-
-    // Remote control. It belongs with KBD and the MIDI client id for the same
-    // reason those do: it says what, other than this window, can currently move
-    // something in this set. A chip and not a panel, because the answer is
-    // three numbers and there is no fourth thing to say about it.
-    if (rx - x >= 88 * s) {
-        const size_t nb = midiMap_.size();
-        const bool learning = midiMap_.learning();
-        char buf[24];
-        if (learning) snprintf(buf, sizeof buf, "Learn");
-        else          snprintf(buf, sizeof buf, "MIDI %zu", nb);
-
-        Rect mr{rx - 80 * s, cy, 80 * s, h};
-        const u64 id = uiId(1, 11);
-
-        // Violet, pulsing, while a control is waiting to be learned — the same
-        // light the armed knob in the device panel is wearing, so the two read
-        // as one state and not as two coincidences. The pulse is a WASH over
-        // the resting chip rather than a fill of its own, so a learning chip and
-        // an armed one are still visibly different things.
-        const f64 sinceHit = nowSeconds() - ctlFlashAt_;
-        f32 wash = 0.f;
-        if (learning)            wash = 0.10f + 0.30f * ctlPulse01();
-        else if (sinceHit < 0.1) wash = 0.22f;                    // per applied hit
-        const bool pressed = ctlChip(ui_, id, mr, fSmall_, buf, false, wash);
-        const bool hot = ui_.isHot(id);
-        // A dot, not a word: "is anything listening on the network" is a yes/no
-        // and the bar has no room for a sentence. Amber when the socket is not
-        // on loopback, which is the one fact about it worth a colour; cyan when
-        // it is — a live connection, which is what cyan means (§1).
-        if (osc_.running())
-            rend_.circle(mr.right() - 8 * s, mr.y + 6 * s, 2.2f * s,
-                         osc_.wide() ? nx::amber : nx::cyan);
-
-        if (hot) {
-            char tip[320];
-            char oscPart[96] = "  -  OSC off";
-            if (osc_.running())
-                snprintf(oscPart, sizeof oscPart, "  -  OSC %s:%d%s", osc_.addr().c_str(),
-                         osc_.port(), osc_.wide() ? " (OPEN TO THE NETWORK)" : "");
-            // The one failure mode a user could never guess at: the mapping
-            // table is fine, the controller is connected, and nothing moves
-            // because the reader thread's tap is not wired up.
-            const bool untapped = eng_.midiReceived() > 0 && ctl::midiTapCount() == 0;
-            if (learning)
-                snprintf(tip, sizeof tip, "MIDI learn: move a control to map %s  (click to cancel)",
-                         midiMap_.learnAddress().c_str());
-            else if (untapped)
-                snprintf(tip, sizeof tip,
-                         "%zu MIDI bindings%s  -  but MIDI input is not tapped, so nothing is routed",
-                         nb, oscPart);
-            else
-                snprintf(tip, sizeof tip, "%zu MIDI bindings  -  %llu applied, %llu inert%s",
-                         nb, (unsigned long long)ctlApplied_, (unsigned long long)ctlInert_,
-                         oscPart);
-            ui_.tip = tip;
-        }
-        if (pressed && learning) {
-            midiMap_.cancelLearn();
-            status_ = "MIDI learn cancelled";
-        }
-        rx = mr.x - gap;
-    }
-    (void)rx;
-
-    ui_.flushText();
+    f32 tx=wrapped?r.x+14*s:std::max(x,rx);
+    const f32 ty=wrapped?r.y+49*s:y;
+    auto tool=[&](int id,const char* label,f32 w,bool on,auto action) {
+        if(ui_.button(uiId(UiStudioShelf,id),{tx,ty,w*s,wrapped?32*s:h},label,on&&id==0,nx::violet)) {action();studioLayoutDirty_=true;}
+        tx+=(w+5)*s;
+    };
+    tool(0,"Playlist",compact?65:75,view_==MainView::Arrangement,[&]{view_=MainView::Arrangement;});
+    tool(2,"Rack",compact?45:65,showChannelRack_,[&]{showChannelRack_=!showChannelRack_;if(showChannelRack_)activateStudioWindow(0);});
+    tool(3,"Piano",compact?50:65,showDetail_&&detailTab_==DetailTab::Clip,[&]{showDetail_=true;detailTab_=DetailTab::Clip;activateStudioWindow(1);});
+    tool(4,"Sound",compact?50:65,spectraOpenUid_!=0,[&]{showDetail_=true;detailTab_=DetailTab::Devices;activateStudioWindow(spectraOpenUid_?2:1);ensurePluginScan();});
+    tool(5,"Mixer",compact?50:65,showStudioMixer_,[&]{showStudioMixer_=!showStudioMixer_;});
+    tool(6,"Audio",compact?50:65,showAudioSettings_,[&]{showAudioSettings_=!showAudioSettings_;if(showAudioSettings_)activateStudioWindow(3);refreshAudioSettings_=true;});
 }
 
+void App::drawControlBarTools(const Rect& r) {
+    const f32 s=win_.dpiScale(), gap=6*s, h=28*s;
+    const f32 y1=r.y+7*s, y2=r.y+41*s, y3=r.y+75*s;
+    const Input& in=win_.input();
+    rend_.rect(r,rgb(0x0B0E12));
+    rend_.hairlineH(r.x,r.right(),r.y,nx::hairlineInk,s);
+    rend_.hairlineH(r.x+12*s,r.right()-12*s,y2-4*s,pal::divider,s);
+    rend_.hairlineH(r.x+12*s,r.right()-12*s,y3-4*s,pal::divider,s);
+    rend_.hairlineH(r.x,r.right(),r.bottom()-s,nx::hairlineInk,s);
+
+    // Row 1: musical setup, clips, browser and help.
+    f32 x=r.x+12*s;
+    Rect tap{x,y1,34*s,h};
+    if(ui_.isHot(uiId(UiControlBar,120))) ui_.tip="Tap tempo: click twice in time with the music";
+    if(ui_.button(uiId(UiControlBar,120),tap,"Tap")) {
+        static f64 lastTap=0;
+        const f64 now=nowSeconds();
+        if(now-lastTap<3.0) {undoPoint("tempo");setTempo(clampv(60.0/(now-lastTap),20.0,999.0));}
+        lastTap=now;
+    }
+    x=tap.right()+gap;
+    const SigChange cur=ses_.sigAtBar(std::max(0,es_.posBar-1));
+    const Rect sig{x,y1,52*s,h}, numR{x,y1,25*s,h}, denR{x+27*s,y1,25*s,h};
+    const u64 numId=uiId(UiControlBar,121), denId=uiId(UiControlBar,122);
+    ui_.setHot(numId,numR);ui_.setHot(denId,denR);
+    const bool sigHot=ui_.isHot(numId)||ui_.isHot(denId)||ui_.active==numId||ui_.active==denId;
+    if(in.pressed[0]&&ui_.isHot(numId)) {ui_.active=numId;ui_.dragAccum=0;ui_.dragStart=cur.num;}
+    if(in.pressed[0]&&ui_.isHot(denId)) {int e=0;while((1<<e)<cur.den)++e;ui_.active=denId;ui_.dragAccum=0;ui_.dragStart=e;}
+    if(in.released[0]&&(ui_.active==numId||ui_.active==denId)) ui_.active=0;
+    if((ui_.active==numId||ui_.active==denId)&&in.dy!=0) {
+        ui_.dragAccum-=in.dy;
+        const bool isDen=ui_.active==denId;
+        int n=cur.num,d=cur.den;
+        if(isDen) d=1<<(int)clampv((int)std::floor(ui_.dragStart+ui_.dragAccum*.03f+.5f),0,5);
+        else n=(int)std::floor(ui_.dragStart+ui_.dragAccum*.12f+.5f);
+        if(clSigNum(n)!=cur.num||clSigDen(d)!=cur.den) {
+            undoPoint("time signature",ui_.active);ses_.setSignature(cur.bar,n,d);
+            status_="Time signature "+std::to_string(clSigNum(n))+"/"+std::to_string(clSigDen(d));
+        }
+    }
+    ctlWell(rend_,sig,s);
+    if(sigHot) rend_.roundRect(sig,std::min(nx::radiusSm*s,h*.5f),nx::violet.alpha(.14f));
+    char sigText[16];std::snprintf(sigText,sizeof sigText,"%d/%d",es_.posSigNum,es_.posSigDen);
+    ui_.drawTextIn(fSmall_,sig,sigText,sigHot?nx::text:pal::textDim,Align::Center);
+    if(sigHot) {ui_.cursor=Cursor::ResizeV;ui_.tip="Time signature: drag numerator or denominator";}
+    x=sig.right()+gap;
+    Rect met{x,y1,48*s,h};
+    if(ui_.isHot(uiId(UiControlBar,123))) ui_.tip="Metronome  (M)";
+    if(ui_.button(uiId(UiControlBar,123),met,"Click",ses_.metronome,nx::violet)) {
+        undoPoint("metronome");ses_.metronome=!ses_.metronome;send(Cmd::SetMetronome,ses_.metronome?1:0);
+    }
+    x=met.right()+gap;
+    rend_.textIn(fSmall_,{x,y1,44*s,h},"Launch",pal::textDim,Align::Left,0);
+    Rect quant{x+44*s,y1,70*s,h};
+    const int wasQuantum=ses_.quantumIdx;
+    if(ui_.selector(uiId(UiControlBar,124),quant,&ses_.quantumIdx,kQuantumNames,kQuantumCount)) {
+        undoPointWith("launch quantum",ses_.quantumIdx,wasQuantum);send(Cmd::SetQuantum,ses_.quantumIdx);
+    }
+    x=quant.right()+gap;
+    Rect clips{x,y1,50*s,h};
+    if(ui_.button(uiId(UiControlBar,125),clips,"Clips",view_==MainView::Session,nx::violet)) view_=MainView::Session;
+    x=clips.right()+gap;
+    Rect browser{x,y1,74*s,h};
+    if(ui_.button(uiId(UiControlBar,126),browser,"Browser",showBrowser_,nx::violet)) {showBrowser_=!showBrowser_;studioLayoutDirty_=true;}
+    x=browser.right()+gap;
+    Rect help{x,y1,28*s,h};
+    if(ui_.button(uiId(UiControlBar,127),help,"?",g_keysOpen,nx::violet)) g_keysOpen=!g_keysOpen;
+    if(ui_.isHot(uiId(UiControlBar,127))) ui_.tip="Keys and gestures  (F1)";
+
+    // Row 2: automation, timeline recording and MIDI input status.
+    x=r.x+12*s;
+    Rect autoR{x,y2,72*s,h};
+    if(ui_.button(uiId(UiControlBar,128),autoR,"Auto arm",autoArm_,nx::violet)) toggleAutoArm();
+    if(ui_.isHot(uiId(UiControlBar,128))) ui_.tip="Automation arm: record control moves into the playing clip";
+    x=autoR.right()+gap;
+    Rect arrR{x,y2,86*s,h};
+    if(ui_.button(uiId(UiControlBar,129),arrR,"Timeline rec",arrArm_,nx::violet)) {
+        arrArm_=!arrArm_;
+        if(arrArm_) status_="Arrangement arm on - recording lands on the timeline";
+        else if(takeOpen_) commitTake();
+        else status_="Arrangement arm off";
+    }
+    if(ui_.isHot(uiId(UiControlBar,129))) ui_.tip="Arrangement arm: record armed tracks onto the timeline";
+    x=arrR.right()+gap;
+    char keyLabel[24];std::snprintf(keyLabel,sizeof keyLabel,"Keys C%d",kbd_.octave());
+    Rect keys{x,y2,66*s,h};
+    if(ctlChip(ui_,uiId(UiControlBar,130),keys,fSmall_,keyLabel,kbdMidi_)) toggleKbdMidi();
+    if(ui_.isHot(uiId(UiControlBar,130))) ui_.tip=kbdMidi_?"Computer MIDI keyboard on  (Ctrl+Shift+K)":"Computer MIDI keyboard  (Ctrl+Shift+K)";
+    x=keys.right()+gap;
+    f64 velocity=kbd_.velocity();
+    Rect vel{x,y2,42*s,h};ctlWell(rend_,vel,s);
+    if(ui_.dragNumber(uiId(16,0),vel,&velocity,1,127,.35,"%.0f",Align::Center,nullptr,1,100)) {
+        kbd_.setVelocity((int)std::lround(velocity));status_="Keyboard velocity "+std::to_string(kbd_.velocity());
+    }
+    if(ui_.isHot(uiId(16,0))) ui_.tip="Keyboard velocity: drag or wheel; right-click to type";
+    x=vel.right()+gap;
+    const size_t bindings=midiMap_.size();const bool learning=midiMap_.learning();
+    char midiLabel[24];
+    if(learning) std::snprintf(midiLabel,sizeof midiLabel,"Learn");
+    else std::snprintf(midiLabel,sizeof midiLabel,"MIDI %zu",bindings);
+    Rect midi{x,y2,86*s,h};
+    const f64 sinceHit=nowSeconds()-ctlFlashAt_;
+    const f32 wash=learning?.10f+.30f*ctlPulse01():(sinceHit<.1?.22f:0.f);
+    const bool midiPressed=ctlChip(ui_,uiId(UiControlBar,131),midi,fSmall_,midiLabel,false,wash);
+    if(osc_.running()) rend_.circle(midi.right()-8*s,midi.y+6*s,2.2f*s,osc_.wide()?nx::amber:nx::cyan);
+    if(ui_.isHot(uiId(UiControlBar,131))) {
+        if(learning) ui_.tip="MIDI learn: move a control to map "+midiMap_.learnAddress()+"  (click to cancel)";
+        else if(osc_.running()) ui_.tip=std::string("MIDI ")+std::to_string(bindings)+"  -  OSC "+osc_.addr()+":"+std::to_string(osc_.port())+(osc_.wide()?" (open to network)":"");
+        else ui_.tip="MIDI "+std::to_string(bindings)+" bindings  -  OSC off";
+    }
+    if(midiPressed&&learning) {midiMap_.cancelLearn();status_="MIDI learn cancelled";}
+
+    // Row 3: creation actions and workspace reset. Stable coordinates support
+    // the screenshot and automation probes at every supported window width.
+    Rect drums{r.x+16*s,y3,96*s,h};
+    if(ui_.button(uiId(UiDrumSequencer,1000),drums,"+ Drums")) addDrumTrack();
+    if(ui_.isHot(uiId(UiDrumSequencer,1000))) ui_.tip="Add a drum track with 808, 707 and 909-inspired kits";
+    Rect spectra{r.x+120*s,y3,96*s,h};
+    if(ui_.button(uiId(UiSpectraStudio,4000),spectra,"+ Spectra")) addSpectraTrack();
+    if(ui_.isHot(uiId(UiSpectraStudio,4000))) ui_.tip="Create a Spectra track with a sound-design workspace";
+    Rect reset{r.right()-112*s,y3,96*s,h};
+    if(ui_.button(uiId(UiControlBar,98),reset,"Reset layout")) {
+        for(auto& w:studioWindows_) w=StudioWindow{};
+        studioLayoutDirty_=true;status_="Workspace layout reset";
+    }
+}
 
 // ---------------------------------------------------------------------------
 // browser
@@ -942,47 +496,24 @@ void App::drawBrowser(const Rect& r) {
     // edge was a solid rule and is now a hairline that fades at both ends.
     rend_.hairlineV(r.right() - 1 * s, r.y, r.bottom(), nx::hairlineInk, 1 * s);
 
-    const f32 rowH = 32 * s;
-    // The header was a painted shelf -- a flat panelAlt rectangle with a hard
-    // edge along the bottom -- while SCENES, MASTER, CHAIN, MACRO and every
-    // other column head in the program is a micro-label over a hairline that
-    // fades at both ends. §11 rules out the solid rule; the inconsistency was
-    // the more visible half of it, since the browser sits beside the scene
-    // column that does it the other way.
-    Rect head{r.x, r.y, r.w, 52 * s};
-    rend_.textIn(fBig_, {head.x + 16 * s, head.y, head.w - 32 * s, head.h}, "Library",
-                 nx::text, Align::Left, 0);
-    rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
-
-    // Quick places are a compact two-column shelf, separate from file content.
-    f32 y = head.bottom() + 8 * s;
-    const f32 placeGap = 6 * s, placeH = 50 * s;
-    const f32 placeW = (r.w - 24 * s - placeGap) * 0.5f;
-    for (size_t i = 0; i < browserPlaces_.size(); ++i) {
-        Rect row{r.x + 12 * s + (i % 2) * (placeW + placeGap),
-                 y + (i / 2) * (placeH + placeGap), placeW, placeH};
-        const std::string& p = browserPlaces_[i];
-        const bool sel = p == browserDir_;
-        const u64 id = uiId(2, 100 + (int)i);
-        const bool hot = ui_.setHot(id, row) && ui_.isHot(id);
-        rend_.roundRect(row, 8 * s, sel ? nx::violet.alpha(0.20f)
-                                      : hot ? pal::slotHover : pal::panelAlt);
-        if (sel) rend_.roundRectOutline(row, 8 * s, s, nx::violet.alpha(0.7f));
-        const size_t slash = p.find_last_of('/');
-        const std::string name = p == homeDir() ? "Home"
-                               : p == "/usr/share/sounds" ? "Sounds"
-                               : slash == std::string::npos ? p : p.substr(slash + 1);
-        const Col icon = sel ? nx::cyan : nx::muted;
-        rend_.roundRectOutline({row.cx() - 7 * s, row.y + 9 * s, 14 * s, 11 * s},
-                               2 * s, s, icon);
-        rend_.line(row.cx() - 6 * s, row.y + 7 * s, row.cx(), row.y + 7 * s, s, icon);
-        rend_.textIn(fSmall_, {row.x + 4 * s, row.y + 26 * s, row.w - 8 * s, 18 * s},
-                     name.c_str(), sel ? nx::text : pal::textDim, Align::Center, 0);
-        if (hot) { ui_.cursor = Cursor::Hand; ui_.tip = p; }
-        if (hot && in.pressed[0]) browseTo(p);
+    const f32 rowH=28*s;
+    Rect head{r.x,r.y,r.w,38*s};
+    rend_.textIn(fBody_,head,"Browser",nx::text,Align::Left,14*s);
+    rend_.roundRect({r.x+14*s,head.bottom()-2*s,48*s,2*s},s,nx::violet);
+    rend_.hairlineH(head.x+12*s,head.right()-12*s,head.bottom());
+    f32 y=head.bottom()+8*s;
+    for(size_t i=0;i<browserPlaces_.size();++i) {
+        const auto& p=browserPlaces_[i];
+        const bool sel=p==browserDir_;
+        Rect row{r.x+8*s,y,r.w-16*s,28*s};y+=28*s;
+        if(sel) rend_.roundRect(row,3*s,rgb(0x181D24));
+        if(ui_.segButton(uiId(2,100+(int)i),row,false,nx::violet)) browseTo(p);
+        const size_t slash=p.find_last_of('/');
+        const std::string name=p==homeDir()?"User library":p=="/usr/share/sounds"?"Sounds":slash==std::string::npos?p:p.substr(slash+1);
+        rend_.roundRectOutline({row.x+7*s,row.y+9*s,11*s,9*s},s,s,sel?nx::violetSoft:nx::muted);
+        rend_.textIn(fSmall_,{row.x+27*s,row.y,row.w-30*s,row.h},name.c_str(),nx::text,Align::Left,0);
     }
-    y += ((browserPlaces_.size() + 1) / 2) * (placeH + placeGap) + 8 * s;
-
+    y+=8*s;
     // Current directory label, cut from the FRONT rather than the back.
     //
     // textIn ellipsises on the right, which on a path keeps the half nobody
@@ -1294,6 +825,7 @@ void App::arrangeCommit(ArrangeContext& ctx, u32 changed) {
         send(Cmd::BackToArrangement, ctx.backToArrTrack);
         status_ = "Back to Arrangement: " + ses_.tracks[(size_t)ctx.backToArrTrack].name;
     }
+    if (changed & ArrangeView::Selection) detailPattern_ = false;
     if (changed & ArrangeView::Loop) publishTransportCell();
 
     // THE SIGNATURE EDITOR, half two: the ruler asked for a change at a bar and
@@ -1393,6 +925,8 @@ void App::arrangeCommit(ArrangeContext& ctx, u32 changed) {
             // Open the roll on it: the point of the gesture is that the NEXT
             // click writes a note, not that a rectangle appeared.
             showDetail_ = true;
+            detailPattern_ = false;
+            spectraOpenUid_ = 0;
             detailTab_ = DetailTab::Clip;
             status_ = "New MIDI clip - draw notes in the roll below";
         } else {
@@ -2583,7 +2117,7 @@ bool App::resolveControl(const std::string& address, ControlRef& out) const {
         return false;
     }
     // `master/vol` parses and resolves to NOTHING, deliberately and reluctantly:
-    // the master fader is a function-local static inside drawMasterStrip
+    // the master fader is shared UI state; it is not yet an automation target
     // (app_session.cpp), so there is no model field to write and a command sent
     // straight to the engine would leave the drawn fader lying about the gain.
     // Mapping it needs that fader promoted to a Session member first; until

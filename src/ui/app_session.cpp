@@ -325,13 +325,9 @@ void App::drawSessionView(const Rect& r) {
     // Right-hand furniture, in Live's order: the scene launchers stay against
     // the clip grid (their rows line up with it), then the return buses, then
     // the master. Everything the mix ends up in reads left to right.
-    const f32 masterW = lay::masterW * s;
-    const f32 sceneW  = lay::sceneColW * s;
-    const f32 retW    = showReturns_ ? lay::returnW * s * kMaxReturns : 0.f;
-    Rect masterCol{r.right() - masterW, r.y, masterW, r.h};
-    Rect retCol{masterCol.x - retW, r.y, retW, r.h};
-    Rect sceneCol{retCol.x - sceneW, r.y, sceneW, r.h};
-    Rect tracksCol{r.x, r.y, std::max(0.f, sceneCol.x - r.x), r.h};
+    const f32 sceneW=lay::sceneColW*s;
+    Rect sceneCol{r.right()-sceneW,r.y,sceneW,r.h};
+    Rect tracksCol{r.x,r.y,std::max(0.f,sceneCol.x-r.x),r.h};
 
     // Horizontal scroll over the track area.
     f32 totalW = 0.f;
@@ -346,11 +342,12 @@ void App::drawSessionView(const Rect& r) {
     // the scene column shares the offset so the rows cannot skew.
     {
         const f32 rowsH   = ((f32)ses_.scenes.size() + 2.f) * lay::slotH * s;
-        const f32 gridH   = r.h - (lay::trackHeadH + lay::mixerH) * s;
+        const f32 mixerH = 0.f;
+        const f32 gridH   = r.h - (lay::trackHeadH + mixerH) * s;
         const f32 maxY    = std::max(0.f, rowsH - gridH);
         const bool overRows = (tracksCol.contains(in.mx, in.my) || sceneCol.contains(in.mx, in.my)) &&
                               in.my >= r.y + lay::trackHeadH * s &&
-                              in.my < r.bottom() - lay::mixerH * s;
+                              in.my < r.bottom() - mixerH * s;
         if (overRows && in.wheel != 0.f && !in.shift() && !in.ctrl())
             gridScrollY_ -= in.wheel * lay::slotH * 3.f * s;
         gridScrollY_ = clampv(gridScrollY_, 0.f, maxY);
@@ -359,12 +356,9 @@ void App::drawSessionView(const Rect& r) {
     rend_.pushClip(tracksCol);
     drawTrackHeaders(tracksCol, gridScrollX_);
     drawClipGrid(tracksCol, gridScrollX_);
-    drawMixer(tracksCol, gridScrollX_);
     rend_.popClip();
 
     drawSceneColumn(sceneCol);
-    drawReturnStrips(retCol);
-    drawMasterStrip(masterCol);
 }
 
 void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
@@ -439,13 +433,14 @@ void App::drawTrackHeaders(const Rect& r, f32 scrollX) {
 void App::drawClipGrid(const Rect& r, f32 scrollX) {
     const f32 s = win_.dpiScale();
     const f32 slotH = lay::slotH * s;
+    const f32 mixerH = 0.f;
     // The clip boundary is FIXED at the header line; only the rows' origin
     // carries the scroll. Folding the offset into one variable let scrolled
     // rows paint over the track headers -- the clip rect and the row origin
     // are different quantities that merely used to coincide at scroll 0.
     const f32 clipTop = r.y + lay::trackHeadH * s;
     const f32 top = clipTop - gridScrollY_;
-    const f32 mixerTop = r.bottom() - lay::mixerH * s;
+    const f32 mixerTop = r.bottom() - mixerH * s;
     const int ns = (int)ses_.scenes.size();
 
     Rect grid{r.x, clipTop, r.w, mixerTop - clipTop};
@@ -739,6 +734,7 @@ void App::drawClipSlot(const Rect& cell, int ti, int si) {
 void App::drawSceneColumn(const Rect& r) {
     const f32 s = win_.dpiScale();
     Input& in = win_.input();
+    const f32 mixerH = 0.f;
     const f32 slotH = lay::slotH * s;
     const f32 clipTop = r.y + lay::trackHeadH * s;
     const f32 top = clipTop - gridScrollY_;
@@ -751,21 +747,17 @@ void App::drawSceneColumn(const Rect& r) {
     rend_.hairlineV(r.x, r.y, r.bottom());
 
     Rect head{r.x, r.y, r.w, lay::trackHeadH * s};
-    rend_.textIn(fSmall_, {head.x + 4 * s, head.y, head.w - 46 * s, head.h},
+    const f32 titleW = head.w - 8.f * s;
+    rend_.textIn(fSmall_, {head.x + 4 * s, head.y, titleW, head.h},
                  "Scenes", nx::text, Align::Left, 0);
-    const Rect returnToggle{head.right() - 40 * s, head.cy() - 14 * s, 36 * s, 28 * s};
-    const u64 returnToggleId = uiId(5, 902);
-    if (ui_.button(returnToggleId, returnToggle, "A-D", showReturns_)) showReturns_ = !showReturns_;
-    if (ui_.isHot(returnToggleId))
-        ui_.tip = showReturns_ ? "Hide return channels A-D" : "Show return channels A-D";
     rend_.hairlineH(head.x + nx::sp1 * s, head.right() - nx::sp1 * s, head.bottom());
 
     const f32 rad = kCellRadius * s;
-    rend_.pushClip({r.x, clipTop, r.w, r.bottom() - lay::mixerH * s - clipTop});
+    rend_.pushClip({r.x, clipTop, r.w, r.bottom() - mixerH * s - clipTop});
     for (int si = 0; si < ns; ++si) {
         Rect cell{r.x + 2 * s, top + si * slotH, r.w - 4 * s, slotH - lay::gutter * s};
         if (cell.bottom() < clipTop) continue;   // scrolled above the viewport
-        if (cell.y > r.bottom() - lay::mixerH * s) break;
+        if (cell.y > r.bottom() - mixerH * s) break;
         const u64 id = uiId(5, si);
         const bool hot = ui_.setHot(id, cell) && ui_.isHot(id);
         const bool sel = si == selSlot_;
@@ -828,20 +820,20 @@ void App::drawSceneColumn(const Rect& r) {
     }
 
     Rect stopAll{r.x + 2 * s, top + ns * slotH, r.w - 4 * s, slotH - lay::gutter * s};
-    if (stopAll.bottom() <= r.bottom() - lay::mixerH * s) {
+    if (stopAll.bottom() <= r.bottom() - mixerH * s) {
         if (ui_.button(uiId(5, 900), stopAll, "Stop all")) send(Cmd::StopAll);
     }
 
     // Keep the row's add action aligned with the scene launchers above.
     Rect add{r.x + 2 * s, stopAll.bottom() + 4 * s, r.w - 4 * s, 24 * s};
-    if (add.bottom() <= r.bottom() - lay::mixerH * s) {
+    if (add.bottom() <= r.bottom() - mixerH * s) {
         if (ui_.button(uiId(5, 901), add, "+ Scene")) { undoPoint("add scene"); addScene(); }
     }
     rend_.popClip();   // the scene rows' clip, opened before the loop
 
     // A count makes rows below the viewport discoverable without pretending
     // this text is a button. The scroll gesture remains over the grid itself.
-    const f32 sceneBottom = r.bottom() - lay::mixerH * s;
+    const f32 sceneBottom = r.bottom() - mixerH * s;
     const int firstVisible = (int)std::floor(gridScrollY_ / slotH);
     const int lastVisible = std::min(ns, (int)std::floor((gridScrollY_ + sceneBottom - clipTop) / slotH));
     char count[48];
@@ -1150,7 +1142,7 @@ void App::drawMasterStrip(const Rect& r) {
         rend_.popClip();
     }
 
-    static f32 masterFader = 0.85f;
+    f32& masterFader = studioMasterFader_;
     f32 y = mix.y + 34 * s;
     const f32 fh = mix.bottom() - y - 12 * s;
     Rect fader{mix.x + 12 * s, y, 28 * s, fh};

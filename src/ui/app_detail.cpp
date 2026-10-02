@@ -140,7 +140,7 @@ void App::drawDetailPanel(const Rect& r) {
     // looking at even when the content area is empty.
     {
         char buf[128];
-        if (detailTab_ == DetailTab::Clip && view_ == MainView::Arrangement) {
+        if (detailTab_ == DetailTab::Clip && view_ == MainView::Arrangement && !detailPattern_) {
             // In Arrangement view the CLIP tab is about the selected ITEM, so
             // the context label says where on the timeline it is rather than
             // which scene it is in -- it is not in one.
@@ -175,7 +175,7 @@ void App::drawDetailPanel(const Rect& r) {
     Rect content{r.x, head.bottom(), r.w, r.bottom() - head.bottom()};
     rend_.pushClip(content);
     if (detailTab_ != DetailTab::Clip)          drawDeviceDetail(content);
-    else if (view_ == MainView::Arrangement)    drawArrangeClipDetail(content);
+    else if (view_ == MainView::Arrangement && !detailPattern_)    drawArrangeClipDetail(content);
     else                                        drawClipDetail(content);
     rend_.popClip();
 }

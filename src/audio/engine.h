@@ -449,7 +449,12 @@ struct RtChain {
 
 enum class Cmd : u32 {
     SetPlaying, SetTempo, SetQuantum, SetMetronome,
-    LaunchClip, StopTrack, LaunchScene, StopAll,
+    LaunchClip, StopTrack,
+    // a = scene/slot; b = 0 retains ordinary scene launch semantics. b = 1
+    // queues an exclusive Pattern launch: every arrangement lane is taken over
+    // on the same quantized boundary, including tracks whose pattern cell is
+    // empty, which are queued to stop.
+    LaunchScene, StopAll,
     // SetClip/ClearClip on a slot whose previous RtClip carried a `notes`
     // array push Ev::NotesRetired for the old pointer (when it differs from
     // the incoming one), and any sounding notes from it get their offs first.
@@ -746,6 +751,7 @@ private:
         bool mute = false, solo = false, arm = false;
         int  playing = -1;           // slot index currently sounding
         int  queued  = -2;           // -2 none, -1 queued stop, >=0 queued slot
+        bool queuedTakeOver = false; // exclusive scene takes arrangement at fireBeat
         f64  fireBeat = 0.0;
         Voice voice;                 // the clip currently launched
         Voice prev;                  // outgoing clip, fading out across a switch

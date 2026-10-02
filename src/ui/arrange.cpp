@@ -1284,7 +1284,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         const u64 triId = uiId(UiArrange, 1, (int)i);
         // The whole title row discloses automation. A clear 26px row avoids
         // aiming at a tiny arrow and stops before the separate override action.
-        const Rect triHit{hb.x + 3.f * s, hb.y, hb.w - 6.f * s, 26.f * s};
+        const Rect triHit{hb.x + 3.f * s, hb.y, hb.w - 6.f * s, 24.f * s};
         const bool hotTri = ui.setHot(triId, triHit) && ui.isHot(triId);
         probeRect("track disclosure triangle", triId, triHit);
         const Col tc = hotTri ? nx::text : nx::muted;
@@ -1314,7 +1314,7 @@ u32 ArrangeView::draw(Ui& ui, const Rect& r, ArrangeContext& ctx) {
         // playing a session clip instead of its lane; the chip both says so and
         // is the Back to Arrangement gesture for that track.
         if (L.overridden) {
-            const Rect ov{hb.x + 6.f * s, hb.y + 28.f * s, 110.f * s, 22.f * s};
+            const Rect ov{hb.x + 6.f * s, hb.y + 24.f * s, 110.f * s, 22.f * s};
             const u64 ovId = uiId(UiArrange, 2, (int)i);
             // This explicit action sits below the title with no shared hit area.
             const Rect ovHit{ov.x - 3.f * s, ov.y, ov.w + 6.f * s, ov.h};

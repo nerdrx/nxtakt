@@ -302,65 +302,28 @@ void App::frame() {
     handleShortcuts();
 
     Rect full{0, 0, W, H};
-    Rect bar = {0, 0, W, lay::controlBarH * s};
+    Rect bar = {0, 0, W, (W<880*s?92.f:lay::controlBarH)*s};
     Rect status = {0, H - lay::statusH * s, W, lay::statusH * s};
     // The engine-link banner (docs/GUI-ON-DAEMON.md §6, §12.7 item 2): a row
     // of its own under the control bar, zero-height while the link is Live.
     // The body SHRINKS to make room rather than being covered, because §8's
     // Detached mode is a working mode, not a moment.
     Rect banner = {0, bar.bottom(), W, std::round(engineBannerH() * s)};
-    Rect body = {0, banner.bottom(), W, status.y - banner.bottom()};
+    const f32 toolsHeight=studioToolsOpen_?112*s:0;
+    Rect body = {0, banner.bottom()+toolsHeight, W, status.y-banner.bottom()-toolsHeight};
 
     drawControlBar(bar);
     if (banner.h > 0.f) drawEngineBanner(banner);
 
-    // An open synthesizer owns a full workspace. No hidden device-strip
-    // controls can react through it, and Back to chain restores the layout.
-    if (showAudioSettings_) drawAudioSettings(body);
-    else if (!drawFocusedSpectra(body)) {
-
-    // UN-GATED (docs/ARRANGEMENT.md §7.6, answer #10). In Arrangement view the
-    // CLIP tab shows the selected item's own `src` and edits it IN PLACE, which
-    // is Rule 1 paying for itself: because `src` is by value, the roll editing
-    // "the clip" edits precisely the one item the user selected, with no
-    // possibility of the edit leaking to another placement and no code in the
-    // roll that knows an arrangement exists.
-    //
-    // The height is PER VIEW and not shared: the arrangement wants a tall panel
-    // for envelope lanes and the session a short one for the grid, and one
-    // field would mean every switch between views silently resized the other.
-    Rect detail{};
-    f32& dHRef = detailHFor(view_);
-    if (showDetail_) {
-        // THE SPLITTER. Without it the piano roll gets 83 device px of note
-        // grid at DPI 1.0 — 6.9 rows of a 128-row axis — and three of the eight
-        // notes in the demo's own melody clip open off-screen. Two other panels
-        // (app_sampler.cpp, app_spectra.cpp) already carry comments apologising
-        // for the same missing control; this is that control.
-        Input& sin = win_.input();
-        const f32 mainFloor = view_ == MainView::Session
-            ? lay::trackHeadH + lay::mixerH + 2.f * lay::slotH : 180.f;
-        const f32 maxDetail = std::max(120.f, body.h / s - mainFloor);
-        const f32 minDetail = std::min(280.f, maxDetail);
-        dHRef = clampv(dHRef, minDetail, maxDetail);
-        const f32 gripH = 12.f * s;
-        const Rect grip{0, body.bottom() - dHRef * s - gripH * 0.5f, W, gripH};
-        const u64 gid = uiId(UiDetailSplit, 0);
-        if (ui_.setHot(gid, grip) && ui_.isHot(gid)) {
-            ui_.cursor = Cursor::ResizeV;
-            if (ui_.tip.empty()) ui_.tip = "drag to resize the panel";
-            if (sin.pressed[0]) detailDrag_ = true;
-        }
-        if (detailDrag_ && !sin.down[0]) detailDrag_ = false;
-        if (detailDrag_) {
-            ui_.cursor = Cursor::ResizeV;
-            // Keep the mixer and two scene rows reachable while resizing.
-            dHRef = clampv(dHRef - sin.dy / s, minDetail, maxDetail);
-        }
-        detail = {0, body.bottom() - dHRef * s, W, dHRef * s};
-        body.h -= detail.h;
+    const Rect studioBounds{0,banner.bottom(),W,status.y-banner.bottom()};
+    prepareStudioWindows(studioBounds);
+    studioInput(-1);
+    Rect mixer{};
+    if (showStudioMixer_) {
+        const f32 height = std::min(145*s, body.h * .38f);
+        mixer = {body.x, body.bottom()-height, body.w, height};
+        body.h -= height;
     }
-
     Rect main = body;
     if (showBrowser_) {
         Rect br = {0, body.y, browserW_ * s, body.h};
@@ -483,7 +446,13 @@ void App::frame() {
         }
     }
 
-    if (showDetail_) drawDetailPanel(detail);
+    if (showStudioMixer_) drawStudioMixer(mixer);
+    studioInput(-2);
+    drawStudioWindows(studioBounds);
+    if(studioToolsOpen_) {
+        studioInput(-1);
+        drawControlBarTools({0,banner.bottom(),W,112*s});
+        studioInput(-2);
     }
     drawStatusBar(status);
     drawDragGhost();
@@ -561,21 +530,22 @@ void App::handleShortcuts() {
     if (in.keyPressed[KeyHome]) send(Cmd::Locate, 0, 0, 0.0);
     // Familiar FL Studio view shortcuts, alongside the existing NxTakt keys.
     if (in.keyPressed[KeyF5]) view_ = MainView::Arrangement;
-    if (in.keyPressed[KeyF6]) view_ = MainView::Session;
+    if (in.keyPressed[KeyF6]) {showChannelRack_ = !showChannelRack_;studioLayoutDirty_=true;}
     if (in.keyPressed[KeyF7]) {
+        activateStudioWindow(1);
         showDetail_ = true;
         detailTab_ = DetailTab::Clip;
         midiInspectorPage_ = 0;
         status_ = "Clip editor: select a pattern to edit notes, or a sample to edit audio";
     }
     if (in.keyPressed[KeyF9]) {
-        view_ = MainView::Session;
-        showDetail_ = false;
-        status_ = "Mixer view  -  F7 restores the clip editor";
+        showStudioMixer_ = !showStudioMixer_;
+        studioLayoutDirty_=true;
+        status_ = "Mixer  -  F9 shows or hides the dock";
     }
     if (in.keyPressed[KeyTab])
         view_ = (view_ == MainView::Session) ? MainView::Arrangement : MainView::Session;
-    if (in.keyPressed['b'] && in.ctrl()) showBrowser_ = !showBrowser_;
+    if (in.keyPressed['b'] && in.ctrl()) {showBrowser_ = !showBrowser_;studioLayoutDirty_=true;}
     if (in.keyPressed['d'] && in.ctrl()) showDetail_ = !showDetail_;
     if (plain('m')) {
         undoPoint("metronome");
@@ -590,7 +560,13 @@ void App::handleShortcuts() {
     // view the same keys mean something else: Delete removes the item under the
     // selection and not the session slot behind the grid nobody is looking at.
     // Everything the arrangement does not claim falls through untouched.
-    if (view_ == MainView::Arrangement) {
+    if (studioFocus_ >= 0 && (studioFocus_ != 1 || studioWindows_[1].minimized || detailTab_!=DetailTab::Clip)) {
+        if (in.keyPressed['s'] && in.ctrl())
+            saveProjectTo(ses_.path.empty() ? homeDir()+"/"+ses_.name+".lattice" : ses_.path);
+        return;
+    }
+    const bool editingPattern=detailPattern_ && studioFocus_==1 && showDetail_ && detailTab_==DetailTab::Clip && !studioWindows_[1].minimized;
+    if (view_ == MainView::Arrangement && !editingPattern) {
         // The roll first, when it is showing the selected item's own clip: a
         // note selection inside an item outranks the item, for the reason a note
         // selection outranks the clip in Session view -- clearing the container
@@ -854,7 +830,7 @@ void App::toggleKbdMidi() {
 // roll may claim a key or hold a meaningful selection. Note that it also
 // answers "was the roll ever drawn", since roll_ is created by drawClipDetail.
 PianoRoll* App::visibleRoll() {
-    if (!roll_ || view_ != MainView::Session || !showDetail_ || detailTab_ != DetailTab::Clip)
+    if (studioFocus_!=1 || studioWindows_[1].minimized || !roll_ || (view_ != MainView::Session && !detailPattern_) || !showDetail_ || detailTab_ != DetailTab::Clip)
         return nullptr;
     if (selTrack_ < 0 || selTrack_ >= (int)ses_.tracks.size()) return nullptr;
     if (selSlot_ < 0 || selSlot_ >= kMaxScenes) return nullptr;
@@ -872,7 +848,7 @@ PianoRoll* App::visibleRoll() {
 // a roll's zoom, scroll and selection are about one particular clip and sharing
 // one would reset the session clip's every time the view was switched.
 PianoRoll* App::visibleArrRoll() {
-    if (!arrRoll_ || view_ != MainView::Arrangement || !showDetail_ ||
+    if (studioFocus_!=1 || studioWindows_[1].minimized || !arrRoll_ || detailPattern_ || view_ != MainView::Arrangement || !showDetail_ ||
         detailTab_ != DetailTab::Clip)
         return nullptr;
     const ArrangeClip* it = selectedArrItem();

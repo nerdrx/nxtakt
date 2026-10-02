@@ -2100,7 +2100,7 @@ void Engine::drainCommands() {
                     Track& t = tracks_[ti];
                     if (t.voice.active) t.voice.releasing = true;
                     if (t.prev.active)  t.prev.releasing = true;
-                    t.playing = -1; t.queued = -2;
+                    t.playing = -1; t.queued = -2; t.queuedTakeOver = false;
                     t.fireBeat = kNoFollow;
                     // Recording needs the clock, so stopping the transport ends
                     // any take on the spot rather than at some boundary that is
@@ -2157,6 +2157,7 @@ void Engine::drainCommands() {
             if (!playing_) armTransport();
             Track& t = tracks_[c.a];
             t.queued = c.b;
+            t.queuedTakeOver = false;
             t.fireBeat = nextQuantum(beat_, cl.quantumIdx);
             break;
         }
@@ -2173,6 +2174,7 @@ void Engine::drainCommands() {
             }
             if (t.playing < 0 && t.queued == -2) break;
             t.queued = -1;
+            t.queuedTakeOver = false;
             t.fireBeat = nextQuantum(beat_, -1);
             break;
         }
@@ -2183,16 +2185,29 @@ void Engine::drainCommands() {
             for (int ti = 0; ti < kMaxTracks; ++ti) {
                 Track& t = tracks_[ti];
                 const RtClip& cl = clips_[ti][c.a];
-                // An empty slot in the scene stops that track, matching Live.
-                if (cl.valid)                            { t.queued = c.a; t.fireBeat = fire; }
-                else if (t.playing >= 0 || t.queued >= 0) { t.queued = -1;  t.fireBeat = fire; }
+                const bool exclusive = c.b == 1;
+                // Ordinary scene launch stops only tracks currently owned by
+                // the session. Pattern mode also queues every arrangement lane
+                // for takeover at this boundary; an empty cell therefore means
+                // a stopped track and a silent arrangement lane.
+                if (cl.valid) {
+                    t.queued = c.a;
+                    t.fireBeat = fire;
+                    t.queuedTakeOver = exclusive;
+                } else if (exclusive || t.playing >= 0 || t.queued >= 0) {
+                    t.queued = -1;
+                    t.fireBeat = fire;
+                    t.queuedTakeOver = exclusive;
+                }
             }
             break;
         }
         case Cmd::StopAll: {
             const f64 fire = nextQuantum(beat_, -1);
             for (auto& t : tracks_)
-                if (t.playing >= 0 || t.queued >= 0) { t.queued = -1; t.fireBeat = fire; }
+                if (t.playing >= 0 || t.queued >= 0) {
+                    t.queued = -1; t.queuedTakeOver = false; t.fireBeat = fire;
+                }
             break;
         }
 
@@ -2319,7 +2334,9 @@ void Engine::drainCommands() {
                 const WarpMarker* oldWarp = dst.markers;
                 if (t.playing == c.b) { t.voice.releasing = true; t.playing = -1;
                                         t.fireBeat = kNoFollow; }
-                if (t.queued  == c.b) { t.queued = -2; t.fireBeat = kNoFollow; }
+                if (t.queued  == c.b) {
+                    t.queued = -2; t.queuedTakeOver = false; t.fireBeat = kNoFollow;
+                }
                 // An audio voice keeps its release ramp over the now-empty clip
                 // (fetch() reads silence out of it); a MIDI voice has nothing to
                 // fade and everything to hand back, so it ends here.
@@ -2766,6 +2783,12 @@ void Engine::fireDue(f64 atBeat) {
         // noticed it on. Probability rolls and follow timers both key off this
         // so they stay independent of the buffer size.
         const f64 sched = t.fireBeat;
+
+        // Take arrangement ownership at the boundary, including empty slots
+        // and probability misses. Doing it here leaves the arrangement audible
+        // while a quantized Pattern launch is waiting.
+        if (t.queuedTakeOver) takeOver(ti);
+        t.queuedTakeOver = false;
 
         if (t.queued == -1) {
             // The slot that was sounding, read before it is cleared: `a` on a

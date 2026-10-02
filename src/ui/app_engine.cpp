@@ -886,8 +886,14 @@ void App::togglePlay() {
     // advancing, so it ends here rather than being left open across the stop and
     // resumed against a beat several bars away.
     if (p) autoRecFinish();
-    send(Cmd::SetPlaying, p ? 0 : 1);
-    status_ = p ? "Stopped" : "Playing";
+    if (!p && !studioSongMode_) {
+        send(Cmd::Locate, 0, 0, 0.0);
+        send(Cmd::LaunchScene, selSlot_, 1); // exclusive pattern: silence empty lanes
+    } else {
+        if (!p && studioSongMode_) send(Cmd::BackToArrangement, -1);
+        send(Cmd::SetPlaying, p ? 0 : 1);
+    }
+    status_ = p ? "Stopped" : studioSongMode_ ? "Playing song" : "Playing pattern";
 }
 
 // ---------------------------------------------------------------------------

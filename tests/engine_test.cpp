@@ -6409,6 +6409,56 @@ static void arrOverrideRules() {
     freeArr(a);
 }
 
+// Pattern scene launch is exclusive with Song playback. Empty pattern cells
+// must queue a stop too, otherwise an arrangement lane keeps sounding under
+// the Pattern even though the visible row is empty.
+static void arrPatternSceneIsExclusive() {
+    const auto songBuf = dcBuf(kArrFrames, 1, 0.5f);
+    const auto patternBuf = dcBuf(kArrFrames, 1, -0.6f);
+    Host h; h.init();
+    h.push(Cmd::SetTempo, 0, 0, 120.0);
+    h.push(Cmd::SetQuantum, 0);
+    RtArrangement* a0 = mkArr({arrItem(0.0, 32.0, 0.0)}, {arrClip(songBuf)});
+    RtArrangement* a1 = mkArr({arrItem(0.0, 32.0, 0.0)}, {arrClip(songBuf)});
+    pushArr(h, 0, a0);
+    pushArr(h, 1, a1);
+    h.setClip(0, 0, mkClip(patternBuf, 1, 1.f, Warp::Off, true, 120.0));
+    h.push(Cmd::SetPlaying, 1);
+    h.run(kBeat120);
+    CHECK(levelAt(h.outL, kBeat120 / 2) > 0.8f,
+          "Song plays both arrangement lanes before Pattern launch (%.3f)",
+          (double)levelAt(h.outL, kBeat120 / 2));
+
+    // Track 1 has an arrangement item but its selected scene cell is empty.
+    h.push(Cmd::LaunchScene, 0, 1); // b=1: exclusive Pattern mode
+    const size_t mark = h.outL.size();
+    h.run(kBeat120);
+    CHECK((h.e.arrOverride.load() & 0x3u) == 0x3u,
+          "Pattern takes over both arrangement lanes, including the empty row (0x%x)",
+          h.e.arrOverride.load());
+    CHECK(levelAt(h.outL, (i64)mark + kBeat120 / 2) < -0.45f,
+          "the Pattern clip plays and the empty track's Song lane stays silent (%.3f)",
+          (double)levelAt(h.outL, (i64)mark + kBeat120 / 2));
+
+    // Song mode clears the overrides without waiting for another bar. Both
+    // arrangement items cover the playhead, so they resume from that point.
+    h.push(Cmd::BackToArrangement, -1);
+    const size_t songMark = h.outL.size();
+    h.run(kBeat120);
+    CHECK(h.e.arrOverride.load() == 0u,
+          "BackToArrangement clears Pattern ownership on every lane (0x%x)",
+          h.e.arrOverride.load());
+    CHECK(levelAt(h.outL, (i64)songMark + kBeat120 / 2) > 0.75f,
+          "Song lanes resume after Pattern mode ends (%.3f)",
+          (double)levelAt(h.outL, (i64)songMark + kBeat120 / 2));
+
+    pushArr(h, 0, nullptr);
+    pushArr(h, 1, nullptr);
+    h.runBlocks(3);
+    freeArr(a0);
+    freeArr(a1);
+}
+
 // --- i. retirement (§3.7, §10.3 gate 8) ----------------------------------
 static void arrRetirement() {
     const auto buf = dcBuf(kArrFrames, 1, 0.5f);
@@ -6541,6 +6591,7 @@ static void testArrangementScheduler() {
     arrLoopNoDrift();
     arrLoopZeroLength();
     arrOverrideRules();
+    arrPatternSceneIsExclusive();
     arrRetirement();
     arrRetirementUnderChurn();
 }

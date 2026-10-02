@@ -43,10 +43,10 @@ namespace nx {
 // §1 / §2  Colour
 // ---------------------------------------------------------------------------
 
-inline constexpr Col bgTop      = rgb(0x17171F);   // field, top
-inline constexpr Col bgBottom   = rgb(0x17171F);   // field, bottom
-inline constexpr Col panel      = rgb(0x22222D);
-inline constexpr Col panel2     = rgb(0x30303D);
+inline constexpr Col bgTop      = rgb(0x07090B);   // field, top
+inline constexpr Col bgBottom   = rgb(0x07090B);   // field, bottom
+inline constexpr Col panel      = rgb(0x0E1115);
+inline constexpr Col panel2     = rgb(0x171B21);
 
 // The brand anchor. Identical to pal::accent by construction, and the one
 // value in this file that is frozen: actions, focus, identity.
@@ -62,7 +62,7 @@ inline constexpr Col amber      = rgb(0xFFB300);   // update / attention, only
 inline constexpr Col danger     = rgb(0xFF5470);   // destructive, only
 inline constexpr Col text       = rgb(0xECECEF);
 inline constexpr Col muted      = rgb(0xB5B6BD);
-inline constexpr Col line       = rgb(0x404052);
+inline constexpr Col line       = rgb(0x252B34);
 
 // Semantic aliases. Same values; these are what a view should reach for when
 // it means the *role* rather than the hue, because roles survive a retune.
@@ -80,7 +80,7 @@ inline constexpr Col brand      = violet;
 // correction globally — "angular, never rounded", radii 3–6px, pills banned
 // (the hub itself ships 6/4/3/5 now). NxTakt sits at 6/3/2/3: same band,
 // tuned for an instrument surface with one shared control height.
-inline constexpr f32 radius   = 10.f;    // cards, sheets, panels
+inline constexpr f32 radius   = 6.f;    // cards, sheets, panels
 inline constexpr f32 radiusSm = 5.f;    // rows, wells, inputs
 inline constexpr f32 radiusXs = 2.f;    // chips, code
 inline constexpr f32 pill     = 6.f;    // "pill" now means a squared control; the
@@ -299,23 +299,23 @@ inline constexpr Grad linear2(f32 angleDeg, Col a, Col b) {
 
 // --- §2 glass fills: light collects top-left and drains to a cool shadow ----
 
-inline constexpr Grad glassBar = linear2(180.f, rgb(0x22222D), rgb(0x22222D));
+inline constexpr Grad glassBar = linear2(180.f, rgb(0x0E1115), rgb(0x0E1115));
 
-inline constexpr Grad glass1 = linear2(180.f, rgb(0x22222D), rgb(0x22222D));
+inline constexpr Grad glass1 = linear2(180.f, rgb(0x0E1115), rgb(0x0E1115));
 
-inline constexpr Grad glass2 = linear2(180.f, rgb(0x30303D), rgb(0x30303D));
+inline constexpr Grad glass2 = linear2(180.f, rgb(0x171B21), rgb(0x171B21));
 
-inline constexpr Grad glassChip = linear2(180.f, rgb(0x383847), rgb(0x383847));
+inline constexpr Grad glassChip = linear2(180.f, rgb(0x15191F), rgb(0x15191F));
 
 // Wells are the answer to "glass inside glass reads as fog": a region inside a
 // card recesses, it does not frost again.
-inline constexpr Grad well = linear2(180.f, rgb(0x1B1B24), rgb(0x1B1B24));
+inline constexpr Grad well = linear2(180.f, rgb(0x0B0E12), rgb(0x0B0E12));
 
-inline constexpr Grad wellDeep = linear2(180.f, rgb(0x14141C), rgb(0x14141C));
+inline constexpr Grad wellDeep = linear2(180.f, rgb(0x080B0E), rgb(0x080B0E));
 
 // --- §2 lit edges: 1px gradient borders, bright top-left -> dark bottom-right
 
-inline constexpr Grad edge = linear2(180.f, rgb(0x404052), rgb(0x404052));
+inline constexpr Grad edge = linear2(180.f, rgb(0x252B34), rgb(0x252B34));
 
 inline constexpr Grad edgeLit = linear2(180.f, rgb(0x7700FF), rgb(0x7700FF));
 

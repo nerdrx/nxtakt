@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <b>Session-first. Sample-accurate. Text on disk.</b><br>
+  <b>Patterns to Playlist. Sample-accurate. Text on disk.</b><br>
   A native Linux DAW, written from scratch in C++20 — no framework, no toolkit, no runtime.
 </p>
 
@@ -32,12 +32,14 @@
 </p>
 
 <p align="center">
-  <img alt="NxTakt Session View: a five-track demo with the compact clip inspector and expanded piano roll" src="assets/hero.png" width="900">
+  <img alt="NxTakt Studio: Playlist, floating tools and slim multicolor mixer" src="assets/studio-workspace.png" width="900">
 </p>
 
-The workflow is Ableton Live's: a grid of clips you launch against a global
-tempo grid, quantised to musical boundaries. The architecture is not Live's,
-and that is the point.
+Build patterns in the Channel Rack, arrange them in the Playlist, and keep your
+instruments and editors in movable, resizable windows. A slim mixer stays
+within reach. The clip-launching grid is still one click away when you want to
+perform. OLED-friendly neutral surfaces keep the focus on your music; NX violet
+marks the brand and your active controls.
 
 ---
 
@@ -90,6 +92,29 @@ the audio.
   <img alt="The device chain: a searchable plugin browser beside Pulse on the keys track" src="assets/devices.png" width="820">
 </p>
 
+## Studio workspace — 0.26.0
+
+- **Playlist first:** build a song on the timeline, with optional Clips view.
+- **Floating tools:** move, resize, minimize and maximize the Channel Rack,
+  piano/sample editor, instrument editor and audio settings. Workspace layout
+  saves between launches; **Reset layout** restores the starting arrangement.
+- **Channel Rack:** select a pattern, edit its sixteen steps, open a track's
+  Piano or Sound editor, and **Place** the pattern in the Playlist. Pattern
+  clips and timeline placements remain independent copies.
+- **Song / Pattern:** Space plays the Playlist in Song mode or loops the
+  selected rack pattern in Pattern mode. Switching modes stops playback.
+- **OLED design:** compact black surfaces, a single toolbar, colored musical
+  content, and a smaller Spectra sound-design window. Deeper tools stay available.
+- **Slim mixer:** narrow color-coded channels, mute/solo/arm, a pinned master
+  on the left, and a selected-channel inspector for sends and effects.
+- **Audio settings:** paired device selection, advanced port routing, and
+  **Restart audio engine** without reopening your project. An optional isolated
+  capture bus provides a monitor source for external voice/streaming tools.
+
+**F5** Playlist · **F6** Rack · **F7** Piano · **F9** Mixer.
+See [Studio workspace](docs/STUDIO-WORKSPACE.md) and
+[Audio settings](docs/AUDIO-SETTINGS.md).
+
 ## Spectra A/B comparison — 0.25.1
 
 Use **Store A** and **Store B** to capture two sounds, then click **A** or **B**
@@ -131,17 +156,15 @@ with your project. See [Creative tools](docs/CREATIVE-TOOLS.md).
 ## Audio I/O — 0.22.0
 
 The top-bar **Audio I/O** control and the audio status line open the audio
-settings panel. On Linux, the **JACK / PipeWire** tab exposes four searchable
-routes — output left, output right, input left and input right — with
-**Automatic** and **Disconnected** choices. **Apply and save** applies JACK
-routing to the current engine and saves it; **Refresh** rescans available ports
-while keeping unsaved selections.
+settings window. On Linux, choose paired **Output device** and **Input device**
+under **JACK / PipeWire**, or open **Advanced port routing** for individual
+channels. **Apply and save** changes JACK routes immediately; **Restart audio engine**
+saves preferences and restores your project into a fresh engine with playback
+stopped. **Refresh** keeps unsaved selections.
 
-The **ALSA fallback** tab lists searchable output and input PCM devices. Saved
-ALSA device choices apply when the audio engine next starts and do not switch
-the active backend. `NXTAKT_AUDIO` remains the backend force switch. JACK / PipeWire
-continues to own sample rate and buffer size, and the Windows panel currently
-uses the system default audio device with no device chooser.
+The **ALSA fallback** tab lists output and input PCM devices; saved choices
+activate after restarting the engine. The active backend still controls sample
+rate and buffer size. Windows currently uses the system audio device.
 
 See [Audio settings](docs/AUDIO-SETTINGS.md) for persistence and routing behavior.
 

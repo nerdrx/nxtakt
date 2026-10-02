@@ -78,6 +78,8 @@ private:
 
     // --- views ---
     void drawControlBar(const Rect& r);
+    void drawControlBarTools(const Rect& r);
+    bool studioToolsOpen_=false;
     void drawBrowser(const Rect& r);
     void drawSessionView(const Rect& r);
     void drawTrackHeaders(const Rect& r, f32 scrollX);
@@ -100,6 +102,15 @@ private:
     // app_chrome.cpp for why its input half rides drawControlBar instead.
     void drawKeysSheet();
     void drawAudioSettings(const Rect& r);
+    void drawStudioMixer(const Rect&);
+    void drawChannelRack(const Rect&);
+    void prepareStudioWindows(const Rect&);
+    void drawStudioShelf(const Rect&);
+    void drawStudioWindows(const Rect&);
+    void studioInput(int layer);
+    Rect studioWindowRect(int index) const;
+    void saveStudioLayout();
+    void activateStudioWindow(int index);
     // The engine-link banner (docs/GUI-ON-DAEMON.md §6, §12.7 item 2): one
     // full-width line under the control bar, drawn only when
     // engineLinkBanner(es_.link) has something to say. engineBannerH() is its
@@ -498,6 +509,8 @@ private:
     static bool isSpectra(const PluginInstance* p);
     void drawSpectraPanel(const Rect& box, DeviceModel& dm, const Col& tc, bool embedded = false);
     bool drawFocusedSpectra(const Rect& bounds);
+    bool closeFocusedSpectra();
+    int focusedSpectraOwner();
     void drawSpectraStudio(const Rect& bounds, DeviceModel& dm);
     // Which slot of `devices` has its panel open, or -1. Resolved from the uid
     // every frame, for the reason rackOpenUid_ is a uid: a chain edit must not
@@ -564,7 +577,7 @@ private:
     std::string samplerDragHold_;
 
     Session  ses_;
-    MainView view_ = MainView::Session;
+    MainView view_ = MainView::Arrangement;
 
     // selection + interaction
     int  selTrack_ = 0, selSlot_ = 0;
@@ -577,11 +590,28 @@ private:
     // the wheel -- filed by the usability pass); Shift stays horizontal.
     f32  gridScrollY_ = 0.f;
     bool showReturns_ = false;
-    f32  browserW_ = 210.f;
+    f32  browserW_ = 180.f;
     // Tall enough for three rows of device knobs under the tab header.
     f32  detailH_ = 390.f;
     bool showBrowser_ = true;
-    bool showDetail_ = true;
+    bool showDetail_ = false;
+    bool detailPattern_ = false;
+    bool showChannelRack_ = true, showStudioMixer_ = true;
+    f32 studioMixerScrollX_ = 0.f, channelRackScrollY_ = 0.f;
+    f32 studioMasterFader_ = .85f;
+    bool studioSongMode_ = true;
+    bool studioLayoutLoaded_ = false, studioLayoutDirty_ = false;
+    struct StudioWindow {
+        Rect bounds{}; // logical pixels, independent of display scale
+        bool initialized = false, minimized = false, maximized = false;
+    };
+    std::array<StudioWindow, 4> studioWindows_{};
+    std::array<int, 4> studioOrder_{{0, 1, 2, 3}};
+    std::array<bool, 4> studioWasVisible_{};
+    Input studioRawInput_{};
+    int studioPointerOwner_ = -1, studioFocus_ = -1;
+    int studioCapture_ = -1, studioGesture_ = 0;
+    Rect studioArea_{};
     bool showAudioSettings_ = false, refreshAudioSettings_ = true;
     DetailTab detailTab_ = DetailTab::Clip;
     int midiInspectorPage_ = 0;

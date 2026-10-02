@@ -14,6 +14,7 @@ struct AudioSettings {
     std::array<std::string, 4> jackPorts{};
     std::string alsaOutput = "default";
     std::string alsaInput = "default";
+    bool discordCaptureBus = false;
 };
 
 inline std::filesystem::path audioSettingsPath() {
@@ -98,6 +99,9 @@ inline AudioSettings loadAudioSettings(
             if (audio_settings_detail::validValue(value, false)) settings.alsaOutput = value;
         } else if (key == "alsa_input") {
             if (audio_settings_detail::validValue(value, false)) settings.alsaInput = value;
+        } else if (key == "discord_capture_bus") {
+            if (value == "1") settings.discordCaptureBus = true;
+            else if (value == "0") settings.discordCaptureBus = false;
         }
     }
     return settings;
@@ -124,7 +128,8 @@ inline bool saveAudioSettings(
         for (std::size_t i = 0; i < settings.jackPorts.size(); ++i)
             output << "jack" << i << ' ' << audio_settings_detail::quote(settings.jackPorts[i]);
         output << "alsa_output " << audio_settings_detail::quote(settings.alsaOutput)
-               << "alsa_input " << audio_settings_detail::quote(settings.alsaInput);
+               << "alsa_input " << audio_settings_detail::quote(settings.alsaInput)
+               << "discord_capture_bus " << audio_settings_detail::quote(settings.discordCaptureBus ? "1" : "0");
         output.flush();
         if (!output) {
             std::filesystem::remove(temporary, ec);

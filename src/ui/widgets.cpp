@@ -277,7 +277,7 @@ void Ui::pillRect(const Rect& b, f32 radius, Pill kind, const Col& tint,
 
     const bool selected = kind == Pill::Primary || kind == Pill::Danger;
     if (kind == Pill::Ghost && m.hover < 0.004f && m.press < 0.004f) return;
-    const Col base = selected ? pal::panelAlt.mix(tint, 0.65f) : pal::panelAlt;
+    const Col base = selected ? tint : pal::panelAlt;
     const Col fill = base.mix(nx::text, 0.05f * m.hover).scale(1.f - 0.10f * m.press);
     // A quiet one-pixel contact shadow gives the face definition without an
     // outline around every control. The pointer geometry remains stationary.
@@ -1586,7 +1586,7 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
     const bool hotNow = isHot(id);
     bool changed = false;
 
-    const f32 handleH = 11.f;
+    const f32 handleH = 18.f * std::max(1.f,r->dpiScale());
     const f32 travel = std::max(1.f, b.h - handleH);
     // t = 1 at the top of the travel.
     auto handleY = [&](f32 tv) { return b.y + (1.f - clampv(tv, 0.f, 1.f)) * travel; };
@@ -1646,6 +1646,9 @@ bool Ui::vFader(u64 id, const Rect& b, f32* t) {
     // The grip line across the middle of the cap.
     r->hairlineH(handle.x + 1.f, handle.right() - 1.f, std::round(handle.cy()),
                  rgba(0x000000, 0.55f), 1.f);
+
+    r->hairlineH(handle.x+2.f,handle.right()-2.f,std::round(handle.cy()-4.f),rgba(0x000000,.25f),1.f);
+    r->hairlineH(handle.x+2.f,handle.right()-2.f,std::round(handle.cy()+4.f),rgba(0x000000,.25f),1.f);
 
     if (hotNow || active == id) cursor = Cursor::ResizeV;
     return changed;

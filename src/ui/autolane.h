@@ -55,13 +55,11 @@ struct IndexSel {
     void adopt(const std::vector<int>& v);
 };
 
-// The renderer keeps its DPI scale private and a view is handed only a Rect, so
-// recover the scale from the font: App loads fSmall at round(9 * dpiScale) px
-// and fBody at round(11 * dpiScale). Rounding costs at most ~5% at 1x, which is
-// invisible in layout maths and cheaper than widening the frozen interface.
-// Moved out of pianoroll.cpp with the lane, because the lane and the
-// arrangement both need it and two copies would be two answers.
+// Share renderer geometry scale across the timeline and automation lanes.
+// Synthetic test views without a renderer fall back to their font sizes.
 inline f32 dpiOf(const Ui& ui) {
+    // Fonts may grow for legibility without changing the timeline geometry.
+    if(ui.r) return std::max(0.5f,ui.r->dpiScale());
     if (ui.fSmall && ui.fSmall->size() > 0) return std::max(0.5f, (f32)ui.fSmall->size() / 9.f);
     if (ui.fBody  && ui.fBody->size()  > 0) return std::max(0.5f, (f32)ui.fBody->size()  / 11.f);
     return 1.f;

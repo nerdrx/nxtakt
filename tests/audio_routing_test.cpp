@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -51,6 +52,24 @@ bool registerPort(jack_client_t* client, const std::string& name, unsigned flags
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--list-devices") {
+        for (const auto& device : lat::listJackDevices(false))
+            std::cout << "OUTPUT\t" << device.left << "\t" << device.right << "\t" << device.label << '\n';
+        for (const auto& device : lat::listJackDevices(true))
+            std::cout << "INPUT\t" << device.left << "\t" << device.right << "\t" << device.label << '\n';
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--list-ports") {
+        jack_status_t status{};
+        Client inspector{jack_client_open("NxTaktAudioInspector", static_cast<jack_options_t>(JackNoStartServer), &status)};
+        if (!inspector.value) return 77;
+        const char** names = jack_get_ports(inspector.value, nullptr, JACK_DEFAULT_AUDIO_TYPE, 0);
+        if (names) {
+            for (const char** name = names; *name; ++name) std::cout << *name << '\n';
+            jack_free(names);
+        }
+        return 0;
+    }
     if(argc==4 && std::string(argv[1])=="--verify") {
         const auto state=lat::inspectAudioRoutes(std::stoi(argv[2]));
         std::ifstream in(argv[3]);std::array<std::string,4> expected;
@@ -76,6 +95,7 @@ int main(int argc, char** argv) {
         std::cerr << "FAIL: cannot open engine JACK client, status=" << status << '\n';
         return 1;
     }
+    const bool testDiscordBus = argc == 2 && std::string(argv[1]) == "--discord-bus";
     Client fixture{jack_client_open(fixtureName.c_str(),
                                     static_cast<jack_options_t>(JackUseExactName | JackNoStartServer),
                                     &status)};
@@ -87,7 +107,7 @@ int main(int argc, char** argv) {
     const std::array<std::string, 4> own = {
         engineName + ":out_L", engineName + ":out_R", engineName + ":in_L", engineName + ":in_R"};
     const std::array<std::string, 4> target = {
-        fixtureName + ":sinkL", fixtureName + ":sinkR", fixtureName + ":sourceL", fixtureName + ":sourceR"};
+        fixtureName + ":sink_L", fixtureName + ":sink_R", fixtureName + ":source_L", fixtureName + ":source_R"};
     const std::string sentinelOut = sentinelName + ":sentinelOut";
     const std::string sentinelIn = sentinelName + ":sentinelIn";
 
@@ -95,10 +115,10 @@ int main(int argc, char** argv) {
                registerPort(engine.value, "out_R", JackPortIsOutput) &&
                registerPort(engine.value, "in_L", JackPortIsInput) &&
                registerPort(engine.value, "in_R", JackPortIsInput), "register engine ports")) return 1;
-    if (!check(registerPort(fixture.value, "sinkL", JackPortIsInput) &&
-               registerPort(fixture.value, "sinkR", JackPortIsInput) &&
-               registerPort(fixture.value, "sourceL", JackPortIsOutput) &&
-               registerPort(fixture.value, "sourceR", JackPortIsOutput), "register fixture ports")) return 1;
+    if (!check(registerPort(fixture.value, "sink_L", JackPortIsInput | JackPortIsPhysical) &&
+               registerPort(fixture.value, "sink_R", JackPortIsInput | JackPortIsPhysical) &&
+               registerPort(fixture.value, "source_L", JackPortIsOutput | JackPortIsPhysical) &&
+               registerPort(fixture.value, "source_R", JackPortIsOutput | JackPortIsPhysical), "register fixture ports")) return 1;
     if (!check(registerPort(sentinel.value, "sentinelOut", JackPortIsOutput) &&
                registerPort(sentinel.value, "sentinelIn", JackPortIsInput), "register sentinel ports")) return 1;
     std::vector<jack_port_t*> engineOutputs{jack_port_by_name(engine.value,own[0].c_str()),jack_port_by_name(engine.value,own[1].c_str())};
@@ -113,6 +133,13 @@ int main(int argc, char** argv) {
     } stop{engine.value,fixture.value,sentinel.value};
     if (!check(!jack_activate(engine.value) && !jack_activate(fixture.value) &&
                !jack_activate(sentinel.value), "activate JACK clients")) return 1;
+    struct BusCleanup {
+        int pid;
+        ~BusCleanup() {
+            std::string ignored;
+            lat::applyAudioRoutes(pid, {"-", "-", "-", "-"}, ignored, false);
+        }
+    } busCleanup{static_cast<int>(getpid())};
     if (!check(!jack_connect(sentinel.value, sentinelOut.c_str(), sentinelIn.c_str()),
                "create sentinel route")) return 1;
 
@@ -127,6 +154,12 @@ int main(int argc, char** argv) {
 
     const auto inspected = lat::inspectAudioRoutes(static_cast<int>(getpid()));
     if (!check(inspected.connected, "inspectAudioRoutes reports connected")) return 1;
+    const auto outputs = lat::listJackDevices(false);
+    const auto inputs = lat::listJackDevices(true);
+    if (!check(std::any_of(outputs.begin(), outputs.end(), [&](const auto& d) { return d.left == target[0] && d.right == target[1]; }),
+               "group physical output ports in left/right order")) return 1;
+    if (!check(std::any_of(inputs.begin(), inputs.end(), [&](const auto& d) { return d.left == target[2] && d.right == target[3]; }),
+               "group physical input ports in left/right order")) return 1;
 
     const std::array<std::string, 4> requested = target;
     std::string error;
@@ -160,6 +193,23 @@ int main(int argc, char** argv) {
                "missing target route rejected: " + error)) return 1;
     for (std::size_t i = 0; i < own.size(); ++i)
         if (!check(links(engine.value, own[i]) == beforeBad[i], "missing target changed routes")) return 1;
+
+    if (testDiscordBus) {
+        const bool busApplied = lat::applyAudioRoutes(static_cast<int>(getpid()), requested, error, true);
+        if (!check(busApplied, "route isolated PipeWire capture bus: " + error)) return 1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto withBus = lat::inspectAudioRoutes(static_cast<int>(getpid()));
+        if (!check(withBus.discordBusConnected, "capture bus links are visible in JACK graph")) return 1;
+        for (std::size_t i = 0; i < 2; ++i) {
+            const auto current = links(engine.value, own[i]);
+            if (!check(std::find(current.begin(), current.end(), target[i]) != current.end(),
+                       "capture bus preserves primary output route")) return 1;
+        }
+        if (!check(lat::applyAudioRoutes(static_cast<int>(getpid()), requested, error, false),
+                   "remove capture bus and keep primary routes: " + error)) return 1;
+        const auto withoutBus = lat::inspectAudioRoutes(static_cast<int>(getpid()));
+        if (!check(!withoutBus.discordBusConnected, "capture bus links removed")) return 1;
+    }
 
     const bool disconnected = lat::applyAudioRoutes(
         static_cast<int>(getpid()), {"-", "-", "-", "-"}, error);

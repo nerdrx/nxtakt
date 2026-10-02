@@ -64,17 +64,17 @@ namespace pal {
 // is 90% darkness with small luminous accents, so the base surfaces move
 // toward the field (#0a0714) and keep only a BREATH of violet; saturated
 // color is for clips, accents and live elements, never for square metres.
-constexpr Col appBg        = rgb(0x17171F);   // the "nothing here" fill
-constexpr Col panel        = rgb(0x22222D);   // chrome panels
-constexpr Col panelAlt     = rgb(0x30303D);   // controls on panels
-constexpr Col gridBg       = rgb(0x17171F);   // the clip grid's empty field
-constexpr Col slotEmpty    = rgb(0x292935);
-constexpr Col slotHover    = rgb(0x3A394B);
+constexpr Col appBg        = rgb(0x07090B);   // the "nothing here" fill
+constexpr Col panel        = rgb(0x0E1115);   // chrome panels
+constexpr Col panelAlt     = rgb(0x171B21);   // controls on panels
+constexpr Col gridBg       = rgb(0x07090B);   // the clip grid's empty field
+constexpr Col slotEmpty    = rgb(0x1B1E23);
+constexpr Col slotHover    = rgb(0x30343B);
 // Not a divider colour any more: `divider` is used both for separators and for
 // recessed troughs, and only the separators are wrong. It is now the --line
 // token, which is a violet-black rather than a grey. Real dividers should move
 // to Renderer::hairlineH/V -- a solid line is a §11 finding.
-constexpr Col divider      = rgb(0x404052);
+constexpr Col divider      = rgb(0x252B34);
 constexpr Col ridge        = rgb(0x96989E);           // raised edges, handles
 
 // Text

@@ -89,7 +89,7 @@ jobs:
             build/dist/nxtakt-${{ env.VERSION }}-linux-x86_64.tar.gz.sha256
           generate_release_notes: true
           body: |
-            NxTakt ${{ env.VERSION }} — session-first DAW for Linux.
+            NxTakt ${{ env.VERSION }} — pattern and Playlist DAW for Linux.
 
             Download `nxtakt-${{ env.VERSION }}-linux-x86_64.tar.gz`, unpack,
             run `./nxtakt`. No set yet? `./gen_demo ~/Music/Demo` writes one.
