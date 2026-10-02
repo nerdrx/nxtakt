@@ -1,4 +1,4 @@
-// NxTakt — a native, session-first DAW for Linux.
+// NxTakt — a native, pattern and Playlist DAW for Linux.
 #include "ui/app.h"
 #include "ui/keymap.h"
 #include "audio/backend.h"
@@ -18,7 +18,7 @@
 
 static void usage() {
     std::printf(
-        "NxTakt " NXTAKT_VERSION " — session-first DAW\n"
+        "NxTakt " NXTAKT_VERSION " — pattern and Playlist DAW\n"
         "\n"
         "  nxtakt [project.lattice]\n"
         "\n"

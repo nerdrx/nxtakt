@@ -37,9 +37,9 @@ inline constexpr Row table[] = {
     {nullptr, nullptr},
 
     {nullptr, "VIEWS AND PANELS"},
-    {"Tab",           "Session / Arrangement"},
-    {"F5 / F6",       "Arrangement / Session (FL-style view shortcuts)"},
-    {"F7 / F9",       "clip editor / mixer"},
+    {"Tab",           "Clips / Playlist"},
+    {"F5 / F6",       "Playlist / Channel Rack"},
+    {"F7 / F9",       "Piano / Mixer"},
     {"Ctrl+B",        "browser"},
     {"Ctrl+D",        "clip detail panel"},
     {"F1",            "this list"},
@@ -104,17 +104,17 @@ inline constexpr Row table[] = {
     {"",              "record. With it lit: click an empty slot on an armed"},
     {"",              "track to start a take, click again to stop. Use the triangle on a MIDI"},
     {"",              "clip to overdub another pass into it."},
-    {"",              "ARR sends the take to the timeline instead of the grid;"},
-    {"",              "AUTO records control moves into the playing clip."},
+    {"",              "Timeline rec sends the take to the timeline instead of the grid;"},
+    {"",              "Auto arm records control moves into the playing clip."},
     {nullptr, nullptr},
 
     {nullptr, "COMPUTER MIDI KEYBOARD"},
     {"Ctrl+Shift+K",  "on / off.  While it is on the letter keys are NOTES and"},
-    {"",              "not shortcuts -- that is what the lit KBD chip means."},
+    {"",              "not shortcuts -- that is what the lit Keys control means."},
     {"",              "FL layout, by key POSITION, on any keyboard layout:"},
     {"",              "   Z X C V B N M  lower octave, white     S D _ G H J  black"},
     {"",              "   Q W E R T Y U + I O P  the two above    2 3 _ 5 6 7 _ 9 0  black"},
-    {"PgUp / PgDn",   "octave.  Velocity is the number beside the KBD chip."},
+    {"PgUp / PgDn",   "octave.  Velocity is the number beside the Keys control."},
 };
 
 inline constexpr int count = (int)(sizeof(table) / sizeof(table[0]));
